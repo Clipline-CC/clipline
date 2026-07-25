@@ -235,6 +235,10 @@ fn should_log_window_event(event: &WindowEvent) -> bool {
     !matches!(event, WindowEvent::Moved(_) | WindowEvent::Resized(_))
 }
 
+fn should_reconcile_native_window_event(event: &WindowEvent) -> bool {
+    matches!(event, WindowEvent::Focused(_) | WindowEvent::Resized(_))
+}
+
 fn configure_bundled_ffmpeg<R: Runtime>(app: &tauri::App<R>) {
     match app
         .path()
@@ -1498,6 +1502,13 @@ enum MinimizeRequestAction {
     Tray,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NativeWindowReconcileAction {
+    None,
+    BackgroundTaskbar,
+    RestoreTaskbar,
+}
+
 fn close_request_action(settings: &AppSettings) -> CloseRequestAction {
     if settings.close_to_tray {
         CloseRequestAction::Tray
@@ -1511,6 +1522,17 @@ fn minimize_request_action(settings: &AppSettings) -> MinimizeRequestAction {
         MinimizeRequestAction::Tray
     } else {
         MinimizeRequestAction::Taskbar
+    }
+}
+
+fn native_window_reconcile_action(
+    mode: WindowLifecycleMode,
+    is_minimized: bool,
+) -> NativeWindowReconcileAction {
+    match (mode, is_minimized) {
+        (WindowLifecycleMode::Foreground, true) => NativeWindowReconcileAction::BackgroundTaskbar,
+        (WindowLifecycleMode::Taskbar, false) => NativeWindowReconcileAction::RestoreTaskbar,
+        _ => NativeWindowReconcileAction::None,
     }
 }
 
@@ -1800,6 +1822,27 @@ fn background_native_minimized_window<R: Runtime>(
         || window.as_ref().hide(),
         || request_webview_memory_target(window, &label, crate::windows::MemoryTarget::Low),
     )
+}
+
+fn reconcile_native_window<R: Runtime>(
+    app: &AppHandle<R>,
+    window: &WebviewWindow<R>,
+) -> Result<(), String> {
+    let mode = app.state::<WindowLifecycleState>().snapshot().mode;
+    if mode == WindowLifecycleMode::Tray {
+        return Ok(());
+    }
+
+    let is_minimized = window.is_minimized().map_err(|error| error.to_string())?;
+    match native_window_reconcile_action(mode, is_minimized) {
+        NativeWindowReconcileAction::None => Ok(()),
+        NativeWindowReconcileAction::BackgroundTaskbar => {
+            // Re-query inside the transition so a restore racing this event
+            // cannot hide a window that is no longer minimized.
+            background_native_minimized_window(app, window).map(|_| ())
+        }
+        NativeWindowReconcileAction::RestoreTaskbar => restore_taskbar_window(app, window),
+    }
 }
 
 #[tauri::command]
@@ -2719,27 +2762,16 @@ pub fn run() {
             }
             tauri::RunEvent::WindowEvent {
                 label,
-                event: WindowEvent::Focused(false),
+                event,
                 ..
-            } if is_app_window_label(&label) => {
-                log_diagnostic(format!("window event: label={label} event=Focused(false)"));
-                if let Some(window) = app.get_webview_window(&label) {
-                    if let Err(error) = background_native_minimized_window(app, &window) {
-                        log_diagnostic(format!(
-                            "native minimize detection failed label={label}: {error}"
-                        ));
-                    }
+            } if is_app_window_label(&label) && should_reconcile_native_window_event(&event) => {
+                if should_log_window_event(&event) {
+                    log_diagnostic(format!("window event: label={label} event={event:?}"));
                 }
-            }
-            tauri::RunEvent::WindowEvent {
-                label,
-                event: WindowEvent::Focused(true),
-                ..
-            } if is_app_window_label(&label) => {
                 if let Some(window) = app.get_webview_window(&label) {
-                    if let Err(error) = restore_taskbar_window(app, &window) {
+                    if let Err(error) = reconcile_native_window(app, &window) {
                         log_diagnostic(format!(
-                            "taskbar restore failed label={label}: {error}"
+                            "native window reconciliation failed label={label}: {error}"
                         ));
                     }
                 }
@@ -2901,10 +2933,18 @@ where
     // paints would show the throttled frame to the user.
     restore_memory_target();
     let _ = show_webview();
-    show().map_err(|e| e.to_string())?;
-    unminimize().map_err(|e| e.to_string())?;
+    // Native operations can report a transient error after already changing
+    // window state. Attempt every recovery step, and never gate the lifecycle
+    // event that boots the frontend on one of those fallible results.
+    let show_error = show().err().map(|error| error.to_string());
+    let unminimize_error = unminimize().err().map(|error| error.to_string());
     publish_foreground();
-    focus().map_err(|e| e.to_string())
+    let focus_error = focus().err().map(|error| error.to_string());
+
+    match show_error.or(unminimize_error).or(focus_error) {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 /// Hide order is the mirror: the native window goes first, so a failed OS hide
@@ -4708,6 +4748,47 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
     }
 
     #[test]
+    fn failed_native_reveal_steps_still_publish_foreground_and_attempt_recovery() {
+        let calls = std::cell::RefCell::new(Vec::new());
+
+        let error = reveal_main_window(
+            || calls.borrow_mut().push("memory_normal"),
+            || {
+                calls.borrow_mut().push("webview_show");
+                Ok::<(), String>(())
+            },
+            || {
+                calls.borrow_mut().push("show");
+                Err::<(), String>("show refused".into())
+            },
+            || {
+                calls.borrow_mut().push("unminimize");
+                Err::<(), String>("unminimize refused".into())
+            },
+            || {
+                calls.borrow_mut().push("focus");
+                Ok::<(), String>(())
+            },
+            || calls.borrow_mut().push("foreground"),
+        )
+        .expect_err("native reveal failures should still be reported");
+
+        assert!(error.contains("show refused"));
+        assert_eq!(
+            *calls.borrow(),
+            [
+                "memory_normal",
+                "webview_show",
+                "show",
+                "unminimize",
+                "foreground",
+                "focus"
+            ],
+            "frontend boot must not be gated on a fallible native reveal step"
+        );
+    }
+
+    #[test]
     fn hiding_main_window_hides_native_window_before_webview() {
         let calls = std::cell::RefCell::new(Vec::new());
 
@@ -4891,6 +4972,41 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
         assert_eq!(
             *calls.borrow(),
             ["background", "webview_hide", "memory_low"]
+        );
+    }
+
+    #[test]
+    fn resize_signal_reconciles_native_minimize_and_restore_without_focus() {
+        let resize = WindowEvent::Resized(tauri::PhysicalSize::new(800, 600));
+
+        assert!(should_reconcile_native_window_event(&resize));
+        assert_eq!(
+            native_window_reconcile_action(WindowLifecycleMode::Foreground, true),
+            NativeWindowReconcileAction::BackgroundTaskbar
+        );
+        assert_eq!(
+            native_window_reconcile_action(WindowLifecycleMode::Taskbar, false),
+            NativeWindowReconcileAction::RestoreTaskbar
+        );
+    }
+
+    #[test]
+    fn native_window_reconciliation_ignores_stable_and_tray_states() {
+        assert_eq!(
+            native_window_reconcile_action(WindowLifecycleMode::Foreground, false),
+            NativeWindowReconcileAction::None
+        );
+        assert_eq!(
+            native_window_reconcile_action(WindowLifecycleMode::Taskbar, true),
+            NativeWindowReconcileAction::None
+        );
+        assert_eq!(
+            native_window_reconcile_action(WindowLifecycleMode::Tray, false),
+            NativeWindowReconcileAction::None
+        );
+        assert_eq!(
+            native_window_reconcile_action(WindowLifecycleMode::Tray, true),
+            NativeWindowReconcileAction::None
         );
     }
 
