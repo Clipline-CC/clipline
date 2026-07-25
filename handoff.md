@@ -4,6 +4,90 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-25): Memory follow-up after PR #106
+
+Plan: `docs/superpowers/plans/2026-07-24-memory-follow-up.md`.
+
+This follow-up supersedes the retention and save-path implementation details in the earlier
+memory-footprint checkpoint below.
+
+**Save Replay no longer duplicates the encoded window.** A memory-backed save borrows the
+`Segment` payloads already owned by the ring. A disk-backed save keeps payload-free segment
+descriptors, validates the selected file region, opens one segment at a time, and streams samples
+through the MP4 writer's 64 KiB transfer buffer. Audio-prefix selection is a metadata view rather
+than a mutation/copy. RAM and disk paths have a byte-identical multitrack regression, including a
+mid-window audio prefix.
+
+**The ring now retains the exact usable replay span.** Duration pressure keeps the latest keyframe
+at-or-before the requested cutoff across the existing ring plus the incoming segment; there is no
+fixed 15 s retention margin. Byte pressure can still advance to the next keyframe, because the hard
+memory cap wins during genuine encoder overshoot. The persisted `buffer_seconds` field remains only
+as a normalized compatibility mirror of `replay_window_s`; runtime no longer treats it as a second
+setting. The capture seed allocation is moved instead of cloned, sealed GOP payload/sample vectors
+are exact-sized, and the application-owned WGC latest-frame queue is one frame (the required WinRT
+frame-pool depth remains two).
+
+**Hidden UI work is revisioned and bounded.** Native state records `Foreground`, `Tray`, or
+`Taskbar` with a monotonic revision. `frontend_ready` returns a snapshot after the lifecycle
+listener is installed, and revision-gap recovery forces teardown/refresh if an event was missed.
+Once native hide/minimize succeeds, background entry invalidates local/cloud work, stops microphone
+testing and Web Audio, releases review media, disconnects poster observation, removes both gallery
+roots, hides the controller, and requests WebView2 `Low`. Foreground restore uses `Normal`, restores
+the controller, and coalesces deferred work into one refresh. Async settings/device loads, cloud
+media, rename restoration, posters, and boot work all reject stale lifecycle generations.
+
+**Large libraries, posters, uploads, and session metadata have explicit bounds.**
+
+- Local and cloud galleries render at most 60 cards per page. Off-page/inactive image sources and
+  DOM are released; selection remains path-keyed across pages.
+- Poster URL/unavailable entries use a 120-entry LRU. Cached and uncached posters share the same
+  viewport gate. Frontend requests and backend FFmpeg extraction are each capped at two, backend
+  extraction is single-flight per canonical clip, FFmpeg discovery is cached, and children have a
+  30 s execution timeout followed by kill/reap, with 64 KiB bounded stderr.
+- Multipart uploads reopen a bounded file slice for every attempt and stream it instead of
+  allocating a server-sized part (previously up to 64 MiB). Two top-level uploads may run at once.
+  A Windows sharing lease keeps the source immutable from validation/checksum through every
+  direct/proxy retry.
+- Full-session MP4 duration entries are aggregated online, all-sync tracks keep no `stss` vector,
+  video stores only sync-sample numbers, chunk offsets use 8 bytes each, and `stsc` changes are
+  run-length encoded as fragments arrive. Replay-only game markers prune against the recorder's
+  actual oldest retained media timestamp, preserving keyframe lead-in and encoder lag.
+
+Validation on the combined tree is green:
+
+- `cargo test --workspace`
+- fresh-cache `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo fmt --all -- --check`
+- JavaScript syntax checks, PowerShell parser check, and `git diff --check`
+
+`scripts/measure-save-replay-memory.ps1` now samples root/child private working set and private
+commit every 50–100 ms during repeated real saves, with GPU local/non-local allocations recorded
+separately. **No new before/after numbers are claimed yet**: the minimum/default/maximum and
+RAM/disk matrix needs real capture footage and deliberate settings changes. Do not substitute the
+older resident-set measurements below for that run.
+
+Remaining conditional risk: ISO-BMFF requires one final sample-size entry per variable-sized
+sample. `TrackState::sizes` and the serialized final `moov` therefore still grow with a multi-hour
+full session and briefly coexist at finalize. Measure that metadata at the intended maximum session
+length before adding a file-backed table spool or rebuilding tables from the already-written
+fragment metadata; either is a larger crash-recovery change than the online table compression.
+
+Manual acceptance checklist:
+
+1. Let both RAM and disk replay modes fill, save repeatedly with output plus microphone/game audio,
+   and verify playable files, duration coverage, audio sync, and no save-time memory spike near the
+   ring size.
+2. Exercise 5 s, default 60 s, and maximum 120 s replay settings; verify the compatibility field
+   round-trips to the same value and saved coverage starts at the covering keyframe.
+3. Hide to tray and taskbar while a poster/cloud request and microphone test are active, save by
+   global hotkey, then reveal; verify the mic stays stopped, no blank window appears, and the
+   gallery refreshes once without stale video reattaching.
+4. Page through local/cloud libraries larger than 60 clips, including search/group/sort changes,
+   cross-page selection, rename/delete, and account/media-root changes; verify counts, images, and
+   poster cache invalidation.
+5. Retry both direct and proxy multipart uploads and try to rename/delete the source while one is
+   active; mutation should be rejected until the upload releases its lease.
+
 ## Checkpoint (2026-07-25): Memory footprint reduction
 
 Plan: `docs/superpowers/plans/2026-07-24-memory-footprint-reduction.md`.
