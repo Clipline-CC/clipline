@@ -24,8 +24,11 @@ serde_json = { workspace = true }
 sha2 = "0.10"
 tokio = { workspace = true, features = ["fs", "io-util"] }
 tokio-util = { version = "0.7", features = ["io", "rt"] }
-tauri = { version = "2", features = ["tray-icon", "protocol-asset"] }
-tauri-runtime = "2"
+# Pinned to 2.11.x, not open 2.x: `app.rs` reaches through `PlatformWebview`
+# into `ICoreWebView2Controller`, so Tauri's COM types must stay aligned with
+# the webview2-com pin below. A routine minor bump could silently change them.
+tauri = { version = "~2.11", features = ["tray-icon", "protocol-asset"] }
+tauri-runtime = "~2.11"
 tauri-plugin-autostart = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-single-instance = "2"

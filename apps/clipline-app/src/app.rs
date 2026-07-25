@@ -1531,8 +1531,8 @@ fn send_main_window_to_tray<R: Runtime>(app: &AppHandle<R>) -> Result<(), String
                 ));
                 result
             },
+            || request_webview_memory_target(&window, &label, crate::windows::MemoryTarget::Low),
         )?;
-        request_webview_memory_target(&window, &label, crate::windows::MemoryTarget::Low);
         log_diagnostic(format!("send-to-tray hide ok label={label}"));
         log_window_state(&format!("send-to-tray after hide label={label}"), &window);
     }
@@ -2632,10 +2632,8 @@ fn reveal_logged_window<R: Runtime>(
     window: &WebviewWindow<R>,
     context: &str,
 ) -> Result<(), String> {
-    // Back to Normal before anything is shown: a reveal that painted while still
-    // at Low would be the first thing the user sees.
-    request_webview_memory_target(window, context, crate::windows::MemoryTarget::Normal);
     reveal_main_window(
+        || request_webview_memory_target(window, context, crate::windows::MemoryTarget::Normal),
         || {
             let result = window.as_ref().show();
             log_diagnostic(format!(
@@ -2676,6 +2674,7 @@ fn reveal_logged_window<R: Runtime>(
 /// propagated — refusing to reveal would leave the window unrecoverable from the
 /// tray, which is far worse than rendering while hidden.
 fn reveal_main_window<E>(
+    restore_memory_target: impl FnOnce(),
     show_webview: impl FnOnce() -> Result<(), E>,
     show: impl FnOnce() -> Result<(), E>,
     unminimize: impl FnOnce() -> Result<(), E>,
@@ -2684,6 +2683,9 @@ fn reveal_main_window<E>(
 where
     E: std::fmt::Display,
 {
+    // Normal before anything becomes visible: a view still at Low when it
+    // paints would show the throttled frame to the user.
+    restore_memory_target();
     let _ = show_webview();
     show().map_err(|e| e.to_string())?;
     unminimize().map_err(|e| e.to_string())?;
@@ -2700,12 +2702,16 @@ where
 fn hide_main_window<E>(
     hide: impl FnOnce() -> Result<(), E>,
     hide_webview: impl FnOnce() -> Result<(), E>,
+    lower_memory_target: impl FnOnce(),
 ) -> Result<(), String>
 where
     E: std::fmt::Display,
 {
     hide().map_err(|e| e.to_string())?;
     let _ = hide_webview();
+    // Only once the window is genuinely gone: throttling a view the user can
+    // still see would be visible to them.
+    lower_memory_target();
     Ok(())
 }
 
@@ -4377,6 +4383,7 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
         let calls = std::cell::RefCell::new(Vec::new());
 
         reveal_main_window(
+            || calls.borrow_mut().push("memory_normal"),
             || {
                 calls.borrow_mut().push("webview_show");
                 Ok::<(), String>(())
@@ -4396,11 +4403,11 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
         )
         .unwrap();
 
-        // The webview must be visible before the native window appears, or the
-        // first frame is transparent/white.
+        // Normal before the webview is shown, and the webview before the native
+        // window, or the user sees a throttled or transparent first frame.
         assert_eq!(
             *calls.borrow(),
-            ["webview_show", "show", "unminimize", "focus"]
+            ["memory_normal", "webview_show", "show", "unminimize", "focus"]
         );
     }
 
@@ -4411,6 +4418,7 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
         // Webview visibility is best-effort: failing it must never leave the
         // window unrevealable from the tray.
         reveal_main_window(
+            || {},
             || Err::<(), String>("controller gone".into()),
             || {
                 calls.borrow_mut().push("show");
@@ -4443,15 +4451,17 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
                 calls.borrow_mut().push("webview_hide");
                 Ok::<(), String>(())
             },
+            || calls.borrow_mut().push("memory_low"),
         )
         .unwrap();
 
-        assert_eq!(*calls.borrow(), ["hide", "webview_hide"]);
+        assert_eq!(*calls.borrow(), ["hide", "webview_hide", "memory_low"]);
     }
 
     #[test]
     fn failed_native_hide_leaves_the_webview_visible() {
         let webview_hidden = std::cell::Cell::new(false);
+        let throttled = std::cell::Cell::new(false);
 
         let error = hide_main_window(
             || Err::<(), String>("hide refused".into()),
@@ -4459,6 +4469,7 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
                 webview_hidden.set(true);
                 Ok::<(), String>(())
             },
+            || throttled.set(true),
         )
         .expect_err("a failed native hide must surface");
 
@@ -4467,17 +4478,27 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
             !webview_hidden.get(),
             "hiding the webview behind a still-visible window would blank it"
         );
+        assert!(
+            !throttled.get(),
+            "throttling a view the user can still see would be visible to them"
+        );
     }
 
     #[test]
     fn hide_reports_success_when_webview_visibility_fails() {
         // The window is already in the tray, so a controller failure is not
-        // worth failing the whole transition over.
+        // worth failing the whole transition over — and the memory target
+        // should still be lowered.
+        let throttled = std::cell::Cell::new(false);
+
         hide_main_window(
             || Ok::<(), String>(()),
             || Err::<(), String>("controller gone".into()),
+            || throttled.set(true),
         )
         .expect("webview visibility is best-effort on hide");
+
+        assert!(throttled.get());
     }
 
     #[test]

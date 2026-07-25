@@ -14,6 +14,10 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
     COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
 };
 use windows_core::Interface;
+use windows_core::HRESULT;
+
+/// `E_NOINTERFACE` — the runtime predates `ICoreWebView2_19`.
+const E_NOINTERFACE: HRESULT = HRESULT(0x8000_4002u32 as i32);
 
 /// Which target level to request for a webview.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,9 +54,13 @@ pub(crate) fn set_memory_target(
         let core = controller
             .CoreWebView2()
             .map_err(|e| format!("resolve CoreWebView2: {e}"))?;
-        let Ok(versioned) = core.cast::<ICoreWebView2_19>() else {
-            // Runtime older than the API — nothing to do.
-            return Ok(false);
+        let versioned = match core.cast::<ICoreWebView2_19>() {
+            Ok(versioned) => versioned,
+            // Only "this runtime does not implement the interface" is expected
+            // and silent. Any other COM failure is a real fault and must be
+            // reported rather than disguised as an old runtime.
+            Err(error) if error.code() == E_NOINTERFACE => return Ok(false),
+            Err(error) => return Err(format!("cast to ICoreWebView2_19: {error}")),
         };
         versioned
             .SetMemoryUsageTargetLevel(target.level())

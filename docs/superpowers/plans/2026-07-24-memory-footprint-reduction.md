@@ -336,12 +336,24 @@ and a clip decoding, hidden 120 s, final-30 s median:
 | 2 | 229.1 → 29.9 | 199.2 | ✓ | 124.4 → 5.7 | 333.7 → 155.8 |
 | 3 | 223.7 → 45.9 | 177.9 | ✓ | 125.6 → 33.8 | 335.3 → 184.4 |
 
-Median 188.3 MiB against the 40 MiB gate — roughly 9× what `SetIsVisible` managed alone. Idle in
-the tray, the whole tree drops from ~335 MB to ~155 MB.
+Median 188.3 MiB against the 40 MiB gate. Idle in the tray, the tree's resident set drops from
+~335 MB to ~155 MB.
 
-Caveat: run 3's playback did not confirm (its CDP probe returned empty), so it may have measured
-with the grid rendered but no active decode. Its GPU baseline of 125.6 MB shows the state was still
-inflated and its delta is in line with the others, but that is two fully-confirmed runs, not three.
+Three corrections to how this should be stated:
+
+- **"Trimmed from the resident set", not "released" or "reclaimed".** The harness sampled private
+  working set only; this plan's secondary private-commit check was **not** performed. So ~188 MiB
+  demonstrably left the resident set, but whether it was decommitted or merely paged out is
+  unmeasured. `scripts/measure-hidden-webview-memory.ps1` now records commit alongside working set
+  so a re-run can settle it.
+- **This is the combined figure, not `Low`'s increment.** It measures playback suspension +
+  `SetIsVisible` + `Low` together, where this task asked for the incremental delta. Subtracting the
+  visibility-only median (20.7 MiB) puts `Low`'s own contribution near **168 MiB** — still an
+  overwhelming pass, but the honest number.
+- **Two confirmed runs plus one corroborating run**, not three clean ones. Run 3's playback probe
+  returned empty and it ended at 33.8 MiB GPU rather than ~5 MiB, so it likely measured with the
+  grid rendered but no active decode. The harness now **fails** rather than proceeding when
+  click/playback confirmation is missing.
 
 ## Investigated and deliberately not changed
 
