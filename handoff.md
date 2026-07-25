@@ -4,6 +4,40 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-25): FFmpeg thumbnail reliability
+
+Plan: `docs/superpowers/plans/2026-07-25-ffmpeg-thumbnail-reliability.md`.
+
+Thumbnail failures on source builds and some installed machines had three indistinguishable causes:
+the executable search omitted the installed `%LOCALAPPDATA%\Clipline\ffmpeg` runtime, release
+bundling could silently consume the gitignored README-only staging directory, and the FFmpeg child
+wrote its temporary JPEG beside the clip where Windows Controlled Folder Access can deny an
+independently distributed process. The gallery swallowed every backend error into the same gradient
+fallback, leaving users no recovery path.
+
+FFmpeg discovery now checks the installed LocalAppData runtime before the legacy roaming development
+bundle and PATH, deduplicating candidates while keeping the explicit and packaged overrides first.
+Poster extraction emits one bounded MJPEG through concurrently drained stdout/stderr pipes; Clipline
+itself owns and atomically publishes the sibling temporary file. Missing-runtime errors are logged
+once by bounded category, without clip paths or FFmpeg stderr, and show a persistent Library warning
+with an in-process `Retry thumbnails` action. Other per-media failures remain local gradient
+fallbacks.
+
+Every Tauri bundle now runs the offline `scripts/verify-ffmpeg-resource.ps1` preflight. It rejects
+missing, unexpected, modified, reparse-point, provenance-mismatched, version-mismatched, GPL, or
+nonfree payloads before packaging. The source payload remains intentionally gitignored and the
+existing pinned staging workflow remains the only networked release step.
+
+Validation is green:
+
+- `cargo test --workspace`
+- cold-cache `cargo clippy --workspace --all-targets -- -D warnings`
+- JavaScript syntax, PowerShell parser, formatting, and `git diff --check`
+- installed payload verification, with README-only staging rejected before bundling
+- Computer Use E2E: a debug build regenerated a poster from the installed LocalAppData fallback;
+  removing every runtime produced the warning, then restoring FFmpeg and clicking Retry regenerated
+  the missing poster without an app restart
+
 ## Checkpoint (2026-07-25): PR #107 review follow-ups
 
 Plan: `docs/superpowers/plans/2026-07-25-pr-107-review-follow-ups.md`.
