@@ -5,11 +5,12 @@
 //! advertise the required capability.
 
 use std::{
-    collections::{hash_map::DefaultHasher, BTreeSet},
-    fs::OpenOptions,
+    collections::{hash_map::DefaultHasher, BTreeSet, HashMap},
+    fs::{File, OpenOptions},
     hash::{Hash, Hasher},
-    os::windows::fs::OpenOptionsExt,
+    os::windows::{fs::OpenOptionsExt, io::AsRawHandle},
     path::Path,
+    sync::{Mutex, OnceLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -24,7 +25,12 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
-use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+use windows_sys::Win32::{
+    Foundation::HANDLE,
+    Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_SHARE_READ,
+    },
+};
 
 const DIRECT_PUT_MAX_ATTEMPTS: usize = 3;
 const PROXY_PUT_MAX_ATTEMPTS: usize = 3;
@@ -34,6 +40,15 @@ const MAX_UPLOAD_PART_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_CONCURRENT_UPLOADS: usize = 2;
 static UPLOAD_PERMITS: tokio::sync::Semaphore =
     tokio::sync::Semaphore::const_new(MAX_CONCURRENT_UPLOADS);
+static ACTIVE_UPLOAD_SOURCES: OnceLock<Mutex<HashMap<UploadSourceIdentity, usize>>> =
+    OnceLock::new();
+const ACTIVE_UPLOAD_MUTATION_ERROR: &str = "clip is uploading; wait for the upload to finish";
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct UploadSourceIdentity {
+    volume_serial_number: u32,
+    file_index: u64,
+}
 
 pub async fn upload_mp4_file_with_progress<F>(
     client: &CloudClient,
@@ -110,18 +125,92 @@ where
 /// source from being deleted, renamed, or atomically replaced between hashing
 /// and a retry reopening its bounded stream.
 struct UploadSourceLease {
-    _file: std::fs::File,
+    file: Option<std::fs::File>,
+    source_identity: UploadSourceIdentity,
 }
 
 impl UploadSourceLease {
     fn acquire(path: &Path) -> CloudApiResult<Self> {
+        // Serialize identity discovery and registration with all app-side
+        // mutation checks. If a mutation checked first, it wins; otherwise it
+        // cannot observe an unregistered lease after this open succeeds.
+        let mut sources = ACTIVE_UPLOAD_SOURCES
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let file = OpenOptions::new()
             .read(true)
             .share_mode(FILE_SHARE_READ)
             .open(path)
             .map_err(|error| upload_file_error("lease upload source", path, error))?;
-        Ok(Self { _file: file })
+        let source_identity = opened_file_identity(&file)
+            .map_err(|error| upload_file_error("identify upload source", path, error))?;
+        *sources.entry(source_identity).or_default() += 1;
+        Ok(Self {
+            file: Some(file),
+            source_identity,
+        })
     }
+}
+
+impl Drop for UploadSourceLease {
+    fn drop(&mut self) {
+        // Release the kernel sharing lease before removing the user-facing
+        // active marker, so a concurrent mutation never falls through to a
+        // raw ERROR_SHARING_VIOLATION after being told the upload is idle.
+        drop(self.file.take());
+        let Some(sources) = ACTIVE_UPLOAD_SOURCES.get() else {
+            return;
+        };
+        let mut sources = sources
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let remove = match sources.get_mut(&self.source_identity) {
+            Some(count) if *count > 1 => {
+                *count -= 1;
+                false
+            }
+            Some(_) => true,
+            None => false,
+        };
+        if remove {
+            sources.remove(&self.source_identity);
+        }
+    }
+}
+
+fn opened_file_identity(file: &File) -> std::io::Result<UploadSourceIdentity> {
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    let result = unsafe { GetFileInformationByHandle(file.as_raw_handle() as HANDLE, &mut info) };
+    if result == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(UploadSourceIdentity {
+        volume_serial_number: info.dwVolumeSerialNumber,
+        file_index: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+    })
+}
+
+pub(crate) fn is_active_upload_source(path: &Path) -> bool {
+    let Some(sources) = ACTIVE_UPLOAD_SOURCES.get() else {
+        return false;
+    };
+    let sources = sources
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if sources.is_empty() {
+        return false;
+    }
+    let identity = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(path)
+        .and_then(|file| opened_file_identity(&file));
+    identity.is_ok_and(|identity| sources.contains_key(&identity))
+}
+
+pub(crate) fn active_upload_source_error(path: &Path) -> Option<String> {
+    is_active_upload_source(path).then(|| ACTIVE_UPLOAD_MUTATION_ERROR.to_string())
 }
 
 #[cfg(test)]
@@ -1229,6 +1318,55 @@ mod tests {
 
         std::fs::write(&path, b"updated").expect("write succeeds after releasing upload lease");
         assert_eq!(std::fs::read(&path).unwrap(), b"updated");
+    }
+
+    #[test]
+    fn upload_source_lease_reports_an_intentional_mutation_error_until_drop() {
+        let dir = TestDir::new("clipline-cloud-upload", "source-mutation-message");
+        let path = dir.path().join("clip.mp4");
+        std::fs::write(&path, b"original").unwrap();
+
+        assert_eq!(active_upload_source_error(&path), None);
+        let lease = UploadSourceLease::acquire(&path).unwrap();
+        assert_eq!(
+            active_upload_source_error(&path).as_deref(),
+            Some("clip is uploading; wait for the upload to finish")
+        );
+
+        drop(lease);
+        assert_eq!(active_upload_source_error(&path), None);
+    }
+
+    #[test]
+    fn upload_source_lease_refcounts_two_readers() {
+        let dir = TestDir::new("clipline-cloud-upload", "source-mutation-refcount");
+        let path = dir.path().join("clip.mp4");
+        std::fs::write(&path, b"original").unwrap();
+
+        let first = UploadSourceLease::acquire(&path).unwrap();
+        let second = UploadSourceLease::acquire(&path).unwrap();
+        drop(first);
+        assert_eq!(
+            active_upload_source_error(&path).as_deref(),
+            Some("clip is uploading; wait for the upload to finish")
+        );
+
+        drop(second);
+        assert_eq!(active_upload_source_error(&path), None);
+    }
+
+    #[test]
+    fn upload_source_lease_matches_hard_link_aliases_by_file_identity() {
+        let dir = TestDir::new("clipline-cloud-upload", "source-mutation-hard-link");
+        let path = dir.path().join("clip.mp4");
+        let alias = dir.path().join("clip-alias.mp4");
+        std::fs::write(&path, b"original").unwrap();
+        std::fs::hard_link(&path, &alias).unwrap();
+
+        let lease = UploadSourceLease::acquire(&path).unwrap();
+        assert!(is_active_upload_source(&alias));
+        drop(lease);
+        assert!(!is_active_upload_source(&alias));
     }
 
     #[tokio::test]

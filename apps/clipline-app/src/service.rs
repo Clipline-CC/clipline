@@ -29,8 +29,8 @@ use clipline_capture::{
 };
 use clipline_events::{is_review_event, ClipAudioTrack, EventKind, MarkerLog, PlayerSummary};
 use clipline_storage::{
-    clip_ownership_marker_path, enforce_quota, ensure_clip_owned, recover_recording_files,
-    remove_clip_ownership_marker, storage_status, StorageStatus,
+    clip_ownership_marker_path, enforce_quota_with_protection, ensure_clip_owned,
+    recover_recording_files, remove_clip_ownership_marker, storage_status, StorageStatus,
 };
 use clipline_storage::{session_label, SessionTracker};
 
@@ -2235,7 +2235,12 @@ fn emit_saved_clip(
     meta: SavedClipMeta,
     opts: &ServiceOptions,
 ) {
-    let report = match enforce_quota(clips_dir, opts.disk_quota_bytes, Some(path)) {
+    let report = match enforce_quota_with_protection(
+        clips_dir,
+        opts.disk_quota_bytes,
+        Some(path),
+        crate::cloud_upload::is_active_upload_source,
+    ) {
         Ok(report) => report,
         Err(e) => {
             warn_user(events, format!("storage cleanup: {e}"));

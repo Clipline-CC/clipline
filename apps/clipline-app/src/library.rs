@@ -630,7 +630,12 @@ pub(crate) fn clip_sidecar_paths(target: &Path) -> [PathBuf; 4] {
 }
 
 fn remove_clip_files(target: &Path) -> Result<(), String> {
-    std::fs::remove_file(target).map_err(|e| e.to_string())?;
+    if let Some(error) = crate::cloud_upload::active_upload_source_error(target) {
+        return Err(error);
+    }
+    std::fs::remove_file(target).map_err(|error| {
+        crate::cloud_upload::active_upload_source_error(target).unwrap_or_else(|| error.to_string())
+    })?;
     for sidecar in clip_sidecar_paths(target) {
         let _ = std::fs::remove_file(sidecar);
     }
@@ -833,6 +838,9 @@ fn rename_clip_files(
     old_path: String,
     target_name: String,
 ) -> Result<RenamedClipInfo, String> {
+    if let Some(error) = crate::cloud_upload::active_upload_source_error(&source) {
+        return Err(error);
+    }
     let parent = source
         .parent()
         .ok_or_else(|| "clip has no containing folder".to_string())?;
@@ -863,7 +871,10 @@ fn rename_clip_files(
     let pending_osu_move = PreparedOsuSidecarMove::stage(&source, &target)?;
 
     if source != target {
-        std::fs::rename(&source, &target).map_err(|e| format!("rename clip: {e}"))?;
+        std::fs::rename(&source, &target).map_err(|error| {
+            crate::cloud_upload::active_upload_source_error(&source)
+                .unwrap_or_else(|| format!("rename clip: {error}"))
+        })?;
     }
     if source_markers.exists() && source_markers != target_markers {
         if let Err(error) = std::fs::rename(&source_markers, &target_markers) {
