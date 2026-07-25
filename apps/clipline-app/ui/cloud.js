@@ -194,6 +194,14 @@ function clipCloudVisibility(record) {
   return record.upload_status === "uploaded_private" ? "private" : "public";
 }
 
+function cloudRecordUploaded(record) {
+  return CloudCore.recordUploaded(record);
+}
+
+function cloudShareUrl(record) {
+  return CloudCore.shareUrl(record);
+}
+
 function cloudLibraryRecords() {
   const cloudListAuthoritative = cloudClipsLoaded
     || cloudClipsLoading
@@ -334,6 +342,7 @@ async function openCloudEntryInApp(entry) {
       ...clip,
       cloud_remote_clip_id: entry.remote_clip_id,
       cloud_remote_url: entry.remote_url,
+      cloud_visibility: entry.visibility,
     });
     setDeckStatus("");
   } catch (e) {
@@ -568,9 +577,12 @@ async function disconnectCloud() {
 }
 
 async function copyCloudUrl(record) {
-  if (!record || !record.remote_url) return;
   setDeckStatus("");
   $("error").textContent = "";
+  if (!cloudShareUrl(record)) {
+    setDeckStatus("this clip has no public share link", { transient: true });
+    return;
+  }
   try {
     await navigator.clipboard.writeText(record.remote_url);
     setDeckStatus("cloud link copied", { transient: true });
@@ -666,10 +678,14 @@ async function uploadClipToCloud(clip, request = {}) {
     });
     if (result && result.record) {
       upsertCloudUploadRecord(result.record);
-      if (result.record.remote_url && result.record.upload_status === "uploaded_processing") {
+      if (result.record.upload_status === "uploaded_private") {
+        setDeckStatus("cloud upload ready — private", { transient: true });
+      } else if (result.record.remote_url && result.record.upload_status === "uploaded_processing") {
         setDeckStatus("cloud upload processing; link available", { transient: true });
       } else if (result.record.remote_url && result.record.upload_status.startsWith("uploaded_")) {
         setDeckStatus("cloud upload ready", { transient: true });
+      } else if (result.record.upload_status === "uploaded_public") {
+        setDeckStatus("cloud upload ready; public link unavailable", { transient: true });
       } else if (result.record.upload_status === "failed") {
         setDeckStatus("");
         $("error").textContent = result.record.error || "cloud upload failed";

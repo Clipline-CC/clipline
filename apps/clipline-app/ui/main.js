@@ -276,8 +276,8 @@ $("clip-menu-upload").addEventListener("click", () => {
   const record = clipContextRecord();
   hideClipContextMenu();
   if (!clip) return;
-  const uploaded = record && record.remote_url && record.upload_status.startsWith("uploaded_");
-  if (uploaded) copyCloudUrl(record);
+  if (cloudShareUrl(record)) copyCloudUrl(record);
+  else if (cloudRecordUploaded(record)) openCloudClipUrl(record);
   else openUploadDialog(clip);
 });
 $("clip-menu-rename").addEventListener("click", () => {
@@ -408,12 +408,19 @@ $("rename-file-input").addEventListener("keydown", (ev) => {
 $("upload-clip").addEventListener("click", () => {
   if (!currentClip) return;
   if (isCloudOnlyReviewClip(currentClip)) {
-    copyCloudUrl({ remote_url: currentClip.cloud_remote_url || "" });
+    const entry = {
+      remote_clip_id: currentClip.cloud_remote_clip_id,
+      remote_url: currentClip.cloud_remote_url || "",
+      visibility: currentClip.cloud_visibility || "private",
+      upload_status: currentClip.cloud_remote_url ? "uploaded_public" : "uploaded_private",
+    };
+    if (cloudShareUrl(entry)) copyCloudUrl(entry);
+    else openCloudClipUrl(entry);
     return;
   }
   const record = clipCloudRecord(currentClip);
-  const uploaded = record && record.remote_url && record.upload_status.startsWith("uploaded_");
-  if (uploaded) copyCloudUrl(record);
+  if (cloudShareUrl(record)) copyCloudUrl(record);
+  else if (cloudRecordUploaded(record)) openCloudClipUrl(record);
   else openUploadDialog(currentClip);
 });
 $("upload-confirm").addEventListener("click", submitUploadDialog);

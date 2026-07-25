@@ -1462,6 +1462,63 @@ fn uploaded_processing_status_survives_cloud_settings_normalization() {
 }
 
 #[test]
+fn cloud_settings_clear_legacy_synthesized_owner_share_urls() {
+    let mut cloud = CloudSettings {
+        host_url: "https://api.clips.example.com".into(),
+        public_url: Some("https://clips.example.com".into()),
+        ..CloudSettings::default()
+    };
+    cloud.uploads.insert(
+        "legacy-owner".into(),
+        CloudUploadRecord {
+            local_clip_id: "legacy-owner".into(),
+            path: "D:\\Videos\\legacy-owner.mp4".into(),
+            remote_clip_id: Some("remote-owner".into()),
+            remote_url: Some("https://old-clips.example.com/clip/remote-owner".into()),
+            visibility: "unlisted".into(),
+            upload_status: "uploaded_public".into(),
+            error: None,
+            updated_at_unix: 2,
+        },
+    );
+    cloud.uploads.insert(
+        "canonical-share".into(),
+        CloudUploadRecord {
+            local_clip_id: "canonical-share".into(),
+            path: "D:\\Videos\\canonical-share.mp4".into(),
+            remote_clip_id: Some("remote-share".into()),
+            remote_url: Some("https://clips.example.com/c/c_public".into()),
+            visibility: "public".into(),
+            upload_status: "uploaded_public".into(),
+            error: None,
+            updated_at_unix: 3,
+        },
+    );
+    cloud.uploads.insert(
+        "now-private".into(),
+        CloudUploadRecord {
+            local_clip_id: "now-private".into(),
+            path: "D:\\Videos\\now-private.mp4".into(),
+            remote_clip_id: Some("remote-private".into()),
+            remote_url: Some("https://clips.example.com/c/c_stale".into()),
+            visibility: "private".into(),
+            upload_status: "uploaded_private".into(),
+            error: None,
+            updated_at_unix: 4,
+        },
+    );
+
+    cloud.normalize();
+
+    assert_eq!(cloud.uploads["legacy-owner"].remote_url, None);
+    assert_eq!(cloud.uploads["now-private"].remote_url, None);
+    assert_eq!(
+        cloud.uploads["canonical-share"].remote_url.as_deref(),
+        Some("https://clips.example.com/c/c_public")
+    );
+}
+
+#[test]
 fn cloud_settings_normalize_connected_display_name() {
     let mut cloud = CloudSettings {
         connected_display_name: Some("  Dain  ".into()),

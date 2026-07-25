@@ -745,7 +745,7 @@ function cloudClipCard(entry) {
 
   const thumb = document.createElement("div");
   thumb.className = "card-thumb";
-  thumb.style.cssText = thumbGradient({ name: entry.title, session: entry.remote_url });
+  thumb.style.cssText = thumbGradient({ name: entry.title, session: entry.remote_clip_id });
   const placeholder = document.createElement("span");
   placeholder.className = "cloud-card-placeholder";
   placeholder.innerHTML = CLOUD_CARD_ICON; // static markup, safe
@@ -788,8 +788,8 @@ function cloudClipCard(entry) {
 
   const localState = document.createElement("div");
   localState.className = "cloud-local-state";
-  localState.textContent = entry.remote_url;
-  localState.title = entry.remote_url;
+  localState.textContent = entry.remote_url || "No public share link";
+  localState.title = entry.remote_url || "This clip is not publicly shareable.";
 
   meta.append(nameRow, info, localState);
   thumb.appendChild(play);
@@ -1342,15 +1342,16 @@ function showClipContextMenu(ev, clip) {
   gamePlayContextTarget = null;
   const record = clipCloudRecord(clip);
   const busy = record && ["queued", "uploading", "processing", "retrying"].includes(record.upload_status);
-  const uploaded = record && record.remote_url && record.upload_status.startsWith("uploaded_");
+  const uploaded = cloudRecordUploaded(record);
+  const shareable = !!cloudShareUrl(record);
   $("clip-menu-play").hidden = true;
   $("clip-menu-open-cloud-page").hidden = true;
   $("clip-menu-copy-cloud-link").hidden = true;
   $("clip-menu-export-play").hidden = true;
   const upload = $("clip-menu-upload");
   upload.hidden = false;
-  upload.textContent = uploaded ? "Copy cloud link" : "Upload";
-  upload.disabled = busy || (!uploaded && !cloudConnected());
+  upload.textContent = shareable ? "Copy cloud link" : uploaded ? "Open cloud page" : "Upload";
+  upload.disabled = busy || (uploaded ? !record.remote_clip_id : !cloudConnected());
   $("clip-menu-rename").hidden = false;
   $("clip-menu-rename-file").hidden = false;
   $("clip-menu-delete").hidden = false;
@@ -1369,9 +1370,9 @@ function showCloudClipContextMenu(ev, entry) {
   $("clip-menu-play").hidden = false;
   $("clip-menu-play").disabled = false;
   $("clip-menu-open-cloud-page").hidden = false;
-  $("clip-menu-open-cloud-page").disabled = !entry.remote_url;
-  $("clip-menu-copy-cloud-link").hidden = false;
-  $("clip-menu-copy-cloud-link").disabled = !entry.remote_url;
+  $("clip-menu-open-cloud-page").disabled = !entry.remote_clip_id;
+  $("clip-menu-copy-cloud-link").hidden = !cloudShareUrl(entry);
+  $("clip-menu-copy-cloud-link").disabled = !cloudShareUrl(entry);
   $("clip-menu-export-play").hidden = true;
   $("clip-menu-upload").hidden = true;
   $("clip-menu-rename").hidden = true;

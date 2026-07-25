@@ -3063,6 +3063,8 @@ fn library_has_cloud_source_tab() {
         "function renderCloudClips()",
         "function cloudLocalClipForEntry(entry)",
         "function openCloudEntryInApp(entry)",
+        "function cloudRecordUploaded(record)",
+        "function cloudShareUrl(record)",
         "function showCloudClipContextMenu(ev, entry)",
         "function observeCloudThumbnail(entry, thumb)",
         "function loadCloudThumbnail(entry, thumb)",
@@ -3082,6 +3084,11 @@ fn library_has_cloud_source_tab() {
         "PlayerCore.cloudLibraryEntries",
         "localClip ? clipCard(localClip) : cloudClipCard(entry)",
         "showCloudClipContextMenu(ev, entry)",
+        "$(\"clip-menu-open-cloud-page\").disabled = !entry.remote_clip_id",
+        "$(\"clip-menu-copy-cloud-link\").hidden = !cloudShareUrl(entry)",
+        "entry.remote_url || \"No public share link\"",
+        "session: entry.remote_clip_id",
+        "Open cloud page — no public share link",
         "$(\"cloud-gallery-grid\")",
         "querySelectorAll(\"#gallery-source-tabs .source-tab\")",
     ] {
@@ -3093,6 +3100,16 @@ fn library_has_cloud_source_tab() {
     assert!(
         !js.contains("actions.className = \"card-actions\""),
         "cloud-only cards should not render inline Play/Open/Copy buttons"
+    );
+    let player_core = player_core_js();
+    assert!(
+        player_core.contains("if (!clip || (!clip.remote_clip_id && !clip.remote_url)) continue;")
+            && player_core.contains(
+                "if (!record || (!record.remote_clip_id && !record.remote_url)) return false;"
+            )
+            && player_core.contains("remote_url: String(clip.remote_url || \"\")")
+            && player_core.contains("remote_url: String(record.remote_url || \"\")"),
+        "private cloud entries must remain addressable by remote identity without a share URL"
     );
     for required in [
         "POSTER_UNAVAILABLE = Symbol(\"poster unavailable\")",

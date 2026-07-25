@@ -52,6 +52,17 @@ var CloudCore = (() => {
     && String(activeOrigin) === String(confirmedOrigin || "")
   );
 
+  const recordUploaded = (record) => !!(
+    record
+    && record.remote_clip_id
+    && String(record.upload_status || "").startsWith("uploaded_")
+  );
+
+  const shareUrl = (record) => {
+    if (!recordUploaded(record) || String(record.visibility || "") === "private") return "";
+    return String(record.remote_url || "");
+  };
+
   const progressRenderFields = [
     "local_clip_id",
     "path",
@@ -100,7 +111,9 @@ var CloudCore = (() => {
     createRequestGate,
     mergeBackendCloudSettings,
     plainHttpConfirmed,
+    recordUploaded,
     reconcileUploadProgress,
+    shareUrl,
   };
 })();
 

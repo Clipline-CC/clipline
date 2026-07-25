@@ -118,6 +118,7 @@ pub struct CloudUploadProgressEvent {
     pub received_size_bytes: u64,
     pub file_size_bytes: u64,
     pub remote_clip_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_url: Option<String>,
     pub error: Option<String>,
 }
@@ -280,7 +281,7 @@ pub async fn list_cloud_clips(
                 .client_clip_id
                 .as_deref()
                 .and_then(|local_clip_id| cloud.uploads.get(local_clip_id));
-            clips.push(cloud_library_clip_from_summary(&cloud, &clip, local_record));
+            clips.push(cloud_library_clip_from_summary(&clip, local_record));
             if clips.len() >= CLOUD_LIBRARY_MAX_CLIPS {
                 truncated = true;
                 break;
@@ -461,7 +462,7 @@ pub fn open_cloud_clip(
     remote_clip_id: String,
 ) -> Result<(), String> {
     let cloud = state.settings().cloud;
-    let url = cloud_clip_page_url(&cloud, &remote_clip_id)?;
+    let url = cloud_owner_clip_page_url(&cloud, &remote_clip_id)?;
     open_cloud_url(url.as_str(), "cloud clip page")
 }
 
@@ -1198,7 +1199,7 @@ pub async fn sync_cloud_clip_status(
     match bounded_cloud_get_clip(&client, &token, &remote_clip_id).await {
         Ok(clip) => {
             let mut updated = record;
-            apply_remote_clip_to_record(&cloud, &mut updated, &clip);
+            apply_remote_clip_to_record(&mut updated, &clip);
             persist_record(&state, &updated)?;
             Ok(CloudClipStatusSyncResult {
                 path: request.path,
@@ -1479,7 +1480,6 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
         description.as_deref(),
         payload.path(),
         |progress| {
-            let url = cloud_clip_url(&cloud, &progress.clip_id);
             let status = if progress.status == "completed" {
                 "processing"
             } else {
@@ -1492,7 +1492,7 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
                 received_size_bytes: progress.received_size_bytes,
                 file_size_bytes: progress.file_size_bytes,
                 remote_clip_id: Some(progress.clip_id.clone()),
-                remote_url: url,
+                remote_url: None,
                 error: None,
             };
             let _ = app.emit(CLOUD_UPLOAD_PROGRESS_EVENT, event);
@@ -1513,7 +1513,7 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
     };
 
     record.remote_clip_id = Some(progress.clip_id.clone());
-    record.remote_url = cloud_clip_url(&cloud, &progress.clip_id);
+    record.remote_url = None;
     record.upload_status = "processing".to_string();
     record.error = None;
     record.updated_at_unix = unix_now();
@@ -1529,7 +1529,7 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
     let clip = match wait_for_ready_clip(&client, &token, &progress.clip_id).await {
         Ok(ReadyClipOutcome::Ready(clip)) => clip,
         Ok(ReadyClipOutcome::Failed(clip)) => {
-            apply_remote_clip_to_record(&cloud, &mut record, &clip);
+            apply_remote_clip_to_record(&mut record, &clip);
             record.upload_status = "failed".to_string();
             record.error = Some(
                 "cloud upload completed, but cloud media processing failed; the local clip was preserved"
@@ -1560,28 +1560,10 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
     let clip = if visibility == "private" {
         clip
     } else {
-        let update = cloud_clip_request(
-            client.base_url(),
-            &token,
-            reqwest::Method::POST,
-            &clip.id,
-            Some("visibility"),
-        )
-        .map(|request| {
-            request.json(&UpdateVisibilityRequest {
-                visibility: visibility.clone(),
-            })
-        });
-        match match update {
-            Ok(request) => {
-                bounded_cloud_json::<ClipDetailResponse>(request, "update cloud clip visibility")
-                    .await
-            }
-            Err(error) => Err(CloudApiError::InvalidUpload(error)),
-        } {
+        match update_cloud_clip_visibility(&client, &token, &clip.id, &visibility).await {
             Ok(updated) if updated.status == "ready" => updated,
             Ok(updated) => {
-                apply_remote_clip_to_record(&cloud, &mut record, &updated);
+                apply_remote_clip_to_record(&mut record, &updated);
                 mark_post_upload_problem(
                     &mut record,
                     format!(
@@ -1606,7 +1588,7 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
         }
     };
 
-    apply_remote_clip_to_record(&cloud, &mut record, &clip);
+    apply_remote_clip_to_record(&mut record, &clip);
     persist_post_upload_record(&app, &state, &record, progress.file_size_bytes)?;
 
     if cloud.delete_local_after_upload {
@@ -1739,6 +1721,39 @@ async fn bounded_cloud_get_clip(
     )
     .map_err(CloudApiError::InvalidUpload)?;
     bounded_cloud_json(request, "get cloud clip").await
+}
+
+async fn update_cloud_clip_visibility(
+    client: &CloudClient,
+    token: &str,
+    clip_id: &str,
+    visibility: &str,
+) -> Result<ClipDetailResponse, CloudApiError> {
+    let request = cloud_clip_request(
+        client.base_url(),
+        token,
+        reqwest::Method::POST,
+        clip_id,
+        Some("visibility"),
+    )
+    .map_err(CloudApiError::InvalidUpload)?
+    .json(&UpdateVisibilityRequest {
+        visibility: visibility.to_string(),
+    });
+    let updated: ClipDetailResponse =
+        bounded_cloud_json(request, "update cloud clip visibility").await?;
+    match bounded_cloud_get_clip(client, token, clip_id).await {
+        Ok(refreshed) => Ok(refreshed),
+        Err(error) => {
+            tracing::warn!(
+                event = "cloud_visibility_refresh_failed",
+                clip_id,
+                error = %error,
+                "visibility changed, but refreshing the canonical public URL failed"
+            );
+            Ok(updated)
+        }
+    }
 }
 
 struct UploadRequestInput<'a> {
@@ -2068,9 +2083,7 @@ fn existing_uploaded_record(
     path: &str,
 ) -> Option<CloudUploadRecord> {
     let uploaded = |record: &&CloudUploadRecord| {
-        record.remote_clip_id.is_some()
-            && record.remote_url.is_some()
-            && record.upload_status.starts_with("uploaded_")
+        record.remote_clip_id.is_some() && record.upload_status.starts_with("uploaded_")
     };
     if let Some(local_clip_id) = local_clip_id {
         return cloud.uploads.get(local_clip_id).filter(uploaded).cloned();
@@ -2116,7 +2129,7 @@ fn persist_record(state: &RuntimeState, record: &CloudUploadRecord) -> Result<()
 fn mark_ready_timeout(record: &mut CloudUploadRecord) {
     record.upload_status = "uploaded_processing".to_string();
     record.error = Some(format!(
-        "cloud upload completed, but cloud processing did not become ready within {} seconds; the local clip was preserved and the cloud link may finish processing shortly",
+        "cloud upload completed, but cloud processing did not become ready within {} seconds; the local clip was preserved and a public share link will remain unavailable until a later status refresh",
         READY_POLL_ATTEMPTS as u64 * READY_POLL_DELAY.as_secs()
     ));
     record.updated_at_unix = unix_now();
@@ -2145,24 +2158,20 @@ fn persist_post_upload_record<R: Runtime>(
     Ok(())
 }
 
-fn apply_remote_clip_to_record(
-    cloud: &CloudSettings,
-    record: &mut CloudUploadRecord,
-    clip: &ClipDetailResponse,
-) {
+fn apply_remote_clip_to_record(record: &mut CloudUploadRecord, clip: &ClipDetailResponse) {
     record.visibility = clip.visibility.clone();
     record.remote_clip_id = Some(clip.id.clone());
-    record.remote_url = clip
-        .public_url
-        .clone()
-        .or_else(|| cloud_clip_url(cloud, &clip.id));
+    record.remote_url = if clip.visibility == "private" {
+        None
+    } else {
+        clip.public_url.clone()
+    };
     record.upload_status = upload_status_for_remote_clip(clip);
     record.error = None;
     record.updated_at_unix = unix_now();
 }
 
 fn cloud_library_clip_from_summary(
-    cloud: &CloudSettings,
     clip: &ClipSummaryResponse,
     local_record: Option<&CloudUploadRecord>,
 ) -> CloudLibraryClip {
@@ -2173,11 +2182,11 @@ fn cloud_library_clip_from_summary(
             .map(|record| record.path.clone())
             .unwrap_or_default(),
         title: clip.title.clone(),
-        remote_url: clip
-            .public_url
-            .clone()
-            .or_else(|| cloud_clip_url(cloud, &clip.id))
-            .unwrap_or_default(),
+        remote_url: if clip.visibility == "private" {
+            String::new()
+        } else {
+            clip.public_url.clone().unwrap_or_default()
+        },
         visibility: clip.visibility.clone(),
         upload_status: upload_status_for_summary_clip(clip),
         updated_at_unix: datetime_to_unix_seconds(clip.updated_at),
@@ -2359,13 +2368,7 @@ async fn verify_ready_cloud_media(
     Ok(())
 }
 
-fn cloud_clip_url(cloud: &CloudSettings, clip_id: &str) -> Option<String> {
-    cloud_clip_page_url(cloud, clip_id)
-        .ok()
-        .map(|url| url.to_string())
-}
-
-fn cloud_clip_page_url(
+fn cloud_owner_clip_page_url(
     cloud: &CloudSettings,
     remote_clip_id: &str,
 ) -> Result<reqwest::Url, String> {
@@ -2423,6 +2426,27 @@ mod tests {
         assert_eq!(
             credential_target("https://clips.example.com", "user_1"),
             "Clipline Cloud:https://clips.example.com:user_1"
+        );
+    }
+
+    #[test]
+    fn upload_progress_omits_absent_share_url() {
+        let event = CloudUploadProgressEvent {
+            local_clip_id: "local-1".into(),
+            path: "D:\\Videos\\clip.mp4".into(),
+            upload_status: "processing".into(),
+            received_size_bytes: 10,
+            file_size_bytes: 20,
+            remote_clip_id: Some("remote-1".into()),
+            remote_url: None,
+            error: None,
+        };
+
+        let serialized = serde_json::to_value(event).expect("serialize upload progress");
+
+        assert!(
+            serialized.get("remote_url").is_none(),
+            "an absent share URL must not erase a previously refreshed URL"
         );
     }
 
@@ -2619,7 +2643,7 @@ mod tests {
             10,
         );
         record.remote_clip_id = Some("remote-1".into());
-        record.remote_url = Some("https://clips.example.com/clip/remote-1".into());
+        record.remote_url = Some("https://clips.example.com/c/c_existing".into());
         cloud.uploads.insert("legacy".into(), record.clone());
 
         assert_eq!(
@@ -2638,19 +2662,37 @@ mod tests {
     }
 
     #[test]
-    fn ready_timeout_keeps_remote_link_available_without_retry_upload() {
+    fn uploaded_private_record_without_share_url_blocks_reupload() {
+        let mut cloud = CloudSettings::default();
+        let mut record = upload_record(
+            "private-local",
+            r"D:\Videos\Clipline\private.mp4",
+            "uploaded_private",
+            10,
+        );
+        record.remote_clip_id = Some("private-remote".into());
+        cloud.uploads.insert("private-local".into(), record.clone());
+
+        assert_eq!(
+            existing_uploaded_record(
+                &cloud,
+                Some("private-local"),
+                r"D:\Videos\Clipline\private.mp4"
+            ),
+            Some(record)
+        );
+    }
+
+    #[test]
+    fn ready_timeout_keeps_remote_identity_without_fabricating_share_url() {
         let mut record = upload_record("local", "D:\\Videos\\clip.mp4", "processing", 10);
         record.remote_clip_id = Some("remote-1".into());
-        record.remote_url = Some("https://clips.example.com/clip/remote-1".into());
 
         mark_ready_timeout(&mut record);
 
         assert_eq!(record.upload_status, "uploaded_processing");
         assert_eq!(record.remote_clip_id.as_deref(), Some("remote-1"));
-        assert_eq!(
-            record.remote_url.as_deref(),
-            Some("https://clips.example.com/clip/remote-1")
-        );
+        assert_eq!(record.remote_url, None);
         assert!(
             record
                 .error
@@ -2792,7 +2834,7 @@ mod tests {
     fn post_upload_problem_keeps_remote_identity_for_reconciliation() {
         let mut record = upload_record("local", "D:\\Videos\\clip.mp4", "processing", 10);
         record.remote_clip_id = Some("remote-1".into());
-        record.remote_url = Some("https://clips.example.com/clip/remote-1".into());
+        record.remote_url = Some("https://clips.example.com/c/c_existing".into());
 
         mark_post_upload_problem(&mut record, "visibility update failed".into());
 
@@ -2800,23 +2842,18 @@ mod tests {
         assert_eq!(record.remote_clip_id.as_deref(), Some("remote-1"));
         assert_eq!(
             record.remote_url.as_deref(),
-            Some("https://clips.example.com/clip/remote-1")
+            Some("https://clips.example.com/c/c_existing")
         );
         assert_eq!(record.error.as_deref(), Some("visibility update failed"));
     }
 
     #[test]
     fn cloud_clip_detail_updates_record_visibility_status_and_url() {
-        let cloud = CloudSettings {
-            public_url: Some("https://clips.example.com".into()),
-            ..CloudSettings::default()
-        };
         let mut record = upload_record("local", "D:\\Videos\\clip.mp4", "uploaded_public", 10);
         record.remote_clip_id = Some("remote-1".into());
         record.remote_url = Some("https://clips.example.com/old".into());
 
         apply_remote_clip_to_record(
-            &cloud,
             &mut record,
             &clip_detail(
                 "remote-1",
@@ -2833,18 +2870,25 @@ mod tests {
             Some("https://share.example.com/c/1")
         );
         assert!(record.error.is_none());
+
+        apply_remote_clip_to_record(
+            &mut record,
+            &clip_detail("remote-1", "private", "ready", None),
+        );
+
+        assert_eq!(record.visibility, "private");
+        assert_eq!(record.upload_status, "uploaded_private");
+        assert_eq!(
+            record.remote_url, None,
+            "private clip detail must clear a previously saved public share URL"
+        );
     }
 
     #[test]
-    fn cloud_summary_maps_to_library_clip_with_client_id_and_owned_url() {
-        let cloud = CloudSettings {
-            public_url: Some("https://clips.example.com".into()),
-            ..CloudSettings::default()
-        };
+    fn private_cloud_summary_maps_to_library_clip_without_share_url() {
         let local = upload_record("local-1", "D:\\Videos\\known.mp4", "uploaded_public", 10);
 
         let entry = cloud_library_clip_from_summary(
-            &cloud,
             &clip_summary(
                 "remote-1",
                 Some("local-1"),
@@ -2860,22 +2904,103 @@ mod tests {
         assert_eq!(entry.local_clip_id.as_deref(), Some("local-1"));
         assert_eq!(entry.path, "D:\\Videos\\known.mp4");
         assert_eq!(entry.title, "Server Title");
-        assert_eq!(entry.remote_url, "https://clips.example.com/clip/remote-1");
+        assert_eq!(entry.remote_url, "");
         assert_eq!(entry.visibility, "private");
         assert_eq!(entry.upload_status, "uploaded_private");
         assert_eq!(entry.source_type.as_deref(), Some("replay"));
         assert!(entry.updated_at_unix > 0);
     }
 
+    #[tokio::test]
+    async fn visibility_update_refreshes_canonical_public_url() {
+        let server = MockServer::start();
+        let stale_update = clip_detail("remote-1", "public", "ready", None);
+        let refreshed = clip_detail(
+            "remote-1",
+            "public",
+            "ready",
+            Some("https://clips.example.com/c/c_share"),
+        );
+        let update = server.mock(|when, then| {
+            when.method(POST)
+                .path("/api/v1/clips/remote-1/visibility")
+                .json_body_obj(&UpdateVisibilityRequest {
+                    visibility: "public".to_string(),
+                });
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body_obj(&stale_update);
+        });
+        let refresh = server.mock(|when, then| {
+            when.method(GET).path("/api/v1/clips/remote-1");
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body_obj(&refreshed);
+        });
+
+        let clip = update_cloud_clip_visibility(
+            &test_cloud_client(&server),
+            "token",
+            "remote-1",
+            "public",
+        )
+        .await
+        .expect("update and refresh visibility");
+
+        assert_eq!(
+            clip.public_url.as_deref(),
+            Some("https://clips.example.com/c/c_share")
+        );
+        update.assert();
+        refresh.assert();
+    }
+
+    #[tokio::test]
+    async fn visibility_update_preserves_post_detail_if_refresh_fails() {
+        let server = MockServer::start();
+        let updated = clip_detail(
+            "remote-1",
+            "unlisted",
+            "ready",
+            Some("https://clips.example.com/c/c_post_fallback"),
+        );
+        let update = server.mock(|when, then| {
+            when.method(POST).path("/api/v1/clips/remote-1/visibility");
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body_obj(&updated);
+        });
+        let refresh = server.mock(|when, then| {
+            when.method(GET).path("/api/v1/clips/remote-1");
+            then.status(503).body("try again later");
+        });
+
+        let clip = update_cloud_clip_visibility(
+            &test_cloud_client(&server),
+            "token",
+            "remote-1",
+            "unlisted",
+        )
+        .await
+        .expect("successful visibility update remains successful");
+
+        assert_eq!(
+            clip.public_url.as_deref(),
+            Some("https://clips.example.com/c/c_post_fallback")
+        );
+        update.assert();
+        refresh.assert();
+    }
+
     #[test]
-    fn cloud_clip_page_url_uses_configured_origin_and_one_safe_segment() {
+    fn cloud_owner_clip_page_url_uses_configured_origin_and_one_safe_segment() {
         let public_cloud = CloudSettings {
             host_url: "https://api.example.com/base/".into(),
             public_url: Some("https://clips.example.com/cloud/".into()),
             ..CloudSettings::default()
         };
         assert_eq!(
-            cloud_clip_page_url(&public_cloud, "remote-1_ABC")
+            cloud_owner_clip_page_url(&public_cloud, "remote-1_ABC")
                 .expect("public clip page")
                 .as_str(),
             "https://clips.example.com/cloud/clip/remote-1_ABC"
@@ -2886,14 +3011,14 @@ mod tests {
             ..CloudSettings::default()
         };
         assert_eq!(
-            cloud_clip_page_url(&private_cloud, "remote-2")
+            cloud_owner_clip_page_url(&private_cloud, "remote-2")
                 .expect("private clip page")
                 .as_str(),
             "http://127.0.0.1:8080/root/clip/remote-2"
         );
         for invalid in ["", "../escape", "remote/escape", "remote?redirect=evil"] {
             assert!(
-                cloud_clip_page_url(&public_cloud, invalid).is_err(),
+                cloud_owner_clip_page_url(&public_cloud, invalid).is_err(),
                 "remote id must be one safe segment: {invalid}"
             );
         }

@@ -4,6 +4,27 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-24): canonical public clip share URLs
+
+Cloud upload records now treat `remote_clip_id` as authenticated remote identity and `remote_url`
+strictly as the server-issued public share URL. Upload progress never synthesizes
+`{public_origin}/clip/{clip_id}`; after processing, and again after the upload flow changes
+visibility, the client reads `GET /api/v1/clips/{clip_id}` and persists
+`ClipDetailResponse.public_url` verbatim. Public and unlisted clips therefore copy the canonical
+`/c/c_...` URL used by unfurled Discord embeds. Private detail responses clear the saved URL, and
+settings normalization removes both stale private URLs and legacy synthesized owner routes,
+including routes saved under a previously configured host.
+
+Private clips still remain in the Cloud library and dedupe against later upload attempts because
+those behaviors key on `remote_clip_id`, not shareability. Their UI offers the authenticated
+**Open cloud page** action but hides copy-link affordances and labels the missing public link
+explicitly. Progress events omit absent `remote_url` fields so byte/status updates cannot erase a
+freshly synchronized share URL. The authenticated `/clip/{clip_id}` route remains isolated to the
+native open-page command and is never stored or copied as a share URL.
+Native/API, settings-migration, DOM-free Cloud/player, and UI contract regressions cover the
+transition matrix. Workspace tests and fresh-cache warning-denied Clippy are green; a live Cloud
+upload plus Discord unfurl remains the final deployment-dependent acceptance check.
+
 ## Checkpoint (2026-07-23): Nightly 0.1.41
 
 Nightly 0.1.41 contains PR #103's WASAPI endpoint-loss recovery and PR #104's private diagnostic
