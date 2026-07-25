@@ -1253,6 +1253,27 @@ fn thirty_second_replay_has_buffer_slack_for_encoder_overshoot() {
 }
 
 #[test]
+fn service_retention_derives_headroom_even_when_buffer_seconds_is_stale() {
+    // `save_to` normalizes only a clone, so a live `AppSettings` can carry a
+    // stale `buffer_seconds`. Equal to `replay_window_s` passes validation —
+    // which only rejects window > buffer — yet leaves zero headroom, so the
+    // service options must derive the value rather than read the field.
+    let settings = AppSettings {
+        replay_window_s: 30.0,
+        buffer_seconds: 30.0,
+        ..AppSettings::default()
+    };
+
+    let opts = settings.to_service_options(None).unwrap();
+
+    assert_eq!(opts.buffer_seconds, 30.0 + BUFFER_HEADROOM_S);
+    assert!(
+        opts.buffer_seconds > settings.replay_window_s,
+        "retention must exceed the save window so GOP granularity cannot clip it"
+    );
+}
+
+#[test]
 fn load_normalizes_buffer_seconds_to_replay_plus_headroom() {
     let dir = TestDir::new("clipline-settings", "buffer-headroom");
     let path = dir.path().join("settings.json");

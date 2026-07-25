@@ -30,10 +30,23 @@ pub enum PipelineError {
     Io(#[from] io::Error),
 }
 
+/// Where the rolling replay buffer lives, and how much it retains.
+///
+/// `retention_s` bounds retention by wall-clock span as well as bytes. The byte
+/// budget carries an encoder-overshoot headroom, so on its own it lets the
+/// buffer grow to the whole budget — roughly twice the intended span, and
+/// further when the encoder undershoots. `f64::INFINITY` disables the bound.
 #[derive(Debug)]
 pub enum ReplayStorageConfig {
-    Memory { max_bytes: usize },
-    Disk { max_bytes: usize, dir: PathBuf },
+    Memory {
+        max_bytes: usize,
+        retention_s: f64,
+    },
+    Disk {
+        max_bytes: usize,
+        retention_s: f64,
+        dir: PathBuf,
+    },
 }
 
 enum ReplayStorage {
@@ -207,11 +220,27 @@ pub struct Recorder<C: CaptureEngine, E: Encoder> {
 }
 
 impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
+    /// In-memory replay buffer bounded only by bytes. A retention window cannot
+    /// be derived from a byte budget, so callers that want one use
+    /// [`Recorder::with_retention`] or [`ReplayStorageConfig`].
     pub fn new(capture: C, encoder: E, max_buffer_bytes: usize) -> Self {
+        Self::with_retention(capture, encoder, max_buffer_bytes, f64::INFINITY)
+    }
+
+    /// In-memory replay buffer bounded by bytes and a retention window (s).
+    pub fn with_retention(
+        capture: C,
+        encoder: E,
+        max_buffer_bytes: usize,
+        retention_s: f64,
+    ) -> Self {
         Self {
             capture,
             encoder,
-            ring: ReplayStorage::Memory(ReplayRing::new(max_buffer_bytes)),
+            ring: ReplayStorage::Memory(ReplayRing::with_retention(
+                max_buffer_bytes,
+                retention_s,
+            )),
             pending: Vec::new(),
             pending_bytes: 0,
             pending_audio_bytes: 0,
@@ -231,16 +260,23 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
         storage: ReplayStorageConfig,
     ) -> io::Result<Self> {
         let storage_max_bytes = match &storage {
-            ReplayStorageConfig::Memory { max_bytes } => *max_bytes,
+            ReplayStorageConfig::Memory { max_bytes, .. } => *max_bytes,
             ReplayStorageConfig::Disk { max_bytes, .. } => *max_bytes,
         };
         let ring = match storage {
-            ReplayStorageConfig::Memory { max_bytes } => {
-                ReplayStorage::Memory(ReplayRing::new(max_bytes))
-            }
-            ReplayStorageConfig::Disk { max_bytes, dir } => {
-                ReplayStorage::Disk(DiskReplayRing::new(max_bytes, dir)?)
-            }
+            ReplayStorageConfig::Memory {
+                max_bytes,
+                retention_s,
+            } => ReplayStorage::Memory(ReplayRing::with_retention(max_bytes, retention_s)),
+            ReplayStorageConfig::Disk {
+                max_bytes,
+                retention_s,
+                dir,
+            } => ReplayStorage::Disk(DiskReplayRing::with_retention(
+                max_bytes,
+                retention_s,
+                dir,
+            )?),
         };
         Ok(Self {
             capture,
@@ -1630,6 +1666,8 @@ mod tests {
             MockEncoder::new(30, 30),
             ReplayStorageConfig::Disk {
                 max_bytes: usize::MAX,
+                // Matches the byte-only `Recorder::new` ring above.
+                retention_s: f64::INFINITY,
                 dir: dir.path().to_path_buf(),
             },
         )
@@ -1643,6 +1681,64 @@ mod tests {
         assert_eq!(disk.ring_len(), ram.ring_len());
         assert_eq!(disk.ring_bytes(), ram.ring_bytes());
         assert_eq!(disk_buf, ram_buf);
+    }
+
+    #[test]
+    fn memory_retention_bounds_the_ring_by_duration() {
+        // 3s of footage in 1s GOPs. A 1.5s retention window keeps the two
+        // newest GOPs, where a byte-only ring keeps all three.
+        let mut bounded = Recorder::new_with_replay_storage(
+            MockCapture::new(90, 30),
+            MockEncoder::new(30, 30),
+            ReplayStorageConfig::Memory {
+                max_bytes: usize::MAX,
+                retention_s: 1.5,
+            },
+        )
+        .unwrap();
+        bounded.run_to_end().unwrap();
+
+        let mut unbounded = Recorder::new(
+            MockCapture::new(90, 30),
+            MockEncoder::new(30, 30),
+            usize::MAX,
+        );
+        unbounded.run_to_end().unwrap();
+
+        assert_eq!(
+            unbounded.ring_len(),
+            3,
+            "`new` must stay byte-only so existing callers are unaffected"
+        );
+        assert_eq!(bounded.ring_len(), 2, "retention drops the oldest GOP");
+        assert!(bounded.ring_bytes() < unbounded.ring_bytes());
+    }
+
+    #[test]
+    fn disk_retention_matches_memory_retention() {
+        let dir = TestDir::new("clipline-pipeline", "disk-retention");
+        let mut disk = Recorder::new_with_replay_storage(
+            MockCapture::new(90, 30),
+            MockEncoder::new(30, 30),
+            ReplayStorageConfig::Disk {
+                max_bytes: usize::MAX,
+                retention_s: 1.5,
+                dir: dir.path().to_path_buf(),
+            },
+        )
+        .unwrap();
+        disk.run_to_end().unwrap();
+
+        let mut ram = Recorder::with_retention(
+            MockCapture::new(90, 30),
+            MockEncoder::new(30, 30),
+            usize::MAX,
+            1.5,
+        );
+        ram.run_to_end().unwrap();
+
+        assert_eq!(disk.ring_len(), ram.ring_len());
+        assert_eq!(disk.ring_bytes(), ram.ring_bytes());
     }
 
     #[test]
