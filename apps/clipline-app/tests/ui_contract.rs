@@ -748,6 +748,7 @@ fn review_player_owns_all_controls() {
         "id=\"copy-clip\"",
         "id=\"stage-overlay\"",
         "id=\"memory-usage\"",
+        "id=\"memory-children\"",
         "id=\"rail-hotkey\"",
         "id=\"rail-dot\"",
         "id=\"rail-status-text\"",
@@ -2993,6 +2994,10 @@ fn shell_shows_live_memory_usage() {
         "sidebar chrome must include the RAM indicator placeholder"
     );
     assert!(
+        html.contains("id=\"memory-children\""),
+        "child-process memory needs its own element so the app figure stays unblended"
+    );
+    assert!(
         js.contains("memory_status"),
         "memory indicator must use the backend sampler"
     );
@@ -3016,6 +3021,15 @@ fn shell_shows_live_memory_usage() {
     assert!(
         css.contains(".memory-usage") && css.contains("font-variant-numeric: tabular-nums"),
         "memory usage should have stable numeric styling in the top-left chrome"
+    );
+    assert!(
+        css.contains(".memory-children[hidden] { display: none; }"),
+        "a display rule on the child line would otherwise defeat the [hidden] attribute"
+    );
+    assert!(
+        js.contains("process_private_working_set_bytes")
+            && js.contains("children_private_working_set_bytes"),
+        "the meter must read the split fields, not the blended tree total"
     );
 }
 

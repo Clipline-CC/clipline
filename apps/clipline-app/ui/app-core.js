@@ -455,8 +455,22 @@ async function refreshMemoryUsage() {
   try {
     const s = await invoke("memory_status");
     // Compact for the 64px rail; the "RAM" caption is a CSS ::before label.
-    $("memory-usage").textContent = fmtBytes(s.private_working_set_bytes);
+    // Headline is Clipline's own process so a regression here is visible; the
+    // webview runtime and any ffmpeg child are real but not ours to allocate,
+    // and blending them hides a ring regression inside Edge's noise.
+    $("memory-usage").textContent = fmtBytes(s.process_private_working_set_bytes);
+    const children = $("memory-children");
+    if (children) {
+      const bytes = s.children_private_working_set_bytes;
+      children.textContent = bytes > 0 ? `+${fmtBytes(bytes)} child` : "";
+      children.hidden = !(bytes > 0);
+    }
   } catch (_) {
     $("memory-usage").textContent = "-- MB";
+    const children = $("memory-children");
+    if (children) {
+      children.textContent = "";
+      children.hidden = true;
+    }
   }
 }
