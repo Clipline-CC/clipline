@@ -27,6 +27,7 @@ $ErrorActionPreference = 'Stop'
 
 Add-Type -TypeDefinition @"
 using System;
+using System.ComponentModel;
 using System.Runtime.InteropServices;
 public class ClipSaveMem {
   [StructLayout(LayoutKind.Sequential)]
@@ -34,14 +35,27 @@ public class ClipSaveMem {
     public UIntPtr peakWs; public UIntPtr ws; public UIntPtr qpp; public UIntPtr qp;
     public UIntPtr qpnp; public UIntPtr qnp; public UIntPtr pf2; public UIntPtr peakPf;
     public UIntPtr PrivateUsage; public UIntPtr PrivateWorkingSetSize; public ulong shared; }
-  [DllImport("kernel32.dll")] public static extern IntPtr OpenProcess(uint a, bool i, int p);
-  [DllImport("psapi.dll")] public static extern bool GetProcessMemoryInfo(IntPtr h, out C c, uint cb);
-  [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  public static extern IntPtr OpenProcess(uint a, bool i, int p);
+  [DllImport("psapi.dll", SetLastError = true)]
+  public static extern bool GetProcessMemoryInfo(IntPtr h, out C c, uint cb);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  public static extern bool CloseHandle(IntPtr h);
   static C Read(int pid) {
     IntPtr h = OpenProcess(0x1000, false, pid);
     C c = new C(); c.cb = (uint)Marshal.SizeOf(typeof(C));
-    if (h == IntPtr.Zero) return c;
-    GetProcessMemoryInfo(h, out c, c.cb); CloseHandle(h); return c; }
+    if (h == IntPtr.Zero)
+      throw new Win32Exception(Marshal.GetLastWin32Error(), "OpenProcess failed for PID " + pid);
+    try {
+      if (!GetProcessMemoryInfo(h, out c, c.cb))
+        throw new Win32Exception(
+          Marshal.GetLastWin32Error(),
+          "GetProcessMemoryInfo(PROCESS_MEMORY_COUNTERS_EX2) failed for PID " + pid);
+      return c;
+    } finally {
+      CloseHandle(h);
+    }
+  }
   public static long Pws(int pid) { return (long)Read(pid).PrivateWorkingSetSize; }
   public static long Commit(int pid) { return (long)Read(pid).PrivateUsage; }
 }
