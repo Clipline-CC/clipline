@@ -12,6 +12,25 @@ fn context() -> Context {
     context
 }
 
+fn path_comparison_context() -> Context {
+    let mut context = Context::default();
+    for name in [
+        "presentation-core.js",
+        "player-core.js",
+        "gallery-window-core.js",
+    ] {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui").join(name);
+        let source =
+            fs::read_to_string(path).unwrap_or_else(|error| panic!("read {name}: {error}"));
+        context
+            .eval(Source::from_bytes(&source))
+            .unwrap_or_else(|error| {
+                panic!("{name} evaluates without DOM or Tauri globals: {error}")
+            });
+    }
+    context
+}
+
 fn eval(context: &mut Context, expression: &str) -> String {
     context
         .eval(Source::from_bytes(expression))
@@ -48,6 +67,44 @@ fn clip_path_keys_match_windows_paths_without_collapsing_other_paths() {
             ])"#,
         ),
         r#"["windows:c:\\clips\\one.mp4","windows:c:\\clips\\one.mp4","windows:c:\\clips\\one.mp4","exact:/clips/One.mp4","exact:/clips/one.mp4"]"#
+    );
+}
+
+#[test]
+fn gallery_path_keys_stay_equivalent_to_player_path_matching() {
+    let mut context = path_comparison_context();
+    assert_eq!(
+        eval(
+            &mut context,
+            r#"JSON.stringify([
+              ["C:\\Clips\\One.mp4", "c:/clips/ONE.mp4", true],
+              ["C:\\Clips\\One.mp4", "//?/C:/CLIPS/one.mp4", true],
+              ["\\\\server\\share\\One.mp4", "//?/UNC/SERVER/SHARE/one.mp4", true],
+              ["C:\\Clips\\One.mp4", "C:\\Clips\\Two.mp4", false],
+              ["\\\\server\\share\\One.mp4", "\\\\server\\other\\One.mp4", false],
+              ["/clips/One.mp4", "/clips/One.mp4", true],
+              [" /clips/One.mp4 ", "/clips/One.mp4", true],
+              ["/clips/One.mp4", "/clips/one.mp4", false],
+              ["clips/one.mp4", "clips\\one.mp4", false],
+              ["", "", false],
+              ["   ", "", false],
+              ["", "C:\\Clips\\One.mp4", false],
+              ["   ", "/clips/One.mp4", false],
+              ["C:\\clips\\one.mp4", "/clips/one.mp4", false],
+              ["C:\\clips\\one.mp4", "\\\\server\\share\\one.mp4", false]
+            ].filter(([left, right, expected]) => {
+              const playerMatches = PlayerCore.sameClipPath(left, right);
+              const leftKey = GalleryWindowCore.clipPathKey(left);
+              const rightKey = GalleryWindowCore.clipPathKey(right);
+              // Production omits empty keys from its Set, so two invalid
+              // paths must not become equivalent merely because both map to "".
+              const galleryMatches = Boolean(
+                leftKey && rightKey && leftKey === rightKey
+              );
+              return playerMatches !== expected || galleryMatches !== expected;
+            }))"#,
+        ),
+        "[]"
     );
 }
 

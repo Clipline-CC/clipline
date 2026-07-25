@@ -38,7 +38,7 @@ var GalleryWindowCore = (() => {
     makeState(0, "", pageSize(size));
 
   // A changed source/filter/group/data identity always returns to page one.
-  // Unchanged data only clamps an out-of-range page after deletion.
+  // Otherwise preserve the current page, clamped to the supplied bounds.
   const updateState = (
     state,
     { identity = "", total = 0, pageSize: requestedSize } = {},
