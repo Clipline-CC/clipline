@@ -11,7 +11,7 @@ use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 use windows::Win32::Media::MediaFoundation::{
     CODECAPI_AVEncCommonMeanBitRate, CODECAPI_AVEncCommonRateControlMode,
-    CODECAPI_AVEncMPVDefaultBPictureCount, CODECAPI_AVEncMPVGOPSize, ICodecAPI,
+    CODECAPI_AVEncMPVDefaultBPictureCount, CODECAPI_AVEncMPVGOPSize, ICodecAPI, IMFActivate,
     IMFDXGIDeviceManager, IMFMediaEventGenerator, IMFSample, IMFTransform, MEError,
     METransformDrainComplete, METransformHaveOutput, METransformNeedInput,
     MFCreateAlignedMemoryBuffer, MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer,
@@ -56,6 +56,23 @@ fn take_and_clear_manually_drop_option<T>(slot: &mut ManuallyDrop<Option<T>>) ->
 
 struct OwnedMftOutputBuffer {
     raw: MFT_OUTPUT_DATA_BUFFER,
+}
+
+struct ReusableMftOutputSample {
+    sample: IMFSample,
+    capacity: u32,
+    alignment: u32,
+}
+
+struct OwnedMftActivation(IMFActivate);
+
+impl Drop for OwnedMftActivation {
+    fn drop(&mut self) {
+        // SAFETY: the owner called ActivateObject and therefore owns the
+        // matching activation shutdown responsibility. This is also harmless
+        // for transforms that do not require an explicit shutdown.
+        let _ = unsafe { self.0.ShutdownObject() };
+    }
 }
 
 impl OwnedMftOutputBuffer {
@@ -106,6 +123,7 @@ pub struct MftConfig {
 }
 
 pub struct MftH264Encoder {
+    _activation: OwnedMftActivation,
     transform: IMFTransform,
     events: IMFMediaEventGenerator,
     converter: VideoConverter,
@@ -123,6 +141,7 @@ pub struct MftH264Encoder {
 /// BGRA -> NV12 conversion and system-memory samples so it remains available
 /// when the machine has neither a hardware encoder nor a bundled FFmpeg.
 pub struct SoftwareMftH264Encoder {
+    _activation: OwnedMftActivation,
     transform: IMFTransform,
     device: ID3D11Device,
     converter: CpuVideoConverter,
@@ -134,6 +153,7 @@ pub struct SoftwareMftH264Encoder {
     input_size: u32,
     input_alignment: u32,
     output_info: MFT_OUTPUT_STREAM_INFO,
+    output_sample: Option<ReusableMftOutputSample>,
     sps_pps: Option<(Vec<u8>, Vec<u8>)>,
     cfg: MftConfig,
     prev_pts_s: Option<f64>,
@@ -240,6 +260,7 @@ impl MftH264Encoder {
         })?;
         // SAFETY: activate is a valid IMFActivate from MFTEnumEx.
         let transform: IMFTransform = unsafe { activate.ActivateObject() }.map_err(backend)?;
+        let activation = OwnedMftActivation(activate.clone());
 
         // Hardware encoder MFTs are async: unlock first, everything else after.
         let attrs = unsafe { transform.GetAttributes() }.map_err(backend)?;
@@ -378,6 +399,7 @@ impl MftH264Encoder {
                 .map_err(|e| EncodeError::Backend(format!("NV12 converter: {e}")))?;
 
         Ok(Self {
+            _activation: activation,
             transform,
             events,
             converter,
@@ -575,6 +597,8 @@ impl Encoder for MftH264Encoder {
             self.transform
                 .ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, self.input_id as usize)
                 .map_err(backend)?;
+            // Current Media Foundation documentation explicitly says ulParam
+            // contains the specified input stream ID for the drain command.
             self.transform
                 .ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, self.input_id as usize)
                 .map_err(backend)?;
@@ -651,6 +675,7 @@ impl SoftwareMftH264Encoder {
             .ok_or_else(|| EncodeError::Backend("no software H.264 encoder MFT".into()))?;
         // SAFETY: activate is a valid IMFActivate returned by MFTEnumEx.
         let transform: IMFTransform = unsafe { activate.ActivateObject() }.map_err(backend)?;
+        let activation = OwnedMftActivation(activate.clone());
         if let Ok(attrs) = unsafe { transform.GetAttributes() } {
             let _ = unsafe { attrs.SetUINT32(&MF_LOW_LATENCY, 1) };
         }
@@ -776,6 +801,7 @@ impl SoftwareMftH264Encoder {
             .map_err(|e| EncodeError::Backend(format!("CPU nv12 converter: {e}")))?;
 
         Ok(Self {
+            _activation: activation,
             transform,
             device: device.clone(),
             converter,
@@ -787,6 +813,7 @@ impl SoftwareMftH264Encoder {
             input_size,
             input_alignment,
             output_info,
+            output_sample: None,
             sps_pps,
             cfg,
             prev_pts_s: None,
@@ -868,6 +895,7 @@ impl SoftwareMftH264Encoder {
                 | MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES.0 as u32)
             != 0;
         if mft_allocates {
+            self.output_sample = None;
             return Ok(OwnedMftOutputBuffer::new(self.output_id));
         }
         if self.output_info.cbSize == 0 {
@@ -876,18 +904,44 @@ impl SoftwareMftH264Encoder {
             ));
         }
         let alignment = mf_alignment_mask(self.output_info.cbAlignment)?;
-        // SAFETY: the sample owns a buffer sized according to
-        // GetOutputStreamInfo, as required for caller-allocated output.
-        let sample = unsafe {
-            let sample = MFCreateSample().map_err(backend)?;
-            let buffer =
-                MFCreateAlignedMemoryBuffer(self.output_info.cbSize, alignment).map_err(backend)?;
-            sample.AddBuffer(&buffer).map_err(backend)?;
+        let needs_sample = self.output_sample.as_ref().is_none_or(|sample| {
+            sample.capacity < self.output_info.cbSize || sample.alignment != alignment
+        });
+        if needs_sample {
+            // SAFETY: the sample owns a buffer sized according to
+            // GetOutputStreamInfo, as required for caller-allocated output.
+            let sample = unsafe {
+                let sample = MFCreateSample().map_err(backend)?;
+                let buffer = MFCreateAlignedMemoryBuffer(self.output_info.cbSize, alignment)
+                    .map_err(backend)?;
+                sample.AddBuffer(&buffer).map_err(backend)?;
+                sample
+            };
+            self.output_sample = Some(ReusableMftOutputSample {
+                sample,
+                capacity: self.output_info.cbSize,
+                alignment,
+            });
+        }
+        let sample = self
+            .output_sample
+            .as_ref()
+            .expect("caller-allocated output sample initialized");
+        // Reuse is safe only after the previous packet has been copied out.
+        // Clear sample attributes (notably CleanPoint) and reset the buffer's
+        // logical length before handing the retained allocation back to the MFT.
+        unsafe {
+            sample.sample.DeleteAllItems().map_err(backend)?;
             sample
-        };
+                .sample
+                .GetBufferByIndex(0)
+                .map_err(backend)?
+                .SetCurrentLength(0)
+                .map_err(backend)?;
+        }
         Ok(OwnedMftOutputBuffer::with_sample(
             self.output_id,
-            Some(sample),
+            Some(sample.sample.clone()),
         ))
     }
 
@@ -911,6 +965,7 @@ impl SoftwareMftH264Encoder {
                 .GetOutputStreamInfo(self.output_id)
                 .map_err(backend)?;
         }
+        self.output_sample = None;
         Ok(())
     }
 
@@ -986,6 +1041,8 @@ impl Encoder for SoftwareMftH264Encoder {
         };
         let nv12 = self.convert(texture)?;
         let nominal = 1.0 / self.cfg.fps as f64;
+        // Match the hardware MFT path's VRR convention: each frame carries
+        // the interval preceding it, with nominal duration on the first frame.
         let duration_s = self
             .prev_pts_s
             .map(|previous| (frame.pts_s - previous).max(1e-4))
@@ -1027,6 +1084,8 @@ impl Encoder for SoftwareMftH264Encoder {
             self.transform
                 .ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, self.input_id as usize)
                 .map_err(backend)?;
+            // Current Media Foundation documentation explicitly says ulParam
+            // contains the specified input stream ID for the drain command.
             self.transform
                 .ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, self.input_id as usize)
                 .map_err(backend)?;
@@ -1185,6 +1244,24 @@ mod tests {
         };
         let mut enc =
             SoftwareMftH264Encoder::new(&device, 640, 360, cfg).expect("software H.264 MFT");
+        let caller_supplies_output = enc.output_info.dwFlags
+            & (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32
+                | MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES.0 as u32)
+            == 0;
+        if caller_supplies_output {
+            let mut first = enc.output_buffer().expect("first output buffer");
+            let first_sample = first.take_sample().expect("first caller sample");
+            let first_identity = first_sample.as_raw();
+            drop(first_sample);
+
+            let mut second = enc.output_buffer().expect("reused output buffer");
+            let second_sample = second.take_sample().expect("second caller sample");
+            assert_eq!(
+                second_sample.as_raw(),
+                first_identity,
+                "caller-owned output allocation is reused"
+            );
+        }
         let texture =
             crate::windows::d3d11::create_bgra_texture(&device, 640, 360).expect("BGRA texture");
         let mut packets = Vec::new();
