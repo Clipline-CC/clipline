@@ -23,6 +23,13 @@ reused after clearing attributes and logical length, and activated MFTs call `Sh
 normal drop and constructor-error unwind. Drain continues to pass the input stream ID, matching
 Microsoft's corrected Media Foundation documentation.
 
+The second review tightened test and measurement portability: child WebView2 processes that exit
+mid-sample are skipped atomically while root-counter failures stay fatal, the poster timeout fixture
+re-invokes the Rust test binary instead of depending on PowerShell/PATH, and one Boa regression now
+cross-checks gallery path keys against player path equality. The active-upload identity lock remains
+intentional: it linearizes kernel lease acquisition with registry publication, and measured local
+contention was only tens of microseconds per candidate open.
+
 Validation is green:
 
 - `cargo test --workspace`
