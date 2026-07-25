@@ -252,3 +252,22 @@ fn poster_cache_is_lru_bounded_including_unavailable_entries() {
         r#"{"size":120,"oldestGone":true,"nextEvicted":true,"touchedKept":true,"touched":"unavailable","evicted":["poster-381"]}"#
     );
 }
+
+#[test]
+fn only_a_missing_ffmpeg_runtime_requests_the_global_poster_warning() {
+    let mut context = context();
+    assert_eq!(
+        eval(
+            &mut context,
+            r#"JSON.stringify([
+              "ffmpeg is not available for poster extraction",
+              new Error("FFMPEG IS NOT AVAILABLE FOR POSTER EXTRACTION"),
+              "ffmpeg poster failed: clip named ffmpeg is not available for poster extraction",
+              "ffmpeg poster failed: corrupt input",
+              "spawn ffmpeg poster: access denied",
+              null
+            ].map((error) => GalleryWindowCore.posterRuntimeUnavailable(error)))"#,
+        ),
+        "[true,true,false,false,false,false]"
+    );
+}

@@ -23,6 +23,11 @@
     <div id="app-status" class="app-status">
       <div id="notice"></div>
       <div id="error"></div>
+      <div id="poster-runtime-warning" class="poster-runtime-warning" role="alert" hidden>
+        <span>Thumbnails need Clipline's FFmpeg component, but it is missing or blocked. Update or
+          reinstall Clipline, check antivirus quarantine, then retry.</span>
+        <button id="poster-runtime-retry" type="button">Retry thumbnails</button>
+      </div>
     </div>
     <aside class="sidebar">
       <div class="sidebar-top">

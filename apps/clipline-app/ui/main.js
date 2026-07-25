@@ -131,6 +131,7 @@ $("gallery-select-toggle").addEventListener("click", () => {
 $("bulk-select-all").addEventListener("click", selectAllVisible);
 $("bulk-clear").addEventListener("click", clearSelection);
 $("bulk-delete").addEventListener("click", bulkDeleteSelected);
+$("poster-runtime-retry").addEventListener("click", retryUnavailablePosters);
 $("gallery-sort").addEventListener("change", (ev) => { gallerySort = ev.target.value; renderClips(); });
 $("gallery-group").addEventListener("change", (ev) => { galleryGroup = ev.target.value; renderClips(); });
 $("gallery-filter").addEventListener("click", (ev) => {

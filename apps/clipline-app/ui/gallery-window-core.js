@@ -179,6 +179,16 @@ var GalleryWindowCore = (() => {
     return `exact:${text}`;
   };
 
+  const posterRuntimeUnavailable = (error) => {
+    const detail = error && typeof error === "object" && "message" in error
+      ? error.message
+      : error;
+    return String(detail ?? "")
+      .trim()
+      .toLowerCase()
+      === "ffmpeg is not available for poster extraction";
+  };
+
   return Object.freeze({
     DEFAULT_PAGE_SIZE,
     initialState,
@@ -190,6 +200,7 @@ var GalleryWindowCore = (() => {
     cacheGet,
     cacheSet,
     clipPathKey,
+    posterRuntimeUnavailable,
   });
 })();
 

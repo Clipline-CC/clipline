@@ -9,7 +9,7 @@ use naming::{
     normalized_clip_title,
 };
 
-use std::collections::{hash_map::DefaultHasher, HashMap};
+use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
@@ -490,6 +490,43 @@ fn poster_extraction_coordinator() -> Arc<PosterExtractionCoordinator> {
     }))
 }
 
+fn poster_failure_kind(error: &str) -> &'static str {
+    if error
+        .trim()
+        .eq_ignore_ascii_case("ffmpeg is not available for poster extraction")
+    {
+        "runtime_unavailable"
+    } else if error.starts_with("spawn ffmpeg poster") {
+        "spawn_failed"
+    } else if error.contains("timed out") {
+        "timeout"
+    } else if error.starts_with("ffmpeg poster failed") {
+        "media_or_codec"
+    } else if error.contains("JPEG data") || error.contains("output limit") {
+        "invalid_output"
+    } else if error.contains("poster temp") || error.contains("finalize poster") {
+        "publish_failed"
+    } else {
+        "unknown"
+    }
+}
+
+fn log_poster_failure_once(error: &str) {
+    static REPORTED: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+    let kind = poster_failure_kind(error);
+    let reported = REPORTED.get_or_init(|| Mutex::new(HashSet::new()));
+    let should_report = match reported.lock() {
+        Ok(mut reported) => reported.insert(kind),
+        Err(_) => true,
+    };
+    if should_report {
+        // Keep clip paths and FFmpeg stderr out of the support log. The
+        // category is enough to distinguish discovery, execution, decoding,
+        // output, and Rust-owned publication failures.
+        tracing::warn!(event = "poster_extraction_failed", kind);
+    }
+}
+
 /// Return (generating on demand) the cached poster JPEG for a clip, as a path
 /// the webview loads through the asset protocol. Lazy and per-clip so the
 /// library listing never blocks on ffmpeg.
@@ -510,7 +547,8 @@ pub async fn clip_poster<R: Runtime>(
                 let seek_s = poster_seek_seconds(&target);
                 crate::poster::ensure_poster(&target, seek_s)
             })
-            .await?
+            .await
+            .inspect_err(|error| log_poster_failure_once(error))?
     };
     allow_local_poster_asset(&app, &scope_root, &poster)?;
     Ok(poster.display().to_string())
@@ -3379,6 +3417,40 @@ mod tests {
         let missing = dir.path().join("missing");
 
         assert!(list_clips_from_dir(missing).is_err());
+    }
+
+    #[test]
+    fn poster_diagnostics_classify_failures_without_retaining_paths_or_stderr() {
+        assert_eq!(
+            poster_failure_kind("ffmpeg is not available for poster extraction"),
+            "runtime_unavailable"
+        );
+        assert_eq!(
+            poster_failure_kind("spawn ffmpeg poster: access denied"),
+            "spawn_failed"
+        );
+        assert_eq!(
+            poster_failure_kind("ffmpeg poster timed out after 30 seconds"),
+            "timeout"
+        );
+        assert_eq!(
+            poster_failure_kind("ffmpeg poster failed: C:\\private\\clip.mp4 is corrupt"),
+            "media_or_codec"
+        );
+        assert_eq!(
+            poster_failure_kind(
+                "ffmpeg poster failed: clip named ffmpeg is not available for poster extraction"
+            ),
+            "media_or_codec"
+        );
+        assert_eq!(
+            poster_failure_kind("ffmpeg poster produced no JPEG data"),
+            "invalid_output"
+        );
+        assert_eq!(
+            poster_failure_kind("finalize poster: sharing violation"),
+            "publish_failed"
+        );
     }
 
     #[test]

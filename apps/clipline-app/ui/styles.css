@@ -536,6 +536,23 @@ label span { white-space: nowrap; }
 }
 .app-status #notice:empty,
 .app-status #error:empty { display: none; }
+.poster-runtime-warning {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px 8px 14px;
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--danger);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  pointer-events: auto;
+}
+.poster-runtime-warning[hidden] { display: none; }
+.poster-runtime-warning button {
+  flex: none;
+  padding: 5px 9px;
+}
 
 /* ---- sidebar ---- */
 .sidebar {

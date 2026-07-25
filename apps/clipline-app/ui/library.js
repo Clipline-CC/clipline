@@ -56,6 +56,7 @@ function clipDisplayTitle(clip) {
 const CLOUD_POSTER_CACHE_PREFIX = "cloud-thumb:";
 const POSTER_UNAVAILABLE_RETRY_MS = 30_000;
 var posterUnavailableUntil = new Map();
+var posterRuntimeWarningReported = false;
 var localClipPathIndexSource = null;
 var localClipPathIndex = new Set();
 
@@ -954,6 +955,33 @@ function markPosterUnavailable(path) {
   posterCacheSet(path, POSTER_UNAVAILABLE);
 }
 
+function showPosterRuntimeWarning(error) {
+  const warning = $("poster-runtime-warning");
+  if (warning) warning.hidden = false;
+  if (posterRuntimeWarningReported) return;
+  posterRuntimeWarningReported = true;
+  reportFrontendDiagnostic("warn", "poster_ffmpeg_unavailable", error);
+}
+
+function clearPosterRuntimeWarning() {
+  const warning = $("poster-runtime-warning");
+  if (warning) warning.hidden = true;
+}
+
+function retryUnavailablePosters() {
+  for (const [key, value] of [...posterCache.entries()]) {
+    if (
+      value === POSTER_UNAVAILABLE
+      && !String(key).startsWith(CLOUD_POSTER_CACHE_PREFIX)
+    ) {
+      posterCacheDelete(key);
+    }
+  }
+  clearPosterRuntimeWarning();
+  posterRuntimeWarningReported = false;
+  renderClips();
+}
+
 // Lazily fetch + cache a clip's poster, then drop it into its card thumbnail.
 // The backend caches the JPEG, so repeat calls are cheap after the first.
 function loadCardPoster(path, thumb) {
@@ -981,8 +1009,12 @@ function loadCardPoster(path, thumb) {
         insertThumbMedia(thumb, makePosterImg(url, () => markPosterUnavailable(path)));
       }
     })
-    .catch(() => {
-      if (isForegroundWorkCurrent(lifecycleWork)) markPosterUnavailable(path);
+    .catch((error) => {
+      if (!isForegroundWorkCurrent(lifecycleWork)) return;
+      markPosterUnavailable(path);
+      if (GalleryWindowCore.posterRuntimeUnavailable(error)) {
+        showPosterRuntimeWarning(error);
+      }
     });
 }
 

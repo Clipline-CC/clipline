@@ -124,37 +124,47 @@ fn search_paths_from(
     exe_name: &str,
     explicit: Option<PathBuf>,
     current_exe: Option<PathBuf>,
+    local_appdata: Option<PathBuf>,
     appdata: Option<PathBuf>,
     bundled: Option<PathBuf>,
 ) -> Vec<PathBuf> {
     let mut paths = Vec::new();
+    let mut push_unique = |path: PathBuf| {
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    };
     if let Some(explicit) = explicit {
-        paths.push(explicit);
+        push_unique(explicit);
     }
     if let Some(bundled) = bundled {
-        paths.push(bundled);
+        push_unique(bundled);
     }
     if let Some(exe) = current_exe {
         if let Some(dir) = exe.parent() {
-            paths.push(dir.join(exe_name));
+            push_unique(dir.join(exe_name));
         }
     }
-    if let Some(appdata) = appdata {
-        paths.push(appdata.join("Clipline").join("ffmpeg").join(exe_name));
+    if let Some(local_appdata) = local_appdata {
+        push_unique(local_appdata.join("Clipline").join("ffmpeg").join(exe_name));
     }
-    paths.push(PathBuf::from(exe_name)); // PATH fallback
+    if let Some(appdata) = appdata {
+        push_unique(appdata.join("Clipline").join("ffmpeg").join(exe_name));
+    }
+    push_unique(PathBuf::from(exe_name)); // PATH fallback
     paths
 }
 
 /// Candidate locations for `ffmpeg`, most-specific first: an explicit
 /// `CLIPLINE_FFMPEG` override, the packaged app resource, next to our own exe,
-/// the per-user `%APPDATA%\Clipline\ffmpeg` bundle, then a bare name for a PATH
-/// lookup.
+/// an installed runtime under `%LOCALAPPDATA%\Clipline\ffmpeg`, the per-user
+/// `%APPDATA%\Clipline\ffmpeg` override, then a bare name for a PATH lookup.
 pub fn search_paths() -> Vec<PathBuf> {
     search_paths_from(
         ffmpeg_exe_name(),
         std::env::var_os("CLIPLINE_FFMPEG").map(PathBuf::from),
         std::env::current_exe().ok(),
+        std::env::var_os("LOCALAPPDATA").map(PathBuf::from),
         std::env::var_os("APPDATA").map(PathBuf::from),
         BUNDLED_FFMPEG.get().cloned(),
     )
@@ -505,6 +515,7 @@ mod tests {
             "ffmpeg.exe",
             None,
             Some(install_exe),
+            None,
             Some(appdata.clone()),
             Some(bundled.clone()),
         );
@@ -527,10 +538,64 @@ mod tests {
             Some(explicit.clone()),
             Some(fixture_path(&["clipline-install", "Clipline.exe"])),
             None,
+            None,
             Some(bundled.clone()),
         );
 
         assert_eq!(paths[0], explicit);
         assert_eq!(paths[1], bundled);
+    }
+
+    #[test]
+    fn installed_local_appdata_runtime_precedes_roaming_override_and_path() {
+        let local_appdata = fixture_path(&["user-profile", "AppData", "Local"]);
+        let appdata = fixture_path(&["user-profile", "AppData", "Roaming"]);
+
+        let paths = search_paths_from(
+            "ffmpeg.exe",
+            None,
+            None,
+            Some(local_appdata.clone()),
+            Some(appdata.clone()),
+            None,
+        );
+
+        assert_eq!(
+            paths,
+            [
+                local_appdata
+                    .join("Clipline")
+                    .join("ffmpeg")
+                    .join("ffmpeg.exe"),
+                appdata.join("Clipline").join("ffmpeg").join("ffmpeg.exe"),
+                PathBuf::from("ffmpeg.exe"),
+            ]
+        );
+    }
+
+    #[test]
+    fn duplicate_candidates_keep_the_first_occurrence() {
+        let install_dir = fixture_path(&["clipline-install"]);
+        let installed_ffmpeg = install_dir.join("ffmpeg.exe");
+        let appdata = fixture_path(&["user-profile", "AppData"]);
+        let appdata_ffmpeg = appdata.join("Clipline").join("ffmpeg").join("ffmpeg.exe");
+
+        let paths = search_paths_from(
+            "ffmpeg.exe",
+            Some(installed_ffmpeg.clone()),
+            Some(install_dir.join("Clipline.exe")),
+            Some(appdata.clone()),
+            Some(appdata),
+            Some(installed_ffmpeg.clone()),
+        );
+
+        assert_eq!(
+            paths,
+            [
+                installed_ffmpeg,
+                appdata_ffmpeg,
+                PathBuf::from("ffmpeg.exe"),
+            ]
+        );
     }
 }

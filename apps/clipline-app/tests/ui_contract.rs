@@ -3374,7 +3374,12 @@ fn library_has_cloud_source_tab() {
         "if (cached === POSTER_UNAVAILABLE) return Promise.resolve();",
         "POSTER_UNAVAILABLE_RETRY_MS = 30_000",
         "Date.now() >= retryAt",
-        "if (isForegroundWorkCurrent(lifecycleWork)) markPosterUnavailable(path);",
+        "if (!isForegroundWorkCurrent(lifecycleWork)) return;",
+        "GalleryWindowCore.posterRuntimeUnavailable(error)",
+        "function retryUnavailablePosters()",
+        "value === POSTER_UNAVAILABLE",
+        "!String(key).startsWith(CLOUD_POSTER_CACHE_PREFIX)",
+        "posterCacheDelete(key);",
         "loadCardPoster(path, thumb)",
         "observePoster(c.path, thumb)",
         "insertThumbMedia(thumb, makePosterImg(cached",
@@ -3397,6 +3402,27 @@ fn library_has_cloud_source_tab() {
             "thumbnail fallbacks must not keep source media open or bypass overlay-safe insertion via `{forbidden}`"
         );
     }
+    for required in [
+        "id=\"poster-runtime-warning\"",
+        "id=\"poster-runtime-retry\"",
+        "check antivirus quarantine",
+    ] {
+        assert!(
+            html.contains(required),
+            "missing thumbnail runtime must expose actionable UI through `{required}`"
+        );
+    }
+    assert!(
+        js.contains(
+            "$(\"poster-runtime-retry\").addEventListener(\"click\", retryUnavailablePosters)"
+        ),
+        "the thumbnail runtime warning must expose an in-process retry"
+    );
+    assert!(
+        css.contains(".poster-runtime-warning[hidden] { display: none; }")
+            && css.contains("pointer-events: auto;"),
+        "the actionable runtime warning must obey hidden state and accept clicks"
+    );
     for required in [
         ".gallery-source-tabs",
         ".source-tab.active",
