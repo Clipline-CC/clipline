@@ -1532,10 +1532,41 @@ fn send_main_window_to_tray<R: Runtime>(app: &AppHandle<R>) -> Result<(), String
                 result
             },
         )?;
+        request_webview_memory_target(&window, &label, crate::windows::MemoryTarget::Low);
         log_diagnostic(format!("send-to-tray hide ok label={label}"));
         log_window_state(&format!("send-to-tray after hide label={label}"), &window);
     }
     Ok(())
+}
+
+/// Request a WebView2 memory-usage target level for one window, best-effort.
+///
+/// `with_webview` hands the controller over on the webview thread, so this is
+/// fire-and-forget like the visibility calls: the outcome is logged, never
+/// propagated. A runtime predating `ICoreWebView2_19` reports `unsupported` and
+/// is not an error.
+fn request_webview_memory_target<R: Runtime>(
+    window: &WebviewWindow<R>,
+    label: &str,
+    target: crate::windows::MemoryTarget,
+) {
+    let owned_label = label.to_string();
+    let dispatched = window.with_webview(move |webview| {
+        let outcome = crate::windows::set_memory_target(&webview.controller(), target);
+        let described = match &outcome {
+            Ok(true) => "ok".to_string(),
+            Ok(false) => "unsupported".to_string(),
+            Err(error) => format!("failed: {error}"),
+        };
+        log_diagnostic(format!(
+            "webview memory target label={owned_label} target={target:?}: {described}"
+        ));
+    });
+    if let Err(error) = dispatched {
+        log_diagnostic(format!(
+            "webview memory target dispatch failed label={label} target={target:?}: {error}"
+        ));
+    }
 }
 
 /// A cold autostart never calls `open_main_window`, and while the native window
@@ -1553,6 +1584,7 @@ fn hide_autostart_webviews<R: Runtime>(app: &AppHandle<R>) {
             "autostart webview hide label={label}: {}",
             result_debug(result.as_ref())
         ));
+        request_webview_memory_target(&window, &label, crate::windows::MemoryTarget::Low);
     }
 }
 
@@ -2600,6 +2632,9 @@ fn reveal_logged_window<R: Runtime>(
     window: &WebviewWindow<R>,
     context: &str,
 ) -> Result<(), String> {
+    // Back to Normal before anything is shown: a reveal that painted while still
+    // at Low would be the first thing the user sees.
+    request_webview_memory_target(window, context, crate::windows::MemoryTarget::Normal);
     reveal_main_window(
         || {
             let result = window.as_ref().show();

@@ -30,6 +30,13 @@ tauri-plugin-autostart = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"
+# Pinned to the version Tauri 2.11 already resolves, so `PlatformWebview::controller`
+# hands back the same `ICoreWebView2Controller` type and no second COM binding
+# enters the dependency tree.
+webview2-com = "0.38"
+# Must match the windows-core that webview2-com-sys 0.38 resolves (0.61), or
+# `Interface::cast` is called against a different COM type system.
+windows-core = "0.61"
 chrono = "0.4.45"
 rfd = "0.15"
 png = "0.17"
