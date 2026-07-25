@@ -54,8 +54,19 @@ function clipDisplayTitle(clip) {
 }
 
 const CLOUD_POSTER_CACHE_PREFIX = "cloud-thumb:";
+const POSTER_UNAVAILABLE_RETRY_MS = 30_000;
+var posterUnavailableUntil = new Map();
+var localClipPathIndexSource = null;
+var localClipPathIndex = new Set();
 
 function posterCacheGet(key) {
+  if (posterCache.get(key) === POSTER_UNAVAILABLE) {
+    const retryAt = posterUnavailableUntil.get(key);
+    if (!Number.isFinite(retryAt) || Date.now() >= retryAt) {
+      posterCacheDelete(key);
+      return undefined;
+    }
+  }
   // Map insertion order gives us a tiny LRU without retaining image elements
   // or decoded bitmaps: the cache owns URL strings / the unavailable sentinel.
   return GalleryWindowCore.cacheGet(posterCache, key);
@@ -63,29 +74,52 @@ function posterCacheGet(key) {
 
 function posterCacheSet(key, value) {
   if (!key) return;
-  GalleryWindowCore.cacheSet(posterCache, key, value, POSTER_CACHE_LIMIT);
+  const evicted = GalleryWindowCore.cacheSet(
+    posterCache,
+    key,
+    value,
+    POSTER_CACHE_LIMIT,
+  );
+  for (const evictedKey of evicted) posterUnavailableUntil.delete(evictedKey);
+  if (value === POSTER_UNAVAILABLE) {
+    posterUnavailableUntil.set(key, Date.now() + POSTER_UNAVAILABLE_RETRY_MS);
+  } else {
+    posterUnavailableUntil.delete(key);
+  }
 }
 
 function posterCacheDelete(key) {
   posterCache.delete(key);
+  posterUnavailableUntil.delete(key);
 }
 
 function clearCloudPosterCache() {
   for (const key of [...posterCache.keys()]) {
     if (String(key).startsWith(CLOUD_POSTER_CACHE_PREFIX)) {
-      posterCache.delete(key);
+      posterCacheDelete(key);
     }
   }
 }
 
+function localClipPaths(clips) {
+  const source = Array.isArray(clips) ? clips : [];
+  if (source === localClipPathIndexSource) return localClipPathIndex;
+  const paths = new Set();
+  for (const clip of source) {
+    const key = GalleryWindowCore.clipPathKey(clip && clip.path);
+    if (key) paths.add(key);
+  }
+  localClipPathIndexSource = source;
+  localClipPathIndex = paths;
+  return paths;
+}
+
 function pruneLocalPosterCache(clips) {
-  const paths = (Array.isArray(clips) ? clips : [])
-    .map((clip) => clip && clip.path)
-    .filter(Boolean);
+  const paths = localClipPaths(clips);
   for (const key of [...posterCache.keys()]) {
     if (String(key).startsWith(CLOUD_POSTER_CACHE_PREFIX)) continue;
-    if (!paths.some((path) => PlayerCore.sameClipPath(path, key))) {
-      posterCache.delete(key);
+    if (!paths.has(GalleryWindowCore.clipPathKey(key))) {
+      posterCacheDelete(key);
     }
   }
 }
@@ -101,7 +135,7 @@ function pruneCloudPosterCache(entries) {
       String(key).startsWith(CLOUD_POSTER_CACHE_PREFIX)
       && !valid.has(key)
     ) {
-      posterCache.delete(key);
+      posterCacheDelete(key);
     }
   }
 }
@@ -166,9 +200,10 @@ async function refreshClips(
   applyLocalLibraryWarnings(result.warnings);
   clipsCache = freshClips;
   pruneLocalPosterCache(clipsCache);
+  const availablePaths = localClipPaths(clipsCache);
   selectedClipPaths = new Set(
     [...selectedClipPaths].filter((path) =>
-      clipsCache.some((clip) => PlayerCore.sameClipPath(clip.path, path))),
+      availablePaths.has(GalleryWindowCore.clipPathKey(path))),
   );
   if (currentClip) {
     const currentPath = preferredCurrentPath || currentClip.path;
@@ -935,7 +970,7 @@ function loadCardPoster(path, thumb) {
   return invoke("clip_poster", { path })
     .then((posterPath) => {
       if (!isForegroundWorkCurrent(lifecycleWork)) return;
-      if (!clipsCache.some((clip) => PlayerCore.sameClipPath(clip.path, path))) return;
+      if (!localClipPaths(clipsCache).has(GalleryWindowCore.clipPathKey(path))) return;
       if (!posterPath) {
         markPosterUnavailable(path);
         return;
@@ -1257,18 +1292,25 @@ function syncBulkBar() {
 /* ---- gallery: filter / sort / group ---- */
 
 function filterGalleryClips(clips) {
-  return clips.filter((c) => {
+  const items = [];
+  let maxModifiedUnix = 0;
+  for (const c of clips) {
     const kind = clipKind(c);
     if ((galleryFilter === "replay" || galleryFilter === "session" || galleryFilter === "trim")
-      && kind !== galleryFilter) return false;
-    if (galleryFilter === "marked" && !clipMarkers(c).length) return false;
+      && kind !== galleryFilter) continue;
+    if (galleryFilter === "marked" && !clipMarkers(c).length) continue;
     if (gallerySearch) {
       const champ = c.markers && c.markers.player_summary ? c.markers.player_summary.champion_name : "";
       const hay = `${clipDisplayTitle(c)} ${c.name} ${champ} ${c.session || ""} ${c.game ? c.game.name : ""}`.toLowerCase();
-      if (!hay.includes(gallerySearch)) return false;
+      if (!hay.includes(gallerySearch)) continue;
     }
-    return true;
-  });
+    items.push(c);
+    const modifiedUnix = Number(c && c.modified_unix);
+    if (Number.isFinite(modifiedUnix)) {
+      maxModifiedUnix = Math.max(maxModifiedUnix, modifiedUnix);
+    }
+  }
+  return { items, maxModifiedUnix };
 }
 
 function sortGalleryClips(clips) {
@@ -1341,45 +1383,27 @@ function galleryGroups(clips) {
   }
 }
 
-function hashGalleryIdentity(hash, value) {
-  const text = String(value ?? "");
-  let next = hash;
-  for (let i = 0; i < text.length; i += 1) {
-    next ^= text.charCodeAt(i);
-    next = Math.imul(next, 16777619);
-  }
-  return next >>> 0;
+function galleryIdentityKey(item) {
+  return String(
+    item && (item.path || item.remote_clip_id || item.name) || "",
+  );
 }
 
-function groupedGalleryIdentity(prefix, groups) {
-  let hash = hashGalleryIdentity(2166136261, prefix);
-  let total = 0;
-  for (const group of groups) {
-    hash = hashGalleryIdentity(hash, group.label);
-    hash = hashGalleryIdentity(hash, "\u0000");
-    for (const item of group.clips || []) {
-      const markers = item && item.markers;
-      for (const field of [
-        item && item.path,
-        item && item.remote_clip_id,
-        item && item.name,
-        item && item.title,
-        item && item.modified_unix,
-        item && item.size_mb,
-        item && item.updated_at_unix,
-        item && item.upload_status,
-        item && item.visibility,
-        markers && Array.isArray(markers.markers) ? markers.markers.length : 0,
-        markers && Array.isArray(markers.plays) ? markers.plays.length : 0,
-      ]) {
-        hash = hashGalleryIdentity(hash, field);
-        hash = hashGalleryIdentity(hash, "\u0002");
-      }
-      hash = hashGalleryIdentity(hash, "\u0001");
-      total += 1;
-    }
-  }
-  return `${prefix}|${total}|${hash}`;
+function groupedGalleryIdentity(
+  prefix,
+  total,
+  firstItem,
+  lastItem,
+  maxModifiedUnix,
+) {
+  const modified = Number(maxModifiedUnix);
+  return JSON.stringify([
+    prefix,
+    total,
+    galleryIdentityKey(firstItem),
+    galleryIdentityKey(lastItem),
+    Number.isFinite(modified) ? modified : 0,
+  ]);
 }
 
 function syncGalleryPagination(info) {
@@ -1466,11 +1490,20 @@ function renderClips() {
   }
   beginBoundedGalleryRender();
   pruneLocalPosterCache(clipsCache);
-  const filtered = filterGalleryClips(clipsCache);
-  const groups = galleryGroups(sortGalleryClips(filtered));
+  const filteredResult = filterGalleryClips(clipsCache);
+  const filtered = filteredResult.items;
+  const sorted = sortGalleryClips(filtered);
+  const groups = galleryGroups(sorted);
+  const firstGroup = groups[0];
+  const lastGroup = groups[groups.length - 1];
+  const firstItems = firstGroup && firstGroup.clips || [];
+  const lastItems = lastGroup && lastGroup.clips || [];
   const identity = groupedGalleryIdentity(
     `local|${galleryFilter}|${gallerySort}|${galleryGroup}|${gallerySearch}`,
-    groups,
+    filtered.length,
+    firstItems[0],
+    lastItems[lastItems.length - 1],
+    filteredResult.maxModifiedUnix,
   );
   galleryPageState = GalleryWindowCore.updateState(galleryPageState, {
     identity,
@@ -1520,11 +1553,23 @@ function renderCloudClips() {
   if (!root) return;
   beginBoundedGalleryRender();
   const entries = cloudLibraryRecords();
-  const filtered = entries.filter(cloudEntryMatchesSearch);
+  const filtered = [];
+  let maxModifiedUnix = 0;
+  for (const entry of entries) {
+    if (!cloudEntryMatchesSearch(entry)) continue;
+    filtered.push(entry);
+    const modifiedUnix = Number(entry && (entry.updated_at_unix || entry.modified_unix));
+    if (Number.isFinite(modifiedUnix)) {
+      maxModifiedUnix = Math.max(maxModifiedUnix, modifiedUnix);
+    }
+  }
   const groups = [{ label: null, clips: filtered }];
   const identity = groupedGalleryIdentity(
     `cloud|${cloudAccountKey()}|${gallerySearch}`,
-    groups,
+    filtered.length,
+    filtered[0],
+    filtered[filtered.length - 1],
+    maxModifiedUnix,
   );
   galleryPageState = GalleryWindowCore.updateState(galleryPageState, {
     identity,

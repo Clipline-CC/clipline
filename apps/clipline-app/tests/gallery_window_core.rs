@@ -22,6 +22,36 @@ fn eval(context: &mut Context, expression: &str) -> String {
 }
 
 #[test]
+fn classic_script_explicitly_exports_the_module_global() {
+    let mut context = context();
+    assert_eq!(
+        eval(
+            &mut context,
+            "String(globalThis.GalleryWindowCore === GalleryWindowCore)",
+        ),
+        "true"
+    );
+}
+
+#[test]
+fn clip_path_keys_match_windows_paths_without_collapsing_other_paths() {
+    let mut context = context();
+    assert_eq!(
+        eval(
+            &mut context,
+            r#"JSON.stringify([
+              GalleryWindowCore.clipPathKey("C:\\Clips\\One.mp4"),
+              GalleryWindowCore.clipPathKey("c:/clips/one.mp4"),
+              GalleryWindowCore.clipPathKey("\\\\?\\C:\\CLIPS\\ONE.mp4"),
+              GalleryWindowCore.clipPathKey("/clips/One.mp4"),
+              GalleryWindowCore.clipPathKey("/clips/one.mp4")
+            ])"#,
+        ),
+        r#"["windows:c:\\clips\\one.mp4","windows:c:\\clips\\one.mp4","windows:c:\\clips\\one.mp4","exact:/clips/One.mp4","exact:/clips/one.mp4"]"#
+    );
+}
+
+#[test]
 fn local_and_cloud_library_sizes_never_exceed_the_card_window() {
     let mut context = context();
     assert_eq!(
@@ -152,15 +182,16 @@ fn poster_cache_is_lru_bounded_including_unavailable_entries() {
                );\
              }\
              const touched = GalleryWindowCore.cacheGet(cache, 'poster-380');\
-             GalleryWindowCore.cacheSet(cache, 'poster-500', 'asset://500', 120);\
+             const evicted = GalleryWindowCore.cacheSet(cache, 'poster-500', 'asset://500', 120);\
              JSON.stringify({\
                size: cache.size,\
                oldestGone: !cache.has('poster-0'),\
                nextEvicted: !cache.has('poster-381'),\
                touchedKept: cache.has('poster-380'),\
-               touched\
+               touched,\
+               evicted\
              })",
         ),
-        r#"{"size":120,"oldestGone":true,"nextEvicted":true,"touchedKept":true,"touched":"unavailable"}"#
+        r#"{"size":120,"oldestGone":true,"nextEvicted":true,"touchedKept":true,"touched":"unavailable","evicted":["poster-381"]}"#
     );
 }

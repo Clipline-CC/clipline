@@ -144,16 +144,39 @@ var GalleryWindowCore = (() => {
   };
 
   const cacheSet = (cache, key, value, requestedLimit) => {
-    if (!cache) return;
+    if (!cache) return [];
     const normalizedLimit = Math.floor(Number(requestedLimit));
     const limit = Number.isSafeInteger(normalizedLimit) && normalizedLimit > 0
       ? normalizedLimit
       : 1;
+    const evicted = [];
     cache.delete(key);
     cache.set(key, value);
     while (cache.size > limit) {
-      cache.delete(cache.keys().next().value);
+      const oldest = cache.keys().next().value;
+      cache.delete(oldest);
+      evicted.push(oldest);
     }
+    return evicted;
+  };
+
+  // Match PlayerCore.sameClipPath semantics while producing a Set-compatible
+  // key: Windows paths compare case-insensitively with slash/device-prefix
+  // normalization; any other path retains exact, case-sensitive identity.
+  const clipPathKey = (path) => {
+    const text = String(path || "").trim();
+    if (!text) return "";
+    let normalized = text.replace(/\//g, "\\");
+    const lower = normalized.toLowerCase();
+    if (lower.startsWith("\\\\?\\unc\\")) {
+      normalized = "\\\\" + normalized.slice(8);
+    } else if (lower.startsWith("\\\\?\\")) {
+      normalized = normalized.slice(4);
+    }
+    if (/^[a-z]:\\/i.test(normalized) || normalized.startsWith("\\\\")) {
+      return `windows:${normalized.toLowerCase()}`;
+    }
+    return `exact:${text}`;
   };
 
   return Object.freeze({
@@ -166,5 +189,8 @@ var GalleryWindowCore = (() => {
     windowGroups,
     cacheGet,
     cacheSet,
+    clipPathKey,
   });
 })();
+
+globalThis.GalleryWindowCore = GalleryWindowCore;

@@ -21,7 +21,7 @@ const POSTER_WIDTH: u32 = 480;
 const POSTER_EXTRACTION_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_POSTER_STDERR_BYTES: usize = 64 * 1024;
 static NEXT_POSTER_TEMP_ID: AtomicU64 = AtomicU64::new(0);
-static POSTER_FFMPEG: OnceLock<Option<PathBuf>> = OnceLock::new();
+static POSTER_FFMPEG: OnceLock<PathBuf> = OnceLock::new();
 
 /// The cached poster path for a clip: `clip.mp4` -> `clip.poster.jpg`. Mirrors
 /// the `<clip>.markers.json` sidecar convention so the two travel together.
@@ -45,12 +45,24 @@ pub fn ensure_poster(clip: &Path, seek_s: f64) -> Result<PathBuf, String> {
         return Ok(poster);
     }
     let poster = poster_path(clip);
-    let ffmpeg = POSTER_FFMPEG
-        .get_or_init(clipline_capture::ffmpeg::locate)
-        .clone()
+    let ffmpeg = cached_successful_path(&POSTER_FFMPEG, clipline_capture::ffmpeg::locate)
         .ok_or_else(|| "ffmpeg is not available for poster extraction".to_string())?;
     generate_poster(&ffmpeg, clip, &poster, seek_s)?;
     Ok(poster)
+}
+
+/// Cache only a successful lookup. A missing executable may be installed or
+/// configured while Clipline is running, so `None` must remain retryable.
+fn cached_successful_path(
+    cache: &OnceLock<PathBuf>,
+    locate: impl FnOnce() -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    if let Some(path) = cache.get() {
+        return Some(path.clone());
+    }
+    let located = locate()?;
+    let _ = cache.set(located);
+    cache.get().cloned()
 }
 
 /// A poster is fresh when it exists and is at least as new as its clip, so a
@@ -255,6 +267,7 @@ fn scale_filter() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     #[test]
     fn poster_path_swaps_mp4_for_poster_jpg() {
@@ -262,6 +275,41 @@ mod tests {
             poster_path(Path::new(r"C:\clips\2026\session_1.mp4")),
             PathBuf::from(r"C:\clips\2026\session_1.poster.jpg")
         );
+    }
+
+    #[test]
+    fn ffmpeg_cache_retries_misses_and_keeps_the_first_success() {
+        let cache = OnceLock::new();
+        let attempts = Cell::new(0);
+
+        assert_eq!(
+            cached_successful_path(&cache, || {
+                attempts.set(attempts.get() + 1);
+                None
+            }),
+            None
+        );
+        assert!(
+            cache.get().is_none(),
+            "a missing executable must not initialize the cache"
+        );
+
+        let expected = PathBuf::from(r"C:\tools\ffmpeg.exe");
+        assert_eq!(
+            cached_successful_path(&cache, || {
+                attempts.set(attempts.get() + 1);
+                Some(expected.clone())
+            }),
+            Some(expected.clone())
+        );
+        assert_eq!(
+            cached_successful_path(&cache, || {
+                attempts.set(attempts.get() + 1);
+                Some(PathBuf::from(r"C:\other\ffmpeg.exe"))
+            }),
+            Some(expected)
+        );
+        assert_eq!(attempts.get(), 2, "a success must remain cached");
     }
 
     #[test]

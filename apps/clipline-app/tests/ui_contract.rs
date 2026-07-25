@@ -3213,9 +3213,17 @@ fn gallery_renders_one_bounded_page_for_local_and_cloud_sources() {
     );
     assert!(
         library.contains("GalleryWindowCore.updateState(galleryPageState")
-            && library.contains("function groupedGalleryIdentity(prefix, groups)")
+            && library.contains("function groupedGalleryIdentity(")
             && library.contains("function changeGalleryPage(delta)"),
         "source, filter, grouping, and data identities must reset or clamp pagination"
+    );
+    let identity = js_function_body(&library, "groupedGalleryIdentity");
+    assert!(
+        identity.contains("firstItem")
+            && identity.contains("lastItem")
+            && identity.contains("maxModifiedUnix")
+            && !identity.contains("for ("),
+        "page identity must use precomputed collection boundaries without rescanning groups or clips"
     );
     assert!(
         js_function_body(&library, "selectAllVisible")
@@ -3264,10 +3272,22 @@ fn gallery_releases_off_page_images_and_bounds_poster_state() {
     );
     let set_cache = js_function_body(&library, "posterCacheSet");
     assert!(
-        set_cache
-            .contains("GalleryWindowCore.cacheSet(posterCache, key, value, POSTER_CACHE_LIMIT)",)
+        set_cache.contains("GalleryWindowCore.cacheSet(")
+            && set_cache.contains("POSTER_CACHE_LIMIT")
+            && set_cache.contains("posterUnavailableUntil")
             && library.contains("GalleryWindowCore.cacheGet(posterCache, key)"),
         "poster URL and unavailable entries must use the pure tested bounded LRU helper"
+    );
+    let local_paths = js_function_body(&library, "localClipPaths");
+    let prune_local = js_function_body(&library, "pruneLocalPosterCache");
+    let load_local = js_function_body(&library, "loadCardPoster");
+    assert!(
+        local_paths.contains("new Set()")
+            && local_paths.contains("GalleryWindowCore.clipPathKey")
+            && prune_local.contains("paths.has(GalleryWindowCore.clipPathKey(key))")
+            && load_local.contains("localClipPaths(clipsCache).has(")
+            && !load_local.contains("clipsCache.some("),
+        "poster membership must use one normalized path index instead of scanning every clip per card"
     );
     for required in [
         "function pruneLocalPosterCache(clips)",
@@ -3352,6 +3372,8 @@ fn library_has_cloud_source_tab() {
         "if (onError) onError();",
         "posterCacheSet(path, POSTER_UNAVAILABLE);",
         "if (cached === POSTER_UNAVAILABLE) return Promise.resolve();",
+        "POSTER_UNAVAILABLE_RETRY_MS = 30_000",
+        "Date.now() >= retryAt",
         "if (isForegroundWorkCurrent(lifecycleWork)) markPosterUnavailable(path);",
         "loadCardPoster(path, thumb)",
         "observePoster(c.path, thumb)",
@@ -3826,6 +3848,7 @@ fn gallery_supports_multi_select_bulk_actions() {
         "id=\"gallery-bulk-bar\"",
         "id=\"bulk-count\"",
         "id=\"bulk-select-all\"",
+        ">Select page</button>",
         "id=\"bulk-clear\"",
         "id=\"bulk-delete\"",
         "id=\"confirm-title\"",
