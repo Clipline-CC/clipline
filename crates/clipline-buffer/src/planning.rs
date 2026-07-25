@@ -100,15 +100,13 @@ pub(crate) fn replay_window_start_index<T: ReplayWindowSegment>(
     (start_idx < segments.len()).then_some(start_idx)
 }
 
-/// How many front segments to drop when a segment ending at
-/// `incoming_pts_end_s` is pushed (ddoc §6).
+/// How many front segments to drop when `incoming` is pushed (ddoc §6).
 ///
 /// The byte budget and the retention window are planned **together**, never
-/// applied as two passes: whichever demands more eviction wins, and that single
-/// count is then advanced to the next keyframe so the surviving front always
-/// starts a decodable GOP. Applying them separately would let the byte bound —
-/// which removes the minimum count with no keyframe awareness — strand a
-/// headless GOP continuation at the front.
+/// applied as two destructive passes. Duration pressure keeps the latest
+/// keyframe at-or-before the requested cutoff: that GOP covers the first frame
+/// a replay may save. Only byte pressure can move the start forward, and that
+/// later start is aligned to the next available keyframe.
 ///
 /// Realignment alone never evicts: with no byte or duration pressure the count
 /// stays zero even if the front is a continuation. Where nothing at or after
@@ -122,29 +120,52 @@ pub(crate) fn replay_window_start_index<T: ReplayWindowSegment>(
 pub(crate) fn eviction_plan<T: ReplayWindowSegment>(
     segments: &VecDeque<T>,
     current_bytes: usize,
-    incoming_bytes: usize,
-    incoming_pts_end_s: f64,
+    incoming: &T,
     max_bytes: usize,
     retention_s: f64,
 ) -> usize {
     let by_bytes = eviction_count(
         segments.iter().map(ReplayWindowSegment::byte_len),
         current_bytes,
-        incoming_bytes,
+        incoming.byte_len(),
         max_bytes,
     );
-    let by_duration = segments
-        .iter()
-        .take_while(|segment| incoming_pts_end_s - segment.pts_end_s() > retention_s)
-        .count();
 
-    let count = by_bytes.max(by_duration);
-    if count == 0 {
+    // The keyframe at-or-before the cutoff is the GOP that covers the first
+    // requested frame. Starting at the following keyframe would silently
+    // shorten the replay by as much as one GOP.
+    let by_duration = if retention_s.is_finite() {
+        let cutoff_s = incoming.pts_end_s() - retention_s.max(0.0);
+        if incoming.starts_with_keyframe() && incoming.pts_start_s() <= cutoff_s {
+            segments.len()
+        } else {
+            segments
+                .iter()
+                .enumerate()
+                .filter(|(_, segment)| {
+                    segment.starts_with_keyframe() && segment.pts_start_s() <= cutoff_s
+                })
+                .map(|(index, _)| index)
+                .next_back()
+                .unwrap_or(0)
+        }
+    } else {
+        0
+    };
+
+    if by_bytes <= by_duration {
+        return by_duration;
+    }
+    if by_bytes == 0 {
         return 0;
     }
-    (count..segments.len())
+
+    // Only genuine byte pressure may move retention forward. Realign that
+    // later start to a keyframe when one is available, including `incoming`.
+    (by_bytes..segments.len())
         .find(|index| segments[*index].starts_with_keyframe())
-        .unwrap_or(count)
+        .or_else(|| incoming.starts_with_keyframe().then_some(segments.len()))
+        .unwrap_or(by_bytes)
 }
 
 pub(crate) fn eviction_count(
@@ -220,6 +241,24 @@ mod tests {
         segments.back().map_or(dur, |s| s.pts_end_s() + dur)
     }
 
+    fn eviction_plan(
+        segments: &VecDeque<Probe>,
+        current_bytes: usize,
+        incoming_bytes: usize,
+        incoming_pts_end_s: f64,
+        max_bytes: usize,
+        retention_s: f64,
+    ) -> usize {
+        let incoming_start_s = segments.back().map_or(0.0, ReplayWindowSegment::pts_end_s);
+        let incoming = Probe {
+            key: true,
+            start: incoming_start_s,
+            dur: incoming_pts_end_s - incoming_start_s,
+            bytes: incoming_bytes,
+        };
+        super::eviction_plan(segments, current_bytes, &incoming, max_bytes, retention_s)
+    }
+
     #[test]
     fn byte_pressure_alone_reproduces_the_byte_only_counts() {
         let segments = gops(1.0, 40, &[true, true]);
@@ -238,9 +277,31 @@ mod tests {
         let segments = gops(1.0, 10, &[true; 6]);
         let end = incoming_end(&segments, 1.0);
 
-        // Ends run 1..=6, incoming ends at 7.0, so a 3s window keeps ends
-        // 4..=6 and drops the three older segments.
-        assert_eq!(eviction_plan(&segments, 60, 10, end, usize::MAX, 3.0), 3);
+        // The incoming segment ends at 7.0, so the exact three-second cutoff
+        // is the keyframe at 4.0.
+        assert_eq!(eviction_plan(&segments, 60, 10, end, usize::MAX, 3.0), 4);
+    }
+
+    #[test]
+    fn duration_retention_keeps_the_keyframe_covering_the_cutoff() {
+        let segments = gops(1.0, 10, &[true, false, false, true, false, false]);
+        let end = incoming_end(&segments, 1.0);
+
+        // The incoming segment ends at 7.0 and the five-second cutoff is 2.0.
+        // The GOP beginning at 0.0 is the latest keyframe that covers that
+        // cutoff. Advancing to the next keyframe at 3.0 would leave only four
+        // seconds for Save Replay.
+        assert_eq!(eviction_plan(&segments, 60, 10, end, usize::MAX, 5.0), 0);
+    }
+
+    #[test]
+    fn exact_duration_boundary_starts_at_the_boundary_keyframe() {
+        let segments = gops(1.0, 10, &[true; 6]);
+        let end = incoming_end(&segments, 1.0);
+
+        // The retained logical stream ends at 7.0, so an exact three-second
+        // window begins at the keyframe at 4.0 (index four).
+        assert_eq!(eviction_plan(&segments, 60, 10, end, usize::MAX, 3.0), 4);
     }
 
     #[test]
@@ -248,20 +309,19 @@ mod tests {
         let segments = gops(1.0, 10, &[true; 6]);
         let end = incoming_end(&segments, 1.0);
 
-        // Byte budget slack, duration wants three.
-        assert_eq!(eviction_plan(&segments, 60, 10, end, usize::MAX, 3.0), 3);
-        // Byte budget wants five, duration still wants three.
+        // Byte budget slack, duration wants four.
+        assert_eq!(eviction_plan(&segments, 60, 10, end, usize::MAX, 3.0), 4);
+        // Byte budget wants five, duration still wants four.
         assert_eq!(eviction_plan(&segments, 60, 10, end, 20, 3.0), 5);
     }
 
     #[test]
-    fn eviction_advances_to_the_next_keyframe_so_the_front_starts_a_gop() {
+    fn duration_pressure_keeps_the_keyframe_covering_the_cutoff() {
         let segments = gops(1.0, 10, &[true, false, false, true, false, false]);
         let end = incoming_end(&segments, 1.0);
 
-        // Duration alone wants one, but index 1 continues the first GOP —
-        // advance to the keyframe at index 3 rather than strand a headless GOP.
-        assert_eq!(eviction_plan(&segments, 60, 10, end, usize::MAX, 5.0), 3);
+        // The cutoff is 2.0, inside the GOP that starts at zero.
+        assert_eq!(eviction_plan(&segments, 60, 10, end, usize::MAX, 5.0), 0);
     }
 
     #[test]
@@ -292,10 +352,25 @@ mod tests {
         let segments = gops(1.0, 10, &[true, false, false, false]);
         let end = incoming_end(&segments, 1.0);
 
-        // Nothing at or after index 1 starts a keyframe. Keep the duration
-        // count and leave `replay_window_start_index`'s first-keyframe
-        // fallback to cope, rather than draining the ring to realign.
-        assert_eq!(eviction_plan(&segments, 40, 10, end, usize::MAX, 3.0), 1);
+        // The cutoff is 2.0, covered by the GOP at index zero. Do not advance
+        // merely because no later existing segment starts a GOP.
+        assert_eq!(eviction_plan(&segments, 40, 10, end, usize::MAX, 3.0), 0);
+    }
+
+    #[test]
+    fn byte_pressure_can_advance_to_the_incoming_keyframe() {
+        let segments = gops(1.0, 10, &[true, false, false]);
+        let incoming = Probe {
+            key: true,
+            start: 3.0,
+            dur: 1.0,
+            bytes: 10,
+        };
+
+        assert_eq!(
+            super::eviction_plan(&segments, 30, &incoming, 10, 10.0),
+            segments.len()
+        );
     }
 
     #[test]

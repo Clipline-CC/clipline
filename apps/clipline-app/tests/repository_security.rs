@@ -568,10 +568,15 @@ fn divergence_prone_paths_keep_single_production_owners() {
         .0;
     assert_eq!(
         writer_production
-            .matches("state.next_decode_time +=")
+            .matches("state.record_sample(sample)?;")
             .count(),
         1,
         "all fragment transports must share one metadata commit path"
+    );
+    assert_eq!(
+        writer_production.matches("fn record_sample(").count(),
+        1,
+        "sample-table accounting must remain centralized"
     );
 }
 

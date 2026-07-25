@@ -49,8 +49,7 @@ impl ReplayRing {
         let evict = crate::planning::eviction_plan(
             &self.segments,
             self.bytes,
-            incoming_bytes,
-            seg.pts_end_s(),
+            &seg,
             self.max_bytes,
             self.retention_s,
         );
@@ -227,18 +226,18 @@ mod tests {
 
     #[test]
     fn retention_settles_the_ring_at_the_window_not_the_byte_cap() {
-        // Default settings shape: 75s retention against a cap sized with the
-        // 2x overshoot headroom (12 Mbps => 214.6 MB), encoder exactly on
-        // target at 1.5 MB/s.
-        let cap = 214_600_000;
-        let mut ring = ReplayRing::with_retention(cap, 75.0);
+        // Default settings shape: 60s retention against the 2x encoder
+        // overshoot cap (12 Mbps => 180 MB), encoder exactly on target at
+        // 1.5 MB/s.
+        let cap = 180_000_000;
+        let mut ring = ReplayRing::with_retention(cap, 60.0);
 
         steady_state(&mut ring, 0.5, 750_000, 600.0);
 
         let span = retained_span(&ring);
         assert!(
-            (75.0..=76.0).contains(&span),
-            "retained {span}s, expected the 75s window"
+            (60.0..=60.5).contains(&span),
+            "retained {span}s, expected the 60s window"
         );
         assert!(
             ring.bytes() < cap * 55 / 100,
@@ -272,7 +271,7 @@ mod tests {
 
         let summed: usize = ring.segments().map(Segment::byte_len).sum();
         assert_eq!(ring.bytes(), summed);
-        assert_eq!(ring.len(), 5, "4s window plus the segment that closes it");
+        assert_eq!(ring.len(), 4, "exact four-second keyframe-aligned window");
     }
 
     #[test]
@@ -295,16 +294,40 @@ mod tests {
     }
 
     #[test]
+    fn non_aligned_window_keeps_the_latest_covering_gop() {
+        // Two-second GOPs represented as four half-second segments. At t=120,
+        // a 10.3s window starts at 109.7, so the GOP beginning at 108.0 is the
+        // latest keyframe that covers it. Advancing to 110.0 loses footage.
+        let mut ring = ReplayRing::with_retention(usize::MAX, 10.3);
+        let mut pts = 0.0;
+        while pts < 120.0 {
+            let key = ((pts / 0.5) as usize).is_multiple_of(4);
+            ring.push(seg(pts, 0.5, 1_000, key));
+            pts += 0.5;
+        }
+
+        let first = ring.segments().next().expect("retained segment");
+        assert_eq!(first.pts_start_s, 108.0);
+        assert!(first.starts_with_keyframe);
+        let saved = ring.save_window(10.3, None);
+        let span: f64 = saved.iter().map(|segment| segment.duration_s).sum();
+        assert!(span >= 10.3, "saved only {span}s of a 10.3s window");
+    }
+
+    #[test]
     fn save_window_still_covers_the_full_window_after_steady_state() {
         // The guarantee that matters: retention must not eat into the window.
-        let mut ring = ReplayRing::with_retention(usize::MAX, 45.0);
+        let mut ring = ReplayRing::with_retention(usize::MAX, 30.0);
 
         steady_state(&mut ring, 0.5, 100_000, 600.0);
 
         let saved = ring.save_window(30.0, None);
         let span: f64 = saved.iter().map(|s| s.duration_s).sum();
-        assert!(span >= 30.0, "saved only {span}s of a 30s window");
-        assert!(saved[0].starts_with_keyframe, "saved clip must decode cleanly");
+        assert_eq!(span, 30.0, "retention should match the exact save window");
+        assert!(
+            saved[0].starts_with_keyframe,
+            "saved clip must decode cleanly"
+        );
     }
 
     #[test]

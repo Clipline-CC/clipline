@@ -202,7 +202,7 @@ impl AppSettings {
         if settings.hotkey_secondary.as_deref() == Some(settings.hotkey.as_str()) {
             settings.hotkey_secondary = None;
         }
-        settings.buffer_seconds = super::replay_buffer_seconds(&settings);
+        settings.buffer_seconds = super::compatibility_buffer_seconds(&settings);
         settings.bitrate_mbps = settings.effective_bitrate_mbps();
         if matches!(settings.capture_mode, CaptureMode::WindowTitle)
             && settings.window_title.trim().is_empty()
@@ -231,7 +231,7 @@ impl AppSettings {
                     .display()
                     .to_string();
         }
-        settings.buffer_seconds = super::replay_buffer_seconds(&settings);
+        settings.buffer_seconds = super::compatibility_buffer_seconds(&settings);
         settings.validate()?;
         let json = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
         if let Some(parent) = path.parent() {

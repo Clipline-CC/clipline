@@ -18,16 +18,38 @@ struct TimelineRun {
     duration: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DurationRun {
+    sample_count: u32,
+    sample_delta: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SampleToChunkRun {
+    first_chunk: u32,
+    samples_per_chunk: u32,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+enum SyncSampleTable {
+    #[default]
+    All,
+    Listed(Vec<u32>),
+}
+
 /// Per-track bookkeeping for the final moov.
 struct TrackState {
     cfg: TrackConfig,
     next_decode_time: u64,
+    media_duration: u64,
+    sample_count: u32,
     sizes: Vec<u32>,
-    durations: Vec<u32>,
-    sync: Vec<bool>,
-    /// (absolute offset of first sample byte, sample count) per fragment
-    /// in which this track had samples.
-    chunks: Vec<(u64, u32)>,
+    duration_runs: Vec<DurationRun>,
+    sync_samples: SyncSampleTable,
+    /// Absolute offset of the first sample byte in each non-empty fragment for
+    /// this track. Sample counts are aggregated online in `stsc_runs`.
+    chunk_offsets: Vec<u64>,
+    stsc_runs: Vec<SampleToChunkRun>,
     timeline_runs: Vec<TimelineRun>,
 }
 
@@ -111,10 +133,13 @@ impl<W: Write + Seek> HybridMp4Writer<W> {
                 .map(|cfg| TrackState {
                     cfg,
                     next_decode_time: 0,
+                    media_duration: 0,
+                    sample_count: 0,
                     sizes: Vec::new(),
-                    durations: Vec::new(),
-                    sync: Vec::new(),
-                    chunks: Vec::new(),
+                    duration_runs: Vec::new(),
+                    sync_samples: SyncSampleTable::default(),
+                    chunk_offsets: Vec::new(),
+                    stsc_runs: Vec::new(),
                     timeline_runs: Vec::new(),
                 })
                 .collect(),
@@ -279,12 +304,9 @@ impl<W: Write + Seek> HybridMp4Writer<W> {
             }
             let state = &mut self.tracks[track_index];
             state.record_run(samples.iter().map(|sample| sample.duration))?;
-            state.chunks.push((sample_offset, samples.len() as u32));
+            state.record_chunk(sample_offset, samples.len())?;
             for sample in samples {
-                state.sizes.push(sample.size);
-                state.durations.push(sample.duration);
-                state.sync.push(sample.is_sync);
-                state.next_decode_time += u64::from(sample.duration);
+                state.record_sample(sample)?;
                 sample_offset += u64::from(sample.size);
             }
         }
@@ -475,7 +497,7 @@ fn rescale_duration(duration: u64, source_timescale: u32, target_timescale: u32)
 
 impl TrackState {
     fn duration_media_ts(&self) -> u64 {
-        self.durations.iter().map(|&d| d as u64).sum()
+        self.media_duration
     }
 
     fn duration_movie_ts(&self) -> u64 {
@@ -532,6 +554,78 @@ impl TrackState {
             duration,
         });
         debug_assert_eq!(presentation_end, self.next_decode_time + duration);
+        Ok(())
+    }
+
+    fn record_chunk(&mut self, offset: u64, sample_count: usize) -> io::Result<()> {
+        let samples_per_chunk = u32::try_from(sample_count)
+            .map_err(|_| invalid_config("chunk sample count exceeds MP4 table range"))?;
+        if samples_per_chunk == 0 {
+            return Err(invalid_config(
+                "MP4 chunks must contain at least one sample",
+            ));
+        }
+        let first_chunk = u32::try_from(
+            self.chunk_offsets
+                .len()
+                .checked_add(1)
+                .ok_or_else(|| invalid_config("track chunk count overflow"))?,
+        )
+        .map_err(|_| invalid_config("track chunk count exceeds MP4 table range"))?;
+
+        if self
+            .stsc_runs
+            .last()
+            .is_none_or(|run| run.samples_per_chunk != samples_per_chunk)
+        {
+            self.stsc_runs.push(SampleToChunkRun {
+                first_chunk,
+                samples_per_chunk,
+            });
+        }
+        self.chunk_offsets.push(offset);
+        Ok(())
+    }
+
+    fn record_sample(&mut self, sample: &FragSampleInfo) -> io::Result<()> {
+        let sample_number = self
+            .sample_count
+            .checked_add(1)
+            .ok_or_else(|| invalid_config("track sample count exceeds MP4 table range"))?;
+        let next_decode_time = self
+            .next_decode_time
+            .checked_add(u64::from(sample.duration))
+            .ok_or_else(|| invalid_config("track decode time overflow"))?;
+        let media_duration = self
+            .media_duration
+            .checked_add(u64::from(sample.duration))
+            .ok_or_else(|| invalid_config("track duration overflow"))?;
+
+        match self.duration_runs.last_mut() {
+            Some(run) if run.sample_delta == sample.duration => {
+                run.sample_count = run
+                    .sample_count
+                    .checked_add(1)
+                    .ok_or_else(|| invalid_config("duration run sample count overflow"))?;
+            }
+            _ => self.duration_runs.push(DurationRun {
+                sample_count: 1,
+                sample_delta: sample.duration,
+            }),
+        }
+        match (&mut self.sync_samples, sample.is_sync) {
+            (SyncSampleTable::All, true) | (SyncSampleTable::Listed(_), false) => {}
+            (table @ SyncSampleTable::All, false) => {
+                *table = SyncSampleTable::Listed((1..sample_number).collect());
+            }
+            (SyncSampleTable::Listed(sync_samples), true) => {
+                sync_samples.push(sample_number);
+            }
+        }
+        self.sizes.push(sample.size);
+        self.sample_count = sample_number;
+        self.next_decode_time = next_decode_time;
+        self.media_duration = media_duration;
         Ok(())
     }
 
@@ -600,62 +694,39 @@ impl TrackState {
     }
 
     fn stts(&self) -> Vec<u8> {
-        // Run-length encode consecutive equal durations.
-        let mut runs: Vec<(u32, u32)> = Vec::new();
-        for &d in &self.durations {
-            match runs.last_mut() {
-                Some((count, delta)) if *delta == d => *count += 1,
-                _ => runs.push((1, d)),
-            }
-        }
         let mut p = Payload::new();
-        p.u32(runs.len() as u32);
-        for (count, delta) in runs {
-            p.u32(count).u32(delta);
+        p.u32(self.duration_runs.len() as u32);
+        for run in &self.duration_runs {
+            p.u32(run.sample_count).u32(run.sample_delta);
         }
         full_box(*b"stts", 0, 0, p.into_vec())
     }
 
     /// None when every sample is sync (spec: absent stss ⇒ all sync).
     fn stss(&self) -> Option<Vec<u8>> {
-        if self.sync.iter().all(|&s| s) {
+        let SyncSampleTable::Listed(sync_samples) = &self.sync_samples else {
             return None;
-        }
-        let syncs: Vec<u32> = self
-            .sync
-            .iter()
-            .enumerate()
-            .filter(|(_, &s)| s)
-            .map(|(i, _)| i as u32 + 1) // 1-based sample numbers
-            .collect();
+        };
         let mut p = Payload::new();
-        p.u32(syncs.len() as u32);
-        for s in syncs {
-            p.u32(s);
+        p.u32(sync_samples.len() as u32);
+        for &sample_number in sync_samples {
+            p.u32(sample_number);
         }
         Some(full_box(*b"stss", 0, 0, p.into_vec()))
     }
 
     fn stsc(&self) -> Vec<u8> {
-        // One chunk per fragment; run-length over samples_per_chunk.
-        let mut runs: Vec<(u32, u32)> = Vec::new(); // (first_chunk, samples_per_chunk)
-        for (i, &(_, count)) in self.chunks.iter().enumerate() {
-            match runs.last() {
-                Some(&(_, c)) if c == count => {}
-                _ => runs.push((i as u32 + 1, count)),
-            }
-        }
         let mut p = Payload::new();
-        p.u32(runs.len() as u32);
-        for (first_chunk, samples_per_chunk) in runs {
-            p.u32(first_chunk).u32(samples_per_chunk).u32(1); // sample_description_index
+        p.u32(self.stsc_runs.len() as u32);
+        for run in &self.stsc_runs {
+            p.u32(run.first_chunk).u32(run.samples_per_chunk).u32(1); // sample_description_index
         }
         full_box(*b"stsc", 0, 0, p.into_vec())
     }
 
     fn stsz(&self) -> Vec<u8> {
         let mut p = Payload::new();
-        p.u32(0).u32(self.sizes.len() as u32);
+        p.u32(0).u32(self.sample_count);
         for &s in &self.sizes {
             p.u32(s);
         }
@@ -664,8 +735,8 @@ impl TrackState {
 
     fn co64(&self) -> Vec<u8> {
         let mut p = Payload::new();
-        p.u32(self.chunks.len() as u32);
-        for &(offset, _) in &self.chunks {
+        p.u32(self.chunk_offsets.len() as u32);
+        for &offset in &self.chunk_offsets {
             p.u64(offset);
         }
         full_box(*b"co64", 0, 0, p.into_vec())
@@ -726,30 +797,59 @@ mod tests {
         i32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap())
     }
 
+    fn legacy_stsc(chunks: &[(u64, u32)]) -> Vec<u8> {
+        let mut runs: Vec<(u32, u32)> = Vec::new();
+        for (index, &(_, samples_per_chunk)) in chunks.iter().enumerate() {
+            match runs.last() {
+                Some(&(_, previous)) if previous == samples_per_chunk => {}
+                _ => runs.push((index as u32 + 1, samples_per_chunk)),
+            }
+        }
+        let mut payload = Payload::new();
+        payload.u32(runs.len() as u32);
+        for (first_chunk, samples_per_chunk) in runs {
+            payload.u32(first_chunk).u32(samples_per_chunk).u32(1);
+        }
+        full_box(*b"stsc", 0, 0, payload.into_vec())
+    }
+
+    fn legacy_co64(chunks: &[(u64, u32)]) -> Vec<u8> {
+        let mut payload = Payload::new();
+        payload.u32(chunks.len() as u32);
+        for &(offset, _) in chunks {
+            payload.u64(offset);
+        }
+        full_box(*b"co64", 0, 0, payload.into_vec())
+    }
+
     // --- TrackState helper tests ---
 
     fn make_track_state(cfg: TrackConfig, samples: &[(u32, u32, bool)]) -> TrackState {
         let mut state = TrackState {
             cfg,
             next_decode_time: 0,
+            media_duration: 0,
+            sample_count: 0,
             sizes: Vec::new(),
-            durations: Vec::new(),
-            sync: Vec::new(),
-            chunks: Vec::new(),
+            duration_runs: Vec::new(),
+            sync_samples: SyncSampleTable::default(),
+            chunk_offsets: Vec::new(),
+            stsc_runs: Vec::new(),
             timeline_runs: Vec::new(),
         };
-        for &(size, duration, is_sync) in samples {
-            state.sizes.push(size);
-            state.durations.push(duration);
-            state.sync.push(is_sync);
-            state.next_decode_time += duration as u64;
-        }
-        if state.next_decode_time > 0 {
-            state.timeline_runs.push(TimelineRun {
-                presentation_start: 0,
-                media_start: 0,
-                duration: state.next_decode_time,
-            });
+        if !samples.is_empty() {
+            state
+                .record_run(samples.iter().map(|(_, duration, _)| *duration))
+                .unwrap();
+            for &(size, duration, is_sync) in samples {
+                state
+                    .record_sample(&FragSampleInfo {
+                        size,
+                        duration,
+                        is_sync,
+                    })
+                    .unwrap();
+            }
         }
         state
     }
@@ -794,6 +894,55 @@ mod tests {
     }
 
     #[test]
+    fn duration_runs_are_aggregated_while_samples_arrive() {
+        let mut samples = vec![(100, 3000, false); 100_000];
+        samples.extend([(100, 6000, false); 3]);
+
+        let state = make_track_state(TrackConfig::Video(video_cfg()), &samples);
+
+        assert_eq!(
+            state.duration_runs,
+            vec![
+                DurationRun {
+                    sample_count: 100_000,
+                    sample_delta: 3000,
+                },
+                DurationRun {
+                    sample_count: 3,
+                    sample_delta: 6000,
+                },
+            ],
+            "long constant-rate sessions should retain one entry per duration run, not one per sample"
+        );
+    }
+
+    #[test]
+    fn online_duration_runs_emit_the_same_stts_bytes_as_per_sample_tables() {
+        let durations = [3000, 3000, 3001, 3001, 3001, 2999, 3000, 3000];
+        let samples: Vec<_> = durations
+            .iter()
+            .copied()
+            .map(|duration| (100, duration, false))
+            .collect();
+        let state = make_track_state(TrackConfig::Video(video_cfg()), &samples);
+
+        let mut expected_payload = Payload::new();
+        expected_payload
+            .u32(4)
+            .u32(2)
+            .u32(3000)
+            .u32(3)
+            .u32(3001)
+            .u32(1)
+            .u32(2999)
+            .u32(2)
+            .u32(3000);
+        let expected = full_box(*b"stts", 0, 0, expected_payload.into_vec());
+
+        assert_eq!(state.stts(), expected);
+    }
+
+    #[test]
     fn stss_none_when_all_sync() {
         let state = make_track_state(
             TrackConfig::Audio(audio_cfg()),
@@ -831,10 +980,56 @@ mod tests {
     }
 
     #[test]
+    fn sync_storage_keeps_only_one_based_sync_sample_numbers() {
+        let mut samples = vec![(80, 3000, false); 100_000];
+        samples[0].2 = true;
+        samples[50_000].2 = true;
+        samples[99_999].2 = true;
+
+        let state = make_track_state(TrackConfig::Video(video_cfg()), &samples);
+
+        assert_eq!(state.sample_count, 100_000);
+        assert_eq!(
+            state.sync_samples,
+            SyncSampleTable::Listed(vec![1, 50_001, 100_000])
+        );
+    }
+
+    #[test]
+    fn all_sync_tracks_do_not_store_one_index_per_sample() {
+        let samples = vec![(80, 960, true); 100_000];
+
+        let state = make_track_state(TrackConfig::Audio(audio_cfg()), &samples);
+
+        assert_eq!(state.sample_count, 100_000);
+        assert_eq!(state.sync_samples, SyncSampleTable::All);
+    }
+
+    #[test]
+    fn online_sync_indexes_emit_the_same_stss_bytes_as_per_sample_flags() {
+        let samples = [
+            (100, 3000, true),
+            (80, 3000, false),
+            (80, 3000, false),
+            (100, 3000, true),
+            (80, 3000, false),
+        ];
+        let state = make_track_state(TrackConfig::Video(video_cfg()), &samples);
+
+        let mut expected_payload = Payload::new();
+        expected_payload.u32(2).u32(1).u32(4);
+        let expected = full_box(*b"stss", 0, 0, expected_payload.into_vec());
+
+        assert_eq!(state.stss(), Some(expected));
+    }
+
+    #[test]
     fn stsc_run_length_encodes_chunk_sizes() {
         let mut state = make_track_state(TrackConfig::Video(video_cfg()), &[]);
         // 3 chunks: first two have 3 samples, third has 2
-        state.chunks = vec![(0, 3), (100, 3), (200, 2)];
+        state.record_chunk(0, 3).unwrap();
+        state.record_chunk(100, 3).unwrap();
+        state.record_chunk(200, 2).unwrap();
         let stsc = state.stsc();
         let boxes = walk(&stsc);
         let p = boxes[0].payload_offset as usize;
@@ -858,6 +1053,68 @@ mod tests {
             u32::from_be_bytes(stsc[p + 24..p + 28].try_into().unwrap()),
             2
         );
+    }
+
+    #[test]
+    fn stable_long_session_keeps_one_sample_to_chunk_run() {
+        let mut state = make_track_state(TrackConfig::Video(video_cfg()), &[]);
+
+        for chunk in 0..100_000_u64 {
+            state.record_chunk(4_096 + chunk * 1_000_000, 300).unwrap();
+        }
+
+        assert_eq!(state.chunk_offsets.len(), 100_000);
+        assert_eq!(
+            state.stsc_runs,
+            vec![SampleToChunkRun {
+                first_chunk: 1,
+                samples_per_chunk: 300,
+            }],
+            "constant fragment cadence should retain one stsc run, not one sample count per chunk"
+        );
+    }
+
+    #[test]
+    fn online_chunk_tables_are_byte_identical_to_finalize_time_encoding() {
+        let legacy_chunks = [
+            (1_000, 3),
+            (5_000, 3),
+            (9_000, 2),
+            (12_000, 2),
+            (15_000, 2),
+            (21_000, 5),
+            (30_000, 3),
+        ];
+        let mut state = make_track_state(TrackConfig::Video(video_cfg()), &[]);
+        for &(offset, samples_per_chunk) in &legacy_chunks {
+            state
+                .record_chunk(offset, samples_per_chunk as usize)
+                .unwrap();
+        }
+
+        assert_eq!(
+            state.stsc_runs,
+            vec![
+                SampleToChunkRun {
+                    first_chunk: 1,
+                    samples_per_chunk: 3,
+                },
+                SampleToChunkRun {
+                    first_chunk: 3,
+                    samples_per_chunk: 2,
+                },
+                SampleToChunkRun {
+                    first_chunk: 6,
+                    samples_per_chunk: 5,
+                },
+                SampleToChunkRun {
+                    first_chunk: 7,
+                    samples_per_chunk: 3,
+                },
+            ]
+        );
+        assert_eq!(state.stsc(), legacy_stsc(&legacy_chunks));
+        assert_eq!(state.co64(), legacy_co64(&legacy_chunks));
     }
 
     #[test]
@@ -890,7 +1147,8 @@ mod tests {
     #[test]
     fn co64_lists_chunk_offsets() {
         let mut state = make_track_state(TrackConfig::Video(video_cfg()), &[]);
-        state.chunks = vec![(1000, 3), (5000, 2)];
+        state.record_chunk(1000, 3).unwrap();
+        state.record_chunk(5000, 2).unwrap();
         let co64 = state.co64();
         let boxes = walk(&co64);
         let p = boxes[0].payload_offset as usize;

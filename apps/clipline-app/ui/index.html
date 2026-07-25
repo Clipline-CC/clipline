@@ -114,6 +114,11 @@
         </div>
         <div id="gallery-grid" class="gallery-grid"></div>
         <div id="cloud-gallery-grid" class="cloud-gallery-grid" hidden></div>
+        <nav id="gallery-pagination" class="gallery-pagination" aria-label="Library pages" hidden>
+          <button id="gallery-page-prev" type="button" aria-label="Previous page">Previous</button>
+          <span id="gallery-page-label" aria-live="polite"></span>
+          <button id="gallery-page-next" type="button" aria-label="Next page">Next</button>
+        </nav>
       </section>
 
       <div id="review-viewer" class="review-viewer">
@@ -553,7 +558,7 @@
           </div>
 
           <div class="settings-section" id="settings-panel-recording" data-section="recording" role="tabpanel" aria-labelledby="settings-tab-recording" hidden>
-            <input id="set-buffer" type="hidden" value="75" />
+            <input id="set-buffer" type="hidden" value="60" />
             <div class="recording-mode-bar">
               <div class="segmented-control recording-mode-control" role="radiogroup" aria-label="Recording settings mode">
                 <label>
@@ -1068,6 +1073,8 @@
   <script src="presentation-core.js"></script>
   <script src="player-core.js"></script>
   <script src="cloud-core.js"></script>
+  <script src="gallery-window-core.js"></script>
+  <script src="window-lifecycle-core.js"></script>
   <script src="support-core.js"></script>
   <script src="app-core.js"></script>
   <script src="settings.js"></script>

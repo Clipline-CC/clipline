@@ -109,15 +109,16 @@ struct CadencedCapture<C> {
 }
 
 impl<C> CadencedCapture<C> {
-    fn new(inner: C, fps: u32, seed: &Frame) -> Self {
+    fn new(inner: C, fps: u32, seed: Frame) -> Self {
         let frame_interval_s = 1.0 / fps.max(1) as f64;
+        let seed_pts_s = seed.pts_s;
         Self {
             inner,
             frame_interval: Duration::from_secs_f64(frame_interval_s),
             frame_interval_s,
-            last_data: Some(seed.data.clone()),
-            last_emit_pts_s: Some(seed.pts_s),
-            next_pts_s: Some(seed.pts_s + frame_interval_s),
+            last_data: Some(seed.data),
+            last_emit_pts_s: Some(seed_pts_s),
+            next_pts_s: Some(seed_pts_s + frame_interval_s),
             last_emit_wall: Instant::now(),
             retry_deadline: None,
         }
@@ -557,10 +558,6 @@ pub struct ServiceOptions {
     pub replay_window_s: f64,
     /// Ring budget in bytes.
     pub buffer_bytes: usize,
-    /// Replay retention window (s) — the save window plus GOP headroom. Bounds
-    /// the ring by span as well as bytes, so steady-state memory tracks the
-    /// footage a save can use instead of the overshoot-padded byte budget.
-    pub buffer_seconds: f64,
     /// Where the rolling replay buffer stores encoded GOP segments.
     pub replay_storage: ReplayStorageOptions,
     /// Saved clip disk quota. None disables save-time GC.
@@ -590,9 +587,8 @@ impl Default for ServiceOptions {
             recover_abandoned_recordings: true,
             lol_url: None,
             replay_window_s: 60.0,
-            // ~2 min at 12 Mbps video + audio headroom.
-            buffer_bytes: 220 * 1024 * 1024,
-            buffer_seconds: 75.0,
+            // 60 s at 12 Mbps with 2x encoder-overshoot allowance.
+            buffer_bytes: 180_000_000,
             replay_storage: ReplayStorageOptions::Memory,
             disk_quota_bytes: Some(DEFAULT_DISK_QUOTA_BYTES),
             recording_mode: RecordingMode::ReplaysOnly,
@@ -896,17 +892,17 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
     let replay_storage = match &opts.replay_storage {
         ReplayStorageOptions::Memory => ReplayStorageConfig::Memory {
             max_bytes: opts.buffer_bytes,
-            retention_s: opts.buffer_seconds,
+            retention_s: opts.replay_window_s,
         },
         ReplayStorageOptions::Disk { .. } => ReplayStorageConfig::Disk {
             max_bytes: prepared_replay.max_bytes,
-            retention_s: opts.buffer_seconds,
+            retention_s: opts.replay_window_s,
             dir: replay_cache_dir
                 .clone()
                 .ok_or_else(|| "disk replay cache was not prepared".to_string())?,
         },
     };
-    let cap = CadencedCapture::new(cap, opts.fps, &first);
+    let cap = CadencedCapture::new(cap, opts.fps, first);
     let mut rec = Recorder::new_with_replay_storage(cap, encoder, replay_storage)
         .map_err(|e| format!("replay cache: {e}"))?;
     prepared_replay.disarm();
@@ -994,6 +990,13 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
 
         if last_status.elapsed() >= Duration::from_secs(1) {
             last_status = Instant::now();
+            if full_session.is_none() {
+                if let Some((oldest_media_s, _)) =
+                    rec.save_window_bounds(opts.replay_window_s, None)
+                {
+                    marker_log.retain_from_recording_offset(oldest_media_s);
+                }
+            }
             send_recording_status(
                 events,
                 &rec,
@@ -3022,12 +3025,33 @@ mod tests {
     }
 
     #[test]
+    fn cadenced_capture_takes_ownership_of_seed_payload_without_clone() {
+        let payload = vec![7, 8, 9, 10];
+        let original = payload.as_ptr();
+        let seed = Frame {
+            pts_s: 1.0,
+            data: FrameData::Cpu(payload),
+        };
+
+        let cap = CadencedCapture::new(TimeoutSource, 60, seed);
+
+        let Some(FrameData::Cpu(retained)) = cap.last_data.as_ref() else {
+            panic!("CPU seed must remain a CPU frame");
+        };
+        assert_eq!(
+            retained.as_ptr(),
+            original,
+            "constructor must move the seed allocation instead of cloning it"
+        );
+    }
+
+    #[test]
     fn cadenced_capture_duplicates_seed_on_idle_timeout() {
         let seed = Frame {
             pts_s: 1.0,
             data: FrameData::Cpu(vec![7, 8, 9]),
         };
-        let mut cap = CadencedCapture::new(TimeoutSource, 60, &seed);
+        let mut cap = CadencedCapture::new(TimeoutSource, 60, seed);
 
         let first = cap
             .next_frame()
@@ -3052,15 +3076,16 @@ mod tests {
             pts_s: 1.0,
             data: FrameData::Cpu(vec![7, 8, 9]),
         };
+        let seed_pts_s = seed.pts_s;
         let mut cap = CadencedCapture::new(
             PrematureTimeoutSource {
                 delay: Duration::from_millis(1),
             },
             fps,
-            &seed,
+            seed,
         );
         let started = Instant::now();
-        let mut last_pts_s = seed.pts_s;
+        let mut last_pts_s = seed_pts_s;
 
         for _ in 0..120 {
             match cap.next_frame() {
@@ -3071,7 +3096,7 @@ mod tests {
         }
 
         let wall_elapsed_s = started.elapsed().as_secs_f64();
-        let pts_elapsed_s = last_pts_s - seed.pts_s;
+        let pts_elapsed_s = last_pts_s - seed_pts_s;
         assert!(
             pts_elapsed_s <= wall_elapsed_s + frame_interval_s,
             "premature timeouts inflated PTS: pts={pts_elapsed_s:.6}s wall={wall_elapsed_s:.6}s"
@@ -3088,7 +3113,7 @@ mod tests {
             outcomes: VecDeque::from([Ok(None)]),
             requested_timeouts: Vec::new(),
         };
-        let mut capture = CadencedCapture::new(source, 60, &seed);
+        let mut capture = CadencedCapture::new(source, 60, seed);
 
         assert!(capture
             .next_frame()
@@ -3120,7 +3145,7 @@ mod tests {
             ]),
             requested_timeouts: Vec::new(),
         };
-        let mut cap = CadencedCapture::new(source, fps, &seed);
+        let mut cap = CadencedCapture::new(source, fps, seed);
 
         let duplicate = cap.next_frame().unwrap().unwrap();
         let skipped = cap.next_frame();
@@ -3168,7 +3193,7 @@ mod tests {
             ]),
             requested_timeouts: Vec::new(),
         };
-        let mut cap = CadencedCapture::new(source, fps, &seed);
+        let mut cap = CadencedCapture::new(source, fps, seed);
 
         let first = cap.next_frame().unwrap().unwrap();
         let skipped = cap.next_frame();
@@ -3196,7 +3221,7 @@ mod tests {
             delay: Duration::from_millis(30),
             requested_timeouts: Vec::new(),
         };
-        let mut cap = CadencedCapture::new(source, fps, &seed);
+        let mut cap = CadencedCapture::new(source, fps, seed);
 
         assert!(matches!(cap.next_frame(), Err(CaptureError::Timeout(_))));
         let duplicate = cap.next_frame().unwrap().unwrap();
@@ -3221,7 +3246,7 @@ mod tests {
         let source = BlockingTimeoutSource {
             requested_timeouts: Vec::new(),
         };
-        let mut cap = CadencedCapture::new(source, fps, &seed);
+        let mut cap = CadencedCapture::new(source, fps, seed);
 
         let first = cap.next_frame().unwrap().unwrap();
         std::thread::sleep(Duration::from_millis(50));
@@ -3256,7 +3281,7 @@ mod tests {
             delay: Duration::from_millis(30),
             requested_timeouts: Vec::new(),
         };
-        let mut cap = CadencedCapture::new(source, fps, &seed);
+        let mut cap = CadencedCapture::new(source, fps, seed);
 
         let real = cap.next_frame().unwrap().unwrap();
         let duplicate = cap.next_frame().unwrap().unwrap();

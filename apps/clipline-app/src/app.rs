@@ -41,9 +41,83 @@ use diagnostics::{diagnostic_log_path, log_diagnostic};
 const MAIN_WINDOW_LABEL: &str = "main";
 const WEBVIEW_READY_TIMEOUT: Duration = Duration::from_secs(5);
 const GAME_DETECTOR_INTERVAL: Duration = Duration::from_millis(500);
+const WINDOW_LIFECYCLE_EVENT: &str = "window-lifecycle";
 static FRONTEND_READY: AtomicBool = AtomicBool::new(false);
 static WEBVIEW_READY_WATCHDOG_ARMED: AtomicBool = AtomicBool::new(false);
 static WEBVIEW_REPAIR_NOTICE_SHOWN: AtomicBool = AtomicBool::new(false);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum WindowLifecycleMode {
+    Foreground,
+    Tray,
+    Taskbar,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+struct WindowLifecycleSnapshot {
+    revision: u64,
+    mode: WindowLifecycleMode,
+    backgrounded: bool,
+}
+
+impl WindowLifecycleSnapshot {
+    fn new(revision: u64, mode: WindowLifecycleMode) -> Self {
+        Self {
+            revision,
+            mode,
+            backgrounded: mode != WindowLifecycleMode::Foreground,
+        }
+    }
+}
+
+struct WindowLifecycleState(Mutex<WindowLifecycleSnapshot>);
+
+impl Default for WindowLifecycleState {
+    fn default() -> Self {
+        // The configured native window starts hidden. A normal launch moves to
+        // Foreground after reveal; autostart deliberately remains in Tray.
+        Self(Mutex::new(WindowLifecycleSnapshot::new(
+            0,
+            WindowLifecycleMode::Tray,
+        )))
+    }
+}
+
+impl WindowLifecycleState {
+    fn snapshot(&self) -> WindowLifecycleSnapshot {
+        match self.0.lock() {
+            Ok(snapshot) => *snapshot,
+            Err(poisoned) => *poisoned.into_inner(),
+        }
+    }
+
+    fn transition(&self, mode: WindowLifecycleMode) -> WindowLifecycleSnapshot {
+        let mut snapshot = match self.0.lock() {
+            Ok(snapshot) => snapshot,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if snapshot.mode != mode {
+            let revision = snapshot.revision.saturating_add(1);
+            *snapshot = WindowLifecycleSnapshot::new(revision, mode);
+        }
+        *snapshot
+    }
+}
+
+fn ensure_foreground_microphone_test(state: &WindowLifecycleState) -> Result<(), String> {
+    if state.snapshot().mode == WindowLifecycleMode::Foreground {
+        Ok(())
+    } else {
+        Err("microphone test is unavailable while Clipline is backgrounded".into())
+    }
+}
+
+#[derive(serde::Serialize)]
+struct FrontendReadyResponse {
+    warnings: Vec<String>,
+    window_lifecycle: WindowLifecycleSnapshot,
+}
 
 #[derive(serde::Serialize)]
 struct DisplayInfo {
@@ -391,7 +465,8 @@ fn frontend_ready<R: Runtime>(
     app: AppHandle<R>,
     runtime: tauri::State<RuntimeState>,
     startup_warnings: tauri::State<StartupWarnings>,
-) -> Vec<String> {
+    window_lifecycle: tauri::State<WindowLifecycleState>,
+) -> FrontendReadyResponse {
     let was_ready = FRONTEND_READY.swap(true, Ordering::AcqRel);
     if !was_ready {
         log_diagnostic("frontend_ready received");
@@ -399,7 +474,10 @@ fn frontend_ready<R: Runtime>(
     if let Some(status) = runtime.current_waiting_status() {
         let _ = app.emit("status", status);
     }
-    startup_warnings.take()
+    FrontendReadyResponse {
+        warnings: startup_warnings.take(),
+        window_lifecycle: window_lifecycle.snapshot(),
+    }
 }
 
 #[derive(Default)]
@@ -1503,8 +1581,6 @@ where
 }
 
 fn send_main_window_to_tray<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
-    app.state::<MicTestState>().stop();
-    let _ = app.emit("suspend-review-playback", ());
     log_diagnostic(format!(
         "send main window to tray webviews={}",
         webview_labels(app)
@@ -1523,6 +1599,7 @@ fn send_main_window_to_tray<R: Runtime>(app: &AppHandle<R>) -> Result<(), String
         log_window_state(&format!("send-to-tray before label={label}"), &window);
         hide_main_window(
             || window.hide(),
+            || publish_background_window(app, WindowLifecycleMode::Tray),
             || {
                 let result = window.as_ref().hide();
                 log_diagnostic(format!(
@@ -1537,6 +1614,25 @@ fn send_main_window_to_tray<R: Runtime>(app: &AppHandle<R>) -> Result<(), String
         log_window_state(&format!("send-to-tray after hide label={label}"), &window);
     }
     Ok(())
+}
+
+fn publish_window_lifecycle<R: Runtime>(
+    app: &AppHandle<R>,
+    mode: WindowLifecycleMode,
+) -> WindowLifecycleSnapshot {
+    let snapshot = app.state::<WindowLifecycleState>().transition(mode);
+    if let Err(error) = app.emit(WINDOW_LIFECYCLE_EVENT, snapshot) {
+        log_diagnostic(format!(
+            "window lifecycle emit failed revision={} mode={:?}: {error}",
+            snapshot.revision, snapshot.mode
+        ));
+    }
+    snapshot
+}
+
+fn publish_background_window<R: Runtime>(app: &AppHandle<R>, mode: WindowLifecycleMode) {
+    app.state::<MicTestState>().stop();
+    publish_window_lifecycle(app, mode);
 }
 
 /// Request a WebView2 memory-usage target level for one window, best-effort.
@@ -1619,11 +1715,91 @@ fn minimize_main_window<R: Runtime>(
 ) -> Result<(), String> {
     match minimize_request_action(&state.settings()) {
         MinimizeRequestAction::Taskbar => {
-            window.minimize().map_err(|e| e.to_string())?;
-            Ok(())
+            let label = window.label().to_string();
+            hide_main_window(
+                || window.minimize(),
+                || publish_background_window(&app, WindowLifecycleMode::Taskbar),
+                || window.as_ref().hide(),
+                || {
+                    request_webview_memory_target(
+                        &window,
+                        &label,
+                        crate::windows::MemoryTarget::Low,
+                    )
+                },
+            )
         }
         MinimizeRequestAction::Tray => send_main_window_to_tray(&app),
     }
+}
+
+fn restore_taskbar_window<R: Runtime>(
+    app: &AppHandle<R>,
+    window: &WebviewWindow<R>,
+) -> Result<(), String> {
+    if app.state::<WindowLifecycleState>().snapshot().mode != WindowLifecycleMode::Taskbar {
+        return Ok(());
+    }
+    let label = window.label().to_string();
+    let result = restore_taskbar_webview(
+        || request_webview_memory_target(window, &label, crate::windows::MemoryTarget::Normal),
+        || window.as_ref().show(),
+        || {
+            publish_window_lifecycle(app, WindowLifecycleMode::Foreground);
+        },
+    );
+    if result.is_err() {
+        request_webview_memory_target(window, &label, crate::windows::MemoryTarget::Low);
+    }
+    result
+}
+
+fn restore_taskbar_webview<E>(
+    restore_memory_target: impl FnOnce(),
+    show_webview: impl FnOnce() -> Result<(), E>,
+    publish_foreground: impl FnOnce(),
+) -> Result<(), String>
+where
+    E: std::fmt::Display,
+{
+    restore_memory_target();
+    show_webview().map_err(|error| error.to_string())?;
+    publish_foreground();
+    Ok(())
+}
+
+fn background_if_native_minimized<E>(
+    is_minimized: impl FnOnce() -> Result<bool, E>,
+    publish_background: impl FnOnce(),
+    hide_webview: impl FnOnce() -> Result<(), E>,
+    lower_memory_target: impl FnOnce(),
+) -> Result<bool, String>
+where
+    E: std::fmt::Display,
+{
+    if !is_minimized().map_err(|error| error.to_string())? {
+        return Ok(false);
+    }
+    publish_background();
+    let _ = hide_webview();
+    lower_memory_target();
+    Ok(true)
+}
+
+fn background_native_minimized_window<R: Runtime>(
+    app: &AppHandle<R>,
+    window: &WebviewWindow<R>,
+) -> Result<bool, String> {
+    if app.state::<WindowLifecycleState>().snapshot().mode != WindowLifecycleMode::Foreground {
+        return Ok(false);
+    }
+    let label = window.label().to_string();
+    background_if_native_minimized(
+        || window.is_minimized(),
+        || publish_background_window(app, WindowLifecycleMode::Taskbar),
+        || window.as_ref().hide(),
+        || request_webview_memory_target(window, &label, crate::windows::MemoryTarget::Low),
+    )
 }
 
 #[tauri::command]
@@ -1888,16 +2064,22 @@ fn report_decode_support(state: tauri::State<RuntimeState>, codecs: Vec<String>)
 fn start_microphone_test<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<MicTestState>,
+    window_lifecycle: tauri::State<WindowLifecycleState>,
     device_id: Option<String>,
     volume: f64,
     mono: bool,
 ) -> Result<(), String> {
+    ensure_foreground_microphone_test(&window_lifecycle)?;
     let channels = if mono {
         clipline_capture::windows::wasapi::WasapiChannelMode::Mono
     } else {
         clipline_capture::windows::wasapi::WasapiChannelMode::Stereo
     };
     let (generation, stop_rx) = state.begin()?;
+    if let Err(error) = ensure_foreground_microphone_test(&window_lifecycle) {
+        state.finish_if_active(generation);
+        return Err(error);
+    }
     let worker_app = app.clone();
     let worker = std::thread::Builder::new()
         .name(format!("clipline-mic-test-{generation}"))
@@ -2268,6 +2450,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(RuntimeState::new(settings.clone(), lol_url))
         .manage(StartupWarnings::new(startup_warnings))
+        .manage(WindowLifecycleState::default())
         .manage(MicTestState::default())
         .manage(support::SupportState::default())
         .manage(crate::memory::MemorySampler::default())
@@ -2534,6 +2717,33 @@ pub fn run() {
                     }
                 }
             }
+            tauri::RunEvent::WindowEvent {
+                label,
+                event: WindowEvent::Focused(false),
+                ..
+            } if is_app_window_label(&label) => {
+                log_diagnostic(format!("window event: label={label} event=Focused(false)"));
+                if let Some(window) = app.get_webview_window(&label) {
+                    if let Err(error) = background_native_minimized_window(app, &window) {
+                        log_diagnostic(format!(
+                            "native minimize detection failed label={label}: {error}"
+                        ));
+                    }
+                }
+            }
+            tauri::RunEvent::WindowEvent {
+                label,
+                event: WindowEvent::Focused(true),
+                ..
+            } if is_app_window_label(&label) => {
+                if let Some(window) = app.get_webview_window(&label) {
+                    if let Err(error) = restore_taskbar_window(app, &window) {
+                        log_diagnostic(format!(
+                            "taskbar restore failed label={label}: {error}"
+                        ));
+                    }
+                }
+            }
             tauri::RunEvent::WindowEvent { label, event, .. } => {
                 if should_log_window_event(&event) {
                     log_diagnostic(format!("window event: label={label} event={event:?}"));
@@ -2663,6 +2873,9 @@ fn reveal_logged_window<R: Runtime>(
             ));
             result
         },
+        || {
+            publish_window_lifecycle(window.app_handle(), WindowLifecycleMode::Foreground);
+        },
     )
 }
 
@@ -2679,6 +2892,7 @@ fn reveal_main_window<E>(
     show: impl FnOnce() -> Result<(), E>,
     unminimize: impl FnOnce() -> Result<(), E>,
     focus: impl FnOnce() -> Result<(), E>,
+    publish_foreground: impl FnOnce(),
 ) -> Result<(), String>
 where
     E: std::fmt::Display,
@@ -2689,6 +2903,7 @@ where
     let _ = show_webview();
     show().map_err(|e| e.to_string())?;
     unminimize().map_err(|e| e.to_string())?;
+    publish_foreground();
     focus().map_err(|e| e.to_string())
 }
 
@@ -2701,6 +2916,7 @@ where
 /// best-effort: by that point the window is already in the tray.
 fn hide_main_window<E>(
     hide: impl FnOnce() -> Result<(), E>,
+    publish_background: impl FnOnce(),
     hide_webview: impl FnOnce() -> Result<(), E>,
     lower_memory_target: impl FnOnce(),
 ) -> Result<(), String>
@@ -2708,6 +2924,7 @@ where
     E: std::fmt::Display,
 {
     hide().map_err(|e| e.to_string())?;
+    publish_background();
     let _ = hide_webview();
     // Only once the window is genuinely gone: throttling a view the user can
     // still see would be visible to them.
@@ -4400,6 +4617,7 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
                 calls.borrow_mut().push("focus");
                 Ok::<(), String>(())
             },
+            || calls.borrow_mut().push("foreground"),
         )
         .unwrap();
 
@@ -4407,7 +4625,14 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
         // window, or the user sees a throttled or transparent first frame.
         assert_eq!(
             *calls.borrow(),
-            ["memory_normal", "webview_show", "show", "unminimize", "focus"]
+            [
+                "memory_normal",
+                "webview_show",
+                "show",
+                "unminimize",
+                "foreground",
+                "focus"
+            ]
         );
     }
 
@@ -4432,10 +4657,54 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
                 calls.borrow_mut().push("focus");
                 Ok::<(), String>(())
             },
+            || calls.borrow_mut().push("foreground"),
         )
         .expect("a webview visibility failure must not fail the reveal");
 
-        assert_eq!(*calls.borrow(), ["show", "unminimize", "focus"]);
+        assert_eq!(
+            *calls.borrow(),
+            ["show", "unminimize", "foreground", "focus"]
+        );
+    }
+
+    #[test]
+    fn failed_focus_still_publishes_foreground_after_reveal() {
+        let calls = std::cell::RefCell::new(Vec::new());
+
+        let error = reveal_main_window(
+            || calls.borrow_mut().push("memory_normal"),
+            || {
+                calls.borrow_mut().push("webview_show");
+                Ok::<(), String>(())
+            },
+            || {
+                calls.borrow_mut().push("show");
+                Ok::<(), String>(())
+            },
+            || {
+                calls.borrow_mut().push("unminimize");
+                Ok::<(), String>(())
+            },
+            || {
+                calls.borrow_mut().push("focus");
+                Err::<(), String>("focus refused".into())
+            },
+            || calls.borrow_mut().push("foreground"),
+        )
+        .expect_err("focus failure should still be reported");
+
+        assert!(error.contains("focus refused"));
+        assert_eq!(
+            *calls.borrow(),
+            [
+                "memory_normal",
+                "webview_show",
+                "show",
+                "unminimize",
+                "foreground",
+                "focus"
+            ]
+        );
     }
 
     #[test]
@@ -4447,6 +4716,7 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
                 calls.borrow_mut().push("hide");
                 Ok::<(), String>(())
             },
+            || calls.borrow_mut().push("background"),
             || {
                 calls.borrow_mut().push("webview_hide");
                 Ok::<(), String>(())
@@ -4455,16 +4725,21 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
         )
         .unwrap();
 
-        assert_eq!(*calls.borrow(), ["hide", "webview_hide", "memory_low"]);
+        assert_eq!(
+            *calls.borrow(),
+            ["hide", "background", "webview_hide", "memory_low"]
+        );
     }
 
     #[test]
     fn failed_native_hide_leaves_the_webview_visible() {
         let webview_hidden = std::cell::Cell::new(false);
+        let backgrounded = std::cell::Cell::new(false);
         let throttled = std::cell::Cell::new(false);
 
         let error = hide_main_window(
             || Err::<(), String>("hide refused".into()),
+            || backgrounded.set(true),
             || {
                 webview_hidden.set(true);
                 Ok::<(), String>(())
@@ -4474,6 +4749,10 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
         .expect_err("a failed native hide must surface");
 
         assert!(error.contains("hide refused"));
+        assert!(
+            !backgrounded.get(),
+            "a failed native hide must not publish background state"
+        );
         assert!(
             !webview_hidden.get(),
             "hiding the webview behind a still-visible window would blank it"
@@ -4493,12 +4772,126 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
 
         hide_main_window(
             || Ok::<(), String>(()),
+            || {},
             || Err::<(), String>("controller gone".into()),
             || throttled.set(true),
         )
         .expect("webview visibility is best-effort on hide");
 
         assert!(throttled.get());
+    }
+
+    #[test]
+    fn window_lifecycle_revisions_only_change_with_native_mode() {
+        let state = WindowLifecycleState::default();
+
+        assert_eq!(
+            state.snapshot(),
+            WindowLifecycleSnapshot::new(0, WindowLifecycleMode::Tray)
+        );
+        assert_eq!(
+            state.transition(WindowLifecycleMode::Tray),
+            WindowLifecycleSnapshot::new(0, WindowLifecycleMode::Tray)
+        );
+        assert_eq!(
+            state.transition(WindowLifecycleMode::Foreground),
+            WindowLifecycleSnapshot::new(1, WindowLifecycleMode::Foreground)
+        );
+        assert_eq!(
+            state.transition(WindowLifecycleMode::Taskbar),
+            WindowLifecycleSnapshot::new(2, WindowLifecycleMode::Taskbar)
+        );
+    }
+
+    #[test]
+    fn taskbar_restore_restores_webview_before_publishing_foreground() {
+        let calls = std::cell::RefCell::new(Vec::new());
+
+        restore_taskbar_webview(
+            || calls.borrow_mut().push("memory_normal"),
+            || {
+                calls.borrow_mut().push("webview_show");
+                Ok::<(), String>(())
+            },
+            || calls.borrow_mut().push("foreground"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            *calls.borrow(),
+            ["memory_normal", "webview_show", "foreground"]
+        );
+    }
+
+    #[test]
+    fn failed_taskbar_webview_restore_does_not_publish_foreground() {
+        let foreground = std::cell::Cell::new(false);
+
+        let error = restore_taskbar_webview(
+            || {},
+            || Err::<(), String>("controller show failed".into()),
+            || foreground.set(true),
+        )
+        .expect_err("controller show failure must keep taskbar lifecycle state");
+
+        assert!(error.contains("controller show failed"));
+        assert!(!foreground.get());
+    }
+
+    #[test]
+    fn microphone_test_requires_foreground_window_lifecycle() {
+        let state = WindowLifecycleState::default();
+        assert!(ensure_foreground_microphone_test(&state).is_err());
+
+        state.transition(WindowLifecycleMode::Foreground);
+        assert!(ensure_foreground_microphone_test(&state).is_ok());
+
+        state.transition(WindowLifecycleMode::Taskbar);
+        assert!(ensure_foreground_microphone_test(&state).is_err());
+    }
+
+    #[test]
+    fn native_minimize_fallback_requires_confirmed_minimized_state() {
+        let calls = std::cell::RefCell::new(Vec::new());
+
+        let changed = background_if_native_minimized(
+            || Ok::<bool, String>(false),
+            || calls.borrow_mut().push("background"),
+            || {
+                calls.borrow_mut().push("webview_hide");
+                Ok::<(), String>(())
+            },
+            || calls.borrow_mut().push("memory_low"),
+        )
+        .unwrap();
+
+        assert!(!changed);
+        assert!(
+            calls.borrow().is_empty(),
+            "ordinary focus loss or Alt-Tab must not be treated as background"
+        );
+    }
+
+    #[test]
+    fn native_minimize_fallback_publishes_before_releasing_webview() {
+        let calls = std::cell::RefCell::new(Vec::new());
+
+        let changed = background_if_native_minimized(
+            || Ok::<bool, String>(true),
+            || calls.borrow_mut().push("background"),
+            || {
+                calls.borrow_mut().push("webview_hide");
+                Ok::<(), String>(())
+            },
+            || calls.borrow_mut().push("memory_low"),
+        )
+        .unwrap();
+
+        assert!(changed);
+        assert_eq!(
+            *calls.borrow(),
+            ["background", "webview_hide", "memory_low"]
+        );
     }
 
     #[test]

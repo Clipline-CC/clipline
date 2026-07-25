@@ -165,6 +165,7 @@ function fillSettings(s) {
   const games = { ...defaultGameSettings(), ...(s.games || {}) };
   const cloud = { ...defaultCloudSettings(), ...(s.cloud || {}) };
   const osu = { ...defaultOsuApiSettings(), ...(s.osu || {}) };
+  const replay = Math.min(120, Math.max(5, Number(s.replay_window_s) || 60));
   cloud.uploads = { ...(cloud.uploads || {}) };
   gamePluginSettings = normalizeGamePluginSettingsMap(games.plugins || {});
   customGames = (games.custom_games || []).map(normalizeCustomGame);
@@ -192,8 +193,8 @@ function fillSettings(s) {
   $("set-mic-enabled").checked = !!audio.mic_enabled;
   $("set-mic-volume").value = String(Number.isFinite(audio.mic_volume) ? audio.mic_volume : 1);
   $("set-mic-mono").checked = (audio.mic_channels || "mono") === "mono";
-  $("set-buffer").value = Number(s.buffer_seconds) || ((Number(s.replay_window_s) || 60) + 15);
-  $("set-replay").value = Math.min(120, Number(s.replay_window_s) || 60);
+  $("set-buffer").value = replay;
+  $("set-replay").value = replay;
   $("set-backend").value = s.capture_backend || "auto";
   $("set-encoder").value = s.video_encoder || "auto";
   $("set-output-resolution").value = outputResolutionOption(s.output_resolution).id;
@@ -276,9 +277,9 @@ function readSettings() {
       mic_volume: Number($("set-mic-volume").value),
       mic_channels: $("set-mic-mono").checked ? "mono" : "stereo",
     },
-    // Ring holds the save window plus 15 s headroom (mirrors BUFFER_HEADROOM_S
-    // in settings.rs) - not a fixed 2 minutes.
-    buffer_seconds: replay + 15,
+    // Persisted for compatibility with older settings files. Runtime retention
+    // derives from replay_window_s.
+    buffer_seconds: replay,
     replay_window_s: replay,
     video_encoder: $("set-encoder").value,
     output_resolution: outputResolutionOption($("set-output-resolution").value).id,
@@ -1339,6 +1340,7 @@ function syncCaptureBackendSummary() {
 
 function syncRecordingFields() {
   const replay = Number($("set-replay").value);
+  $("set-buffer").value = replay;
   const encoder = selectedVideoEncoder();
   const outputResolution = outputResolutionOption($("set-output-resolution").value);
   const quality = recordingQualityPreset(Number($("set-bitrate").value), outputResolution.id);
@@ -1563,6 +1565,11 @@ function playMicSamples(samples) {
 function stopMicTestUi(message = "stopped") {
   micTestRunning = false;
   stopMicPlayback();
+  const context = micAudioContext;
+  micAudioContext = null;
+  if (context && context.state !== "closed") {
+    context.close().catch(() => {});
+  }
   syncAudioFields();
   setMicTestStatus(message, 0);
 }
@@ -1579,17 +1586,31 @@ async function testMic() {
     return;
   }
 
+  const lifecycleWork = captureForegroundWork();
+  if (!lifecycleWork) return;
   micTestRunning = true;
   syncAudioFields();
   setMicTestStatus("listening", 0);
   try {
     await startMicPlayback();
+    if (!isForegroundWorkCurrent(lifecycleWork)) {
+      stopMicTestUi("stopped");
+      return;
+    }
     await invoke("start_microphone_test", {
       deviceId: selectedDeviceId("set-mic-device"),
       volume: Number($("set-mic-volume").value),
       mono: $("set-mic-mono").checked,
     });
+    if (!isForegroundWorkCurrent(lifecycleWork)) {
+      await invoke("stop_microphone_test").catch(() => {});
+      stopMicTestUi("stopped");
+    }
   } catch (e) {
+    if (!isForegroundWorkCurrent(lifecycleWork)) {
+      stopMicTestUi("stopped");
+      return;
+    }
     stopMicTestUi("error");
     $("error").textContent = e;
   }
@@ -1768,49 +1789,81 @@ function setRegion(next) {
   if (typeof settingsOpen !== "undefined" && settingsOpen) syncSettingsDraftFromForm();
 }
 
-async function loadDisplays() {
+async function loadDisplays(lifecycleWork = captureForegroundWork()) {
+  if (!lifecycleWork) return false;
   try {
-    displays = await invoke("list_displays");
+    const nextDisplays = await invoke("list_displays");
+    if (!isForegroundWorkCurrent(lifecycleWork)) return false;
+    displays = nextDisplays;
     displaysLoaded = true;
     if (!regionState.display_id && displays.length) {
       regionState = regionForDisplay(primaryDisplay());
     }
     renderCaptureTargetSelect();
     renderRegionEditor();
+    return true;
   } catch (e) {
+    if (!isForegroundWorkCurrent(lifecycleWork)) return false;
     $("region-display-label").textContent = "display list unavailable";
     $("error").textContent = e;
+    return true;
   }
 }
 
-async function ensureDisplaysLoaded() {
-  if (displaysLoaded) return;
+async function ensureDisplaysLoaded(lifecycleWork = captureForegroundWork()) {
+  if (!lifecycleWork) return false;
+  if (displaysLoaded) return true;
   if (!displaysLoadPromise) {
-    displaysLoadPromise = loadDisplays().finally(() => {
-      displaysLoadPromise = null;
+    const pending = loadDisplays(lifecycleWork).finally(() => {
+      if (displaysLoadPromise === pending) displaysLoadPromise = null;
     });
+    displaysLoadPromise = pending;
   }
-  await displaysLoadPromise;
+  const completed = await displaysLoadPromise;
+  if (
+    !completed
+    && !displaysLoaded
+    && isForegroundWorkCurrent(lifecycleWork)
+  ) {
+    return ensureDisplaysLoaded(lifecycleWork);
+  }
+  return completed;
 }
 
-async function loadAudioDevices() {
+async function loadAudioDevices(lifecycleWork = captureForegroundWork()) {
+  if (!lifecycleWork) return false;
   try {
-    audioDevices = await invoke("list_audio_devices");
+    const nextAudioDevices = await invoke("list_audio_devices");
+    if (!isForegroundWorkCurrent(lifecycleWork)) return false;
+    audioDevices = nextAudioDevices;
     audioDevicesLoaded = true;
     renderAudioDeviceSelects();
+    return true;
   } catch (e) {
+    if (!isForegroundWorkCurrent(lifecycleWork)) return false;
     $("error").textContent = e;
+    return true;
   }
 }
 
-async function ensureAudioDevicesLoaded() {
-  if (audioDevicesLoaded) return;
+async function ensureAudioDevicesLoaded(lifecycleWork = captureForegroundWork()) {
+  if (!lifecycleWork) return false;
+  if (audioDevicesLoaded) return true;
   if (!audioDevicesLoadPromise) {
-    audioDevicesLoadPromise = loadAudioDevices().finally(() => {
-      audioDevicesLoadPromise = null;
+    const pending = loadAudioDevices(lifecycleWork).finally(() => {
+      if (audioDevicesLoadPromise === pending) audioDevicesLoadPromise = null;
     });
+    audioDevicesLoadPromise = pending;
   }
-  await audioDevicesLoadPromise;
+  const completed = await audioDevicesLoadPromise;
+  if (
+    !completed
+    && !audioDevicesLoaded
+    && isForegroundWorkCurrent(lifecycleWork)
+  ) {
+    return ensureAudioDevicesLoaded(lifecycleWork);
+  }
+  return completed;
 }
 
 // Probe which codecs this WebView2 can actually decode and report them so
@@ -1825,41 +1878,66 @@ function probeDecodableCodecs() {
   decodableCodecs = supported;
 }
 
-async function loadVideoEncoders() {
+async function loadVideoEncoders(lifecycleWork = captureForegroundWork()) {
+  if (!lifecycleWork) return false;
   probeDecodableCodecs();
   try {
     await invoke("report_decode_support", { codecs: decodableCodecs });
   } catch (e) {
     // Reporting is best-effort; the recorder defaults to H.264-safe Automatic.
   }
+  if (!isForegroundWorkCurrent(lifecycleWork)) return false;
   try {
-    videoEncoders = await invoke("probe_encoders");
+    const nextVideoEncoders = await invoke("probe_encoders");
+    if (!isForegroundWorkCurrent(lifecycleWork)) return false;
+    videoEncoders = nextVideoEncoders;
     videoEncodersLoaded = true;
   } catch (e) {
+    if (!isForegroundWorkCurrent(lifecycleWork)) return false;
     videoEncoders = [];
     $("error").textContent = e;
   }
   renderVideoEncoderSelect();
   if (currentSettings) syncRecordingFields();
+  return true;
 }
 
-async function ensureVideoEncodersLoaded() {
-  if (videoEncodersLoaded) return;
+async function ensureVideoEncodersLoaded(lifecycleWork = captureForegroundWork()) {
+  if (!lifecycleWork) return false;
+  if (videoEncodersLoaded) return true;
   if (!videoEncodersLoadPromise) {
-    videoEncodersLoadPromise = loadVideoEncoders().finally(() => {
-      videoEncodersLoadPromise = null;
+    const pending = loadVideoEncoders(lifecycleWork).finally(() => {
+      if (videoEncodersLoadPromise === pending) videoEncodersLoadPromise = null;
     });
+    videoEncodersLoadPromise = pending;
   }
-  await videoEncodersLoadPromise;
+  const completed = await videoEncodersLoadPromise;
+  if (
+    !completed
+    && !videoEncodersLoaded
+    && isForegroundWorkCurrent(lifecycleWork)
+  ) {
+    return ensureVideoEncodersLoaded(lifecycleWork);
+  }
+  return completed;
 }
 
-async function loadGamePlugins() {
+async function loadGamePlugins(lifecycleWork = captureForegroundWork()) {
+  if (!lifecycleWork) {
+    requestWindowRefresh();
+    return false;
+  }
   try {
-    syncGamePluginCatalog(await invoke("list_game_plugins"));
+    const plugins = await invoke("list_game_plugins");
+    if (!isForegroundWorkCurrent(lifecycleWork)) return false;
+    syncGamePluginCatalog(plugins);
+    return true;
   } catch (e) {
+    if (!isForegroundWorkCurrent(lifecycleWork)) return false;
     gamePlugins = [];
     $("error").textContent = e;
     renderGamePlugins();
+    return true;
   }
 }
 
@@ -2093,6 +2171,9 @@ function renderGameWindows() {
 }
 
 async function refreshGameWindows() {
+  const lifecycleWork = captureForegroundWork();
+  if (!lifecycleWork) return false;
+  const scanId = ++gameWindowsScanId;
   $("error").textContent = "";
   $("game-window-list").replaceChildren();
   const loading = document.createElement("div");
@@ -2100,16 +2181,31 @@ async function refreshGameWindows() {
   loading.textContent = "scanning running windows…";
   $("game-window-list").appendChild(loading);
   try {
-    gameWindows = await invoke("list_game_windows");
+    const windows = await invoke("list_game_windows");
+    if (
+      !isForegroundWorkCurrent(lifecycleWork)
+      || scanId !== gameWindowsScanId
+      || !$("game-window-picker-dialog").open
+    ) return false;
+    gameWindows = windows;
     renderGameWindows();
+    return true;
   } catch (e) {
+    if (
+      !isForegroundWorkCurrent(lifecycleWork)
+      || scanId !== gameWindowsScanId
+      || !$("game-window-picker-dialog").open
+    ) return false;
     $("error").textContent = e;
     gameWindows = [];
     renderGameWindows();
+    return true;
   }
 }
 
 async function showDetectedGamesDialog() {
+  const lifecycleWork = captureForegroundWork();
+  if (!lifecycleWork) return;
   $("error").textContent = "";
   if (!$("detected-games-dialog").open) $("detected-games-dialog").showModal();
   const scanId = ++detectedGamesScanId;
@@ -2123,11 +2219,19 @@ async function showDetectedGamesDialog() {
   $("detected-games-list").appendChild(loading);
   try {
     const candidates = await invoke("detect_installed_games", { existingCustomGames: customGames });
-    if (scanId !== detectedGamesScanId || !$("detected-games-dialog").open) return;
+    if (
+      !isForegroundWorkCurrent(lifecycleWork)
+      || scanId !== detectedGamesScanId
+      || !$("detected-games-dialog").open
+    ) return;
     detectedGameCandidates = candidates;
     renderDetectedGames();
   } catch (e) {
-    if (scanId !== detectedGamesScanId || !$("detected-games-dialog").open) return;
+    if (
+      !isForegroundWorkCurrent(lifecycleWork)
+      || scanId !== detectedGamesScanId
+      || !$("detected-games-dialog").open
+    ) return;
     $("error").textContent = e;
     detectedGameCandidates = [];
     renderDetectedGames();
@@ -2193,10 +2297,16 @@ async function showGameWindowPicker() {
 }
 
 function hideGameWindowPicker() {
+  gameWindowsScanId += 1;
+  gameWindows = [];
+  $("game-window-list").replaceChildren();
   if ($("game-window-picker-dialog").open) $("game-window-picker-dialog").close();
 }
 
 async function addCustomGameFromWindow(win) {
+  const lifecycleWork = captureForegroundWork();
+  if (!lifecycleWork) return;
+  const scanId = gameWindowsScanId;
   const name = gameNameFromWindow(win);
   // Pull the executable's icon now, while we still have its path. Best-effort:
   // a missing path or icon just leaves the game with the placeholder glyph.
@@ -2208,6 +2318,11 @@ async function addCustomGameFromWindow(win) {
       icon = null;
     }
   }
+  if (
+    !isForegroundWorkCurrent(lifecycleWork)
+    || scanId !== gameWindowsScanId
+    || !$("game-window-picker-dialog").open
+  ) return;
   customGames.push(normalizeCustomGame({
     id: customGameId(name),
     name,
@@ -2222,6 +2337,24 @@ async function addCustomGameFromWindow(win) {
   renderCustomGames();
   syncSettingsDraftFromForm();
   $("settings-status").textContent = "custom game added - save to apply";
+}
+
+function releaseBackgroundSettingsUi() {
+  gameWindowsScanId += 1;
+  gameWindows = [];
+  $("game-window-list").replaceChildren();
+  if ($("game-window-picker-dialog").open) {
+    $("game-window-picker-dialog").close();
+  }
+
+  detectedGamesScanId += 1;
+  detectedGameCandidates = [];
+  selectedDetectedGameIds = new Set();
+  $("detected-games-list").replaceChildren();
+  $("add-detected-games").disabled = true;
+  if ($("detected-games-dialog").open) {
+    $("detected-games-dialog").close();
+  }
 }
 
 function updateGameDetectionStatus() {

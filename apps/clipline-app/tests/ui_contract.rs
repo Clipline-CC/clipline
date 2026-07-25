@@ -13,6 +13,8 @@ fn index_html() -> String {
 const APP_UI_JS: &[&str] = &[
     "presentation-core.js",
     "cloud-core.js",
+    "gallery-window-core.js",
+    "window-lifecycle-core.js",
     "support-core.js",
     "app-core.js",
     "settings.js",
@@ -26,6 +28,31 @@ const APP_UI_JS: &[&str] = &[
 fn read_ui_js(name: &str) -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui").join(name);
     fs::read_to_string(path).unwrap_or_else(|err| panic!("read ui/{name}: {err}"))
+}
+
+#[test]
+fn legacy_buffer_setting_mirrors_the_replay_window() {
+    let html = index_html();
+    let settings = read_ui_js("settings.js");
+
+    assert!(
+        html.contains("<input id=\"set-buffer\" type=\"hidden\" value=\"60\" />"),
+        "the hidden compatibility value must match the default replay window"
+    );
+    assert!(
+        settings
+            .matches("$(\"set-buffer\").value = replay;")
+            .count()
+            >= 2
+            && settings.contains("buffer_seconds: replay,"),
+        "loading, editing, and saving settings must mirror replay_window_s into buffer_seconds"
+    );
+    assert!(
+        !settings.contains("replay + 15")
+            && !settings.contains("BUFFER_HEADROOM_S")
+            && !settings.contains("replay_window_s) || 60) + 15"),
+        "the removed fixed retention headroom must not survive in the UI"
+    );
 }
 
 /// Concatenated app UI scripts (everything except player-core.js).
@@ -1548,7 +1575,8 @@ fn local_library_refresh_rejects_stale_snapshots_and_reports_event_errors() {
     );
     for required in [
         "const request = localClipsRequestGate.begin(\"local-library\");",
-        "const isCurrent = () => localClipsRequestGate.isCurrent(request, \"local-library\");",
+        "isForegroundWorkCurrent(lifecycleWork)",
+        "localClipsRequestGate.isCurrent(request, \"local-library\")",
         "if (!isCurrent()) return false;",
         "result = await invoke(\"list_clips\");",
         "freshClips = Array.isArray(result.clips) ? result.clips : [];",
@@ -2425,7 +2453,7 @@ fn every_review_video_source_mutation_uses_generation_helpers() {
 }
 
 #[test]
-fn close_to_tray_suspends_review_playback() {
+fn native_background_lifecycle_releases_heavy_frontend_state() {
     let app = app_rs();
     let js = main_js();
     let tray_start = app
@@ -2437,18 +2465,31 @@ fn close_to_tray_suspends_review_playback() {
         .expect("quit helper follows tray helper");
     let tray_helper = &app[tray_start..tray_end];
     let suspend_start = js
-        .find("function suspendReviewPlayback()")
+        .find("function suspendReviewPlayback(")
         .expect("frontend suspend helper");
     let close_review_start = js.find("function closeReview()").unwrap();
     let suspend_helper = &js[suspend_start..close_review_start];
 
     assert!(
-        tray_helper.contains("emit(\"suspend-review-playback\""),
-        "native close-to-tray must tell the WebView to stop clip playback before hiding it"
+        tray_helper.contains("publish_background_window(app, WindowLifecycleMode::Tray)")
+            && tray_helper.contains("WINDOW_LIFECYCLE_EVENT"),
+        "native close-to-tray must publish durable lifecycle state after hiding"
     );
     assert!(
-        js.contains("listen(\"suspend-review-playback\"") && js.contains("suspendReviewPlayback"),
-        "frontend must listen for the native close-to-tray suspend event"
+        js.contains("listen(\"window-lifecycle\"")
+            && js.contains("applyWindowLifecycleSnapshot(event.payload)"),
+        "frontend must consume revisioned native lifecycle snapshots"
+    );
+    let ready = js_function_body(&js, "reportFrontendReady");
+    let listener_ready = ready
+        .find("await windowLifecycleListenerReady")
+        .expect("frontend_ready waits for lifecycle listener registration");
+    let ready_invoke = ready
+        .find("invoke(\"frontend_ready\")")
+        .expect("frontend_ready invoke");
+    assert!(
+        listener_ready < ready_invoke,
+        "the durable snapshot must be requested only after lifecycle events can be received"
     );
     assert!(
         suspend_helper.contains("cancelDesiredAudioPreview();")
@@ -2462,6 +2503,84 @@ fn close_to_tray_suspends_review_playback() {
             && suspend_helper.contains("currentReviewMediaPath = null;")
             && suspend_helper.contains("updateViews();"),
         "suspending playback must also leave the editor state so reopening from tray cannot show a src-less current clip"
+    );
+    let release = js_function_body(&js, "releaseBackgroundUi");
+    for required in [
+        "localClipsRequestGate.invalidate();",
+        "cloudClipsRequestGate.invalidate();",
+        "releaseBackgroundSettingsUi();",
+        "suspendReviewPlayback({ renderGallery: false });",
+        "clearHeavyGalleryDom();",
+    ] {
+        assert!(
+            release.contains(required),
+            "background entry must release/invalidate `{required}`"
+        );
+    }
+    assert!(
+        !release.contains("renderClips()"),
+        "background teardown must not immediately rebuild gallery DOM"
+    );
+}
+
+#[test]
+fn lifecycle_guards_refreshes_posters_and_cloud_media_completions() {
+    let app_core = read_ui_js("app-core.js");
+    let library = read_ui_js("library.js");
+    let cloud = read_ui_js("cloud.js");
+    let main = read_ui_js("main.js");
+    let settings = read_ui_js("settings.js");
+    let review = read_ui_js("review-player.js");
+
+    assert!(
+        app_core.contains("WindowLifecycleCore.requestRefresh(windowLifecycleState)")
+            && main.contains("if (!requestWindowRefresh()) return;"),
+        "background event bursts must coalesce into a single dirty refresh"
+    );
+    let refresh_clips = js_function_body(&library, "refreshClips");
+    assert!(
+        refresh_clips.contains("isForegroundWorkCurrent(lifecycleWork)")
+            && refresh_clips.contains("localClipsRequestGate.isCurrent("),
+        "local library responses must satisfy both lifecycle and request generations"
+    );
+    let poster = js_function_body(&library, "loadCardPoster");
+    assert!(
+        poster.contains("captureForegroundWork()")
+            && poster.contains("isForegroundWorkCurrent(lifecycleWork)"),
+        "poster completions from an old foreground generation must be ignored"
+    );
+    let cloud_open = js_function_body(&cloud, "openCloudEntryInApp");
+    let stale_guard = cloud_open
+        .find("if (!isForegroundWorkCurrent(lifecycleWork)) return;")
+        .expect("cloud download stale-generation guard");
+    let open_clip = cloud_open
+        .find("openClip({")
+        .expect("cloud download opens a clip");
+    assert!(
+        stale_guard < open_clip,
+        "a cloud download completing after background entry must not recreate media"
+    );
+    assert!(
+        main.contains("transition.missedBackground") && main.contains("releaseBackgroundUi();"),
+        "a revision gap returning to foreground must reconcile missed teardown"
+    );
+    let mic_test = js_function_body(&settings, "testMic");
+    assert!(
+        mic_test.contains("captureForegroundWork()")
+            && mic_test.contains("isForegroundWorkCurrent(lifecycleWork)"),
+        "microphone setup must not complete into an old foreground generation"
+    );
+    assert!(
+        review.contains("function reviewAsyncWorkStillCurrent(")
+            && review.contains("reviewSourceGeneration === expectedSourceGeneration"),
+        "rename completion must require both lifecycle and review-source generations"
+    );
+    let initial_settings = js_function_body(&main, "loadInitialSettings");
+    assert!(
+        initial_settings.contains("isForegroundWorkCurrent(lifecycleWork)")
+            && main.contains("foregroundBootPromise")
+            && main.contains("foregroundBootCompleted"),
+        "initial settings work must be generation guarded and retryable after failure"
     );
 }
 
@@ -3002,7 +3121,7 @@ fn shell_shows_live_memory_usage() {
         "memory indicator must use the backend sampler"
     );
     assert!(
-        js.contains("if (!document.hidden) refreshMemoryUsage()")
+        js.contains("if (!document.hidden && captureForegroundWork()) refreshMemoryUsage()")
             && js.contains("visibilitychange"),
         "memory polling must pause while hidden and refresh when visible again"
     );
@@ -3056,6 +3175,121 @@ fn gallery_header_shows_library_storage_usage() {
 }
 
 #[test]
+fn gallery_renders_one_bounded_page_for_local_and_cloud_sources() {
+    let html = index_html();
+    let library = read_ui_js("library.js");
+    let app_core = read_ui_js("app-core.js");
+    let css = styles_css();
+
+    for required in [
+        "id=\"gallery-pagination\"",
+        "id=\"gallery-page-prev\"",
+        "id=\"gallery-page-label\"",
+        "id=\"gallery-page-next\"",
+    ] {
+        assert!(
+            html.contains(required),
+            "bounded gallery markup must include `{required}`"
+        );
+    }
+    assert!(
+        app_core.contains("galleryPageState = GalleryWindowCore.initialState()")
+            && app_core.contains("POSTER_CACHE_LIMIT = 120"),
+        "gallery state must start from the pure window core with a finite poster cache"
+    );
+
+    let local = js_function_body(&library, "renderClips");
+    assert!(
+        local.contains("GalleryWindowCore.windowGroups(groups, galleryPageState)")
+            && local.contains("for (const group of page.groups)")
+            && local.contains("for (const c of group.items)"),
+        "local rendering must only create cards from the current grouped page"
+    );
+    let cloud = js_function_body(&library, "renderCloudClips");
+    assert!(
+        cloud.contains("GalleryWindowCore.windowItems(filtered, galleryPageState)")
+            && cloud.contains("for (const entry of page.items)"),
+        "cloud rendering must only create cards from the current page"
+    );
+    assert!(
+        library.contains("GalleryWindowCore.updateState(galleryPageState")
+            && library.contains("function groupedGalleryIdentity(prefix, groups)")
+            && library.contains("function changeGalleryPage(delta)"),
+        "source, filter, grouping, and data identities must reset or clamp pagination"
+    );
+    assert!(
+        js_function_body(&library, "selectAllVisible")
+            .contains("selectedClipPaths = new Set(selectedClipPaths);"),
+        "selecting a page must retain path-keyed selections made on other pages"
+    );
+    for required in [
+        ".gallery-pagination",
+        ".gallery-pagination[hidden] { display: none; }",
+        "grid-template-rows: auto auto minmax(0, 1fr) auto;",
+    ] {
+        assert!(
+            css.contains(required),
+            "pagination must have a stable, non-scrolling layout through `{required}`"
+        );
+    }
+}
+
+#[test]
+fn gallery_releases_off_page_images_and_bounds_poster_state() {
+    let library = read_ui_js("library.js");
+    let cloud = read_ui_js("cloud.js");
+
+    let release = js_function_body(&library, "releaseGalleryRoot");
+    assert!(
+        release.contains("img.removeAttribute(\"src\");")
+            && release.contains("root.replaceChildren();"),
+        "changing pages/sources must release decoded images and detached card DOM"
+    );
+    let begin = js_function_body(&library, "beginBoundedGalleryRender");
+    assert!(
+        begin.contains("posterObserver.disconnect()")
+            && begin.contains("posterWorkQueue = [];")
+            && begin.contains("releaseGalleryRoot($(\"gallery-grid\"))")
+            && begin.contains("releaseGalleryRoot($(\"cloud-gallery-grid\"))"),
+        "each render must invalidate poster observation and clear both source roots"
+    );
+
+    let local_card = js_function_body(&library, "clipCard");
+    let cloud_card = js_function_body(&library, "cloudClipCard");
+    assert!(
+        local_card.contains("observePoster(c.path, thumb)")
+            && !local_card.contains("posterCacheGet(")
+            && cloud_card.contains("observeCloudThumbnail(entry, thumb)"),
+        "cached and uncached local/cloud images must use the same viewport gate"
+    );
+    let set_cache = js_function_body(&library, "posterCacheSet");
+    assert!(
+        set_cache
+            .contains("GalleryWindowCore.cacheSet(posterCache, key, value, POSTER_CACHE_LIMIT)",)
+            && library.contains("GalleryWindowCore.cacheGet(posterCache, key)"),
+        "poster URL and unavailable entries must use the pure tested bounded LRU helper"
+    );
+    for required in [
+        "function pruneLocalPosterCache(clips)",
+        "function pruneCloudPosterCache(entries)",
+        "function clearCloudPosterCache()",
+        "pruneLocalPosterCache(clipsCache);",
+        "POSTER_WORK_LIMIT = 2",
+    ] {
+        assert!(
+            library.contains(required),
+            "poster memory/work bounds must include `{required}`"
+        );
+    }
+    assert!(
+        cloud.contains("clearCloudPosterCache();")
+            && cloud.contains("pruneCloudPosterCache(cloudClipsCache);")
+            && cloud.contains("${CLOUD_POSTER_CACHE_PREFIX}${cloudAccountKey()}"),
+        "cloud poster keys must be account-scoped and pruned on reset/refresh"
+    );
+}
+
+#[test]
 fn library_has_cloud_source_tab() {
     let html = index_html();
     let js = main_js();
@@ -3081,7 +3315,8 @@ fn library_has_cloud_source_tab() {
         "function observeCloudThumbnail(entry, thumb)",
         "function loadCloudThumbnail(entry, thumb)",
         "cloudThumbnailInflight = new Map()",
-        "posterQueue.set(thumb, { type: \"cloud-thumbnail\", entry })",
+        "const request = { type: \"cloud-thumbnail\", entry }",
+        "posterQueue.set(thumb, request)",
         "cloudClipsCache = []",
         "function loadCloudClips",
         "if (gallerySource === \"cloud\") renderCloudClips();",
@@ -3115,12 +3350,12 @@ fn library_has_cloud_source_tab() {
         "img.addEventListener(\"error\", () => {",
         "img.remove();",
         "if (onError) onError();",
-        "posterCache.set(path, POSTER_UNAVAILABLE);",
-        "if (cachedPoster === POSTER_UNAVAILABLE) {",
-        ".catch(() => markPosterUnavailable(path));",
+        "posterCacheSet(path, POSTER_UNAVAILABLE);",
+        "if (cached === POSTER_UNAVAILABLE) return Promise.resolve();",
+        "if (isForegroundWorkCurrent(lifecycleWork)) markPosterUnavailable(path);",
         "loadCardPoster(path, thumb)",
         "observePoster(c.path, thumb)",
-        "insertThumbMedia(thumb, makePosterImg(cached))",
+        "insertThumbMedia(thumb, makePosterImg(cached",
         "insertThumbMedia(thumb, makePosterImg(url))",
     ] {
         assert!(
@@ -3265,7 +3500,19 @@ fn cloud_tab_click_forces_authoritative_refresh() {
 #[test]
 fn rail_profile_identity_change_resets_and_refetches_cloud_library() {
     let cloud = read_ui_js("cloud.js");
+    let sync = js_function_body(&cloud, "syncRailProfile");
+    assert!(
+        sync.contains("const lifecycleWork = captureForegroundWork();")
+            && sync.contains("refreshRailProfileIdentity(key, lifecycleWork)")
+            && sync.contains("loadRailProfileAvatar(key, name, lifecycleWork)"),
+        "profile and avatar requests must capture the same foreground lifecycle generation"
+    );
     let refresh = js_function_body(&cloud, "refreshRailProfileIdentity");
+    assert!(
+        refresh.contains("if (!lifecycleWork) return;")
+            && refresh.contains("!isForegroundWorkCurrent(lifecycleWork)"),
+        "a profile response captured before backgrounding must not mutate account or DOM state"
+    );
     let capture = refresh
         .find("const previousAccountKey = cloudAccountKey()")
         .expect("profile refresh must capture the account before mutation");
@@ -3282,6 +3529,15 @@ fn rail_profile_identity_change_resets_and_refetches_cloud_library() {
         .expect("identity change must reset and force-refetch the active cloud gallery");
 
     assert!(capture < mutation && mutation < identity_change);
+
+    let avatar = js_function_body(&cloud, "loadRailProfileAvatar");
+    assert!(
+        avatar.contains("if (!lifecycleWork) return;")
+            && avatar.contains("!isForegroundWorkCurrent(lifecycleWork)")
+            && avatar.contains("request !== railProfileAvatarRequest")
+            && avatar.contains("key !== railProfileAvatarKey"),
+        "an avatar response must satisfy lifecycle, request, and account identity gates before attaching its data URL"
+    );
 }
 
 #[test]
@@ -3292,14 +3548,15 @@ fn games_ui_wires_detection_commands() {
         "await invoke(\"list_game_plugins\")",
         "await invoke(\"list_game_windows\")",
         "listen(\"game-detection\"",
-        "if (activeDetectedGame?.active) loadGamePlugins();",
+        "if (captureForegroundWork()) loadGamePlugins();",
         "var detectedGameCandidates = []",
         "var selectedDetectedGameIds = new Set()",
         "var detectedGamesScanId = 0",
         "await invoke(\"detect_installed_games\", { existingCustomGames: customGames })",
         "const scanId = ++detectedGamesScanId",
         "$(\"detected-games-dialog\").showModal()",
-        "if (scanId !== detectedGamesScanId || !$(\"detected-games-dialog\").open) return",
+        "scanId !== detectedGamesScanId",
+        "!$(\"detected-games-dialog\").open",
         "detectedGamesScanId += 1",
         "const addableKeys = new Set(addable.map(detectedGameKey))",
         "selectedDetectedGameIds = new Set([...selectedDetectedGameIds].filter((key) => addableKeys.has(key)))",
@@ -3322,6 +3579,31 @@ fn games_ui_wires_detection_commands() {
         assert!(
             js.contains(required),
             "main/settings JS must wire detected games workflow through {required}"
+        );
+    }
+    for function in [
+        "refreshGameWindows",
+        "showDetectedGamesDialog",
+        "addCustomGameFromWindow",
+    ] {
+        let body = js_function_body(&js, function);
+        assert!(
+            body.contains("captureForegroundWork()")
+                && body.contains("isForegroundWorkCurrent(lifecycleWork)"),
+            "{function} must reject a completion from before a background transition"
+        );
+    }
+    let background_settings = js_function_body(&js, "releaseBackgroundSettingsUi");
+    for required in [
+        "gameWindowsScanId += 1;",
+        "gameWindows = [];",
+        "detectedGamesScanId += 1;",
+        "detectedGameCandidates = [];",
+        "selectedDetectedGameIds = new Set();",
+    ] {
+        assert!(
+            background_settings.contains(required),
+            "background settings teardown must invalidate and clear `{required}`"
         );
     }
 
@@ -3465,6 +3747,8 @@ fn ui_is_split_into_markup_styles_and_logic() {
         "href=\"styles.css\"",
         "src=\"presentation-core.js\"",
         "src=\"player-core.js\"",
+        "src=\"gallery-window-core.js\"",
+        "src=\"window-lifecycle-core.js\"",
         "src=\"app-core.js\"",
         "src=\"settings.js\"",
         "src=\"library.js\"",
@@ -3480,9 +3764,21 @@ fn ui_is_split_into_markup_styles_and_logic() {
         bootstrap.contains("import { PresentationCore } from \"./presentation.mjs\"")
             && bootstrap.contains("import { PlayerCore } from \"./player-core.mjs\"")
             && bootstrap.contains("import { CloudCore } from \"./cloud-core.mjs\"")
+            && bootstrap
+                .contains("import { GalleryWindowCore } from \"./gallery-window-core.mjs\"")
+            && bootstrap
+                .contains("import { WindowLifecycleCore } from \"./window-lifecycle-core.mjs\"",)
             && bootstrap.contains("globalThis.CliplineModules = Object.freeze(")
             && bootstrap.contains("await import(\"./main.js\")"),
         "renderer startup must enter through an explicit ES-module core/controller boundary"
+    );
+
+    let gallery_core = html.find("src=\"gallery-window-core.js\"").unwrap();
+    let lifecycle_core = html.find("src=\"window-lifecycle-core.js\"").unwrap();
+    let app_core = html.find("src=\"app-core.js\"").unwrap();
+    assert!(
+        gallery_core < app_core && lifecycle_core < app_core,
+        "pure gallery/lifecycle cores must load before controller state consumes them"
     );
 
     let presentation = read_ui_js("presentation-core.js");
