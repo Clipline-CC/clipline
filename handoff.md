@@ -4,6 +4,34 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-25): PR #107 review follow-ups
+
+Plan: `docs/superpowers/plans/2026-07-25-pr-107-review-follow-ups.md`.
+
+The native lifecycle no longer gates `Foreground` publication on fallible show, restore, or focus
+calls. Both focus and resize events now reconcile the authoritative minimized state, so taskbar
+restores that omit a focus event re-show the WebView2 controller before publishing `Foreground`.
+
+Large-library renders build one normalized local-path index, use constant-size gallery identity
+inputs already collected during filtering/sorting, and expire negative poster entries after 30
+seconds. FFmpeg discovery caches successes only. The bulk-selection label now says “Select page.”
+
+Upload leases now track the underlying Windows file identity, including hard-link and junction
+aliases. Delete/rename return an intentional “clip is uploading” error, and quota GC protects active
+sources while continuing with the next deletable clip. Software MFT caller-owned output samples are
+reused after clearing attributes and logical length, and activated MFTs call `ShutdownObject` on
+normal drop and constructor-error unwind. Drain continues to pass the input stream ID, matching
+Microsoft's corrected Media Foundation documentation.
+
+Validation is green:
+
+- `cargo test --workspace`
+- fresh-cache `cargo clippy --workspace --all-targets -- -D warnings`
+- real 30-frame WARP software-MFT encode/reuse regression
+- JavaScript syntax, PowerShell parser, formatting, and `git diff --check`
+- Computer Use native minimize/restore smoke; the restored app rendered the full library instead of
+  a blank WebView and was left open in `Waiting`
+
 ## Checkpoint (2026-07-25): native Microsoft software H.264 MFT
 
 Plan: `docs/superpowers/plans/2026-07-25-native-software-mft-h264.md`.
