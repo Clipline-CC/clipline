@@ -22,7 +22,7 @@ use clipline_capture::windows::wasapi::{
 };
 use clipline_capture::windows::{
     d3d11, find_window_by_title, mft_probe, window_from_raw_handle, DxgiDuplicationCapture,
-    ID3D11Device, MftConfig, MftH264Encoder, WasapiLoopback, WgcCapture,
+    ID3D11Device, MftConfig, MftH264Encoder, SoftwareMftH264Encoder, WasapiLoopback, WgcCapture,
 };
 use clipline_capture::{
     even_dimensions, PipelineError, Recorder, RelativeClock, ReplayStorageConfig,
@@ -1386,6 +1386,20 @@ enum FfmpegConversionPath {
     Cpu,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MftEncoderPath {
+    Hardware,
+    Software,
+}
+
+fn mft_encoder_path(backend: EncoderBackend) -> MftEncoderPath {
+    if backend == EncoderBackend::MfSoftware {
+        MftEncoderPath::Software
+    } else {
+        MftEncoderPath::Hardware
+    }
+}
+
 fn ffmpeg_conversion_path(backend: EncoderBackend) -> FfmpegConversionPath {
     if backend == EncoderBackend::MfSoftware {
         FfmpegConversionPath::Cpu
@@ -1410,9 +1424,6 @@ fn open_candidate(
 ) -> Result<Box<dyn Encoder>, String> {
     match candidate.api {
         EncoderApi::Mft => {
-            if candidate.backend == EncoderBackend::MfSoftware {
-                return Err("software H.264 MFT is not yet wired".into());
-            }
             let cfg = MftConfig {
                 width: enc_w,
                 height: enc_h,
@@ -1420,9 +1431,14 @@ fn open_candidate(
                 bitrate_bps: opts.bitrate_bps,
                 encoder_backend: Some(candidate.backend),
             };
-            MftH264Encoder::new(device, in_w, in_h, cfg)
-                .map(|e| Box::new(e) as Box<dyn Encoder>)
-                .map_err(|e| e.to_string())
+            match mft_encoder_path(candidate.backend) {
+                MftEncoderPath::Software => SoftwareMftH264Encoder::new(device, in_w, in_h, cfg)
+                    .map(|encoder| Box::new(encoder) as Box<dyn Encoder>)
+                    .map_err(|error| error.to_string()),
+                MftEncoderPath::Hardware => MftH264Encoder::new(device, in_w, in_h, cfg)
+                    .map(|encoder| Box::new(encoder) as Box<dyn Encoder>)
+                    .map_err(|error| error.to_string()),
+            }
         }
         EncoderApi::Ffmpeg => {
             let ffmpeg = ffmpeg_path
@@ -2609,7 +2625,19 @@ mod tests {
     }
 
     #[test]
-    fn software_media_foundation_uses_cpu_frame_conversion() {
+    fn native_media_foundation_software_uses_synchronous_mft() {
+        assert_eq!(
+            mft_encoder_path(EncoderBackend::MfSoftware),
+            MftEncoderPath::Software
+        );
+        assert_eq!(
+            mft_encoder_path(EncoderBackend::Amf),
+            MftEncoderPath::Hardware
+        );
+    }
+
+    #[test]
+    fn ffmpeg_media_foundation_software_uses_cpu_frame_conversion() {
         assert_eq!(
             ffmpeg_conversion_path(EncoderBackend::MfSoftware),
             FfmpegConversionPath::Cpu

@@ -4,6 +4,39 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-25): native Microsoft software H.264 MFT
+
+Plan: `docs/superpowers/plans/2026-07-25-native-software-mft-h264.md`.
+
+The `MfSoftware` probe result is now an executable native path rather than an advertised-but-skipped
+candidate. `SoftwareMftH264Encoder` selects only Microsoft's inbox synchronous H.264 MFT, converts
+the captured GPU BGRA frame to CPU NV12, feeds aligned system-memory samples, and emits the same
+AVCC packet/config contract as the existing async hardware MFT. It preserves the caller's
+timestamps and durations, honors transforms that supply their own output samples or require caller
+allocation, refreshes output-stream requirements after stream changes, and drains with the actual
+input stream ID. The existing FFmpeg `h264_mf -hw_encoding 0` route remains the separate-process
+fallback when available.
+
+The Windows integration regression uses a WARP D3D device to encode 30 frames at 640x360 through
+the advertised inbox transform, checks exact timestamp cardinality, AVCC framing, SPS/PPS, and the
+first IDR. It skips when that optional Windows component is absent (notably some Windows Server CI
+images); the dev machine exercises it for real. The service routing regressions prove MFT software
+selection cannot silently fall through to FFmpeg.
+
+Validation is green:
+
+- `cargo test --workspace`
+- fresh-cache `cargo clippy --workspace --all-targets -- -D warnings`
+- focused real WARP software-MFT encode and application routing tests
+- Computer Use E2E: the app reported `Software · H.264`, recorded the 1280x800 display, saved and
+  played a 29.4-second two-audio-track MP4, then stopped and finalized without an encoder error.
+  The temporary games-only setting change was restored and the app was left armed in `Waiting`.
+
+The E2E artifact is
+`C:\Users\dain9\Videos\Clipline\2026-07-25 06-44\clip_1784987122.mp4` (1.7 MB). Its optional audio
+preview sidecar reported that FFmpeg was unavailable, but native WebView2 playback of the main MP4
+and its selectable audio tracks succeeded; sidecar extraction is separate from recording.
+
 ## Checkpoint (2026-07-25): Memory follow-up after PR #106
 
 Plan: `docs/superpowers/plans/2026-07-24-memory-follow-up.md`.
@@ -3016,10 +3049,11 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
   remain one sample; keyframes come from IDR/IRAP NALs. AV1 keyframe state comes from the encoded
   frame header rather than output position. Input/output timestamp cardinality is strict for every
   codec.
-- `EncoderBackend::MfSoftware` is modeled by the probe but **not instantiable** — `MftH264Encoder`
-  only enumerates hardware MFTs. The candidate walk skips it; wiring the sync software MFT (CPU
-  input, no D3D manager) is a follow-up. With no hardware H.264 and no ffmpeg, recording errors
-  (same as before this milestone).
+- `EncoderBackend::MfSoftware` uses `SoftwareMftH264Encoder`, which intentionally selects only the
+  inbox Microsoft synchronous H.264 MFT. It has CPU NV12 input and no D3D manager; third-party
+  synchronous transforms are not advertised under this backend. Its real integration test can
+  skip on Windows Server images where the optional inbox encoder is absent, so keep a Windows
+  client E2E in release acceptance.
 
 **Tauri (v2)**
 - The webview **silently no-ops** (no events, no invoke) without
@@ -3131,9 +3165,8 @@ production health and readiness must remain green before shipping a client relea
 4. **In-app HEVC/AV1 playback** (ddoc §11): the encoder matrix (milestone 23) can record HEVC/AV1,
    but WebView2 can't decode them without OS extensions — Automatic avoids them and explicit picks
    warn. A native FFmpeg decode path feeding frames to the review player would close that gap.
-   Smaller follow-ups from milestone 23: wire the Microsoft software H.264 MFT (the only
-   software H.264 under LGPL), bundle the lgpl-shared ffmpeg into the installer, and revisit
-   NVENC/QSV arg tuning (only AMF + SVT-AV1 were verified live on this RDNA2 box).
+   Smaller follow-ups from milestone 23: bundle the lgpl-shared ffmpeg into the installer and
+   revisit NVENC/QSV arg tuning (only AMF + SVT-AV1 were verified live on this RDNA2 box).
 5. **Dynamic audio-session tracking** (ddoc §10): process audio is split at recorder start; new app sessions that appear mid-recording and multi-process grouping remain next.
 6. **Polish toward release:** display-capture privacy warning (ddoc §9), borderless-fullscreen
    guidance (§8), WebView2-destroyed-when-minimized RAM trick (§4), installer/signing (§4).
