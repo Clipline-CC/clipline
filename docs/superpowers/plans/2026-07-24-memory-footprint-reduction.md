@@ -251,13 +251,56 @@ then allocates a *second* per-frame NV12 vector in `CpuVideoConverter::convert`
       settings/pipeline plumbing (Task 3), webview visibility (Task 4), meter attribution (Task 5),
       readback reuse (Task 7), docs (Task 8).
 
-## If Task 4 underdelivers
+### Task 4 outcome — gate missed, kept deliberately
 
-Investigate `MemoryUsageTargetLevel.Low` **before** `TrySuspend`. `Low` is designed to reduce an
-inactive WebView's memory while scripts and network connections keep running; `TrySuspend` pauses
-scripts, which a tray-hidden window may still need for event handling and would require a state
-re-sync on `Resume`. Microsoft advises using `Low`/`Normal` **or** `Suspend`/`Resume`, not mixing
-them — so pick one model and stay in it.
+Three clean release launches, library open and a clip decoding, hidden 120 s, final-30 s median.
+Helper enumeration validates descendant **and** creation time — an earlier harness without the
+creation-time check reported an impossible 3,886 MB tree from PID reuse against the ~19 unrelated
+`msedgewebview2` processes on this machine.
+
+| Run | WebView2 base → hidden | Δ | Gate | GPU | Renderer |
+|---|---|---|---|---|---|
+| 1 | 232.1 → 217.4 | 14.7 | ✗ | −3.4 | −12.7 |
+| 2 | 269.2 → 226.2 | 42.9 | ✓ | −27.2 | −13.2 |
+| 3 | 243.9 → 223.1 | 20.7 | ✗ | −5.5 | −15.2 |
+
+**1 of 3 passed; median 20.7 MiB against the 40 MiB gate.** The renderer sheds 12.7–15.2 MiB
+reliably; GPU reclamation is erratic (−3.4 to −27.2) and drives the whole spread. The 40 MiB gate
+was effectively a bet on the GPU process, which `SetIsVisible` does not reliably reclaim —
+it is documented to stop *rendering*, and reclamation was inferred rather than promised.
+
+Kept anyway: not rendering an invisible window is correct independent of the number, and the
+autostart path was rendering indefinitely. Recorded here as missing its stated gate rather than
+retro-fitting the threshold.
+
+## Task 4b: MemoryUsageTargetLevel.Low while hidden
+
+The documented API for shrinking an *inactive* WebView, as opposed to merely not drawing it.
+Scripts and network connections keep running, so the tray-hidden window still handles events —
+unlike `TrySuspend`, which pauses scripts and would need a state re-sync on `Resume`. Microsoft
+advises using `Low`/`Normal` **or** `Suspend`/`Resume`, never mixing them: stay in `Low`/`Normal`.
+
+- [ ] Add `webview2-com` to the `cfg(windows)` dependencies, pinned to the version Tauri 2.11.2
+      already resolves (0.38) so the `ICoreWebView2Controller` types match and no second COM
+      binding enters the tree.
+- [ ] Confine the `unsafe` to a safe wrapper under `src/windows/` per platform discipline:
+      `controller.CoreWebView2()` → cast to `ICoreWebView2_19` (`webview2-com-sys-0.38.2`
+      declares `SetMemoryUsageTargetLevel` there) → set
+      `COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW`.
+- [ ] Reach the controller with `WebviewWindow::with_webview` (`tauri/src/webview/mod.rs:1668`);
+      `PlatformWebview::controller()` (`:180`) returns the typed interface. The closure runs on the
+      webview thread and is `FnOnce + Send + 'static`, so treat it as fire-and-forget best-effort
+      exactly like Task 4's visibility calls.
+- [ ] Set `Low` alongside the existing hide (tray **and** autostart), `Normal` on reveal. A missing
+      `ICoreWebView2_19` on an older runtime must degrade silently — the cast failing is not an
+      error worth surfacing, and Win10 users on old WebView2 already caused one shipped incident.
+- [ ] Same acceptance harness and the **same 40 MiB gate**, measured on top of Task 4 — report the
+      incremental delta, not the combined figure, so the two changes stay separable.
+- [ ] Behavioural checks unchanged from Task 4, plus: confirm the hotkey still saves while hidden in
+      `Low` (scripts continue, but verify rather than assume), and that reveal from `Low` repaints
+      without a stale frame.
+- [ ] Revert if the incremental gate is missed. Do **not** escalate to `TrySuspend` in this task —
+      that is a separate behavioural change needing its own re-sync design.
 
 ## Investigated and deliberately not changed
 
