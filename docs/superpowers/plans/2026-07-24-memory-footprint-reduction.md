@@ -108,7 +108,67 @@ replay_window_s` passes and yields **zero** headroom.
 - [ ] Confirm `ReplayStorageOptions::Disk` gets the same retention — the disk ring has the identical
       byte-only bug, where the cost is cache disk rather than RAM.
 
-## Task 4: Attribute memory honestly in the meter
+## Task 4: Release WebView2 rendering resources while hidden
+
+**Measured:** with the window hidden for four minutes, child private working set moved less than
+1 MB (230.0 → 230.4) and the GPU process did not budge from 132.0 MB. Windows is not reclaiming it
+either, so ~230 MB of resident memory stays live whenever Clipline sits in the tray — more than the
+entire Rust process. An earlier measurement of *committed* private could not distinguish "nothing
+released" from "paged out"; private working set can, and it says nothing is released.
+
+**Cause:** `send_main_window_to_tray` (`app.rs:1524`) calls `WebviewWindow::hide()`, which is
+`self.window.hide()` (`tauri/src/webview/webview_window.rs:2200`) — the **native window only**. The
+WebView2 controller is never told it is off-screen.
+
+**No COM and no new unsafe.** `Webview::hide()`/`show()` (`tauri/src/webview/mod.rs:1541`) dispatch
+to wry's `set_visible`, which does `ShowWindow` **and** `controller.SetIsVisible(visible)`
+(`wry-0.55.1/src/webview2/mod.rs:1487`). `WebviewWindow` implements `AsRef<Webview>`
+(`webview_window.rs:1446`), so `window.as_ref().hide()` reaches it safely. (The Rust method is
+`SetIsVisible`; `put_IsVisible` is the C++ name.)
+
+- [ ] Extend the existing closure-based reveal test (`unresponsive_main_window_reveals_existing_handle`,
+      `app.rs:4249`) to pin reveal order: **webview show → native show → unminimize → focus**, so the
+      native window never appears before the webview can paint.
+- [ ] Add hide-order coverage: **native hide → webview hide**, so a native-hide failure can never
+      leave a visible but blank window. The existing settings tests already cover close/minimize
+      routing — do not add another artificial decision layer.
+- [ ] Treat webview visibility as best-effort: log failures, never let one strand Clipline in the
+      tray or leave the window unrevealable.
+- [ ] **Cover the autostart path — the most important hidden session and the one this task exists
+      for.** The window is created hidden (`tauri.conf.json:20` `"visible": false`) and `app.rs:2440`
+      skips `open_main_window` entirely under `--autostart`, while wry initialises the controller
+      from `attributes.visible` (`webview2/mod.rs:544`). A cold autostart therefore renders
+      indefinitely. Hide the webview explicitly during autostart setup.
+- [ ] Verify the first reveal after an autostart-hidden start: initial frontend work is gated behind
+      two animation frames in `main.js`, which may be deferred while invisible.
+- [ ] Cover all four transitions: tray hide, autostart-hidden init, existing-window reveal, and
+      rebuilt-window reveal.
+
+### Acceptance — external harness, not the in-app meter
+
+The meter cannot measure this: `main.js:727` only polls while `!document.hidden` and refreshes on
+`visibilitychange`, so by the time it samples, the controller is visible again.
+
+- [ ] **Primary gate: aggregate private working set across all `msedgewebview2.exe` processes drops
+      by ≥ 40 MiB while hidden.** Not GPU-only — Microsoft documents qualitative memory benefits and
+      cache purging, not a GPU-specific reduction.
+- [ ] Record the browser/GPU/renderer/utility breakdown as diagnostics only.
+- [ ] Secondary check: total process-tree private working set **and** private commit, to prove memory
+      was released rather than shifted.
+- [ ] Protocol: stable visible baseline, hide 90–120 s, compare the final 30 s median, repeated
+      across ≥ 3 clean release-build launches. Re-enumerate helper processes each sample — WebView2
+      processes can restart and change PID.
+- [ ] Behavioural acceptance, since `IsVisible(false)` is not suspension but does throttle animations
+      and some tasks and purge caches: hide > 5 minutes; save several clips via the global hotkey;
+      reopen and confirm recorder status, library contents, and notices are current (status is
+      event-driven at `main.js`, not polled); hide while review playback is active and confirm clean
+      unload/restore; repeat hide/show cycles with no white frame, stale frame, delayed input, or
+      memory rebound.
+- [ ] The readiness watchdog is **not** sufficient evidence — it checks the native host and latches
+      frontend readiness; it does not prove the controller became visible or repainted.
+- [ ] **Revert the commit** if the 40 MiB gate is missed or any restore behaviour regresses.
+
+## Task 5: Attribute memory honestly in the meter
 
 The descendant total **cannot** be labeled "WebView2". `current_process_tree_memory` (`memory.rs:80`)
 sums every descendant except `conhost.exe`, and `ffmpeg_encoder.rs:174` spawns a long-lived
@@ -128,7 +188,7 @@ bundled ffmpeg and ran a hardware encoder.
       single meter and must move together: `:750`, `:2992` (pins the exact `Using -- RAM`
       placeholder in `ui/index.html:33`), and `:3017` (pins the `.memory-usage` tabular-nums rule).
 
-## Task 5: Release baseline, with unambiguous encoder identification
+## Task 6: Release baseline, with unambiguous encoder identification
 
 - [ ] `encoder_label` (`service.rs:394`) formats only `backend · codec` and discards `EncoderApi`,
       so an MFT and an FFmpeg path both render e.g. "AMD AMF · H.264". Before relying on the
@@ -140,11 +200,11 @@ bundled ffmpeg and ran a hardware encoder.
       release; the Task 1–3 win is arithmetic on retained bytes and holds regardless of profile.
 - [ ] Confirm the ring fix landed: retained span ≈ `buffer_seconds`, retained bytes roughly halved
       at default settings.
-- [ ] If the resolved path is MFT, **skip Task 6 and continue to verification** — frames stay on the
+- [ ] If the resolved path is MFT, **skip Task 7 and continue to verification** — frames stay on the
       GPU and there is no readback to optimize. Do not abandon the plan. Alternatively force an
-      FFmpeg path deliberately to measure Task 6 on the path it affects.
+      FFmpeg path deliberately to measure Task 7 on the path it affects.
 
-## Task 6: Stop allocating per frame on the readback path
+## Task 7: Stop allocating per frame on the readback path
 
 `read_nv12` (`nv12.rs:298`) and `read_bgra` (`nv12.rs:433`) are stateless free functions returning
 owned buffers, so there is nowhere to hang reusable state — the API has to change. The CPU fallback
@@ -168,7 +228,7 @@ then allocates a *second* per-frame NV12 vector in `CpuVideoConverter::convert`
       scratch capacity can leave RSS flat or slightly higher while still removing the churn. Revert
       rather than keep a change that does not measurably improve allocation rate or frame time.
 
-## Task 7: Documentation and verification
+## Task 8: Documentation and verification
 
 - [ ] Update the `ReplayRing` rustdoc (`ring.rs:6`): it currently describes byte-budgeted eviction
       and asserts dropping from the front "never strands a partial GOP" — the keyframe advance in
@@ -188,8 +248,16 @@ then allocates a *second* per-frame NV12 vector in `CpuVideoConverter::convert`
 - [ ] Manual smoke: repeat on a static desktop (the encoder-undershoot case) and confirm retention
       settles at `buffer_seconds` rather than stretching to ~5×.
 - [ ] Update `handoff.md`. Commit as separate conventional changes: eviction planner (Tasks 1–2),
-      settings/pipeline plumbing (Task 3), meter attribution (Task 4), readback reuse (Task 6),
-      docs (Task 7).
+      settings/pipeline plumbing (Task 3), webview visibility (Task 4), meter attribution (Task 5),
+      readback reuse (Task 7), docs (Task 8).
+
+## If Task 4 underdelivers
+
+Investigate `MemoryUsageTargetLevel.Low` **before** `TrySuspend`. `Low` is designed to reduce an
+inactive WebView's memory while scripts and network connections keep running; `TrySuspend` pauses
+scripts, which a tray-hidden window may still need for event handling and would require a state
+re-sync on `Resume`. Microsoft advises using `Low`/`Normal` **or** `Suspend`/`Resume`, not mixing
+them — so pick one model and stay in it.
 
 ## Investigated and deliberately not changed
 
