@@ -854,6 +854,17 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
 
     let (encoder, active) = build_encoder(&device, &opts, in_w, in_h, enc_w, enc_h, events)?;
     let encoder_status = encoder_label(active);
+    // `encoder_label` intentionally shows only backend and codec, so an MFT and
+    // an FFmpeg path render identically ("AMD AMF · H.264"). Log the API too:
+    // the two have very different memory and readback behaviour, and telling
+    // them apart from a support bundle was otherwise guesswork.
+    tracing::info!(
+        event = "encoder_selected",
+        api = ?active.api,
+        backend = ?active.backend,
+        codec = ?active.codec,
+        label = %encoder_status,
+    );
 
     let (clips_dir, fell_back) = clips_dir_resolved(&opts.media_dir, default_clips_dir)?;
     let _ = events.send(Event::MediaRootResolved {
