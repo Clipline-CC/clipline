@@ -97,8 +97,19 @@ function Get-MemorySample {
     $childCommit = 0L
     foreach ($processId in $ProcessIds) {
         if ($processId -eq $RootPid) { continue }
-        $childPws += [ClipSaveMem]::Pws($processId)
-        $childCommit += [ClipSaveMem]::Commit($processId)
+        try {
+            # A WebView2 utility process can exit after Resolve-ProcessTree
+            # snapshots it. Read both values before adding either so a
+            # partially sampled child does not skew the aggregate.
+            $processPws = [ClipSaveMem]::Pws($processId)
+            $processCommit = [ClipSaveMem]::Commit($processId)
+            $childPws += $processPws
+            $childCommit += $processCommit
+        } catch {
+            # Child churn is expected during a save. Root reads above remain
+            # deliberately uncaught so an invalid run or unsupported counter
+            # layout still fails loudly.
+        }
     }
     return [pscustomobject]@{
         RootPws = $rootPws
