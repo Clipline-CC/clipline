@@ -8,6 +8,7 @@ use crate::segment::{SampleInfo, Segment, TrackSamples};
 #[derive(Debug)]
 pub struct DiskReplayRing {
     max_bytes: usize,
+    retention_s: f64,
     dir: PathBuf,
     segments: VecDeque<DiskSegment>,
     bytes: usize,
@@ -35,10 +36,19 @@ struct DiskTrack {
 }
 
 impl DiskReplayRing {
+    /// Byte-budgeted cache with no retention bound.
     pub fn new(max_bytes: usize, dir: PathBuf) -> io::Result<Self> {
+        Self::with_retention(max_bytes, f64::INFINITY, dir)
+    }
+
+    /// Cache bounded by a byte budget and a retention window in seconds. The
+    /// cost of over-retention here is cache disk rather than memory, but the
+    /// eviction contract is the ring's (see `planning::eviction_plan`).
+    pub fn with_retention(max_bytes: usize, retention_s: f64, dir: PathBuf) -> io::Result<Self> {
         fs::create_dir_all(&dir)?;
         Ok(Self {
             max_bytes,
+            retention_s,
             dir,
             segments: VecDeque::new(),
             bytes: 0,
@@ -88,12 +98,17 @@ impl DiskReplayRing {
             samples: seg.samples.clone(),
             audio,
         };
-        let evict = crate::planning::eviction_count(
-            self.segments.iter().map(DiskSegment::byte_len),
+        let evict = crate::planning::eviction_plan(
+            &self.segments,
             self.bytes,
             stored.byte_len,
+            stored.pts_end_s(),
             self.max_bytes,
+            self.retention_s,
         );
+        // The incoming segment stays owned by `final_owner` until every
+        // fallible deletion below has succeeded, so a mid-eviction failure
+        // discards it and leaves the ring consistent rather than half-updated.
         for _ in 0..evict {
             let front = self
                 .segments
@@ -315,4 +330,23 @@ mod tests {
 
         assert!(!run.exists());
     }
+
+    #[test]
+    fn duration_eviction_unlinks_segment_files() {
+        let dir = TestDir::new("clipline-disk-ring", "retention-unlink");
+        let run = dir.path().join("run");
+        let mut ring = DiskReplayRing::with_retention(usize::MAX, 2.0, run.clone()).unwrap();
+
+        ring.push(seg(0.0, 1.0, 100, true)).unwrap();
+        let first = ring.segments().next().unwrap().path().to_path_buf();
+        ring.push(seg(1.0, 1.0, 100, true)).unwrap();
+        ring.push(seg(2.0, 1.0, 100, true)).unwrap();
+        ring.push(seg(3.0, 1.0, 100, true)).unwrap();
+
+        assert!(!first.exists(), "evicted segment file must be removed");
+        assert_eq!(ring.len(), 3, "2s window plus the segment that closes it");
+        let summed: usize = ring.segments().map(DiskSegment::byte_len).sum();
+        assert_eq!(ring.bytes(), summed);
+    }
+
 }
