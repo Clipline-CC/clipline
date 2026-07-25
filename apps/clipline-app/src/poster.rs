@@ -370,14 +370,13 @@ mod tests {
 
     #[test]
     fn timed_out_poster_child_is_killed_and_reaped() {
-        let mut child = Command::new("powershell.exe")
+        let mut child = Command::new(std::env::current_exe().expect("locate test executable"))
             .args([
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "Start-Sleep -Seconds 30",
+                "--exact",
+                "poster::tests::poster_timeout_fixture_sleeps",
+                "--nocapture",
             ])
+            .env("CLIPLINE_POSTER_TIMEOUT_FIXTURE", "1")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -392,6 +391,13 @@ mod tests {
             child.try_wait().unwrap().is_some(),
             "timed-out poster child must be reaped"
         );
+    }
+
+    #[test]
+    fn poster_timeout_fixture_sleeps() {
+        if std::env::var("CLIPLINE_POSTER_TIMEOUT_FIXTURE").as_deref() == Ok("1") {
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        }
     }
 
     fn test_dir(label: &str) -> PathBuf {
