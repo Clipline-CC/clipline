@@ -156,9 +156,6 @@ pub(crate) fn eviction_plan<T: ReplayWindowSegment>(
     if by_bytes <= by_duration {
         return by_duration;
     }
-    if by_bytes == 0 {
-        return 0;
-    }
 
     // Only genuine byte pressure may move retention forward. Realign that
     // later start to a keyframe when one is available, including `incoming`.
