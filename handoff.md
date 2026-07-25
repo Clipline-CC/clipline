@@ -4,6 +4,63 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-25): Memory footprint reduction
+
+Plan: `docs/superpowers/plans/2026-07-24-memory-footprint-reduction.md`.
+
+**Replay retention is now bounded by span as well as bytes.** `estimated_buffer_bytes` sizes the
+ring with a 2× encoder-overshoot headroom so a bitrate spike cannot evict footage the save window
+needs — but eviction was byte-only, so the headroom became a target instead of a cap: the ring grew
+until it *reached* the budget, holding ~2× the usable footage, and ~5× when the encoder undershoots
+on low-motion content (fewer bytes/second means more seconds fit under the cap). `planning::
+eviction_plan` now resolves both bounds in one plan — larger count wins, then advanced to the next
+keyframe so the front always starts a decodable GOP. Sequencing them separately would let the byte
+bound, which has no keyframe awareness, strand a headless GOP. Retention is derived via
+`replay_buffer_seconds`, never read from `AppSettings::buffer_seconds`: `save_to` normalizes only a
+clone, and validation accepts `buffer_seconds == replay_window_s`, which would leave zero headroom.
+Measured on the dev machine (30 s window, 720p Sharp): ring 85.8 MB cap → ~45 MB retained, app
+process plateau 147–180 MB → ~103 MB, held across a 12-minute soak.
+
+**WebView2 no longer stays fully resident in the tray.** `WebviewWindow::hide` hides only the
+native window; the controller kept rendering with nothing on screen (hidden four minutes moved
+child private working set by <1 MB, GPU pinned at 132.0 MB). Two changes: `Webview::hide/show`,
+which reaches `SetIsVisible` through wry with no COM or new unsafe, and
+`MemoryUsageTargetLevel::Low` on hide / `Normal` on reveal. Visibility alone reclaimed only ~20 MiB
+and **missed the plan's 40 MiB gate** — kept anyway because not rendering an invisible window is
+correct, and because `--autostart` skips `open_main_window` entirely and was rendering
+indefinitely. `Low` cleared the gate by ~4.5×: 188.3 / 199.2 / 177.9 MiB across three clean
+launches, GPU dropping to ~5 MB, tray-idle tree ~335 MB → ~155 MB. `Low` keeps scripts and network
+alive, unlike `TrySuspend`; do not mix the two models.
+
+**The RAM meter reports app and children separately.** It previously summed the whole tree, so
+~230 MB of webview sat on Clipline's own figure — during this work a WebView2 playback spike of
++110 MB read as a ring leak. Labelled "child", not "webview", because the walk also catches the
+`ffmpeg.exe` child on the CPU encoder path.
+
+Sharp edges found along the way:
+
+- **`encoder_label` discards `EncoderApi`** — MFT and FFmpeg both render `AMD AMF · H.264`. An
+  `encoder_selected` diagnostic now logs api/backend/codec. This machine resolves `api=Mft`, so
+  the planned per-frame readback work (`nv12.rs`, `cpu_video.rs`) is **skipped**: frames stay on
+  the GPU. Revisit only if the FFmpeg path becomes a default.
+- **The meter cannot measure hidden-state savings** — `main.js` only polls while
+  `!document.hidden`. Acceptance needs an external harness.
+- **Measuring memory: pick the right metric.** Committed private bytes do not move when Windows
+  trims a hidden process, so they cannot distinguish "released" from "paged out"; private working
+  set can. A process-tree walk also needs a creation-time check, or PID reuse sweeps in unrelated
+  processes — this machine runs ~19 `msedgewebview2` processes belonging to other apps, and an
+  early harness reported an impossible 3,886 MB tree.
+- **Release still carries ~191 MB of IMAGE mappings** (debuginfo plus mapped system/WebView2
+  DLLs), barely below debug's 205 MB. File-backed and shared, so it does not inflate private bytes.
+
+Known-unwired, found but deliberately untouched: the buffer crate implements and tests the
+"don't re-clip overlapping footage" smart mode (`exclude_before_s`), but `service.rs` passes
+`None`, so consecutive saves overlap. That is a product decision, not memory work.
+
+Investigated and **not** a leak: `ENRICHMENT_PASSES` (`osu_api.rs`) is a per-root single-flight
+lease registry removed on `Drop`, not an unbounded per-clip set. Bounding it would break the
+single-flight behaviour it exists to provide.
+
 ## Checkpoint (2026-07-23): Nightly 0.1.41
 
 Nightly 0.1.41 contains PR #103's WASAPI endpoint-loss recovery and PR #104's private diagnostic

@@ -204,7 +204,30 @@ bundled ffmpeg and ran a hardware encoder.
       GPU and there is no readback to optimize. Do not abandon the plan. Alternatively force an
       FFmpeg path deliberately to measure Task 7 on the path it affects.
 
-## Task 7: Stop allocating per frame on the readback path
+### Task 6 outcome — release baseline, and Task 7 gated out
+
+`encoder_label` was the ambiguity it was predicted to be: the label reads `AMD AMF · H.264` on this
+machine while the resolved API is **`Mft`**. Added an `encoder_selected` diagnostic logging api /
+backend / codec, cross-checked by the absence of an `ffmpeg.exe` child.
+
+Release baseline, capture live at the machine's settings (30 s window, 720p Sharp, MFT/AMF/H.264),
+one minute uptime:
+
+| | Release | Debug (earlier) |
+|---|---|---|
+| App private | 201.9 MB committed / 151.0 MB working set | 296.8 MB committed |
+| Committed regions | PRIVATE 192.3 / IMAGE 191.3 / MAPPED 25.6 MB | PRIVATE 279 / IMAGE 205 / MAPPED 25 |
+
+Correction to this plan's earlier claim that the IMAGE figure "will not survive release": it largely
+did — 191.3 MB vs 205 MB. The release profile keeps debuginfo, and IMAGE also counts mapped system
+and WebView2 DLLs. It is file-backed and shared, so it does not inflate private bytes, but the
+stated reason was wrong.
+
+**Task 7 is skipped, per this task's own instruction:** the path is MFT, so frames stay on the GPU
+and there is no per-frame CPU readback to optimize. `nv12.rs`'s allocation churn is real but
+unreachable on this configuration — revisit only if the FFmpeg encoder path becomes a default.
+
+## Task 7: Stop allocating per frame on the readback path (SKIPPED — MFT path)
 
 `read_nv12` (`nv12.rs:298`) and `read_bgra` (`nv12.rs:433`) are stateless free functions returning
 owned buffers, so there is nowhere to hang reusable state — the API has to change. The CPU fallback
@@ -301,6 +324,24 @@ advises using `Low`/`Normal` **or** `Suspend`/`Resume`, never mixing them: stay 
       without a stale frame.
 - [ ] Revert if the incremental gate is missed. Do **not** escalate to `TrySuspend` in this task —
       that is a separate behavioural change needing its own re-sync design.
+
+### Task 4b outcome — gate cleared by ~4.5×
+
+Same harness and gate as Task 4, measured on top of it. Three clean release launches, library open
+and a clip decoding, hidden 120 s, final-30 s median:
+
+| Run | WebView2 base → hidden | Δ | Gate | GPU | Tree total |
+|---|---|---|---|---|---|
+| 1 | 234.2 → 45.8 | 188.3 | ✓ | 116.1 → 5.4 | 339.1 → 153.8 |
+| 2 | 229.1 → 29.9 | 199.2 | ✓ | 124.4 → 5.7 | 333.7 → 155.8 |
+| 3 | 223.7 → 45.9 | 177.9 | ✓ | 125.6 → 33.8 | 335.3 → 184.4 |
+
+Median 188.3 MiB against the 40 MiB gate — roughly 9× what `SetIsVisible` managed alone. Idle in
+the tray, the whole tree drops from ~335 MB to ~155 MB.
+
+Caveat: run 3's playback did not confirm (its CDP probe returned empty), so it may have measured
+with the grid rendered but no active decode. Its GPU baseline of 125.6 MB shows the state was still
+inflated and its delta is in line with the others, but that is two fully-confirmed runs, not three.
 
 ## Investigated and deliberately not changed
 
