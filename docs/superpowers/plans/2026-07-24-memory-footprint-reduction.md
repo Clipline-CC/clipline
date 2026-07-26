@@ -227,6 +227,12 @@ stated reason was wrong.
 and there is no per-frame CPU readback to optimize. `nv12.rs`'s allocation churn is real but
 unreachable on this configuration — revisit only if the FFmpeg encoder path becomes a default.
 
+**A software H.264 MFT exists but does not change this.** It was added for off-site E2E testing in a
+Windows VM with no hardware encoder. That path does move frames through CPU memory, so the per-frame
+allocation churn is reachable there — but a test VM is not perf-sensitive, so the churn does not
+matter where the path is used, and does not occur where it would matter. The skip stands on both
+counts. Revisit only if a software encoder becomes reachable on user hardware.
+
 ## Task 7: Stop allocating per frame on the readback path (SKIPPED — MFT path)
 
 `read_nv12` (`nv12.rs:298`) and `read_bgra` (`nv12.rs:433`) are stateless free functions returning
