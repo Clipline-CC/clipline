@@ -51,6 +51,17 @@ jobs:
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version "^2" --locked
 
+      - name: Stage pinned FFmpeg runtime
+        shell: pwsh
+        run: |
+          $manifest = Get-Content apps/clipline-app/ffmpeg-runtime.json -Raw | ConvertFrom-Json
+          $inputs = Join-Path $env:RUNNER_TEMP "clipline-ffmpeg-inputs"
+          New-Item -ItemType Directory -Path $inputs -Force | Out-Null
+          $archive = Join-Path $inputs $manifest.archive_name
+          Invoke-WebRequest -Uri $manifest.archive_url -OutFile $archive
+          .\scripts\stage-ffmpeg-resource.ps1 -ArchivePath $archive
+          .\scripts\verify-ffmpeg-resource.ps1
+
       # Static frontend (frontendDist: "ui") — no Node/npm step needed.
       - name: Build NSIS installer + updater artifacts
         working-directory: apps/clipline-app

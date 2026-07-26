@@ -4,6 +4,192 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-25): FFmpeg thumbnail reliability
+
+Plan: `docs/superpowers/plans/2026-07-25-ffmpeg-thumbnail-reliability.md`.
+
+Thumbnail failures on source builds and some installed machines had three indistinguishable causes:
+the executable search omitted the installed `%LOCALAPPDATA%\Clipline\ffmpeg` runtime, release
+bundling could silently consume the gitignored README-only staging directory, and the FFmpeg child
+wrote its temporary JPEG beside the clip where Windows Controlled Folder Access can deny an
+independently distributed process. The gallery swallowed every backend error into the same gradient
+fallback, leaving users no recovery path.
+
+FFmpeg discovery now checks the installed LocalAppData runtime before the legacy roaming development
+bundle and PATH, deduplicating candidates while keeping the explicit and packaged overrides first.
+Poster extraction emits one bounded MJPEG through concurrently drained stdout/stderr pipes; Clipline
+itself owns and atomically publishes the sibling temporary file. Missing-runtime errors are logged
+once by bounded category, without clip paths or FFmpeg stderr, and show a persistent Library warning
+with an in-process `Retry thumbnails` action. Other per-media failures remain local gradient
+fallbacks.
+
+Every Tauri bundle now runs the offline `scripts/verify-ffmpeg-resource.ps1` preflight. It rejects
+missing, unexpected, modified, reparse-point, provenance-mismatched, version-mismatched, GPL, or
+nonfree payloads before packaging. The source payload remains intentionally gitignored and the
+existing pinned staging workflow remains the only networked release step.
+
+Validation is green:
+
+- `cargo test --workspace`
+- cold-cache `cargo clippy --workspace --all-targets -- -D warnings`
+- JavaScript syntax, PowerShell parser, formatting, and `git diff --check`
+- installed payload verification, with README-only staging rejected before bundling
+- Computer Use E2E: a debug build regenerated a poster from the installed LocalAppData fallback;
+  removing every runtime produced the warning, then restoring FFmpeg and clicking Retry regenerated
+  the missing poster without an app restart
+
+## Checkpoint (2026-07-25): PR #107 review follow-ups
+
+Plan: `docs/superpowers/plans/2026-07-25-pr-107-review-follow-ups.md`.
+
+The native lifecycle no longer gates `Foreground` publication on fallible show, restore, or focus
+calls. Both focus and resize events now reconcile the authoritative minimized state, so taskbar
+restores that omit a focus event re-show the WebView2 controller before publishing `Foreground`.
+
+Large-library renders build one normalized local-path index, use constant-size gallery identity
+inputs already collected during filtering/sorting, and expire negative poster entries after 30
+seconds. FFmpeg discovery caches successes only. The bulk-selection label now says “Select page.”
+
+Upload leases now track the underlying Windows file identity, including hard-link and junction
+aliases. Delete/rename return an intentional “clip is uploading” error, and quota GC protects active
+sources while continuing with the next deletable clip. Software MFT caller-owned output samples are
+reused after clearing attributes and logical length, and activated MFTs call `ShutdownObject` on
+normal drop and constructor-error unwind. Drain continues to pass the input stream ID, matching
+Microsoft's corrected Media Foundation documentation.
+
+The second review tightened test and measurement portability: child WebView2 processes that exit
+mid-sample are skipped atomically while root-counter failures stay fatal, the poster timeout fixture
+re-invokes the Rust test binary instead of depending on PowerShell/PATH, and one Boa regression now
+cross-checks gallery path keys against player path equality. The active-upload identity lock remains
+intentional: it linearizes kernel lease acquisition with registry publication, and measured local
+contention was only tens of microseconds per candidate open.
+
+Validation is green:
+
+- `cargo test --workspace`
+- fresh-cache `cargo clippy --workspace --all-targets -- -D warnings`
+- real 30-frame WARP software-MFT encode/reuse regression
+- JavaScript syntax, PowerShell parser, formatting, and `git diff --check`
+- Computer Use native minimize/restore smoke; the restored app rendered the full library instead of
+  a blank WebView and was left open in `Waiting`
+
+## Checkpoint (2026-07-25): native Microsoft software H.264 MFT
+
+Plan: `docs/superpowers/plans/2026-07-25-native-software-mft-h264.md`.
+
+The `MfSoftware` probe result is now an executable native path rather than an advertised-but-skipped
+candidate. `SoftwareMftH264Encoder` selects only Microsoft's inbox synchronous H.264 MFT, converts
+the captured GPU BGRA frame to CPU NV12, feeds aligned system-memory samples, and emits the same
+AVCC packet/config contract as the existing async hardware MFT. It preserves the caller's
+timestamps and durations, honors transforms that supply their own output samples or require caller
+allocation, refreshes output-stream requirements after stream changes, and drains with the actual
+input stream ID. The existing FFmpeg `h264_mf -hw_encoding 0` route remains the separate-process
+fallback when available.
+
+The Windows integration regression uses a WARP D3D device to encode 30 frames at 640x360 through
+the advertised inbox transform, checks exact timestamp cardinality, AVCC framing, SPS/PPS, and the
+first IDR. It skips when that optional Windows component is absent (notably some Windows Server CI
+images); the dev machine exercises it for real. The service routing regressions prove MFT software
+selection cannot silently fall through to FFmpeg.
+
+Validation is green:
+
+- `cargo test --workspace`
+- fresh-cache `cargo clippy --workspace --all-targets -- -D warnings`
+- focused real WARP software-MFT encode and application routing tests
+- Computer Use E2E: the app reported `Software · H.264`, recorded the 1280x800 display, saved and
+  played a 29.4-second two-audio-track MP4, then stopped and finalized without an encoder error.
+  The temporary games-only setting change was restored and the app was left armed in `Waiting`.
+
+The E2E artifact is
+`C:\Users\dain9\Videos\Clipline\2026-07-25 06-44\clip_1784987122.mp4` (1.7 MB). Its optional audio
+preview sidecar reported that FFmpeg was unavailable, but native WebView2 playback of the main MP4
+and its selectable audio tracks succeeded; sidecar extraction is separate from recording.
+
+## Checkpoint (2026-07-25): Memory follow-up after PR #106
+
+Plan: `docs/superpowers/plans/2026-07-24-memory-follow-up.md`.
+
+This follow-up supersedes the retention and save-path implementation details in the earlier
+memory-footprint checkpoint below.
+
+**Save Replay no longer duplicates the encoded window.** A memory-backed save borrows the
+`Segment` payloads already owned by the ring. A disk-backed save keeps payload-free segment
+descriptors, validates the selected file region, opens one segment at a time, and streams samples
+through the MP4 writer's 64 KiB transfer buffer. Audio-prefix selection is a metadata view rather
+than a mutation/copy. RAM and disk paths have a byte-identical multitrack regression, including a
+mid-window audio prefix.
+
+**The ring now retains the exact usable replay span.** Duration pressure keeps the latest keyframe
+at-or-before the requested cutoff across the existing ring plus the incoming segment; there is no
+fixed 15 s retention margin. Byte pressure can still advance to the next keyframe, because the hard
+memory cap wins during genuine encoder overshoot. The persisted `buffer_seconds` field remains only
+as a normalized compatibility mirror of `replay_window_s`; runtime no longer treats it as a second
+setting. The capture seed allocation is moved instead of cloned, sealed GOP payload/sample vectors
+are exact-sized, and the application-owned WGC latest-frame queue is one frame (the required WinRT
+frame-pool depth remains two).
+
+**Hidden UI work is revisioned and bounded.** Native state records `Foreground`, `Tray`, or
+`Taskbar` with a monotonic revision. `frontend_ready` returns a snapshot after the lifecycle
+listener is installed, and revision-gap recovery forces teardown/refresh if an event was missed.
+Once native hide/minimize succeeds, background entry invalidates local/cloud work, stops microphone
+testing and Web Audio, releases review media, disconnects poster observation, removes both gallery
+roots, hides the controller, and requests WebView2 `Low`. Foreground restore uses `Normal`, restores
+the controller, and coalesces deferred work into one refresh. Async settings/device loads, cloud
+media, rename restoration, posters, and boot work all reject stale lifecycle generations.
+
+**Large libraries, posters, uploads, and session metadata have explicit bounds.**
+
+- Local and cloud galleries render at most 60 cards per page. Off-page/inactive image sources and
+  DOM are released; selection remains path-keyed across pages.
+- Poster URL/unavailable entries use a 120-entry LRU. Cached and uncached posters share the same
+  viewport gate. Frontend requests and backend FFmpeg extraction are each capped at two, backend
+  extraction is single-flight per canonical clip, FFmpeg discovery is cached, and children have a
+  30 s execution timeout followed by kill/reap, with 64 KiB bounded stderr.
+- Multipart uploads reopen a bounded file slice for every attempt and stream it instead of
+  allocating a server-sized part (previously up to 64 MiB). Two top-level uploads may run at once.
+  A Windows sharing lease keeps the source immutable from validation/checksum through every
+  direct/proxy retry.
+- Full-session MP4 duration entries are aggregated online, all-sync tracks keep no `stss` vector,
+  video stores only sync-sample numbers, chunk offsets use 8 bytes each, and `stsc` changes are
+  run-length encoded as fragments arrive. Replay-only game markers prune against the recorder's
+  actual oldest retained media timestamp, preserving keyframe lead-in and encoder lag.
+
+Validation on the combined tree is green:
+
+- `cargo test --workspace`
+- fresh-cache `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo fmt --all -- --check`
+- JavaScript syntax checks, PowerShell parser check, and `git diff --check`
+
+`scripts/measure-save-replay-memory.ps1` now samples root/child private working set and private
+commit every 50–100 ms during repeated real saves, with GPU local/non-local allocations recorded
+separately. **No new before/after numbers are claimed yet**: the minimum/default/maximum and
+RAM/disk matrix needs real capture footage and deliberate settings changes. Do not substitute the
+older resident-set measurements below for that run.
+
+Remaining conditional risk: ISO-BMFF requires one final sample-size entry per variable-sized
+sample. `TrackState::sizes` and the serialized final `moov` therefore still grow with a multi-hour
+full session and briefly coexist at finalize. Measure that metadata at the intended maximum session
+length before adding a file-backed table spool or rebuilding tables from the already-written
+fragment metadata; either is a larger crash-recovery change than the online table compression.
+
+Manual acceptance checklist:
+
+1. Let both RAM and disk replay modes fill, save repeatedly with output plus microphone/game audio,
+   and verify playable files, duration coverage, audio sync, and no save-time memory spike near the
+   ring size.
+2. Exercise 5 s, default 60 s, and maximum 120 s replay settings; verify the compatibility field
+   round-trips to the same value and saved coverage starts at the covering keyframe.
+3. Hide to tray and taskbar while a poster/cloud request and microphone test are active, save by
+   global hotkey, then reveal; verify the mic stays stopped, no blank window appears, and the
+   gallery refreshes once without stale video reattaching.
+4. Page through local/cloud libraries larger than 60 clips, including search/group/sort changes,
+   cross-page selection, rename/delete, and account/media-root changes; verify counts, images, and
+   poster cache invalidation.
+5. Retry both direct and proxy multipart uploads and try to rename/delete the source while one is
+   active; mutation should be rejected until the upload releases its lease.
+
 ## Checkpoint (2026-07-25): Memory footprint reduction
 
 Plan: `docs/superpowers/plans/2026-07-24-memory-footprint-reduction.md`.
@@ -2932,10 +3118,11 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
   remain one sample; keyframes come from IDR/IRAP NALs. AV1 keyframe state comes from the encoded
   frame header rather than output position. Input/output timestamp cardinality is strict for every
   codec.
-- `EncoderBackend::MfSoftware` is modeled by the probe but **not instantiable** — `MftH264Encoder`
-  only enumerates hardware MFTs. The candidate walk skips it; wiring the sync software MFT (CPU
-  input, no D3D manager) is a follow-up. With no hardware H.264 and no ffmpeg, recording errors
-  (same as before this milestone).
+- `EncoderBackend::MfSoftware` uses `SoftwareMftH264Encoder`, which intentionally selects only the
+  inbox Microsoft synchronous H.264 MFT. It has CPU NV12 input and no D3D manager; third-party
+  synchronous transforms are not advertised under this backend. Its real integration test can
+  skip on Windows Server images where the optional inbox encoder is absent, so keep a Windows
+  client E2E in release acceptance.
 
 **Tauri (v2)**
 - The webview **silently no-ops** (no events, no invoke) without
@@ -3047,9 +3234,8 @@ production health and readiness must remain green before shipping a client relea
 4. **In-app HEVC/AV1 playback** (ddoc §11): the encoder matrix (milestone 23) can record HEVC/AV1,
    but WebView2 can't decode them without OS extensions — Automatic avoids them and explicit picks
    warn. A native FFmpeg decode path feeding frames to the review player would close that gap.
-   Smaller follow-ups from milestone 23: wire the Microsoft software H.264 MFT (the only
-   software H.264 under LGPL), bundle the lgpl-shared ffmpeg into the installer, and revisit
-   NVENC/QSV arg tuning (only AMF + SVT-AV1 were verified live on this RDNA2 box).
+   Smaller follow-ups from milestone 23: bundle the lgpl-shared ffmpeg into the installer and
+   revisit NVENC/QSV arg tuning (only AMF + SVT-AV1 were verified live on this RDNA2 box).
 5. **Dynamic audio-session tracking** (ddoc §10): process audio is split at recorder start; new app sessions that appear mid-recording and multi-process grouping remain next.
 6. **Polish toward release:** display-capture privacy warning (ddoc §9), borderless-fullscreen
    guidance (§8), WebView2-destroyed-when-minimized RAM trick (§4), installer/signing (§4).

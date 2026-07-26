@@ -417,6 +417,7 @@ fn ffmpeg_release_staging_is_pinned_allowlisted_and_attributed() {
     )
     .expect("valid FFmpeg runtime manifest JSON");
 
+    assert_eq!(manifest["schema_version"].as_u64(), Some(1));
     let release_tag = manifest["release_tag"].as_str().expect("release tag");
     let archive_name = manifest["archive_name"].as_str().expect("archive name");
     let archive_url = manifest["archive_url"].as_str().expect("archive URL");
@@ -500,6 +501,7 @@ fn ffmpeg_release_staging_is_pinned_allowlisted_and_attributed() {
         "PROVENANCE.json",
         "version_line",
         "forbidden_configuration",
+        "manifest.schema_version",
         "Move-Item",
     ] {
         assert!(
@@ -509,9 +511,57 @@ fn ffmpeg_release_staging_is_pinned_allowlisted_and_attributed() {
     }
     assert!(!script.contains("$SourceDir"));
 
+    let verifier = fs::read_to_string(root.join("scripts/verify-ffmpeg-resource.ps1"))
+        .expect("read staged FFmpeg verifier");
+    for contract in [
+        "allowed_files",
+        "PROVENANCE.json",
+        "manifest_sha256",
+        "Get-FileHash",
+        "version_line",
+        "required_configuration",
+        "forbidden_configuration",
+        "manifest.schema_version",
+        "Unexpected FFmpeg resource entries",
+    ] {
+        assert!(
+            verifier.contains(contract),
+            "offline FFmpeg resource verification must enforce {contract}"
+        );
+    }
+    assert!(
+        !verifier.contains("Invoke-WebRequest"),
+        "the release-bundle preflight must stay offline"
+    );
+
     let tauri = fs::read_to_string(root.join("apps/clipline-app/tauri.conf.json"))
         .expect("read Tauri config");
     assert_eq!(tauri.matches("\"ffmpeg/\"").count(), 1);
+    let tauri: serde_json::Value = serde_json::from_str(&tauri).expect("valid Tauri configuration");
+    let preflight = tauri
+        .pointer("/build/beforeBundleCommand")
+        .expect("Tauri bundles must run the FFmpeg resource preflight");
+    assert_eq!(preflight["cwd"].as_str(), Some("../.."));
+    let preflight_script = preflight["script"]
+        .as_str()
+        .expect("beforeBundleCommand script");
+    assert_eq!(
+        preflight_script,
+        r"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\verify-ffmpeg-resource.ps1",
+        "Tauri's command runner treats surrounding executable quotes literally; keep the no-space SystemRoot path unquoted"
+    );
+    let release = fs::read_to_string(root.join("docs/release.workflow.yml"))
+        .expect("read release workflow template");
+    let stage_position = release
+        .find(r".\scripts\stage-ffmpeg-resource.ps1")
+        .expect("release workflow must stage the pinned FFmpeg runtime");
+    let build_position = release
+        .find("run: cargo tauri build")
+        .expect("release workflow must build the Tauri app");
+    assert!(
+        stage_position < build_position,
+        "release workflow must stage and verify FFmpeg before Tauri invokes the bundle preflight"
+    );
     let readme = fs::read_to_string(root.join("apps/clipline-app/ffmpeg/README.md"))
         .expect("read bundled FFmpeg notice");
     assert!(readme.contains("LGPL") && readme.contains("replace"));
@@ -568,10 +618,15 @@ fn divergence_prone_paths_keep_single_production_owners() {
         .0;
     assert_eq!(
         writer_production
-            .matches("state.next_decode_time +=")
+            .matches("state.record_sample(sample)?;")
             .count(),
         1,
         "all fragment transports must share one metadata commit path"
+    );
+    assert_eq!(
+        writer_production.matches("fn record_sample(").count(),
+        1,
+        "sample-table accounting must remain centralized"
     );
 }
 

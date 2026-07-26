@@ -470,10 +470,23 @@ async function releaseVideoFileHandle() {
   clearReviewAudioSidecars("direct");
   video.pause();
   releaseReviewVideoSource();
+  const releasedSourceGeneration = reviewSourceGeneration;
   await afterNextPaint();
+  return releasedSourceGeneration;
 }
 
-function suspendReviewPlayback() {
+function reviewAsyncWorkStillCurrent(
+  lifecycleWork,
+  expectedClipPath,
+  expectedSourceGeneration,
+) {
+  return isForegroundWorkCurrent(lifecycleWork)
+    && !!currentClip
+    && PlayerCore.sameClipPath(currentClip.path, expectedClipPath)
+    && reviewSourceGeneration === expectedSourceGeneration;
+}
+
+function suspendReviewPlayback({ renderGallery = true } = {}) {
   setClipTitleEditing(false);
   cancelDesiredAudioPreview();
   clearReviewAudioSidecars("direct");
@@ -499,7 +512,7 @@ function suspendReviewPlayback() {
   renderGameEventRail(null);
   renderGamePlayRail(null);
   renderGameMetadataPanel(null);
-  renderClips();
+  if (renderGallery) renderClips();
 }
 
 function isRenameFileLockError(error) {
@@ -513,6 +526,8 @@ async function saveClipRename(ev) {
   ev.preventDefault();
   if (!currentClip || renamePending) return;
   if (isCloudOnlyReviewClip(currentClip)) return;
+  const lifecycleWork = captureForegroundWork();
+  if (!lifecycleWork) return;
   const oldClip = currentClip;
   const oldPath = oldClip.path;
   const nextName = $("rename-input").value.trim();
@@ -529,17 +544,19 @@ async function saveClipRename(ev) {
   setClipRenameControlsDisabled(true);
   $("error").textContent = "";
   setDeckStatus("renaming clip...");
+  let expectedSourceGeneration = reviewSourceGeneration;
   await afterNextPaint();
 
   let mediaReleased = false;
   try {
+    if (!reviewAsyncWorkStillCurrent(lifecycleWork, oldPath, expectedSourceGeneration)) return;
     let result;
     try {
       result = await invoke("rename_clip", { path: oldPath, name: nextName });
     } catch (error) {
       if (!isRenameFileLockError(error)) throw error;
       mediaReleased = true;
-      await releaseVideoFileHandle();
+      expectedSourceGeneration = await releaseVideoFileHandle();
       result = await invoke("rename_clip", { path: oldPath, name: nextName });
     }
     const renamed = applyRenamedClip(oldClip, result);
@@ -547,10 +564,28 @@ async function saveClipRename(ev) {
     renderClips();
     setDeckStatus("clip renamed", { transient: true });
     setNotice("clip renamed", { transient: true });
-    if (mediaReleased) restoreVideoAfterRename(renamed.path, resumeTime, shouldResume, rate);
+    if (
+      mediaReleased
+      && reviewAsyncWorkStillCurrent(
+        lifecycleWork,
+        renamed.path,
+        expectedSourceGeneration,
+      )
+    ) {
+      restoreVideoAfterRename(renamed.path, resumeTime, shouldResume, rate);
+    }
   } catch (e) {
     $("error").textContent = String(e);
-    if (mediaReleased) restoreVideoAfterRename(oldPath, resumeTime, shouldResume, rate);
+    if (
+      mediaReleased
+      && reviewAsyncWorkStillCurrent(
+        lifecycleWork,
+        oldPath,
+        expectedSourceGeneration,
+      )
+    ) {
+      restoreVideoAfterRename(oldPath, resumeTime, shouldResume, rate);
+    }
   } finally {
     renamePending = false;
     setClipRenameControlsDisabled(false);
@@ -587,6 +622,8 @@ function closeRenameFileDialog(force = false) {
 async function submitRenameFileDialog() {
   const oldClip = renameFileDialogClip;
   if (!oldClip || renameFilePending) return;
+  const lifecycleWork = captureForegroundWork();
+  if (!lifecycleWork) return;
   const nextName = $("rename-file-input").value.trim();
   if (!nextName) {
     $("rename-file-status").textContent = "File name is required.";
@@ -603,17 +640,29 @@ async function submitRenameFileDialog() {
   renameFilePending = true;
   setRenameFileControlsDisabled(true);
   $("rename-file-status").textContent = "Renaming...";
+  let expectedSourceGeneration = reviewSourceGeneration;
   await afterNextPaint();
 
   let mediaReleased = false;
   try {
+    if (!isForegroundWorkCurrent(lifecycleWork)) return;
+    if (
+      isCurrent
+      && !reviewAsyncWorkStillCurrent(
+        lifecycleWork,
+        oldPath,
+        expectedSourceGeneration,
+      )
+    ) {
+      return;
+    }
     let result;
     try {
       result = await invoke("rename_clip_file", { path: oldPath, name: nextName });
     } catch (error) {
       if (!isCurrent || !isRenameFileLockError(error)) throw error;
       mediaReleased = true;
-      await releaseVideoFileHandle();
+      expectedSourceGeneration = await releaseVideoFileHandle();
       result = await invoke("rename_clip_file", { path: oldPath, name: nextName });
     }
     const renamed = applyRenamedClip(oldClip, result);
@@ -621,16 +670,30 @@ async function submitRenameFileDialog() {
     renderClips();
     setDeckStatus("file renamed", { transient: true });
     setNotice("file renamed", { transient: true });
-    if (isCurrent && renamed.path !== oldPath) {
+    const restoreIsCurrent = reviewAsyncWorkStillCurrent(
+      lifecycleWork,
+      renamed.path,
+      expectedSourceGeneration,
+    );
+    if (isCurrent && renamed.path !== oldPath && restoreIsCurrent) {
       setReviewVideoSource(renamed.path, { resumeTime, shouldResume, rate, trimRange });
       currentReviewAudioKey = null;
       requestSelectedAudioPreview();
-    } else if (mediaReleased) {
+    } else if (mediaReleased && restoreIsCurrent) {
       restoreVideoAfterRename(renamed.path, resumeTime, shouldResume, rate);
     }
   } catch (e) {
     $("rename-file-status").textContent = String(e);
-    if (mediaReleased) restoreVideoAfterRename(oldPath, resumeTime, shouldResume, rate);
+    if (
+      mediaReleased
+      && reviewAsyncWorkStillCurrent(
+        lifecycleWork,
+        oldPath,
+        expectedSourceGeneration,
+      )
+    ) {
+      restoreVideoAfterRename(oldPath, resumeTime, shouldResume, rate);
+    }
   } finally {
     renameFilePending = false;
     setRenameFileControlsDisabled(false);
@@ -748,6 +811,23 @@ function renderVisibleSettingsSection() {
   }
 }
 
+function resumeForegroundSettingsWork() {
+  if (!settingsOpen) return;
+  const lifecycleWork = captureForegroundWork();
+  if (!lifecycleWork) return;
+  Promise.all([
+    ensureDisplaysLoaded(lifecycleWork),
+    ensureAudioDevicesLoaded(lifecycleWork),
+    ensureVideoEncodersLoaded(lifecycleWork),
+  ])
+    .then(() => {
+      if (isForegroundWorkCurrent(lifecycleWork)) renderVisibleSettingsSection();
+    })
+    .catch((e) => {
+      if (isForegroundWorkCurrent(lifecycleWork)) $("error").textContent = e;
+    });
+}
+
 function requestSettingsClose({ allowDiscard = true } = {}) {
   if (!settingsOpen) return;
   syncSettingsDraftFromForm({ resetDiscard: false });
@@ -768,9 +848,7 @@ function toggleSettings(open = !settingsOpen) {
   if (settingsOpen && !wasOpen) {
     resetSettingsDiscardWarning();
     syncSettingsDirtyState({ resetDiscard: true });
-    ensureDisplaysLoaded().then(renderVisibleSettingsSection).catch((e) => $("error").textContent = e);
-    ensureAudioDevicesLoaded().catch((e) => $("error").textContent = e);
-    ensureVideoEncodersLoaded().catch((e) => $("error").textContent = e);
+    resumeForegroundSettingsWork();
   }
   // Closing discards unsaved edits by repainting from last-saved settings.
   if (wasOpen && !settingsOpen && currentSettings) fillSettings(currentSettings);

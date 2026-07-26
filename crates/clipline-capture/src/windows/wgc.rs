@@ -36,7 +36,7 @@ use crate::windows::window::{window_client_crop_state, WindowClientCrop};
 /// idle desktop can legitimately go quiet; recorders that need cadence
 /// repeat the previous frame (encoder-side concern, milestone 4).
 const DEFAULT_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
-const FRAME_QUEUE_CAPACITY: usize = 2;
+const FRAME_QUEUE_CAPACITY: usize = 1;
 
 #[derive(Clone)]
 enum FrameCopyMode {
@@ -666,6 +666,30 @@ mod tests {
                 .expect("third frame")
                 .ticks_100ns,
             3
+        );
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_millis(1)),
+            Err(RecvTimeoutError::Timeout)
+        ));
+    }
+
+    #[test]
+    fn production_frame_queue_keeps_only_the_latest_frame() {
+        let (device, _) = crate::windows::d3d11::create_device_for_tests().expect("device");
+        let texture = crate::windows::d3d11::create_bgra_texture(&device, 2, 2).expect("texture");
+        let (tx, rx) = bounded_frame_channel(FRAME_QUEUE_CAPACITY);
+        for ticks_100ns in [1, 2] {
+            tx.send_drop_oldest(QueuedFrame {
+                texture: texture.clone(),
+                ticks_100ns,
+            });
+        }
+
+        assert_eq!(
+            rx.recv_timeout(Duration::from_millis(1))
+                .expect("latest frame")
+                .ticks_100ns,
+            2
         );
         assert!(matches!(
             rx.recv_timeout(Duration::from_millis(1)),

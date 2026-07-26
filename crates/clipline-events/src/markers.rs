@@ -10,6 +10,7 @@ use crate::schema::{GameEvent, GameId};
 #[derive(Debug, Default)]
 pub struct MarkerLog {
     events: Vec<GameEvent>, // every entry has recording_offset_s = Some
+    retained_from_s: Option<f64>,
 }
 
 /// One marker inside a saved clip, `t_s` seconds from clip start.
@@ -150,9 +151,35 @@ impl MarkerLog {
     /// Unanchored events (no recording offset yet) are dropped — they
     /// cannot be placed on the timeline.
     pub fn push(&mut self, event: GameEvent) {
-        if event.recording_offset_s.is_some() {
-            self.events.push(event);
+        let Some(offset_s) = event.recording_offset_s else {
+            return;
+        };
+        if self
+            .retained_from_s
+            .is_some_and(|retained_from_s| offset_s < retained_from_s)
+        {
+            return;
         }
+        self.events.push(event);
+    }
+
+    /// Discard markers that the recorder can no longer include in a future
+    /// replay. The caller supplies the actual oldest retained media timestamp,
+    /// including keyframe coverage and encoder lag, rather than deriving a
+    /// cutoff from wall time.
+    pub fn retain_from_recording_offset(&mut self, retained_from_s: f64) {
+        if !retained_from_s.is_finite() {
+            return;
+        }
+        let retained_from_s = self
+            .retained_from_s
+            .map_or(retained_from_s, |current| current.max(retained_from_s));
+        self.retained_from_s = Some(retained_from_s);
+        self.events.retain(|event| {
+            event
+                .recording_offset_s
+                .is_some_and(|offset_s| offset_s >= retained_from_s)
+        });
     }
 
     pub fn len(&self) -> usize {
@@ -245,6 +272,67 @@ mod tests {
         let clip = log.clip_markers(60.0, 120.0);
         assert_eq!(clip.markers.len(), 1);
         assert_eq!(clip.markers[0].event.kind, EventKind::ChampionKill);
+    }
+
+    #[test]
+    fn replay_pruning_uses_actual_oldest_media_and_keeps_keyframe_lead_in() {
+        let mut log = MarkerLog::new();
+        log.push(ev(EventKind::ChampionKill, 0.0));
+        log.push(ev(EventKind::DragonKill, 8.0));
+        log.push(ev(EventKind::BaronKill, 9.5));
+        log.push(ev(EventKind::Ace, 12.0));
+
+        // A nominal ten-second cutoff at t=20 would be 10.0, but the actual
+        // saved MP4 begins at its covering keyframe at 8.0.
+        log.retain_from_recording_offset(8.0);
+
+        let clip = log.clip_markers(0.0, 20.0);
+        let kinds: Vec<_> = clip
+            .markers
+            .iter()
+            .map(|marker| marker.event.kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            [EventKind::DragonKill, EventKind::BaronKill, EventKind::Ace]
+        );
+        assert_eq!(log.len(), 3);
+    }
+
+    #[test]
+    fn replay_log_does_not_retain_late_events_before_the_media_front() {
+        let mut log = MarkerLog::new();
+        log.retain_from_recording_offset(60.0);
+        log.push(ev(EventKind::Ace, 120.0));
+        log.push(ev(EventKind::ChampionKill, 20.0));
+
+        assert_eq!(log.len(), 1);
+        assert_eq!(
+            log.clip_markers(0.0, 121.0).markers[0].event.kind,
+            EventKind::Ace
+        );
+    }
+
+    #[test]
+    fn replay_media_front_prunes_without_new_markers_and_never_moves_backward() {
+        let mut log = MarkerLog::new();
+        log.push(ev(EventKind::ChampionKill, 0.0));
+        log.push(ev(EventKind::DragonKill, 30.0));
+
+        log.retain_from_recording_offset(60.0);
+        log.retain_from_recording_offset(50.0);
+        log.push(ev(EventKind::Ace, 55.0));
+
+        assert!(log.is_empty());
+    }
+
+    #[test]
+    fn full_session_log_keeps_markers_older_than_the_replay_window() {
+        let mut log = MarkerLog::new();
+        log.push(ev(EventKind::ChampionKill, 0.0));
+        log.push(ev(EventKind::Ace, 120.0));
+
+        assert_eq!(log.len(), 2);
     }
 
     #[test]

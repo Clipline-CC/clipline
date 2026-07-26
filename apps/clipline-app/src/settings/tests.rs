@@ -32,7 +32,7 @@ fn defaults_match_current_recorder_behavior() {
     assert_eq!(settings.audio.mic_volume, 1.0);
     assert_eq!(settings.audio.mic_channels, AudioChannelMode::Mono);
     assert_eq!(settings.replay_window_s, 60.0);
-    assert_eq!(settings.buffer_seconds, 75.0);
+    assert_eq!(settings.buffer_seconds, 60.0);
     assert_eq!(settings.video_quality, VideoQuality::Balanced);
     assert_eq!(settings.bitrate_mbps, 12.0);
     assert_eq!(settings.fps, 60);
@@ -624,9 +624,8 @@ fn load_clamps_legacy_replay_window_to_two_minutes() {
     let settings = AppSettings::load_from(&path).unwrap();
 
     assert_eq!(settings.replay_window_s, 120.0);
-    // Buffer is recomputed from the (clamped) window + headroom, not kept
-    // at the legacy 300 s.
-    assert_eq!(settings.buffer_seconds, 120.0 + 15.0);
+    // The legacy compatibility field mirrors the (clamped) save window.
+    assert_eq!(settings.buffer_seconds, 120.0);
 }
 
 #[test]
@@ -840,7 +839,7 @@ fn load_repairs_invalid_fields_without_resetting_valid_neighbors() {
     assert_eq!(settings.audio.mic_volume, 0.0);
     assert_eq!(settings.audio.mic_channels, AudioChannelMode::Mono);
     assert_eq!(settings.replay_window_s, 120.0);
-    assert_eq!(settings.buffer_seconds, 120.0 + 15.0);
+    assert_eq!(settings.buffer_seconds, 120.0);
     assert_eq!(settings.video_quality, VideoQuality::Maximum);
     assert_eq!(settings.bitrate_mbps, 40.0);
     assert_eq!(settings.fps, 120);
@@ -905,8 +904,10 @@ fn service_options_include_estimated_buffer_bytes() {
     assert_eq!(opts.lol_url.as_deref(), Some("http://mock"));
     assert_eq!(opts.audio, AudioOptions::default());
     assert_eq!(opts.replay_storage, ReplayStorageOptions::Memory);
-    assert!(opts.buffer_bytes >= 200 * 1024 * 1024);
-    assert!(opts.buffer_bytes < 240 * 1024 * 1024);
+    assert_eq!(
+        opts.buffer_bytes,
+        estimated_buffer_bytes(60.0, settings.effective_bitrate_mbps())
+    );
 }
 
 #[test]
@@ -1253,28 +1254,44 @@ fn thirty_second_replay_has_buffer_slack_for_encoder_overshoot() {
 }
 
 #[test]
-fn service_retention_derives_headroom_even_when_buffer_seconds_is_stale() {
-    // `save_to` normalizes only a clone, so a live `AppSettings` can carry a
-    // stale `buffer_seconds`. Equal to `replay_window_s` passes validation —
-    // which only rejects window > buffer — yet leaves zero headroom, so the
-    // service options must derive the value rather than read the field.
+fn service_options_ignore_stale_legacy_buffer_seconds() {
+    // `buffer_seconds` is a persisted compatibility mirror. Runtime sizing and
+    // retention must derive from the replay window even if a live value is
+    // stale or outside the old validation range.
     let settings = AppSettings {
         replay_window_s: 30.0,
-        buffer_seconds: 30.0,
+        buffer_seconds: 1.0,
         ..AppSettings::default()
     };
 
     let opts = settings.to_service_options(None).unwrap();
 
-    assert_eq!(opts.buffer_seconds, 30.0 + BUFFER_HEADROOM_S);
-    assert!(
-        opts.buffer_seconds > settings.replay_window_s,
-        "retention must exceed the save window so GOP granularity cannot clip it"
+    assert_eq!(opts.replay_window_s, 30.0);
+    assert_eq!(
+        opts.buffer_bytes,
+        estimated_buffer_bytes(30.0, settings.effective_bitrate_mbps())
     );
 }
 
 #[test]
-fn load_normalizes_buffer_seconds_to_replay_plus_headroom() {
+fn five_second_replay_uses_exact_retention() {
+    let settings = AppSettings {
+        replay_window_s: 5.0,
+        buffer_seconds: 5.0,
+        ..AppSettings::default()
+    };
+
+    let opts = settings.to_service_options(None).unwrap();
+
+    assert_eq!(opts.replay_window_s, 5.0);
+    assert_eq!(
+        opts.buffer_bytes,
+        estimated_buffer_bytes(5.0, settings.effective_bitrate_mbps())
+    );
+}
+
+#[test]
+fn load_normalizes_legacy_buffer_seconds_to_replay_window() {
     let dir = TestDir::new("clipline-settings", "buffer-headroom");
     let path = dir.path().join("settings.json");
     std::fs::write(
@@ -1297,8 +1314,25 @@ fn load_normalizes_buffer_seconds_to_replay_plus_headroom() {
 
     let settings = AppSettings::load_from(&path).unwrap();
 
-    assert_eq!(settings.buffer_seconds, 45.0);
+    assert_eq!(settings.buffer_seconds, 30.0);
     assert_eq!(settings.replay_storage, ReplayStorageSettings::default());
+}
+
+#[test]
+fn save_normalizes_legacy_buffer_seconds_to_replay_window() {
+    let dir = TestDir::new("clipline-settings", "save-buffer-mirror");
+    let path = dir.path().join("settings.json");
+    let settings = AppSettings {
+        replay_window_s: 30.0,
+        buffer_seconds: f64::INFINITY,
+        ..AppSettings::default()
+    };
+
+    settings.save_to(&path).unwrap();
+
+    let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(saved["buffer_seconds"], 30.0);
+    assert_eq!(AppSettings::load_from(&path).unwrap().buffer_seconds, 30.0);
 }
 
 #[test]

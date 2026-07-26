@@ -54,6 +54,7 @@ New-Item -ItemType Directory -Path $ffmpegInputs -Force | Out-Null
 $ffmpegArchive = Join-Path $ffmpegInputs $ffmpegManifest.archive_name
 Invoke-WebRequest -Uri $ffmpegManifest.archive_url -OutFile $ffmpegArchive
 .\scripts\stage-ffmpeg-resource.ps1 -ArchivePath $ffmpegArchive
+.\scripts\verify-ffmpeg-resource.ps1
 
 # 1. Regular build (from apps/clipline-app so config discovery works)
 Set-Location apps/clipline-app
@@ -87,6 +88,10 @@ staging script against the exact archive and review the logged provenance.
 Never use BtbN's floating `latest` asset. `apps/clipline-app/ffmpeg/` is a
 build staging directory and its binaries are intentionally git-ignored; its
 allowlisted `PROVENANCE.json` and license are bundled into both installers.
+Tauri runs `scripts/verify-ffmpeg-resource.ps1` again through
+`build.beforeBundleCommand` immediately before either installer is bundled.
+This offline preflight rejects a README-only, incomplete, modified, or
+misconfigured runtime; do not bypass it or replace it with a network fetch.
 A GitHub Actions workflow can automate this later, but pushing workflow files
 requires a token with GitHub's `workflow` scope.
 

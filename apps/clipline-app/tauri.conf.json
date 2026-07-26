@@ -4,7 +4,11 @@
   "version": "0.1.41",
   "identifier": "io.clipline.app",
   "build": {
-    "frontendDist": "ui"
+    "frontendDist": "ui",
+    "beforeBundleCommand": {
+      "script": "%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\\verify-ffmpeg-resource.ps1",
+      "cwd": "../.."
+    }
   },
   "app": {
     "withGlobalTauri": true,

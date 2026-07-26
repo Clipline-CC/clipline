@@ -98,15 +98,18 @@ are in place — the workflow needs them to run.)
 
 Trigger: push a `v*` tag (or run it manually via *workflow_dispatch*).
 
-1. Build the NSIS installer + Tauri updater artifacts (`cargo tauri build`).
-2. Upload the unsigned installer and submit it to SignPath; wait for the signed
+1. Download the archive pinned by `ffmpeg-runtime.json`, stage its exact
+   allowlist, and verify the hashes, provenance, version, and LGPL configuration.
+2. Build the NSIS installer + Tauri updater artifacts (`cargo tauri build`);
+   Tauri repeats the FFmpeg verification offline immediately before bundling.
+3. Upload the unsigned installer and submit it to SignPath; wait for the signed
    result (a `release-signing` request may pause for manual approval).
-3. **Regenerate the updater signature** over the *signed* installer. Authenticode
+4. **Regenerate the updater signature** over the *signed* installer. Authenticode
    signing rewrites the PE, so the `.sig` Tauri made during the build is stale —
    the workflow re-runs `tauri signer sign` on the signed file and rebuilds
    `latest.json`. (Skipping this breaks auto-update: the updater would reject the
    signed installer.)
-4. Publish a **draft** GitHub release with the signed installer, its `.sig`, and
+5. Publish a **draft** GitHub release with the signed installer, its `.sig`, and
    `latest.json`. Review, then publish.
 
 ## Before flipping the release to non-draft

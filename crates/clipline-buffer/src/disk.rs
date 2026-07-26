@@ -1,9 +1,9 @@
 use std::collections::VecDeque;
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use crate::segment::{SampleInfo, Segment, TrackSamples};
+use crate::segment::{SampleInfo, Segment};
 
 #[derive(Debug)]
 pub struct DiskReplayRing {
@@ -33,6 +33,19 @@ struct DiskTrack {
     offset: usize,
     len: usize,
     samples: Vec<SampleInfo>,
+}
+
+/// Payload-free view of one encoded track in a [`DiskSegment`].
+///
+/// All tracks share one backing file. `offset` and `byte_len` describe this
+/// track's declared region, while `samples` indexes individual encoded
+/// samples within that region.
+#[derive(Debug, Clone, Copy)]
+pub struct DiskTrackRef<'a> {
+    pub pts_start_s: Option<f64>,
+    pub offset: u64,
+    pub byte_len: usize,
+    pub samples: &'a [SampleInfo],
 }
 
 impl DiskReplayRing {
@@ -101,8 +114,7 @@ impl DiskReplayRing {
         let evict = crate::planning::eviction_plan(
             &self.segments,
             self.bytes,
-            stored.byte_len,
-            stored.pts_end_s(),
+            &stored,
             self.max_bytes,
             self.retention_s,
         );
@@ -190,37 +202,37 @@ impl DiskSegment {
         self.byte_len
     }
 
-    pub fn load(&self) -> io::Result<Segment> {
-        let mut buf = Vec::new();
-        File::open(&self.path)?.read_to_end(&mut buf)?;
-        if buf.len() < self.byte_len {
+    pub fn video_track(&self) -> DiskTrackRef<'_> {
+        DiskTrackRef {
+            pts_start_s: Some(self.pts_start_s),
+            offset: 0,
+            byte_len: self.video_len,
+            samples: &self.samples,
+        }
+    }
+
+    pub fn audio_tracks(&self) -> impl ExactSizeIterator<Item = DiskTrackRef<'_>> {
+        self.audio.iter().map(|track| DiskTrackRef {
+            pts_start_s: track.pts_start_s,
+            offset: track.offset as u64,
+            byte_len: track.len,
+            samples: &track.samples,
+        })
+    }
+
+    /// Open this segment's shared payload file without materializing it.
+    ///
+    /// The length check preserves the old whole-load API's early truncation
+    /// failure while allowing callers to stream samples from the file.
+    pub fn open_payload(&self) -> io::Result<File> {
+        let file = File::open(&self.path)?;
+        if file.metadata()?.len() < self.byte_len as u64 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 format!("replay segment {:?} is truncated", self.path),
             ));
         }
-        let data = buf[..self.video_len].to_vec();
-        let audio = self
-            .audio
-            .iter()
-            .map(|track| {
-                let start = track.offset;
-                let end = start + track.len;
-                TrackSamples {
-                    pts_start_s: track.pts_start_s,
-                    data: buf[start..end].to_vec(),
-                    samples: track.samples.clone(),
-                }
-            })
-            .collect();
-        Ok(Segment {
-            starts_with_keyframe: self.starts_with_keyframe,
-            pts_start_s: self.pts_start_s,
-            duration_s: self.duration_s,
-            data,
-            samples: self.samples.clone(),
-            audio,
-        })
+        Ok(file)
     }
 
     pub fn path(&self) -> &Path {
@@ -231,6 +243,7 @@ impl DiskSegment {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TrackSamples;
     use clipline_test_utils::TestDir;
 
     fn seg(pts: f64, dur: f64, bytes: usize, key: bool) -> Segment {
@@ -257,16 +270,70 @@ mod tests {
     }
 
     #[test]
-    fn stores_payloads_on_disk_and_loads_segments() {
+    fn stores_payloads_on_disk_and_opens_stream() {
         let dir = TestDir::new("clipline-disk-ring", "load");
         let mut ring = DiskReplayRing::new(10_000, dir.path().to_path_buf()).unwrap();
         ring.push(seg(0.0, 1.0, 100, true)).unwrap();
 
         let stored = ring.segments().next().unwrap();
         assert!(stored.path().exists());
-        let loaded = stored.load().unwrap();
-        assert_eq!(loaded.data.len(), 100);
-        assert_eq!(loaded.audio[0].data.len(), 50);
+        let file = stored.open_payload().unwrap();
+        assert_eq!(file.metadata().unwrap().len(), 150);
+    }
+
+    #[test]
+    fn track_refs_describe_contiguous_payload_without_loading() {
+        let dir = TestDir::new("clipline-disk-ring", "track-refs");
+        let mut ring = DiskReplayRing::new(10_000, dir.path().to_path_buf()).unwrap();
+        let mut segment = seg(3.0, 1.0, 100, true);
+        segment.audio.push(TrackSamples {
+            pts_start_s: Some(3.25),
+            data: vec![b'b'; 25],
+            samples: vec![SampleInfo {
+                size: 25,
+                duration_s: 0.5,
+                is_sync: true,
+            }],
+        });
+        ring.push(segment).unwrap();
+
+        let stored = ring.segments().next().unwrap();
+        let video = stored.video_track();
+        let audio: Vec<_> = stored.audio_tracks().collect();
+
+        assert_eq!(video.pts_start_s, Some(3.0));
+        assert_eq!(video.offset, 0);
+        assert_eq!(video.byte_len, 100);
+        assert_eq!(video.samples.len(), 1);
+        assert_eq!(video.samples.as_ptr(), stored.samples.as_ptr());
+        assert_eq!(audio.len(), 2);
+        assert_eq!(audio[0].pts_start_s, Some(3.0));
+        assert_eq!(audio[0].offset, 100);
+        assert_eq!(audio[0].byte_len, 50);
+        assert_eq!(audio[0].samples.as_ptr(), stored.audio[0].samples.as_ptr());
+        assert_eq!(audio[1].pts_start_s, Some(3.25));
+        assert_eq!(audio[1].offset, 150);
+        assert_eq!(audio[1].byte_len, 25);
+        assert_eq!(audio[1].samples.as_ptr(), stored.audio[1].samples.as_ptr());
+        assert_eq!(std::fs::metadata(stored.path()).unwrap().len(), 175);
+    }
+
+    #[test]
+    fn open_payload_rejects_truncated_segment_before_muxing() {
+        let dir = TestDir::new("clipline-disk-ring", "truncated-open");
+        let mut ring = DiskReplayRing::new(10_000, dir.path().to_path_buf()).unwrap();
+        ring.push(seg(0.0, 1.0, 100, true)).unwrap();
+        let stored = ring.segments().next().unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(stored.path())
+            .unwrap()
+            .set_len(149)
+            .unwrap();
+
+        let error = stored.open_payload().unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
     }
 
     #[test]
@@ -344,9 +411,8 @@ mod tests {
         ring.push(seg(3.0, 1.0, 100, true)).unwrap();
 
         assert!(!first.exists(), "evicted segment file must be removed");
-        assert_eq!(ring.len(), 3, "2s window plus the segment that closes it");
+        assert_eq!(ring.len(), 2, "exact two-second keyframe-aligned window");
         let summed: usize = ring.segments().map(DiskSegment::byte_len).sum();
         assert_eq!(ring.bytes(), summed);
     }
-
 }

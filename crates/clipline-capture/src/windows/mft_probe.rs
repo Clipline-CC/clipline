@@ -1,13 +1,15 @@
 //! Real H.264 encoder probing (ddoc §4) via MFTEnumEx: which hardware
 //! vendors offer an H.264 encoder MFT, plus the Microsoft software H.264
 //! MFT as the last-resort tier. This is the proven zero-copy path; it only
-//! reports H.264 because `MftH264Encoder` only implements H.264. Hardware
-//! AV1/HEVC on the same silicon is surfaced by the FFmpeg probe instead.
+//! reports H.264 because the native hardware and software MFT wrappers only
+//! implement H.264. Hardware AV1/HEVC on the same silicon is surfaced by the
+//! FFmpeg probe instead.
 
 use windows::core::GUID;
 use windows::Win32::Media::MediaFoundation::{
-    IMFActivate, MFMediaType_Video, MFStartup, MFTEnumEx, MFT_ENUM_HARDWARE_VENDOR_ID_Attribute,
-    MFVideoFormat_H264, MFSTARTUP_FULL, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE,
+    CMSH264EncoderMFT, IMFActivate, MFMediaType_Video, MFStartup, MFTEnumEx,
+    MFT_ENUM_HARDWARE_VENDOR_ID_Attribute, MFT_TRANSFORM_CLSID_Attribute, MFVideoFormat_H264,
+    MFSTARTUP_FULL, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE,
     MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT, MFT_REGISTER_TYPE_INFO, MF_VERSION,
 };
 use windows::Win32::System::Com::CoTaskMemFree;
@@ -85,8 +87,13 @@ pub(crate) fn backend_of(activate: &IMFActivate) -> Option<EncoderBackend> {
     vendor_of(activate).and_then(|vendor| backend_for_vendor(&vendor))
 }
 
+pub(crate) fn is_microsoft_software_h264(activate: &IMFActivate) -> bool {
+    unsafe { activate.GetGUID(&MFT_TRANSFORM_CLSID_Attribute) }
+        .is_ok_and(|clsid| clsid == CMSH264EncoderMFT)
+}
+
 /// MF-backed implementation of the ddoc §4 probe — H.264 only, since that
-/// is all `MftH264Encoder` implements.
+/// is all the native MFT wrappers implement.
 pub fn enumerate() -> windows::core::Result<Vec<EncoderCapability>> {
     ensure_mf_started()?;
     let mut backends: Vec<EncoderBackend> = Vec::new();
@@ -109,11 +116,12 @@ pub fn enumerate() -> windows::core::Result<Vec<EncoderCapability>> {
         })
         .collect();
     // Software H.264 (sync MFT — Microsoft's encoder) as the last resort.
-    if !enum_activates(
+    if enum_activates(
         MFVideoFormat_H264,
         MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER,
     )?
-    .is_empty()
+    .iter()
+    .any(is_microsoft_software_h264)
     {
         caps.push(EncoderCapability {
             api: EncoderApi::Mft,
