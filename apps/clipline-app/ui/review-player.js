@@ -1278,7 +1278,14 @@ video.addEventListener("seeked", () => {
   paintTimeline();
   syncGameEventRail(current);
   syncGamePlayRail(current);
-  syncReviewAudioSidecars({ forceSeek: true });
+  // Only an explicit user reposition may bypass the sidecar drift tolerance. The
+  // initial source settlement reaches this handler too, and forcing there
+  // re-seeked already-audible sidecars backward for no correction — the drift it
+  // "fixed" was ~20 ms against a 0.5 s tolerance, and the element landed back
+  // where it started. That was the audible repeat at the start of every clip.
+  syncReviewAudioSidecars({
+    forceSeek: PlayerCore.sidecarRealignmentForced(decision.confirmedSource),
+  });
 });
 
 function seekBy(delta) {
