@@ -315,6 +315,26 @@ traces prove no audible element is seeked and no unmute happens mid-seek, which 
 candidate mechanisms — but only a recording of the actual output can confirm the repeat a listener
 hears is gone.
 
+### Runtime validation of the seek races
+
+The pure and static tests cannot reach these: they assert decisions and source text, not DOM/media
+event sequences. `scripts/check-review-audio-handover.ps1` drives a release build over CDP and reports
+every media element's audible state, so a stranded mute shows as `audible: 0` and an unsettled claim as
+`tok != settled`.
+
+| Stage | mode | video muted | sidecars audible | tokens | skew |
+|---|---|---|---|---|---|
+| After warm handover | `sidecars` | true | 2 / 2 | tok 2 = settled 2 | 13 ms |
+| After 12 overlapping seeks | `sidecars` | true | 2 / 2 | tok 14 = settled 14 | 8 ms |
+| After 8 overlapping seeks while playing | `sidecars` | true | 2 / 2 | tok 22 = settled 22 | 4 ms |
+
+Tokens advancing 2 → 14 → 22 confirms all 20 overlapping claims occurred, and `settledToken` converged
+with `seekToken` each time. Pre-fix that storm is what stranded a sidecar muted.
+
+Note the first probe attempt measured nothing and reported clean: it looked for `<audio>` elements in
+the DOM, but sidecars are built with `new Audio()` and never appended. The state is reachable as
+globals only because the UI loads as classic scripts, not modules.
+
 ### Known residual: brief echo when switching audio tracks mid-playback
 
 Confirmed by ear and accepted. **A different mechanism from the fault above**, so it is not a partial
