@@ -58,6 +58,59 @@ not measure the defect and nothing built behind it can be trusted.
       audible element with no muting, so a scrub during playback must produce violations. Record the
       failing output in this plan.
 
+### Task 1 outcome — a valid negative control, not yet a durable gate
+
+`scripts/gate-review-audio-alignment.ps1` failed on `develop` as required: **34 samples** with a
+sidecar observed `muted === false` while `seeking === true`, both tracks, reproducible across runs.
+That is real evidence that `develop` exposes a large, observable unsafe state.
+
+**It cannot become the pass criterion, because a green from it would prove nothing.** Polling at 4 ms
+via `setInterval` can miss a `false → true → false` transition entirely — and the windows measured
+earlier in this investigation were ~2 ms. Absence of samples is not absence of the state. Recorded
+here so no future run is read as proof:
+
+- **Sampling cannot prove a negative.** The durable assertion has to come from instrumenting the
+  single writer (Task 3), where every write to `muted` is recorded *by construction* with its
+  justification. An audit log can be complete; a poll cannot.
+- **It observes only `activeReviewAudioSidecars`.** Prepared, outgoing, and stale sets — the track-switch
+  participants that matter most — are invisible to it.
+- **It checks native `seeking`, not authoritative outstanding alignment.** Assigned-but-not-yet-seeking,
+  and off-target after a stale completion, both pass.
+- **`muted === false && seeking === true` proves output *eligibility*, not emission.** Paused state and
+  volume are not recorded, so an unmuted-but-paused element counts as a violation and an unmuted
+  zero-volume element counts as audible. The loopback comparison remains the only direct audio evidence.
+
+**Two claims made when reporting this run were unsupported and are withdrawn:**
+
+- "2 muted transitions in 2733 samples" — the sampler counts a first observation (`!prev`) as a
+  transition, so those two were the two tracks' initial reads. There were **zero** actual transitions,
+  which strengthens the finding (`develop` never mutes) but the figure as stated was wrong.
+- "Violations cluster in the scrub window, not at clip open" — the sampler is installed *after* both
+  clip opens, so this run contributes **no clip-open observation at all**. Violations begin near
+  +2009 ms because the script sleeps two seconds and then scrubs. #109's correctness rests on its own
+  traces, not on this run.
+
+Harness defects to fix before it is trusted for anything but the negative control, each a false-green
+risk:
+
+- [ ] Every exercise's return value is discarded (`| Out-Null`, 9 sites). `no-seek-path`,
+      `single-track`, and a failed play must fail the gate, not pass silently.
+- [ ] Playback uses `video.play()` with the rejection suppressed and always reports `playing`; it must
+      click the real play control and verify the result.
+- [ ] The track-switch exercise toggles the last checkbox, which on an output+microphone fixture likely
+      lands in **output-only `direct` mode** — bypassing sidecar preparation and activation entirely.
+      The observed terminal `mode=direct` corroborates this. It must assert it actually entered a
+      sidecar switch.
+- [ ] Fabricated `pointerdown/move/up` in one task hit `setPointerCapture(ev.pointerId)`
+      (`review-player.js:1457`), which may throw for a pointer id that was never active. Use genuine
+      CDP `Input.dispatchMouseEvent`, and subscribe to `window.error` / `unhandledrejection` so an
+      async handler failure cannot pass unnoticed.
+- [ ] Terminal assertions promised by the plan are absent: no zero-timeout-settlement check, and
+      desired playback is never compared with actual (`videoPaused` is collected and unused).
+- [ ] Active ids are compared with `currentReviewAudioTrackIds` — two app-produced values that can be
+      stale together. Compare against the selection the **harness** requested, captured before acting.
+- [ ] `Cdp` inspects `exceptionDetails` but not protocol-level errors or a missing result.
+
 ## Task 2: Deterministic state-transition tests
 
 Pure, in `player-core.js`, run under Boa on both CI OSes. Each is a sequence, not a single decision.
@@ -77,7 +130,13 @@ Pure, in `player-core.js`, run under Boa on both CI OSes. Each is a sequence, no
       `current | stale | committed-with-error`, never a silent success.
 - [ ] Confirm each fails before implementation.
 
-## Task 3: Single-writer reconciliation
+**These must drive one reducer that production actually uses.** The previous attempt's failure mode was
+a collection of individually-correct pure helpers wired together by untested DOM glue — every P1 lived
+in the glue, not in any helper. So the sequences above exercise a single state machine that
+`review-player.js` delegates to, and a contract test pins that the DOM layer holds no decision logic of
+its own.
+
+## Task 3: Single-writer reconciliation, and the durable gate it enables
 
 - [ ] One `reconcileSidecarOutput()` computes and assigns `muted` for every sidecar from the invariant
       above. Nothing else assigns `muted` — grep for it as a contract test.
@@ -86,6 +145,22 @@ Pure, in `player-core.js`, run under Boa on both CI OSes. Each is a sequence, no
       ordering mistake can expose them.
 - [ ] Replace `applyReviewAudioOutput`'s global write with the reconcile pass, so a volume change
       during a seek cannot unmute mid-flight.
+
+**The durable gate belongs here, not in Task 1.** Because the single writer is the only place `muted`
+changes, it can emit a complete audit record — and a complete record supports a negative, which
+sampling never can.
+
+- [ ] Every reconciliation appends `{ element, from, to, mode, eligible, outstandingAlignment, reason }`
+      to an in-page audit log, behind a flag so it is off in normal use.
+- [ ] The gate asserts over the **audit log**, not samples: no entry may set `muted: false` while that
+      element had an outstanding alignment, was not in the current active set, or was ineligible by
+      mode. This is exhaustive over writes by construction.
+- [ ] Assert **zero timeout-manufactured clearings**: an alignment cleared because a timer fired, rather
+      than because the current claim satisfied `!seeking` and position-within-tolerance, is a failure.
+- [ ] Keep Task 1's sampler as a **cross-check only** — if it ever records a violation the audit log
+      does not explain, the single-writer invariant has been bypassed and that is itself a failure.
+- [ ] Loopback comparison still required for emission (Task 6). The audit proves eligibility was never
+      wrong; only audio proves nothing escaped.
 
 ## Task 4: Transport intent
 
