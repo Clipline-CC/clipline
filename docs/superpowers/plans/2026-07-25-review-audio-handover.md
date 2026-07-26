@@ -281,6 +281,40 @@ presence), and that the resume and timeout decisions are used rather than a raw 
 - [ ] Do **not** crossfade. Crossfading two misaligned copies produces echo or comb filtering —
       strictly worse than the current artefact. Alignment must be proven by Task 1's trace first.
 
+### Task 3 outcome — both mechanisms gone from the traces
+
+Re-traced on a release build, cold and warm. **Neither run now contains a single sidecar seek
+assigned while unmuted** — the query that previously returned the warm backward seek returns nothing.
+
+| | Before | After |
+|---|---|---|
+| Warm: audible backward seek | `from=0.014 → target=0.000845`, `muted=False` | **none** |
+| Warm: state at output switch | `seeking: true` on both sidecars | `seeking: false` on both |
+| Warm: settlement `seeked` | forced a realignment | `confirmedSource=assignment`, `forceSeek=False` |
+| Cold: sidecar vs video at switch | — | exact match (both `0.061838`) |
+| Cold: post-resume skew | ~71 ms | **~27.5 ms** |
+
+The stationary alignment lands sidecars exactly on the video's position, and `handover_resume`
+reports `play=True intent=internal-pause wasPlaying=True` — the transaction's own pause is correctly
+not read as user intent. Post-resume skew improved as the plan speculated it might, and is inside the
+±100 ms the drift controller permits by design.
+
+Two contracts were **deliberately changed**, not merely repaired:
+
+- `audio_sidecar_transport_follows_only_the_video_clock` pinned the literal
+  `syncReviewAudioSidecars({ forceSeek: true });` — i.e. it *encoded the bug*, requiring every video
+  `seeked` to bypass the drift tolerance. It now pins provenance-driven forcing instead.
+- `valid_sidecar_activation_reads_latest_player_state_without_swapping_video` pinned activation's
+  old snapshot literals. Its intent — read live state, never swap the video source — is preserved and
+  arguably strengthened, since the playhead is now re-read per alignment attempt. It now also pins
+  that the prepared *and* previous sets are paused, which is the correction that made "stationary"
+  true.
+
+**Still outstanding: the loopback waveform comparison.** Everything above is control-plane. The
+traces prove no audible element is seeked and no unmute happens mid-seek, which removes both
+candidate mechanisms — but only a recording of the actual output can confirm the repeat a listener
+hears is gone.
+
 ## Task 4: Fallback if the stationary handover proves unreliable
 
 Only if Task 3's trace still shows repetition or the pause is perceptible as a hitch.

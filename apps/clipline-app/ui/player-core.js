@@ -295,21 +295,30 @@ const PlayerCore = (() => {
     targetTime: null,
     sourceGeneration: 0,
     metadataGeneration: null,
+    // Provenance of `targetTime`: "user" for an explicit reposition, "assignment"
+    // for a source's own resume seek. Only a user reposition justifies bypassing
+    // the sidecar drift tolerance — settlement forcing a realignment is what
+    // dragged audible sidecars backward at clip start.
+    targetSource: null,
   });
 
   const requestLogicalSeek = (state, time, duration) => {
     if (!Number.isFinite(time)) return state;
-    return { ...state, targetTime: clampTime(time, duration) };
+    return { ...state, targetTime: clampTime(time, duration), targetSource: "user" };
   };
 
   const beginSourceAssignment = (state, sourceGeneration, resumeTime, duration) => {
-    const requested = Number.isFinite(state && state.targetTime)
+    const carried = Number.isFinite(state && state.targetTime);
+    const requested = carried
       ? state.targetTime
       : Number.isFinite(resumeTime) ? resumeTime : 0;
     return {
       targetTime: clampTime(requested, duration),
       sourceGeneration,
       metadataGeneration: null,
+      // A carried user target keeps its provenance across the replacement;
+      // relabelling it would silently downgrade a real reposition.
+      targetSource: carried && state.targetSource === "user" ? "user" : "assignment",
     };
   };
 
@@ -330,20 +339,93 @@ const PlayerCore = (() => {
         || state.metadataGeneration !== sourceGeneration
         || !Number.isFinite(state.targetTime)
         || !Number.isFinite(currentTime)) {
-      return { state, applyTime: null, confirmed: false };
+      return { state, applyTime: null, confirmed: false, confirmedSource: null };
     }
     const targetTime = clampTime(state.targetTime, duration);
     if (Math.abs(currentTime - targetTime) <= SEEK_CONFIRM_TOLERANCE_S) {
       return {
-        state: { ...state, targetTime: null },
+        state: { ...state, targetTime: null, targetSource: null },
         applyTime: null,
         confirmed: true,
+        // Reported so the caller can force a sidecar realignment for a user
+        // reposition while leaving settlement to the ordinary tolerance path.
+        confirmedSource: state.targetSource || null,
       };
     }
+    // A completion for a superseded position: re-apply the current target and
+    // keep its provenance, so only the real arrival can confirm it.
     return {
       state: { ...state, targetTime },
       applyTime: targetTime,
       confirmed: false,
+      confirmedSource: null,
+    };
+  };
+
+  /// Only an explicit user reposition may bypass the sidecar drift tolerance.
+  const sidecarRealignmentForced = (confirmedSource) => confirmedSource === "user";
+
+  const sidecarAlignmentSettled = (sidecar) => {
+    if (!sidecar) return false;
+    if (sidecar.seeking) return false;
+    const token = Number(sidecar.seekToken);
+    const settled = Number(sidecar.settledToken);
+    if (Number.isFinite(token) && Number.isFinite(settled) && settled >= token) return true;
+    // A no-op seek may never emit `seeked`, so an already-satisfied target counts
+    // as settled; otherwise the backstop timeout becomes the normal path.
+    const current = Number(sidecar.currentTime);
+    const target = Number(sidecar.targetTime);
+    return Number.isFinite(current)
+      && Number.isFinite(target)
+      && Math.abs(current - target) <= SEEK_CONFIRM_TOLERANCE_S;
+  };
+
+  /// Whether sidecar output may become audible yet.
+  ///
+  /// Ownership is per-sidecar and token-revisioned: several seeks overlap inside
+  /// one selection generation, so a completion for an older token must not settle
+  /// a newer one. Stale generations are ignored rather than blocking, and a
+  /// transport change after the stationary target was captured requires the
+  /// alignment to restart against the latest logical target.
+  const sidecarHandoverDecision = (sidecars, generation, transport = {}) => {
+    const captured = Number(transport && transport.capturedTransport);
+    const current = Number(transport && transport.currentTransport);
+    const restart = Number.isFinite(captured)
+      && Number.isFinite(current)
+      && captured !== current;
+    const currentGeneration = (sidecars || []).filter(
+      (sidecar) => sidecar && sidecar.generation === generation,
+    );
+    const outstanding = currentGeneration
+      .filter((sidecar) => !sidecarAlignmentSettled(sidecar))
+      .map((sidecar) => sidecar.audioTrackId);
+    return {
+      ready: !restart && currentGeneration.length > 0 && outstanding.length === 0,
+      outstanding,
+      restart,
+    };
+  };
+
+  /// Restores the user's latest intent after the handover's internal pause. The
+  /// transaction's own pause is not user intent and must not suppress a resume.
+  const handoverResumeDecision = (snapshot, user = {}) => {
+    const intent = user && user.intent;
+    if (intent === "play") return { play: true };
+    if (intent === "pause") return { play: false };
+    return { play: Boolean(snapshot && snapshot.wasPlaying) };
+  };
+
+  /// On timeout, restore the *complete* previous output state. Falling back to
+  /// `direct` would make embedded audio audible after a `muted` selection, and
+  /// would discard a valid sidecar set during a mid-play track change.
+  const handoverTimeoutDecision = (previous = {}) => {
+    const mode = previous && previous.mode;
+    const known = mode === "muted" || mode === "sidecars" || mode === "direct";
+    return {
+      mode: known ? mode : "direct",
+      restoreSidecars: Array.isArray(previous && previous.sidecars)
+        ? previous.sidecars.slice()
+        : [],
     };
   };
 
@@ -2077,6 +2159,10 @@ const PlayerCore = (() => {
     beginSourceAssignment,
     metadataSeekDecision,
     seekedDecision,
+    sidecarRealignmentForced,
+    sidecarHandoverDecision,
+    handoverResumeDecision,
+    handoverTimeoutDecision,
     logicalPlaybackTime,
     relativeSeekTarget,
     percentFor,

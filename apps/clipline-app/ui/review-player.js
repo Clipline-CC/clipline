@@ -147,26 +147,57 @@ function resetAudioHandoverTrace(reason) {
   traceAudioHandover("trace_reset", { reason });
 }
 
-/// One-shot `seeking`/`seeked` witnesses so an unresolved seek is visible as a
-/// missing `seeked` rather than inferred.
-function watchAudioSeek(audio, audioTrackId, target, phase) {
-  const onSeeking = () => traceAudioHandover("sidecar_seeking", {
-    audioTrackId, phase, currentTime: audio.currentTime,
-  });
+/// Claim a sidecar's next alignment and witness its completion.
+///
+/// Ownership is per-sidecar and token-revisioned rather than a shared flag:
+/// several seeks overlap inside one selection generation (prepare, first
+/// activation, final alignment, and possibly a user seek), so a completion for an
+/// older token must not settle a newer one. The listener is one-shot and keyed to
+/// the token it claimed, and disposal aborts it.
+function claimSidecarAlignment(sidecar, target, phase) {
+  const audio = sidecar.element;
+  const token = (sidecar.seekToken || 0) + 1;
+  sidecar.seekToken = token;
+  sidecar.targetTime = target;
+  if (sidecar.abortAlignment) sidecar.abortAlignment();
   const onSeeked = () => {
-    traceAudioHandover("sidecar_seeked", {
-      audioTrackId, phase, target, currentTime: audio.currentTime, muted: audio.muted,
-    });
-    audio.removeEventListener("seeking", onSeeking);
     audio.removeEventListener("seeked", onSeeked);
+    sidecar.abortAlignment = null;
+    // Settle only the token this listener claimed.
+    if (sidecar.seekToken !== token) return;
+    sidecar.settledToken = token;
+    traceAudioHandover("sidecar_seeked", {
+      audioTrackId: sidecar.audioTrackId, phase, token, target,
+      currentTime: audio.currentTime, muted: audio.muted,
+    });
   };
-  audio.addEventListener("seeking", onSeeking);
+  sidecar.abortAlignment = () => {
+    audio.removeEventListener("seeked", onSeeked);
+    sidecar.abortAlignment = null;
+  };
   audio.addEventListener("seeked", onSeeked);
+  return token;
+}
+
+/// Snapshot for `PlayerCore.sidecarHandoverDecision`.
+function sidecarAlignmentStates(sidecars, generation) {
+  return (sidecars || []).map((sidecar) => ({
+    audioTrackId: sidecar.audioTrackId,
+    generation,
+    seekToken: sidecar.seekToken || 0,
+    settledToken: sidecar.settledToken || 0,
+    seeking: sidecar.element.seeking,
+    currentTime: sidecar.element.currentTime,
+    targetTime: sidecar.targetTime,
+  }));
 }
 
 function disposeReviewAudioSidecarSet(sidecars) {
   for (const sidecar of sidecars || []) {
     const audio = sidecar.element;
+    // Abort this sidecar's own alignment listener rather than clearing shared
+    // state, so a disposal cannot settle or strand another set's seek.
+    if (sidecar.abortAlignment) sidecar.abortAlignment();
     audio.pause();
     audio.removeAttribute("src");
     audio.load();
@@ -215,7 +246,8 @@ async function syncReviewAudioSidecarSet(sidecars, options = {}) {
     videoPaused: videoState.paused,
     sidecars: (sidecars || []).length,
   });
-  for (const { element: audio, audioTrackId } of sidecars || []) {
+  for (const sidecar of sidecars || []) {
+    const { element: audio, audioTrackId } = sidecar;
     const decision = PlayerCore.audioSidecarSyncDecision(
       videoState,
       {
@@ -230,7 +262,7 @@ async function syncReviewAudioSidecarSet(sidecars, options = {}) {
         audioTrackId, phase, from: audio.currentTime, target: decision.seekTime,
         paused: audio.paused, muted: audio.muted,
       });
-      watchAudioSeek(audio, audioTrackId, decision.seekTime, phase);
+      claimSidecarAlignment(sidecar, decision.seekTime, phase);
       audio.currentTime = decision.seekTime;
     }
     audio.playbackRate = decision.playbackRate;
@@ -339,45 +371,125 @@ async function prepareReviewAudioSidecars(sidecars, generation) {
   }
 }
 
-async function activatePreparedReviewAudioSidecars(prepared, request) {
-  if (!previewRequestStillCurrent(request)) throw new Error("stale audio selection");
-  const activationState = {
-    currentTime: reviewPlayheadTime(),
-    playbackRate: video.playbackRate,
-    paused: video.paused,
-    ended: video.ended,
-  };
-  traceAudioHandover("activation_begin", {
-    videoTime: activationState.currentTime,
-    videoPaused: activationState.paused,
-    sidecars: (prepared || []).length,
-  });
-  await syncReviewAudioSidecarSet(prepared, {
-    forceSeek: true,
-    videoState: activationState,
-    tracePhase: "activate_first",
-  });
-  if (!previewRequestStillCurrent(request)) throw new Error("stale audio selection");
+const HANDOVER_ALIGNMENT_TIMEOUT_MS = 750;
+const HANDOVER_ALIGNMENT_ATTEMPTS = 3;
 
-  const finalState = {
-    currentTime: reviewPlayheadTime(),
-    playbackRate: video.playbackRate,
-    paused: video.paused,
-    ended: video.ended,
-  };
-  await syncReviewAudioSidecarSet(prepared, {
-    forceSeek: true,
-    videoState: finalState,
-    tracePhase: "activate_second",
-  });
+/// Bump on any transport change so an alignment captured against an older
+/// playhead is rejected rather than switched into. A user seek does not advance
+/// the selection generation, so this is the only signal that the captured
+/// stationary target went stale.
+var reviewTransportEpoch = 0;
+/// The user's latest play/pause request, or "internal-pause" for the handover's
+/// own pause — which must never be mistaken for user intent.
+var reviewTransportIntent = null;
+
+function noteReviewTransportIntent(intent) {
+  reviewTransportIntent = intent;
+  if (intent !== "internal-pause") reviewTransportEpoch += 1;
+}
+
+/// Bring `sidecars` to a stationary `target` and wait until every one has
+/// genuinely settled there. Resolves false on timeout so the caller can restore
+/// the previous output rather than unmute into an unknown position.
+async function alignSidecarsWhilePaused(sidecars, target, generation, capturedEpoch) {
+  for (const sidecar of sidecars) {
+    claimSidecarAlignment(sidecar, target, "handover_align");
+    sidecar.element.currentTime = target;
+  }
+  const deadline = Date.now() + HANDOVER_ALIGNMENT_TIMEOUT_MS;
+  for (;;) {
+    const decision = PlayerCore.sidecarHandoverDecision(
+      sidecarAlignmentStates(sidecars, generation),
+      generation,
+      { capturedTransport: capturedEpoch, currentTransport: reviewTransportEpoch },
+    );
+    if (decision.restart) return "restart";
+    if (decision.ready) return "ready";
+    if (Date.now() >= deadline) {
+      traceAudioHandover("handover_alignment_timeout", { outstanding: decision.outstanding });
+      return "timeout";
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 15));
+  }
+}
+
+async function activatePreparedReviewAudioSidecars(prepared, request) {
   if (!previewRequestStillCurrent(request)) throw new Error("stale audio selection");
 
   const previous = activeReviewAudioSidecars;
+  const previousState = {
+    mode: reviewAudioMode,
+    sidecars: previous.map((sidecar) => sidecar.audioTrackId),
+  };
+  const snapshot = { wasPlaying: !video.paused && !video.ended };
+  traceAudioHandover("activation_begin", {
+    videoTime: reviewPlayheadTime(),
+    wasPlaying: snapshot.wasPlaying,
+    previousMode: previousState.mode,
+    sidecars: (prepared || []).length,
+  });
+
+  // Pause every source, not just the video: `prepared` is already playing from
+  // the load pass but is not yet in `activeReviewAudioSidecars`, so no video
+  // pause handler reaches it. Without this, sidecars keep advancing while their
+  // siblings seek and "nothing is flowing" would be false.
+  const resumeAfter = snapshot.wasPlaying;
+  if (resumeAfter) {
+    noteReviewTransportIntent("internal-pause");
+    video.pause();
+  }
+  for (const sidecar of prepared) sidecar.element.pause();
+  for (const sidecar of previous) sidecar.element.pause();
+
+  let outcome = "restart";
+  for (let attempt = 0; attempt < HANDOVER_ALIGNMENT_ATTEMPTS && outcome === "restart"; attempt++) {
+    if (!previewRequestStillCurrent(request)) throw new Error("stale audio selection");
+    const capturedEpoch = reviewTransportEpoch;
+    const target = reviewPlayheadTime();
+    traceAudioHandover("handover_align_begin", { attempt, target, capturedEpoch });
+    // eslint-disable-next-line no-await-in-loop -- each attempt supersedes the last
+    outcome = await alignSidecarsWhilePaused(
+      prepared,
+      target,
+      request.sidecarGeneration,
+      capturedEpoch,
+    );
+  }
+  if (!previewRequestStillCurrent(request)) throw new Error("stale audio selection");
+
+  if (outcome !== "ready") {
+    // Restore the complete previous output state. Reverting to `direct` would
+    // make embedded audio audible after a `muted` selection and would discard a
+    // valid sidecar set during a mid-play track change.
+    const fallback = PlayerCore.handoverTimeoutDecision(previousState);
+    traceAudioHandover("handover_restored_previous", { outcome, mode: fallback.mode });
+    reviewAudioMode = fallback.mode;
+    applyReviewAudioOutput();
+    disposeReviewAudioSidecarSet(prepared);
+    if (PlayerCore.handoverResumeDecision(snapshot, { intent: reviewTransportIntent }).play) {
+      void video.play().catch(() => syncPlayState());
+    }
+    refreshReviewAudioDriftTimer();
+    throw new Error(`audio handover did not settle (${outcome})`);
+  }
+
+  // Final gate immediately before the switch: the loop above proved readiness a
+  // tick ago, and a transport change or a fresh seek since then must still block
+  // an unmute at a stale position.
+  const gate = PlayerCore.sidecarHandoverDecision(
+    sidecarAlignmentStates(prepared, request.sidecarGeneration),
+    request.sidecarGeneration,
+    { capturedTransport: reviewTransportEpoch, currentTransport: reviewTransportEpoch },
+  );
+  if (!gate.ready) {
+    traceAudioHandover("handover_gate_refused", { outstanding: gate.outstanding });
+    disposeReviewAudioSidecarSet(prepared);
+    throw new Error("audio handover gate refused the switch");
+  }
+
   for (const { element: audio } of previous) audio.muted = true;
   activeReviewAudioSidecars = prepared;
   reviewAudioMode = "sidecars";
-  // The moment under investigation: if `activate_second`'s `sidecar_seeked`
-  // has not appeared above this line, the sidecar unmutes mid-seek.
   traceAudioHandover("output_switched_to_sidecars", {
     videoTime: reviewPlayheadTime(),
     sidecarTimes: prepared.map((s) => ({
@@ -389,6 +501,17 @@ async function activatePreparedReviewAudioSidecars(prepared, request) {
   applyReviewAudioOutput();
   audioHandoverAwaitingFirstDrift = true;
   disposeReviewAudioSidecarSet(previous);
+
+  // Restore the user's latest intent, not the pre-pause snapshot: they may have
+  // paused or pressed play while the alignment ran, and their action wins.
+  const resume = PlayerCore.handoverResumeDecision(snapshot, { intent: reviewTransportIntent });
+  traceAudioHandover("handover_resume", {
+    play: resume.play, intent: reviewTransportIntent, wasPlaying: snapshot.wasPlaying,
+  });
+  if (resume.play) {
+    void video.play().catch(() => syncPlayState());
+    await syncReviewAudioSidecarSet(prepared, { tracePhase: "handover_resume" });
+  }
   refreshReviewAudioDriftTimer();
 }
 
@@ -1287,8 +1410,9 @@ function renderRuler() {
 
 function seekTo(time, options = {}) {
   if (!currentClip || !Number.isFinite(time)) return;
-  // TEMPORARY (Task 1b): distinguish an explicit reposition from the initial
-  // source settlement, which reaches the same forced-sync path.
+  // A user reposition invalidates any stationary target an in-flight handover
+  // captured, so it must restart the alignment rather than switch at t0.
+  noteReviewTransportIntent("seek");
   traceAudioHandover("seek_to", { time, videoTime: video.currentTime, audioMode: reviewAudioMode });
   if (!options.keepGameEventSelection) clearGameEventSelection();
   if (!options.keepGamePlaySelection) clearGamePlaySelection();
@@ -1317,21 +1441,21 @@ video.addEventListener("seeked", () => {
   paintTimeline();
   syncGameEventRail(current);
   syncGamePlayRail(current);
-  // TEMPORARY (Task 1b): prove this handler is the origin of the forced sidecar
-  // seek that lands on already-audible elements, and record whether it is the
-  // initial source settlement or a genuine reposition.
-  traceAudioHandover("video_seeked_forces_sidecar_sync", {
+  // Only an explicit user reposition may bypass the drift tolerance. The initial
+  // source settlement reaches this handler too, and forcing there dragged
+  // already-audible sidecars backward for no correction — the drift it "fixed"
+  // was an order of magnitude inside the tolerance.
+  const forceSeek = PlayerCore.sidecarRealignmentForced(decision.confirmedSource);
+  traceAudioHandover("video_seeked_sidecar_sync", {
     videoTime: video.currentTime,
     logicalTime: current,
-    metadataGeneration: reviewSeekState.metadataGeneration,
-    sourceGeneration: reviewSourceGeneration,
-    appliedTime: decision.applyTime,
+    confirmedSource: decision.confirmedSource,
+    forceSeek,
     audioMode: reviewAudioMode,
-    activeSidecars: activeReviewAudioSidecars.length,
     sidecarsAudible: reviewAudioMode === "sidecars"
       && activeReviewAudioSidecars.some((s) => !s.element.muted),
   });
-  syncReviewAudioSidecars({ forceSeek: true });
+  syncReviewAudioSidecars({ forceSeek });
 });
 
 function seekBy(delta) {
@@ -1345,8 +1469,15 @@ function seekBy(delta) {
 
 function togglePlay() {
   if (!currentClip) return;
-  if (video.paused) video.play().catch(() => syncPlayState());
-  else video.pause();
+  // Recorded so an in-flight audio handover restores what the user last asked
+  // for rather than the transport state it captured before pausing.
+  if (video.paused) {
+    noteReviewTransportIntent("play");
+    video.play().catch(() => syncPlayState());
+  } else {
+    noteReviewTransportIntent("pause");
+    video.pause();
+  }
 }
 
 function syncPlayState() {

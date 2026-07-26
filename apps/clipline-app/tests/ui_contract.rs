@@ -2294,7 +2294,14 @@ fn audio_sidecar_transport_follows_only_the_video_clock() {
         .nth(1)
         .and_then(|tail| tail.split("function seekBy").next())
         .expect("seeked handler");
-    assert!(seeked.contains("syncReviewAudioSidecars({ forceSeek: true });"));
+    // Deliberately changed: this previously pinned `forceSeek: true`, i.e. *every*
+    // video `seeked` bypassing the drift tolerance. Traced, that made the initial
+    // source settlement drag already-audible sidecars backward ~20 ms for no
+    // correction — the drift was far inside the tolerance and the element landed
+    // back where it started. Forcing is now driven by seek provenance, so a user
+    // reposition still realigns immediately while settlement does not.
+    assert!(seeked.contains("syncReviewAudioSidecars({ forceSeek });"));
+    assert!(seeked.contains("PlayerCore.sidecarRealignmentForced(decision.confirmedSource)"));
     assert!(review.contains("window.setInterval(() => syncReviewAudioSidecars(), 500)"));
 }
 
@@ -2357,20 +2364,25 @@ fn valid_sidecar_activation_reads_latest_player_state_without_swapping_video() {
     assert!(!run.contains("video.src"));
 
     let activate = js_function_body(&review, "activatePreparedReviewAudioSidecars");
-    assert!(activate.contains("currentTime: reviewPlayheadTime()"));
-    assert!(activate.contains("playbackRate: video.playbackRate"));
-    assert!(activate.contains("paused: video.paused"));
-    assert!(activate.contains("ended: video.ended"));
-    let await_play = activate
-        .find("await syncReviewAudioSidecarSet(")
-        .expect("activation waits for every muted sidecar play promise");
+    // Still reads the live playhead rather than a stale snapshot -- now re-read per
+    // alignment attempt, since a mid-handover seek invalidates the captured target.
+    assert!(activate.contains("reviewPlayheadTime()"));
+    assert!(activate.contains("video.paused"));
+    // The transaction pauses every source before aligning: `prepared` is already
+    // playing from the load pass but is not yet in `activeReviewAudioSidecars`, so
+    // no video pause handler reaches it.
+    assert!(activate.contains("for (const sidecar of prepared) sidecar.element.pause();"));
+    assert!(activate.contains("for (const sidecar of previous) sidecar.element.pause();"));
+    let align = activate
+        .find("await alignSidecarsWhilePaused(")
+        .expect("activation aligns every sidecar from a stationary position");
     let install = activate
         .find("activeReviewAudioSidecars = prepared;")
         .expect("complete prepared set is installed atomically");
     let switch_output = activate
         .find("reviewAudioMode = \"sidecars\";")
-        .expect("sidecar output becomes audible only after readiness/play succeeds");
-    assert!(await_play < install && install < switch_output);
+        .expect("sidecar output becomes audible only after alignment settles");
+    assert!(align < install && install < switch_output);
     assert!(activate[install..].contains("applyReviewAudioOutput();"));
 }
 
