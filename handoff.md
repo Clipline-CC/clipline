@@ -4,6 +4,67 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-26): Review audio handover
+
+Plan: `docs/superpowers/plans/2026-07-25-review-audio-handover.md`. Traces committed alongside it
+(`2026-07-25-handover-trace-{cold,warm,after-cold,after-warm}.json`).
+
+**Symptom:** every clip opened with a split-second audio repeat at the start. Not a recording fault —
+replaying from the start was clean and the same file was clean in VLC.
+
+**Why:** the review player does not play the clip's embedded audio. It plays separate sidecar
+`<audio>` elements against a muted video so multi-track selection works, and the handover between
+them was unguarded in two places.
+
+1. **Settlement forced a realignment.** The `video`'s `seeked` handler called
+   `syncReviewAudioSidecars({ forceSeek: true })` unconditionally, and `forceSeek` bypasses the drift
+   tolerance entirely. The *initial source settlement* reaches that handler too, so on a warm cache it
+   fired ~26 ms after the sidecars became audible and seeked them **backward ~20 ms** — while the
+   drift was far inside `AUDIO_SIDECAR_HARD_SEEK_TOLERANCE_S` (0.5 s) and the element landed back
+   where it started. Pure churn with an audible cost. Forcing is now driven by seek provenance:
+   `beginSourceAssignment` tags `"assignment"`, `requestLogicalSeek` tags `"user"`, and only a user
+   reposition bypasses the tolerance.
+2. **Output switched mid-seek.** Activation ran two forced seeks; on the second the sidecars were
+   already playing, so no play promise existed, `await Promise.all([])` resolved instantly, and the
+   unmute happened with `seeking === true`. Activation is now a stationary transaction: pause every
+   source, capture the stationary playhead, align, wait for each sidecar to genuinely settle, then
+   switch.
+
+**The fault was ordering-dependent, which is why it looked intermittent.** Warm handover (~87 ms) beats
+the video's initial seek (~117 ms) and loses; cold handover (~176 ms) arrives after it and is
+unaffected. A populated preview cache is the steady state, so warm is what users hit.
+
+Sharp edges worth knowing:
+
+- **Ownership must be per-sidecar and token-revisioned.** Several seeks overlap inside one selection
+  generation (prepare, first activation, final alignment, possibly a user seek), so a late `seeked`
+  can settle a newer assignment's claim. `ui_contract.rs` prohibits the legacy single-flag identifier
+  for exactly this reason, building it as `["pending","Seek"].concat()` so the guard cannot trip on
+  itself. `reviewSeekRevision` is prohibited too.
+- **`cargo test --workspace` can pass against a stale binary.** `ui_contract.rs` embeds
+  `tests/player_core.rs` via `include_str!`, and cargo does *not* rebuild it when only that file
+  changes. Touch the consuming test or the run is meaningless — this hid a failing guard once.
+- **Pausing the video does not pause the prepared sidecars.** They start during the load pass but are
+  not in `activeReviewAudioSidecars` until commit, so no video pause handler reaches them.
+- **Nothing may throw past the commit point.** After `activeReviewAudioSidecars = prepared`, the
+  caller's error cleanup would dispose the *active* set while the mode stayed `sidecars` — silence.
+- **`play()` restarts ended media by design**, so transport intent is epoch-scoped to the transaction
+  rather than read from global history.
+- Do **not** crossfade sidecars. Crossfading misaligned copies gives echo or comb filtering.
+
+**Verification status, honestly:** workspace tests and warning-denied Clippy green; cold and warm
+traces show no sidecar seek assigned while unmuted and no unmute mid-seek; confirmed by ear on a
+release build. The plan's **loopback waveform comparison was not completed** — an attempt produced
+invalid evidence (aligned 11.7 min into a 22-min source at 0.66 correlation, because the save window
+was mostly not the review playback and the player outputs a *mix* of two previews). Task 5 is marked
+incomplete in the plan. A valid run needs a single-audio-track clip, a tight save window, the clip's
+own `audio-preview-*.mp4` as the source, and a correlation gate.
+
+**Known residual, accepted:** a brief echo when switching audio tracks mid-playback. A *different*
+mechanism — the outgoing set is muted in the same tick the incoming set is unmuted, and muting does
+not flush already-queued audio, so two *aligned* copies overlap. Fix by letting the outgoing set drain
+a frame before unmuting, if it ever matters.
+
 ## Checkpoint (2026-07-23): Nightly 0.1.41
 
 Nightly 0.1.41 contains PR #103's WASAPI endpoint-loss recovery and PR #104's private diagnostic
