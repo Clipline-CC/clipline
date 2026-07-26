@@ -3115,3 +3115,266 @@ fn only_user_repositions_force_a_sidecar_realignment() {
         "false"
     );
 }
+
+// --- Audio output state machine (plan 2026-07-26-review-audio-alignment, Task 2) ---
+//
+// One reducer that production delegates to. The previous attempt failed because
+// individually-correct pure helpers were wired together by untested DOM glue and
+// every P1 lived in the glue, so these are *sequences* over a single machine, and
+// `sidecarMuteMap` is the only source of truth the DOM layer may assign from.
+
+/// Build a state with one active sidecar in `sidecars` mode, ready to align.
+fn audio_state(ctx: &mut Context) -> String {
+    eval(
+        ctx,
+        "(() => { \
+           let s = PlayerCore.createAudioOutputState(); \
+           s = PlayerCore.audioOutputReduce(s, { type: 'setMode', mode: 'sidecars' }); \
+           s = PlayerCore.audioOutputReduce(s, { type: 'addSidecar', id: 'output', generation: 1, role: 'active' }); \
+           s = PlayerCore.audioOutputReduce(s, { type: 'setGeneration', generation: 1 }); \
+           window.__s = s; return 'ok'; \
+         })()",
+    )
+}
+
+/// A completion for a superseded claim must not clear the live claim's alignment.
+/// This is the exact race that shipped twice: a stale `seeked` unmuting an element
+/// whose newer seek is still in flight.
+#[test]
+fn a_stale_seek_completion_leaves_the_live_alignment_outstanding() {
+    let mut ctx = player_core_context();
+    audio_state(&mut ctx);
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "(() => { \
+               let s = window.__s; \
+               s = PlayerCore.audioOutputReduce(s, { type: 'claimAlignment', id: 'output', claim: 1, target: 5 }); \
+               s = PlayerCore.audioOutputReduce(s, { type: 'claimAlignment', id: 'output', claim: 2, target: 9 }); \
+               s = PlayerCore.audioOutputReduce(s, { type: 'observeSeek', id: 'output', claim: 1, seeking: false, currentTime: 5 }); \
+               return { outstanding: PlayerCore.hasOutstandingAlignment(s, 'output'), muted: PlayerCore.sidecarMuteMap(s).output }; \
+             })()"
+        ),
+        "{\"outstanding\":true,\"muted\":true}"
+    );
+}
+
+/// Clearing requires the current claim AND `!seeking` AND position within
+/// tolerance. Each missing condition keeps the alignment outstanding.
+#[test]
+fn clearing_an_alignment_requires_claim_settled_and_on_target() {
+    let mut ctx = player_core_context();
+    audio_state(&mut ctx);
+    // Right claim, still seeking: outstanding.
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "(() => { let s = PlayerCore.audioOutputReduce(window.__s, { type: 'claimAlignment', id: 'output', claim: 1, target: 5 }); \
+               s = PlayerCore.audioOutputReduce(s, { type: 'observeSeek', id: 'output', claim: 1, seeking: true, currentTime: 5 }); \
+               return PlayerCore.hasOutstandingAlignment(s, 'output'); })()"
+        ),
+        "true"
+    );
+    // Right claim, settled, but off target: outstanding.
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "(() => { let s = PlayerCore.audioOutputReduce(window.__s, { type: 'claimAlignment', id: 'output', claim: 1, target: 5 }); \
+               s = PlayerCore.audioOutputReduce(s, { type: 'observeSeek', id: 'output', claim: 1, seeking: false, currentTime: 2 }); \
+               return PlayerCore.hasOutstandingAlignment(s, 'output'); })()"
+        ),
+        "true"
+    );
+    // All three satisfied: cleared, and only then audible.
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "(() => { let s = PlayerCore.audioOutputReduce(window.__s, { type: 'claimAlignment', id: 'output', claim: 1, target: 5 }); \
+               s = PlayerCore.audioOutputReduce(s, { type: 'observeSeek', id: 'output', claim: 1, seeking: false, currentTime: 5 }); \
+               return { outstanding: PlayerCore.hasOutstandingAlignment(s, 'output'), muted: PlayerCore.sidecarMuteMap(s).output }; })()"
+        ),
+        "{\"outstanding\":false,\"muted\":false}"
+    );
+}
+
+/// A timeout may report, but must never manufacture readiness. #108's runtime
+/// evidence was circular precisely because a safety timer forced the convergence
+/// it then reported as proof.
+#[test]
+fn a_timeout_never_clears_an_alignment() {
+    let mut ctx = player_core_context();
+    audio_state(&mut ctx);
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "(() => { let s = PlayerCore.audioOutputReduce(window.__s, { type: 'claimAlignment', id: 'output', claim: 1, target: 5 }); \
+               s = PlayerCore.audioOutputReduce(s, { type: 'alignmentTimedOut', id: 'output', claim: 1 }); \
+               return { outstanding: PlayerCore.hasOutstandingAlignment(s, 'output'), muted: PlayerCore.sidecarMuteMap(s).output, timedOut: PlayerCore.alignmentTimedOut(s, 'output') }; })()"
+        ),
+        "{\"outstanding\":true,\"muted\":true,\"timedOut\":true}"
+    );
+}
+
+/// Reconciling for an unrelated input — a volume change — must not unmute an
+/// element mid-alignment. On `develop` the global write does exactly that.
+#[test]
+fn a_volume_change_mid_alignment_does_not_unmute() {
+    let mut ctx = player_core_context();
+    audio_state(&mut ctx);
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "(() => { let s = PlayerCore.audioOutputReduce(window.__s, { type: 'claimAlignment', id: 'output', claim: 1, target: 5 }); \
+               s = PlayerCore.audioOutputReduce(s, { type: 'setVolume', volume: 0.4 }); \
+               return PlayerCore.sidecarMuteMap(s).output; })()"
+        ),
+        "true"
+    );
+}
+
+/// Prepared, outgoing, and stale-generation sidecars are ineligible by
+/// construction — not by check order — so no ordering mistake can expose them.
+#[test]
+fn only_the_current_generations_active_set_is_ever_audible() {
+    let mut ctx = player_core_context();
+    audio_state(&mut ctx);
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "(() => { \
+               let s = window.__s; \
+               s = PlayerCore.audioOutputReduce(s, { type: 'addSidecar', id: 'prepared', generation: 2, role: 'prepared' }); \
+               s = PlayerCore.audioOutputReduce(s, { type: 'addSidecar', id: 'outgoing', generation: 1, role: 'outgoing' }); \
+               s = PlayerCore.audioOutputReduce(s, { type: 'addSidecar', id: 'stale', generation: 0, role: 'active' }); \
+               const m = PlayerCore.sidecarMuteMap(s); \
+               return { active: m.output, prepared: m.prepared, outgoing: m.outgoing, stale: m.stale }; \
+             })()"
+        ),
+        "{\"active\":false,\"prepared\":true,\"outgoing\":true,\"stale\":true}"
+    );
+    // And no mode other than `sidecars` may make any of them audible.
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "(() => { const s = PlayerCore.audioOutputReduce(window.__s, { type: 'setMode', mode: 'direct' }); \
+               return Object.values(PlayerCore.sidecarMuteMap(s)).every(Boolean); })()"
+        ),
+        "true"
+    );
+}
+
+/// A seek changes position, not intent. A handover that began paused and then
+/// received Play must finish playing even if the user also scrubbed.
+#[test]
+fn seeking_bumps_the_position_revision_without_clearing_play_intent() {
+    let mut ctx = player_core_context();
+    audio_state(&mut ctx);
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "(() => { \
+               let s = window.__s; \
+               const r0 = s.transport.positionRevision; \
+               s = PlayerCore.audioOutputReduce(s, { type: 'userPlay' }); \
+               s = PlayerCore.audioOutputReduce(s, { type: 'userSeek' }); \
+               return { desired: s.transport.desiredPlaying, revisionMoved: s.transport.positionRevision > r0 }; \
+             })()"
+        ),
+        "{\"desired\":true,\"revisionMoved\":true}"
+    );
+}
+
+/// The transaction's own pause is not user intent, and must not move the position
+/// revision either — bumping it there would make every handover restart itself.
+#[test]
+fn an_internal_pause_changes_neither_intent_nor_position_revision() {
+    let mut ctx = player_core_context();
+    audio_state(&mut ctx);
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "(() => { \
+               let s = PlayerCore.audioOutputReduce(window.__s, { type: 'userPlay' }); \
+               const r0 = s.transport.positionRevision; \
+               s = PlayerCore.audioOutputReduce(s, { type: 'internalPause' }); \
+               return { desired: s.transport.desiredPlaying, revision: s.transport.positionRevision === r0 }; \
+             })()"
+        ),
+        "{\"desired\":true,\"revision\":true}"
+    );
+}
+
+/// Every activation reports a structured outcome, so a stale request cannot
+/// overwrite a newer one's bookkeeping and a post-commit failure cannot pass as
+/// success.
+#[test]
+fn activation_outcomes_are_structured_not_boolean() {
+    let mut ctx = player_core_context();
+    audio_state(&mut ctx);
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.activationOutcome(window.__s, { generation: 0, committed: true, error: null })"
+        ),
+        "stale"
+    );
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.activationOutcome(window.__s, { generation: 1, committed: true, error: 'play rejected' })"
+        ),
+        "committed-with-error"
+    );
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.activationOutcome(window.__s, { generation: 1, committed: true, error: null })"
+        ),
+        "current"
+    );
+}
+
+/// The audit trail the durable gate asserts over: every mute change is recorded
+/// with its justification, and an unmute while outstanding is unrepresentable.
+#[test]
+fn the_audit_records_every_mute_change_with_a_reason() {
+    let mut ctx = player_core_context();
+    audio_state(&mut ctx);
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "(() => { \
+               const before = window.__s; \
+               let after = PlayerCore.audioOutputReduce(before, { type: 'claimAlignment', id: 'output', claim: 1, target: 5 }); \
+               const entries = PlayerCore.audioOutputAudit(before, after); \
+               return entries.map((e) => ({ id: e.id, from: e.from, to: e.to, reason: e.reason })); \
+             })()"
+        ),
+        "[{\"id\":\"output\",\"from\":false,\"to\":true,\"reason\":\"alignment-outstanding\"}]"
+    );
+    // No audit entry may ever unmute an element that still has an outstanding
+    // alignment -- the property the gate asserts exhaustively over writes.
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "(() => { \
+               let s = PlayerCore.audioOutputReduce(window.__s, { type: 'claimAlignment', id: 'output', claim: 1, target: 5 }); \
+               const actions = [ \
+                 { type: 'setVolume', volume: 0.2 }, \
+                 { type: 'observeSeek', id: 'output', claim: 0, seeking: false, currentTime: 5 }, \
+                 { type: 'alignmentTimedOut', id: 'output', claim: 1 }, \
+                 { type: 'userPlay' }, \
+               ]; \
+               for (const a of actions) { \
+                 const next = PlayerCore.audioOutputReduce(s, a); \
+                 const bad = PlayerCore.audioOutputAudit(s, next) \
+                   .some((e) => e.to === false && PlayerCore.hasOutstandingAlignment(next, e.id)); \
+                 if (bad) return 'unmuted while outstanding'; \
+                 s = next; \
+               } \
+               return 'never unmuted while outstanding'; \
+             })()"
+        ),
+        "never unmuted while outstanding"
+    );
+}
