@@ -56,7 +56,7 @@ first so the fix is measured against something real.
 - [ ] Note whether the first drift tick (`:209`, 500 ms) issues its own backward seek, which would
       be a second, independent source of repetition.
 
-### Task 1 outcome — ordering confirmed, magnitude complicates it
+### Task 1 outcome — the predicted race is confirmed; its audible effect is not yet proven
 
 Captured on a release build via CDP, cold cache (`audio-previews` emptied) and warm.
 
@@ -70,34 +70,66 @@ Captured on a release build via CDP, cold cache (`audio-previews` emptied) and w
 
 `awaited=0` proves the second pass pushed no play promise, and the switch happens with
 `seeking: true` on every sidecar. Warm is identical in shape (switch 92.3 ms, `seeked` 94.2 ms).
-So the plan's stop-condition did **not** trigger — the root cause stands.
+The stop-condition did not trigger: **the predicted race is real and that invariant is broken.** But
+it does not follow that this race is what is audible — see the stronger candidate below.
 
-**But the wall-clock window is only ~2 ms**, which alone is too short to perceive as a repeat. Two
-readings, and the fix covers both:
+**A second, unguarded forced seek fires on already-audible sidecars.** The full warm trace shows,
+*after* the sidecars are unmuted at 92.3 ms:
 
-1. **The leaked *audio* is not bounded by that 2 ms.** A media element can have a decoded buffer of
-   tens of milliseconds already queued; unmuting for even 2 ms mid-seek can let a whole pre-seek
-   buffer through. This remains the most likely explanation and is consistent with the symptom.
-2. **The video→sidecar crossover is a second candidate.** Until the switch the video's own audio is
-   audible (mode `direct`, 206 ms cold / 92 ms warm of real playback). Muting a media element does
-   not necessarily flush already-queued audio, so both copies of the same content can briefly
-   overlap at the instant of handover.
+```
+117.7ms  sync_enter   phase=sync  forceSeek=False       <- drift path, assigns no seek
+118.1ms  sync_enter   phase=sync  forceSeek=True
+118.2ms  sidecar_seek_assigned  from=0.014 target=0.000845 muted=False  <- BACKWARD, audible
+118.4ms  sidecar_seek_assigned  from=0.014 target=0.000845 muted=False
+124.0ms  sidecar_seeked         target=0.000845 currentTime=0.014 muted=False
+```
 
-A stationary handover (Task 3) addresses both, because switching while paused means no audio is
-flowing from either source at the switch instant. Note this is a *different* reason than "await
-`seeked`" alone — keep the pause, do not reduce Task 3 to just gating on `seeked`.
+That is a **backward seek on an audible element**, ~26 ms after it became audible and resolving ~6 ms
+later — the textbook shape of a brief repeat, and a far better fit for the symptom than a 2 ms
+control-plane window. The harness issued no seek. The caller is
+`syncReviewAudioSidecars({ forceSeek: true })` (`review-player.js:1317`) inside `seekTo` (`:1288`),
+which also applies `video.currentTime` at `:1311` — the initial video source/seek settlement drives a
+forced sidecar seek.
 
-**Two further measurements worth recording:**
+**Task 3's activation-only barrier would not cover this.** Establish the origin first (Task 1b), then
+decide whether activation must wait for the initial video seek to settle, or whether *every* forced
+sidecar seek needs completion gating while audible.
 
-- **The drift timer never corrects.** Cold, at the first tick the sidecars sit ~71 ms behind the
-  video (video 0.224 s, sidecars 0.153 s) and every subsequent sync reports `forceSeek=False` with
-  no seek assigned — `audioSidecarSyncDecision` treats that offset as within tolerance. So there is
-  a persistent, uncorrected A/V offset after handover, separate from the artefact under
-  investigation. Out of scope here; worth its own look.
-- **Cold sidecar generation measured ~202 ms, not 0.5–2 s.** That was one argument for rejecting
-  muting-at-open, and on this hardware and clip length it does not hold. The decision stands on the
-  other grounds — the tested direct-fallback invariant, and no exit path from pending-muted for
-  clips that never request sidecars — but the timing claim should not be repeated as fact.
+**Corrections, each of which overstated the evidence:**
+
+- **The ~2 ms figure is not a measurement of audible audio.** `output_switched_to_sidecars` is logged
+  *before* `applyReviewAudioOutput()`, and console/CDP logging perturbs the event loop. It bounds a
+  control-plane ordering and nothing more.
+- **"206 ms cold / 92 ms warm of real direct playback" was wrong.** Those are wall-clock times since
+  source assignment, not media time. At the cold switch the video timeline was ~50 ms in; at the warm
+  switch it was still at **0**. So the video→sidecar crossover cannot explain the warm case, and that
+  candidate is much weaker than claimed.
+
+- **The ~202 ms is one clip's cold time-to-handover, not isolated FFmpeg generation.** The trace
+  starts at source assignment with no backend invoke start/end markers. The historical 0.5–2 s figure
+  remains valid for the 31-minute clip it came from. Neither number is a universal expectation, and
+  neither should be used to re-argue muting-at-open — that decision stands on the tested
+  direct-fallback invariant and the missing exit path from pending-muted.
+- **The "drift never corrects" claim is overstated.** The `drift_first_tick` flag is consumed by the
+  next `syncReviewAudioSidecars` call from *any* source — play, pause, timeupdate, seeking, rate
+  change, or the timer — and cold shows it 159 ms after the switch, so it is not the 500 ms interval.
+  It proves one ~71 ms clock-skew snapshot; the later absence of seeks proves only that skew stayed
+  under the intentional gross-discontinuity threshold, and `player_core.rs` deliberately permits
+  ±100 ms during playback. Drift-controller changes stay out of scope, but post-resume skew becomes an
+  acceptance measurement for Task 3, since a stationary handover may remove the startup offset for
+  free.
+
+## Task 1b: Establish the origin of the post-unmute forced seek
+
+- [ ] Confirm what invokes `seekTo` at ~118 ms warm — the `loadedmetadata` / source-assignment resume
+      path is the prime suspect. Trace the caller, not just the effect.
+- [ ] Decide the boundary that implies: either activation must not complete until the initial video
+      seek has settled, or **every** forced sidecar seek must be completion-gated while audible.
+      Record the choice and its reasoning; it determines whether Task 3 suffices on its own.
+- [ ] Check the same window on the cold trace, where ordering may differ because activation lands
+      later relative to source settlement.
+- [ ] Retain sanitized cold and warm traces in the repo (or attach them to the PR). The complete
+      evidence currently exists only under `%TEMP%` and will not survive.
 
 ## Task 2: Failing tests for a completion-gated stationary handover
 
@@ -114,15 +146,25 @@ flowing from either source at the switch instant. Note this is a *different* rea
 
 ## Task 3: Stationary, completion-gated handover
 
-- [ ] In `activatePreparedReviewAudioSidecars`, replace the second unguarded forced seek with:
-      pause the video, capture that now-stationary time, seek every still-muted current-generation
+- [ ] **Pause all three sets, not just the video.** Pausing the video does not pause the prepared
+      sidecars: they were started during the first activation pass but are not yet in
+      `activeReviewAudioSidecars`, so no video pause handler reaches them. "Nothing is flowing" is
+      false unless this explicitly pauses (a) the video/direct source, (b) every *prepared* sidecar,
+      and (c) the currently active sidecars when this is a mid-play track change. Otherwise
+      early-finishing sidecars keep advancing while slower ones seek.
+- [ ] In `activatePreparedReviewAudioSidecars`, replace the second unguarded forced seek with: pause
+      everything above, capture the now-stationary time, seek every still-muted current-generation
       sidecar to it, and **await `seeked` on each** before switching output.
-- [ ] Switch output while paused, then restore the transport to the state captured before the pause
-      — resume only if it was playing. Route the resume through the existing play-state path so
-      `syncPlayState` and the drift timer are not fighting it.
+- [ ] Switch output while paused, then restore the transport to the **latest user intent**, not merely
+      the state captured before the pause — the user may have hit play, pause, or seek during the
+      internal pause, and their action must win. Route the resume through the existing play-state path
+      so `syncPlayState` and the drift timer are not fighting it.
 - [ ] Bound the wait: a sidecar that never fires `seeked` must not hang the handover. On timeout,
-      fall back to `handleReviewAudioSidecarFailure`'s existing `direct` recovery rather than
-      unmuting into an unknown position.
+      **preserve whatever was previously audible** — for a sidecar-to-sidecar track change, calling
+      `handleReviewAudioSidecarFailure` unconditionally would destroy a valid existing selection and
+      drop back to `direct`. Only fall back to `direct` when there was no prior audible sidecar set.
+- [ ] Measure post-resume skew as acceptance (see Task 1b's correction): a stationary handover should
+      not leave the sidecars tens of milliseconds behind the video.
 - [ ] Preserve every existing escape hatch: stale generation checks (`previewRequestStillCurrent`),
       cancellation, preview failure, and manual Play during the handover.
 - [ ] Do **not** crossfade. Crossfading two misaligned copies produces echo or comb filtering —
@@ -144,6 +186,10 @@ Only if Task 3's trace still shows repetition or the pause is perceptible as a h
 - [ ] Remove Task 1's temporary diagnostics, or promote only what is durably useful behind the
       existing structured-diagnostics facility.
 - [ ] `cargo test --workspace` green; fresh-cache warning-denied Clippy.
+- [ ] **Loopback waveform comparison, not DOM state.** Record the system output while opening a clip
+      and compare the first second against the source audio. DOM and trace state cannot prove what
+      reached the speakers, and every timing figure in this plan is control-plane only. This is the
+      only evidence that closes the question of whether the repeat is fixed.
 - [ ] Manual, cold cache: open several clips and confirm the opening audio is present, correct, and
       free of repetition. Cold is the important case — the extraction window is where the race lives.
 - [ ] Manual, warm cache: same, plus switching audio-track selection mid-playback, which re-enters
