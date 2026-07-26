@@ -135,39 +135,55 @@ function claimSidecarAlignment(sidecar, target) {
   const token = (sidecar.seekToken || 0) + 1;
   sidecar.seekToken = token;
   sidecar.targetTime = target;
+  // Supersede any listener still waiting on the previous token, so exactly one
+  // claim owns the restore at a time.
   if (sidecar.abortAlignment) sidecar.abortAlignment();
-  const onSeeked = () => {
-    audio.removeEventListener("seeked", onSeeked);
+
+  // Silence across the seek. Setting `currentTime` starts an async seek and the
+  // element may keep emitting already-decoded pre-seek audio until `seeked`, so
+  // this must cover *every* seek, not only the handover's.
+  audio.muted = true;
+  let safety = 0;
+  const settle = () => {
+    audio.removeEventListener("seeked", settle);
+    if (safety) window.clearTimeout(safety);
     sidecar.abortAlignment = null;
-    // Settle only the token this listener claimed.
-    if (sidecar.seekToken !== token) return;
+    const completion = PlayerCore.sidecarSeekCompletion(sidecar.seekToken, token);
+    // A newer claim owns the element now; it restores in its own time.
+    if (!completion.settles) return;
     sidecar.settledToken = token;
+    // Restore only this element, from the current output decision — the mode may
+    // have moved to `direct` or `muted` while the seek was in flight.
+    if (completion.restoresOutput) audio.muted = sidecarMutedByOutput();
   };
+  // A seek that never reports completion must not leave the element muted
+  // forever; without this an unsettled drift seek is permanent silence.
+  safety = window.setTimeout(() => {
+    if (sidecar.seekToken !== token) return;
+    warnAudioHandover("seek never settled; restoring output", {
+      audioTrackId: sidecar.audioTrackId,
+    });
+    settle();
+  }, HANDOVER_ALIGNMENT_TIMEOUT_MS);
   sidecar.abortAlignment = () => {
-    audio.removeEventListener("seeked", onSeeked);
+    audio.removeEventListener("seeked", settle);
+    if (safety) window.clearTimeout(safety);
     sidecar.abortAlignment = null;
   };
-  audio.addEventListener("seeked", onSeeked);
+  audio.addEventListener("seeked", settle);
   return token;
 }
 
-/// Mute an audible sidecar for the duration of a seek, restoring it once the
-/// seek settles. Applies to whatever token is current when the seek completes, so
-/// overlapping seeks cannot unmute early.
-function silenceSidecarAcrossSeek(sidecar) {
-  const audio = sidecar.element;
-  if (audio.muted) return;
-  const token = sidecar.seekToken;
-  audio.muted = true;
-  const restore = () => {
-    audio.removeEventListener("seeked", restore);
-    // A newer seek has taken over; it owns the unmute.
-    if (sidecar.seekToken !== token) return;
-    // Respect the output decision rather than blindly unmuting: the selection
-    // may have moved to `direct` or `muted` while this seek was in flight.
-    applyReviewAudioOutput();
-  };
-  audio.addEventListener("seeked", restore);
+/// What `reviewAudioMode` says a sidecar's `muted` should be right now.
+///
+/// Per-sidecar, deliberately: restoring through the global
+/// `applyReviewAudioOutput` would unmute siblings that are still mid-seek.
+function sidecarMutedByOutput() {
+  return PlayerCore.reviewAudioOutputDecision(
+    reviewAudioMode,
+    reviewAudioMuted,
+    reviewAudioVolume,
+  ).sidecarMuted;
 }
 
 /// Snapshot for `PlayerCore.sidecarHandoverDecision`.
@@ -240,14 +256,9 @@ async function syncReviewAudioSidecarSet(sidecars, options = {}) {
       { forceSeek: options.forceSeek === true },
     );
     if (decision.seekTime != null) {
-      // Claim the alignment before assigning, so a completion is attributed to
-      // this seek's token and cannot settle a later one.
+      // Claiming both attributes the completion to this seek's token and
+      // silences the element across it, so no seek is ever audible.
       claimSidecarAlignment(sidecar, decision.seekTime);
-      // Never seek an *audible* element: setting `currentTime` starts an async
-      // seek and the element may keep emitting already-decoded pre-seek audio
-      // until `seeked`. Mute across the seek and restore on settle — this is the
-      // same exposure the clip-start fault had, and it still reaches user scrubs.
-      silenceSidecarAcrossSeek(sidecar);
       audio.currentTime = decision.seekTime;
     }
     audio.playbackRate = decision.playbackRate;
@@ -386,10 +397,10 @@ async function alignSidecarsWhilePaused(sidecars, target, generation, capturedEp
 /// and a retry that did not re-pause would align against a moving playhead while
 /// the previous output is still flowing.
 function pauseAllHandoverSources(prepared, previous) {
-  if (!video.paused) {
-    noteReviewTransportIntent("internal-pause");
-    video.pause();
-  }
+  // Deliberately does *not* record intent. Recording "internal-pause" here would
+  // overwrite a user's pending "play" on every retry, so a handover that began
+  // paused would finish paused despite the user asking to play.
+  if (!video.paused) video.pause();
   for (const sidecar of prepared) sidecar.element.pause();
   for (const sidecar of previous) sidecar.element.pause();
 }
@@ -400,6 +411,11 @@ function pauseAllHandoverSources(prepared, previous) {
 function restoreHandoverTransport(snapshot, intentSince) {
   const intent = reviewTransportIntentEpoch > intentSince ? reviewTransportIntent : null;
   if (PlayerCore.handoverResumeDecision(snapshot, { intent }).play) {
+    // Advance the transport epoch: activations can overlap, because the preview
+    // queue advances its state before awaiting activation. A stale transaction
+    // resuming playback without this would let a newer one commit against a
+    // playhead that has started moving again.
+    reviewTransportEpoch += 1;
     void video.play().catch(() => syncPlayState());
   }
   refreshReviewAudioDriftTimer();
@@ -481,11 +497,17 @@ async function activatePreparedReviewAudioSidecars(prepared, request) {
   try {
     const intent = reviewTransportIntentEpoch > intentSince ? reviewTransportIntent : null;
     if (PlayerCore.handoverResumeDecision(snapshot, { intent }).play) {
+      reviewTransportEpoch += 1;
       void video.play().catch(() => syncPlayState());
       await syncReviewAudioSidecarSet(prepared);
     }
   } catch (error) {
+    // The selection *is* active, so this cannot throw — the caller would dispose
+    // the live set. But the user may now have silent or partial audio, so say so
+    // rather than reporting a clean success.
     warnAudioHandover("resume after commit failed", { error: String(error) });
+    syncPlayState();
+    setDeckStatus("audio may be out of sync — press play again", { transient: true });
   }
   refreshReviewAudioDriftTimer();
   return committed;
@@ -891,7 +913,7 @@ function openClip(clip) {
   renderClips();
   noteActivity();
   requestAnimationFrame(updateStageFrame);
-  video.play().catch(() => syncPlayState());
+  playFromUserIntent();
   if (clipAudioTracks(clip).length > 0) {
     requestSelectedAudioPreview();
   }
@@ -974,8 +996,14 @@ function requestSettingsClose({ allowDiscard = true } = {}) {
 function toggleSettings(open = !settingsOpen) {
   const wasOpen = settingsOpen;
   settingsOpen = open;
-  // The clip survives the round-trip; just don't play behind the page.
-  if (settingsOpen && !video.paused) video.pause();
+  // The clip survives the round-trip; just don't play behind the page. Record the
+  // intent unconditionally: if an audio handover has already paused the video,
+  // `!video.paused` is false and the transaction would otherwise restore its
+  // earlier playing snapshot, resuming playback behind the settings page.
+  if (settingsOpen) {
+    noteReviewTransportIntent("pause");
+    if (!video.paused) video.pause();
+  }
   if (settingsOpen && !wasOpen) {
     resetSettingsDiscardWarning();
     syncSettingsDirtyState({ resetDiscard: true });
@@ -1290,7 +1318,7 @@ function renderPlayBlocks() {
       ev.stopPropagation();
       selectGamePlay(index, play.start, play.end);
       seekTo(play.start, { keepGamePlaySelection: true });
-      video.play().catch(() => syncPlayState());
+      playFromUserIntent();
     });
     layer.appendChild(block);
   });
@@ -1333,7 +1361,7 @@ function renderMarkers() {
       ev.stopPropagation();
       // Start a beat before the event so its lead-up plays, then roll.
       seekTo(m.t_s - MARKER_LEAD_S);
-      video.play().catch(() => syncPlayState());
+      playFromUserIntent();
     });
     layer.appendChild(marker);
   }
@@ -1431,13 +1459,18 @@ function seekBy(delta) {
   ));
 }
 
+/// Play because the *user* asked. Records intent so an in-flight audio handover
+/// restores what they wanted rather than the transport state it captured before
+/// pausing — every user-facing play path must go through here.
+function playFromUserIntent() {
+  noteReviewTransportIntent("play");
+  video.play().catch(() => syncPlayState());
+}
+
 function togglePlay() {
   if (!currentClip) return;
-  // Recorded so an in-flight audio handover restores what the user last asked
-  // for rather than the transport state it captured before pausing.
   if (video.paused) {
-    noteReviewTransportIntent("play");
-    video.play().catch(() => syncPlayState());
+    playFromUserIntent();
   } else {
     noteReviewTransportIntent("pause");
     video.pause();
@@ -1662,7 +1695,7 @@ function endDrag() {
   if (clickSeek) seekTo(slideClickT);
   if (resumeAfterDrag) {
     resumeAfterDrag = false;
-    video.play().catch(() => syncPlayState());
+    playFromUserIntent();
   }
 }
 

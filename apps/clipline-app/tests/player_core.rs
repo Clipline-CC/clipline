@@ -3301,3 +3301,55 @@ fn handover_timeout_restores_the_complete_previous_output_state() {
         "direct"
     );
 }
+
+/// Overlapping seeks on one sidecar: exactly the newest claim may settle and
+/// restore output. Both failure modes here have shipped -- an older completion
+/// restoring unmutes while a newer seek is still in flight (the pre-seek leak),
+/// and no claim restoring leaves the element muted permanently.
+#[test]
+fn only_the_newest_seek_claim_restores_sidecar_output() {
+    let mut ctx = player_core_context();
+
+    // The owning claim settles and restores.
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.sidecarSeekCompletion(4, 4)"),
+        "{\"settles\":true,\"restoresOutput\":true}"
+    );
+    // A superseded claim completing later does neither.
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.sidecarSeekCompletion(5, 4)"),
+        "{\"settles\":false,\"restoresOutput\":false}"
+    );
+    // A completion from the future cannot settle either.
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.sidecarSeekCompletion(4, 5)"),
+        "{\"settles\":false,\"restoresOutput\":false}"
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.sidecarSeekCompletion(4, null)"),
+        "{\"settles\":false,\"restoresOutput\":false}"
+    );
+}
+
+/// The sequence that broke: claim, supersede, then both completions arrive. The
+/// first must be inert and the second must restore -- exactly one restore, and it
+/// is the live one.
+#[test]
+fn a_superseded_then_completed_seek_pair_restores_exactly_once() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "(() => { \
+               const current = 2; \
+               const completions = [1, 2].map((t) => PlayerCore.sidecarSeekCompletion(current, t)); \
+               return { \
+                 restores: completions.filter((c) => c.restoresOutput).length, \
+                 staleRestored: completions[0].restoresOutput, \
+                 liveRestored: completions[1].restoresOutput, \
+               }; \
+             })()"
+        ),
+        "{\"restores\":1,\"staleRestored\":false,\"liveRestored\":true}"
+    );
+}

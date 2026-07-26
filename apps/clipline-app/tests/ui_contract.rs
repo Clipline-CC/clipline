@@ -2074,13 +2074,18 @@ fn opening_multitrack_clip_starts_direct_and_prepares_default_sidecars() {
         "currentReviewAudioTrackIds = PlayerCore.directPlaybackAudioTrackIds(clipAudioTracks(clip));"
     ));
     assert!(open_clip.contains("assignReviewVideoSource(clip.path, { resumeTime: 0 })"));
-    assert!(open_clip.contains("video.play().catch(() => syncPlayState());"));
+    // Routed through `playFromUserIntent` rather than calling `play()` directly, so
+    // an in-flight audio handover restores what the user asked for instead of the
+    // transport state it captured before pausing.
+    assert!(open_clip.contains("playFromUserIntent();"));
     assert!(open_clip.contains("requestSelectedAudioPreview();"));
     assert!(
-        open_clip.find("video.play().catch(() => syncPlayState());")
-            < open_clip.find("requestSelectedAudioPreview();"),
+        open_clip.find("playFromUserIntent();") < open_clip.find("requestSelectedAudioPreview();"),
         "direct playback should start before the selected sidecars are prepared"
     );
+    let play_intent = js_function_body(&review, "playFromUserIntent");
+    assert!(play_intent.contains("noteReviewTransportIntent(\"play\")"));
+    assert!(play_intent.contains("video.play()"));
     assert!(!open_clip.contains("applySelectedAudioTracksToPlayback"));
     assert!(!main_js().contains("function applyDefaultAudioSelectionIfNeeded"));
 }

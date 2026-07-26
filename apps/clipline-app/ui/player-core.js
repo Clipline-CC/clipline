@@ -365,6 +365,22 @@ const PlayerCore = (() => {
   /// Only an explicit user reposition may bypass the sidecar drift tolerance.
   const sidecarRealignmentForced = (confirmedSource) => confirmedSource === "user";
 
+  /// Which claim owns a sidecar when one of its seeks completes.
+  ///
+  /// Overlapping seeks share one element, and the element is silenced for the
+  /// duration of each. Exactly the newest claim may settle and restore output: an
+  /// older completion restoring would unmute while a newer seek is still in
+  /// flight (the pre-seek leak), and *no* claim restoring leaves the element muted
+  /// forever. Both failures have been shipped here; this is the invariant.
+  const sidecarSeekCompletion = (currentToken, completingToken) => {
+    const current = Number(currentToken);
+    const completing = Number(completingToken);
+    const owns = Number.isFinite(current)
+      && Number.isFinite(completing)
+      && current === completing;
+    return { settles: owns, restoresOutput: owns };
+  };
+
   const sidecarAlignmentSettled = (sidecar) => {
     if (!sidecar) return false;
     if (sidecar.seeking) return false;
@@ -2160,6 +2176,7 @@ const PlayerCore = (() => {
     metadataSeekDecision,
     seekedDecision,
     sidecarRealignmentForced,
+    sidecarSeekCompletion,
     sidecarHandoverDecision,
     handoverResumeDecision,
     handoverTimeoutDecision,
