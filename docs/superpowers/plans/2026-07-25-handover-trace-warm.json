@@ -1,1 +1,2300 @@
-{"id":1,"result":{"result":{"type":"string","value":"[{\"ms\":0,\"event\":\"trace_reset\",\"reason\":\"source_assigned <clip path redacted>"},{\"ms\":83.8,\"event\":\"sync_enter\",\"phase\":\"prepare\",\"forceSeek\":true,\"allowPlayback\":false,\"videoTime\":0,\"videoPaused\":false,\"sidecars\":2},{\"ms\":84,\"event\":\"sidecar_seek_assigned\",\"audioTrackId\":\"output\",\"phase\":\"prepare\",\"from\":0.014,\"target\":0,\"paused\":true,\"muted\":true},{\"ms\":84,\"event\":\"sidecar_seek_assigned\",\"audioTrackId\":\"microphone\",\"phase\":\"prepare\",\"from\":0.014,\"target\":0,\"paused\":true,\"muted\":true},{\"ms\":84.1,\"event\":\"sync_exit\",\"phase\":\"prepare\",\"awaited\":0},{\"ms\":84.3,\"event\":\"activation_begin\",\"videoTime\":0,\"videoPaused\":false,\"sidecars\":2},{\"ms\":84.4,\"event\":\"sync_enter\",\"phase\":\"activate_first\",\"forceSeek\":true,\"allowPlayback\":true,\"videoTime\":0,\"videoPaused\":false,\"sidecars\":2},{\"ms\":84.5,\"event\":\"sidecar_seek_assigned\",\"audioTrackId\":\"output\",\"phase\":\"activate_first\",\"from\":0,\"target\":0,\"paused\":true,\"muted\":true},{\"ms\":84.6,\"event\":\"sidecar_play_requested\",\"audioTrackId\":\"output\",\"phase\":\"activate_first\"},{\"ms\":84.9,\"event\":\"sidecar_seek_assigned\",\"audioTrackId\":\"microphone\",\"phase\":\"activate_first\",\"from\":0,\"target\":0,\"paused\":true,\"muted\":true},{\"ms\":84.9,\"event\":\"sidecar_play_requested\",\"audioTrackId\":\"microphone\",\"phase\":\"activate_first\"},{\"ms\":85,\"event\":\"sidecar_seeking\",\"audioTrackId\":\"output\",\"phase\":\"prepare\",\"currentTime\":0},{\"ms\":85,\"event\":\"sidecar_seeking\",\"audioTrackId\":\"output\",\"phase\":\"activate_first\",\"currentTime\":0},{\"ms\":85,\"event\":\"sidecar_seeking\",\"audioTrackId\":\"microphone\",\"phase\":\"prepare\",\"currentTime\":0},{\"ms\":85.1,\"event\":\"sidecar_seeking\",\"audioTrackId\":\"microphone\",\"phase\":\"activate_first\",\"currentTime\":0},{\"ms\":85.1,\"event\":\"sidecar_seeking\",\"audioTrackId\":\"output\",\"phase\":\"prepare\",\"currentTime\":0},{\"ms\":85.2,\"event\":\"sidecar_seeking\",\"audioTrackId\":\"output\",\"phase\":\"activate_first\",\"currentTime\":0},{\"ms\":85.2,\"event\":\"sidecar_seeking\",\"audioTrackId\":\"microphone\",\"phase\":\"prepare\",\"currentTime\":0},{\"ms\":85.2,\"event\":\"sidecar_seeking\",\"audioTrackId\":\"microphone\",\"phase\":\"activate_first\",\"currentTime\":0},{\"ms\":86.2,\"event\":\"sidecar_seeked\",\"audioTrackId\":\"output\",\"phase\":\"prepare\",\"target\":0,\"currentTime\":0.014,\"muted\":true},{\"ms\":86.2,\"event\":\"sidecar_seeked\",\"audioTrackId\":\"output\",\"phase\":\"activate_first\",\"target\":0,\"currentTime\":0.014018,\"muted\":true},{\"ms\":86.3,\"event\":\"sidecar_play_resolved\",\"audioTrackId\":\"output\",\"phase\":\"activate_first\",\"currentTime\":0.014082},{\"ms\":86.4,\"event\":\"sidecar_seeked\",\"audioTrackId\":\"microphone\",\"phase\":\"prepare\",\"target\":0,\"currentTime\":0.014148,\"muted\":true},{\"ms\":86.4,\"event\":\"sidecar_seeked\",\"audioTrackId\":\"microphone\",\"phase\":\"activate_first\",\"target\":0,\"currentTime\":0.014197,\"muted\":true},{\"ms\":86.5,\"event\":\"sidecar_play_resolved\",\"audioTrackId\":\"microphone\",\"phase\":\"activate_first\",\"currentTime\":0.014244},{\"ms\":86.5,\"event\":\"sync_exit\",\"phase\":\"activate_first\",\"awaited\":2},{\"ms\":86.6,\"event\":\"sync_enter\",\"phase\":\"activate_second\",\"forceSeek\":true,\"allowPlayback\":true,\"videoTime\":0,\"videoPaused\":false,\"sidecars\":2},{\"ms\":86.6,\"event\":\"sidecar_seek_assigned\",\"audioTrackId\":\"output\",\"phase\":\"activate_second\",\"from\":0.014354,\"target\":0,\"paused\":false,\"muted\":true},{\"ms\":86.6,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"activate_second\"},{\"ms\":86.7,\"event\":\"sidecar_seek_assigned\",\"audioTrackId\":\"microphone\",\"phase\":\"activate_second\",\"from\":0.014441,\"target\":0,\"paused\":false,\"muted\":true},{\"ms\":86.7,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"activate_second\"},{\"ms\":86.8,\"event\":\"sync_exit\",\"phase\":\"activate_second\",\"awaited\":0},{\"ms\":86.8,\"event\":\"output_switched_to_sidecars\",\"videoTime\":0,\"sidecarTimes\":[{\"audioTrackId\":\"output\",\"currentTime\":0,\"seeking\":true},{\"audioTrackId\":\"microphone\",\"currentTime\":0,\"seeking\":true}]},{\"ms\":87,\"event\":\"sidecar_seeking\",\"audioTrackId\":\"output\",\"phase\":\"activate_second\",\"currentTime\":0},{\"ms\":87,\"event\":\"sidecar_seeking\",\"audioTrackId\":\"microphone\",\"phase\":\"activate_second\",\"currentTime\":0},{\"ms\":88.6,\"event\":\"sidecar_seeked\",\"audioTrackId\":\"output\",\"phase\":\"activate_second\",\"target\":0,\"currentTime\":0.014,\"muted\":false},{\"ms\":88.8,\"event\":\"sidecar_seeked\",\"audioTrackId\":\"microphone\",\"phase\":\"activate_second\",\"target\":0,\"currentTime\":0.014,\"muted\":false},{\"ms\":116.3,\"event\":\"drift_first_tick\",\"videoTime\":0,\"sidecarTimes\":[{\"audioTrackId\":\"output\",\"currentTime\":0.021279},{\"audioTrackId\":\"microphone\",\"currentTime\":0.021258}]},{\"ms\":116.4,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":0,\"videoPaused\":false,\"sidecars\":2},{\"ms\":116.5,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":116.5,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":116.6,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":116.8,\"event\":\"video_seeked_forces_sidecar_sync\",\"videoTime\":0.0014,\"logicalTime\":0.0014,\"metadataGeneration\":1,\"sourceGeneration\":1,\"appliedTime\":null,\"audioMode\":\"sidecars\",\"activeSidecars\":2,\"sidecarsAudible\":true},{\"ms\":116.9,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":true,\"allowPlayback\":true,\"videoTime\":0.0014,\"videoPaused\":false,\"sidecars\":2},{\"ms\":116.9,\"event\":\"sidecar_seek_assigned\",\"audioTrackId\":\"output\",\"phase\":\"sync\",\"from\":0.021791,\"target\":0.0014,\"paused\":false,\"muted\":false},{\"ms\":116.9,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":117,\"event\":\"sidecar_seek_assigned\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\",\"from\":0.021879,\"target\":0.0014,\"paused\":false,\"muted\":false},{\"ms\":117.1,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":117.1,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":118.8,\"event\":\"sidecar_seeking\",\"audioTrackId\":\"output\",\"phase\":\"sync\",\"currentTime\":0.0014},{\"ms\":118.8,\"event\":\"sidecar_seeking\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\",\"currentTime\":0.0014},{\"ms\":123.3,\"event\":\"sidecar_seeked\",\"audioTrackId\":\"output\",\"phase\":\"sync\",\"target\":0.0014,\"currentTime\":0.014,\"muted\":false},{\"ms\":123.4,\"event\":\"sidecar_seeked\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\",\"target\":0.0014,\"currentTime\":0.014,\"muted\":false},{\"ms\":374,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":0.218122,\"videoPaused\":false,\"sidecars\":2},{\"ms\":374,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":374,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":374,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":588,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":0.432056,\"videoPaused\":false,\"sidecars\":2},{\"ms\":588,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":588.1,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":588.1,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":640.2,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":0.483545,\"videoPaused\":false,\"sidecars\":2},{\"ms\":640.2,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":640.2,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":640.2,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":905.2,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":0.748861,\"videoPaused\":false,\"sidecars\":2},{\"ms\":905.3,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":905.3,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":905.3,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":1087.8,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":0.931924,\"videoPaused\":false,\"sidecars\":2},{\"ms\":1088,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":1088,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":1088,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":1171.8,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":1.015193,\"videoPaused\":false,\"sidecars\":2},{\"ms\":1171.9,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":1171.9,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":1171.9,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":1436.8,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":1.281065,\"videoPaused\":false,\"sidecars\":2},{\"ms\":1436.9,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":1437,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":1437,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":1588.2,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":1.432266,\"videoPaused\":false,\"sidecars\":2},{\"ms\":1588.2,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":1588.3,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":1588.3,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":1702.6,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":1.54622,\"videoPaused\":false,\"sidecars\":2},{\"ms\":1702.7,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":1702.7,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":1702.7,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":1967.8,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":1.812321,\"videoPaused\":false,\"sidecars\":2},{\"ms\":1967.9,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":1968,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":1968,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":2087.8,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":1.931775,\"videoPaused\":false,\"sidecars\":2},{\"ms\":2087.8,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":2087.8,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":2087.8,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":2233,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":2.077576,\"videoPaused\":false,\"sidecars\":2},{\"ms\":2233,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":2233.1,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":2233.1,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":2498.5,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":2.343074,\"videoPaused\":false,\"sidecars\":2},{\"ms\":2498.6,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":2498.6,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":2498.6,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":2588.3,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":2.432326,\"videoPaused\":false,\"sidecars\":2},{\"ms\":2588.3,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":2588.3,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":2588.4,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":2764.4,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":2.608083,\"videoPaused\":false,\"sidecars\":2},{\"ms\":2764.5,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":2764.5,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":2764.6,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":3030.8,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":2.874157,\"videoPaused\":false,\"sidecars\":2},{\"ms\":3030.8,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":3030.9,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":3031,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":3088.4,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":2.933067,\"videoPaused\":false,\"sidecars\":2},{\"ms\":3088.5,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":3088.6,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":3088.6,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":3296.1,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":3.140036,\"videoPaused\":false,\"sidecars\":2},{\"ms\":3296.1,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":3296.1,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":3296.1,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":3562.2,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":3.406563,\"videoPaused\":false,\"sidecars\":2},{\"ms\":3562.2,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":3562.3,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":3562.3,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":3587.2,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":3.431218,\"videoPaused\":false,\"sidecars\":2},{\"ms\":3587.2,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":3587.2,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":3587.3,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":3826.6,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":3.671155,\"videoPaused\":false,\"sidecars\":2},{\"ms\":3826.7,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":3826.7,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":3826.8,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":4087.5,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":3.931344,\"videoPaused\":false,\"sidecars\":2},{\"ms\":4087.6,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":4087.7,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":4087.7,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":4092.8,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":3.936434,\"videoPaused\":false,\"sidecars\":2},{\"ms\":4092.9,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":4092.9,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":4093,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":4359.5,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":4.203763,\"videoPaused\":false,\"sidecars\":2},{\"ms\":4359.5,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":4359.6,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":4359.6,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":4587.1,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":4.431643,\"videoPaused\":false,\"sidecars\":2},{\"ms\":4587.1,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":4587.1,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":4587.1,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":4624.4,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":4.467548,\"videoPaused\":false,\"sidecars\":2},{\"ms\":4624.5,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":4624.5,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":4624.5,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":4890.5,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":4.734962,\"videoPaused\":false,\"sidecars\":2},{\"ms\":4890.6,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":4890.6,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":4890.6,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":5088.1,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":4.932687,\"videoPaused\":false,\"sidecars\":2},{\"ms\":5088.1,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":5088.2,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":5088.2,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":5155.4,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":4.99924,\"videoPaused\":false,\"sidecars\":2},{\"ms\":5155.5,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":5155.5,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":5155.6,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":5421.6,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":5.266077,\"videoPaused\":false,\"sidecars\":2},{\"ms\":5421.7,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":5421.7,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":5421.7,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":5587.9,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":5.432007,\"videoPaused\":false,\"sidecars\":2},{\"ms\":5588,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":5588,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":5588,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":5686.7,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":5.530669,\"videoPaused\":false,\"sidecars\":2},{\"ms\":5686.8,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":5686.8,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":5686.8,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":5952.4,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":5.796649,\"videoPaused\":false,\"sidecars\":2},{\"ms\":5952.5,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":5952.5,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":5952.5,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":6087.5,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":5.932194,\"videoPaused\":false,\"sidecars\":2},{\"ms\":6087.6,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":6087.6,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":6087.7,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":6219,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":6.062559,\"videoPaused\":false,\"sidecars\":2},{\"ms\":6219,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":6219.1,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":6219.1,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":6484.2,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":6.328447,\"videoPaused\":false,\"sidecars\":2},{\"ms\":6484.4,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":6484.4,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":6484.5,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":6588.6,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":6.433051,\"videoPaused\":false,\"sidecars\":2},{\"ms\":6588.6,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":6588.7,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":6588.8,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":6750.2,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":6.594721,\"videoPaused\":false,\"sidecars\":2},{\"ms\":6750.3,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":6750.3,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":6750.4,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":7015.4,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":6.859292,\"videoPaused\":false,\"sidecars\":2},{\"ms\":7015.5,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":7015.5,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":7015.6,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":7088.2,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":6.932667,\"videoPaused\":false,\"sidecars\":2},{\"ms\":7088.3,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":7088.3,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":7088.3,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":7280.4,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":7.124434,\"videoPaused\":false,\"sidecars\":2},{\"ms\":7280.5,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":7280.5,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":7280.5,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":7546,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":7.389797,\"videoPaused\":false,\"sidecars\":2},{\"ms\":7546.1,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":7546.1,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":7546.2,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":7587,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":7.431583,\"videoPaused\":false,\"sidecars\":2},{\"ms\":7587.1,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":7587.1,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":7587.1,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":7812.5,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":7.656675,\"videoPaused\":false,\"sidecars\":2},{\"ms\":7812.6,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":7812.6,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":7812.7,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":8077.5,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":7.921832,\"videoPaused\":false,\"sidecars\":2},{\"ms\":8077.6,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":8077.6,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":8077.6,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":8087,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":7.931408,\"videoPaused\":false,\"sidecars\":2},{\"ms\":8087,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":8087,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":8087,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":8343.2,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":8.187614,\"videoPaused\":false,\"sidecars\":2},{\"ms\":8343.3,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":8343.4,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":8343.4,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":8587.3,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":8.431449,\"videoPaused\":false,\"sidecars\":2},{\"ms\":8587.4,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":8587.4,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":8587.4,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":8608.2,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":8.452095,\"videoPaused\":false,\"sidecars\":2},{\"ms\":8608.3,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":8608.3,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":8608.4,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":8873.9,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":8.718104,\"videoPaused\":false,\"sidecars\":2},{\"ms\":8874,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":8874.1,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":8874.1,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":9088.6,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":8.93271,\"videoPaused\":false,\"sidecars\":2},{\"ms\":9088.6,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":9088.6,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":9088.7,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":9140.5,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":8.984194,\"videoPaused\":false,\"sidecars\":2},{\"ms\":9140.6,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":9140.6,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":9140.6,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":9406.1,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":9.250556,\"videoPaused\":false,\"sidecars\":2},{\"ms\":9406.1,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":9406.1,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":9406.2,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":9587.9,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":9.432606,\"videoPaused\":false,\"sidecars\":2},{\"ms\":9587.9,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":9588.1,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":9588.1,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":9670.3,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":9.513338,\"videoPaused\":false,\"sidecars\":2},{\"ms\":9670.4,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":9670.4,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":9670.4,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":9937.5,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":9.781043,\"videoPaused\":false,\"sidecars\":2},{\"ms\":9937.6,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":9937.6,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":9937.7,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":10087.5,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":9.931651,\"videoPaused\":false,\"sidecars\":2},{\"ms\":10087.5,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":10087.6,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":10087.6,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":10202.1,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":10.045165,\"videoPaused\":false,\"sidecars\":2},{\"ms\":10202.2,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":10202.3,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":10202.3,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":10468,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":10.312135,\"videoPaused\":false,\"sidecars\":2},{\"ms\":10468,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":10468.1,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":10468.1,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":10588,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":10.432658,\"videoPaused\":false,\"sidecars\":2},{\"ms\":10588.1,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":10588.2,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":10588.2,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":10733.2,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":10.577078,\"videoPaused\":false,\"sidecars\":2},{\"ms\":10733.3,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":10733.4,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":10733.4,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":10999.1,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":10.843061,\"videoPaused\":false,\"sidecars\":2},{\"ms\":10999.2,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":10999.2,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":10999.2,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":11087.3,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":10.931591,\"videoPaused\":false,\"sidecars\":2},{\"ms\":11087.3,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":11087.4,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":11087.4,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":11264.7,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":11.108058,\"videoPaused\":false,\"sidecars\":2},{\"ms\":11264.7,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":11264.8,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":11264.8,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":11529.7,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":11.374086,\"videoPaused\":false,\"sidecars\":2},{\"ms\":11529.8,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":11529.8,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":11529.8,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":11587.5,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":11.431629,\"videoPaused\":false,\"sidecars\":2},{\"ms\":11587.5,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":11587.6,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":11587.7,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0},{\"ms\":11795.7,\"event\":\"sync_enter\",\"phase\":\"sync\",\"forceSeek\":false,\"allowPlayback\":true,\"videoTime\":11.64004,\"videoPaused\":false,\"sidecars\":2},{\"ms\":11795.8,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"output\",\"phase\":\"sync\"},{\"ms\":11795.8,\"event\":\"sidecar_play_skipped_already_playing\",\"audioTrackId\":\"microphone\",\"phase\":\"sync\"},{\"ms\":11795.9,\"event\":\"sync_exit\",\"phase\":\"sync\",\"awaited\":0}]"}}}
+[
+ {
+  "ms": 0,
+  "event": "trace_reset",
+  "reason": "source_assigned <clip path redacted>"
+ },
+ {
+  "ms": 88.9,
+  "event": "sync_enter",
+  "phase": "prepare",
+  "forceSeek": true,
+  "allowPlayback": false,
+  "videoTime": 0,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 89.1,
+  "event": "sidecar_seek_assigned",
+  "audioTrackId": "output",
+  "phase": "prepare",
+  "from": 0.014,
+  "target": 0,
+  "paused": true,
+  "muted": true
+ },
+ {
+  "ms": 89.2,
+  "event": "sidecar_seek_assigned",
+  "audioTrackId": "microphone",
+  "phase": "prepare",
+  "from": 0.014,
+  "target": 0,
+  "paused": true,
+  "muted": true
+ },
+ {
+  "ms": 89.3,
+  "event": "sync_exit",
+  "phase": "prepare",
+  "awaited": 0
+ },
+ {
+  "ms": 89.5,
+  "event": "activation_begin",
+  "videoTime": 0,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 89.6,
+  "event": "sync_enter",
+  "phase": "activate_first",
+  "forceSeek": true,
+  "allowPlayback": true,
+  "videoTime": 0,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 89.6,
+  "event": "sidecar_seek_assigned",
+  "audioTrackId": "output",
+  "phase": "activate_first",
+  "from": 0,
+  "target": 0,
+  "paused": true,
+  "muted": true
+ },
+ {
+  "ms": 89.7,
+  "event": "sidecar_play_requested",
+  "audioTrackId": "output",
+  "phase": "activate_first"
+ },
+ {
+  "ms": 89.9,
+  "event": "sidecar_seek_assigned",
+  "audioTrackId": "microphone",
+  "phase": "activate_first",
+  "from": 0,
+  "target": 0,
+  "paused": true,
+  "muted": true
+ },
+ {
+  "ms": 89.9,
+  "event": "sidecar_play_requested",
+  "audioTrackId": "microphone",
+  "phase": "activate_first"
+ },
+ {
+  "ms": 90.1,
+  "event": "sidecar_seeking",
+  "audioTrackId": "output",
+  "phase": "prepare",
+  "currentTime": 0
+ },
+ {
+  "ms": 90.1,
+  "event": "sidecar_seeking",
+  "audioTrackId": "output",
+  "phase": "activate_first",
+  "currentTime": 0
+ },
+ {
+  "ms": 90.1,
+  "event": "sidecar_seeking",
+  "audioTrackId": "microphone",
+  "phase": "prepare",
+  "currentTime": 0
+ },
+ {
+  "ms": 90.2,
+  "event": "sidecar_seeking",
+  "audioTrackId": "microphone",
+  "phase": "activate_first",
+  "currentTime": 0
+ },
+ {
+  "ms": 90.2,
+  "event": "sidecar_seeking",
+  "audioTrackId": "output",
+  "phase": "prepare",
+  "currentTime": 0
+ },
+ {
+  "ms": 90.3,
+  "event": "sidecar_seeking",
+  "audioTrackId": "output",
+  "phase": "activate_first",
+  "currentTime": 0
+ },
+ {
+  "ms": 90.3,
+  "event": "sidecar_seeking",
+  "audioTrackId": "microphone",
+  "phase": "prepare",
+  "currentTime": 0
+ },
+ {
+  "ms": 90.3,
+  "event": "sidecar_seeking",
+  "audioTrackId": "microphone",
+  "phase": "activate_first",
+  "currentTime": 0
+ },
+ {
+  "ms": 91.6,
+  "event": "sidecar_seeked",
+  "audioTrackId": "output",
+  "phase": "prepare",
+  "target": 0,
+  "currentTime": 0.014,
+  "muted": true
+ },
+ {
+  "ms": 91.6,
+  "event": "sidecar_seeked",
+  "audioTrackId": "output",
+  "phase": "activate_first",
+  "target": 0,
+  "currentTime": 0.014,
+  "muted": true
+ },
+ {
+  "ms": 91.7,
+  "event": "sidecar_play_resolved",
+  "audioTrackId": "output",
+  "phase": "activate_first",
+  "currentTime": 0.014065
+ },
+ {
+  "ms": 91.8,
+  "event": "sidecar_seeked",
+  "audioTrackId": "microphone",
+  "phase": "prepare",
+  "target": 0,
+  "currentTime": 0.014143,
+  "muted": true
+ },
+ {
+  "ms": 91.9,
+  "event": "sidecar_seeked",
+  "audioTrackId": "microphone",
+  "phase": "activate_first",
+  "target": 0,
+  "currentTime": 0.01419,
+  "muted": true
+ },
+ {
+  "ms": 91.9,
+  "event": "sidecar_play_resolved",
+  "audioTrackId": "microphone",
+  "phase": "activate_first",
+  "currentTime": 0.014239
+ },
+ {
+  "ms": 91.9,
+  "event": "sync_exit",
+  "phase": "activate_first",
+  "awaited": 2
+ },
+ {
+  "ms": 92,
+  "event": "sync_enter",
+  "phase": "activate_second",
+  "forceSeek": true,
+  "allowPlayback": true,
+  "videoTime": 0,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 92,
+  "event": "sidecar_seek_assigned",
+  "audioTrackId": "output",
+  "phase": "activate_second",
+  "from": 0.014384,
+  "target": 0,
+  "paused": false,
+  "muted": true
+ },
+ {
+  "ms": 92,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "activate_second"
+ },
+ {
+  "ms": 92.1,
+  "event": "sidecar_seek_assigned",
+  "audioTrackId": "microphone",
+  "phase": "activate_second",
+  "from": 0.014473,
+  "target": 0,
+  "paused": false,
+  "muted": true
+ },
+ {
+  "ms": 92.2,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "activate_second"
+ },
+ {
+  "ms": 92.2,
+  "event": "sync_exit",
+  "phase": "activate_second",
+  "awaited": 0
+ },
+ {
+  "ms": 92.3,
+  "event": "output_switched_to_sidecars",
+  "videoTime": 0,
+  "sidecarTimes": [
+   {
+    "audioTrackId": "output",
+    "currentTime": 0,
+    "seeking": true
+   },
+   {
+    "audioTrackId": "microphone",
+    "currentTime": 0,
+    "seeking": true
+   }
+  ]
+ },
+ {
+  "ms": 92.5,
+  "event": "sidecar_seeking",
+  "audioTrackId": "output",
+  "phase": "activate_second",
+  "currentTime": 0
+ },
+ {
+  "ms": 92.6,
+  "event": "sidecar_seeking",
+  "audioTrackId": "microphone",
+  "phase": "activate_second",
+  "currentTime": 0
+ },
+ {
+  "ms": 94.2,
+  "event": "sidecar_seeked",
+  "audioTrackId": "output",
+  "phase": "activate_second",
+  "target": 0,
+  "currentTime": 0.014,
+  "muted": false
+ },
+ {
+  "ms": 94.3,
+  "event": "sidecar_seeked",
+  "audioTrackId": "microphone",
+  "phase": "activate_second",
+  "target": 0,
+  "currentTime": 0.014,
+  "muted": false
+ },
+ {
+  "ms": 117.7,
+  "event": "drift_first_tick",
+  "videoTime": 0,
+  "sidecarTimes": [
+   {
+    "audioTrackId": "output",
+    "currentTime": 0.014
+   },
+   {
+    "audioTrackId": "microphone",
+    "currentTime": 0.014
+   }
+  ]
+ },
+ {
+  "ms": 117.7,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 0,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 117.8,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 117.9,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 117.9,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 118.1,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": true,
+  "allowPlayback": true,
+  "videoTime": 0.000845,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 118.2,
+  "event": "sidecar_seek_assigned",
+  "audioTrackId": "output",
+  "phase": "sync",
+  "from": 0.014,
+  "target": 0.000845,
+  "paused": false,
+  "muted": false
+ },
+ {
+  "ms": 118.2,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 118.4,
+  "event": "sidecar_seek_assigned",
+  "audioTrackId": "microphone",
+  "phase": "sync",
+  "from": 0.014,
+  "target": 0.000845,
+  "paused": false,
+  "muted": false
+ },
+ {
+  "ms": 118.4,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 118.4,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 119.2,
+  "event": "sidecar_seeking",
+  "audioTrackId": "output",
+  "phase": "sync",
+  "currentTime": 0.000845
+ },
+ {
+  "ms": 119.2,
+  "event": "sidecar_seeking",
+  "audioTrackId": "microphone",
+  "phase": "sync",
+  "currentTime": 0.000845
+ },
+ {
+  "ms": 124,
+  "event": "sidecar_seeked",
+  "audioTrackId": "output",
+  "phase": "sync",
+  "target": 0.000845,
+  "currentTime": 0.014,
+  "muted": false
+ },
+ {
+  "ms": 124,
+  "event": "sidecar_seeked",
+  "audioTrackId": "microphone",
+  "phase": "sync",
+  "target": 0.000845,
+  "currentTime": 0.014,
+  "muted": false
+ },
+ {
+  "ms": 368.3,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 0.210204,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 368.4,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 368.4,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 368.5,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 592.8,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 0.435171,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 592.8,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 592.9,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 593,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 634.9,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 0.477269,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 634.9,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 634.9,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 635,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 900.5,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 0.742036,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 900.7,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 900.7,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 900.8,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 1093.4,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 0.935672,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 1093.5,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 1093.5,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 1093.6,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 1165.5,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 1.006656,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 1165.6,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 1165.6,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 1165.6,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 1431.4,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 1.274036,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 1431.5,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 1431.5,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 1431.5,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 1594.3,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 1.436204,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 1594.3,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 1594.5,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 1594.5,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 1697.2,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 1.539646,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 1697.3,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 1697.3,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 1697.4,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 1963.3,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 1.805217,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 1963.4,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 1963.4,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 1963.4,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 2093.4,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 1.935611,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 2093.4,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 2093.4,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 2093.5,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 2229.2,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 2.071067,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 2229.2,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 2229.3,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 2229.3,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 2494.2,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 2.336617,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 2494.3,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 2494.4,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 2494.4,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 2593.1,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 2.435068,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 2593.2,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 2593.2,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 2593.2,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 2759.6,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 2.602203,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 2759.7,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 2759.7,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 2759.7,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 3025.7,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 2.867817,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 3025.8,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 3025.8,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 3025.9,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 3093,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 2.93563,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 3093.1,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 3093.1,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 3093.2,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 3290,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 3.132564,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 3290.1,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 3290.1,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 3290.1,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 3556,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 3.398692,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 3556,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 3556,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 3556.1,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 3593.3,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 3.435757,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 3593.3,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 3593.4,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 3593.4,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 3822,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 3.664033,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 3822,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 3822,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 3822.1,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 4087.7,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 3.929593,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 4087.8,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 4087.8,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 4087.9,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 4092.7,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 3.934705,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 4092.7,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 4092.7,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 4092.7,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 4354.2,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 4.196068,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 4354.3,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 4354.3,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 4354.3,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 4592.8,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 4.434925,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 4592.9,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 4592.9,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 4592.9,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 4618.8,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 4.461134,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 4618.8,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 4618.9,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 4618.9,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 4884.8,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 4.72684,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 4885,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 4885,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 4885,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 5093.2,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 4.935075,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 5093.2,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 5093.3,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 5093.3,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 5149.7,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 4.992094,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 5149.7,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 5149.8,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 5149.8,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 5415.8,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 5.256303,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 5415.8,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 5415.8,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 5415.9,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 5593.7,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 5.436312,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 5593.7,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 5593.9,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 5593.9,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 5681.4,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 5.523629,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 5681.5,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 5681.5,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 5681.5,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 5947,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 5.78958,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 5947.1,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 5947.2,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 5947.2,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 6092.6,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 5.93463,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 6092.7,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 6092.7,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 6092.8,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 6212.7,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 6.054583,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 6212.7,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 6212.7,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 6212.8,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 6478.5,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 6.321029,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 6478.6,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 6478.6,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 6478.6,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 6593,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 6.435721,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 6593,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 6593,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 6593.1,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 6744,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 6.585768,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 6744,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 6744,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 6744,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 7009,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 6.849542,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 7009,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 7009,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 7009,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 7094.3,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 6.937131,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 7094.3,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 7094.4,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 7094.4,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 7274.7,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 7.116837,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 7274.8,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 7274.8,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 7274.8,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 7541.3,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 7.383534,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 7541.4,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 7541.5,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 7541.5,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 7594.1,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 7.436676,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 7594.2,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 7594.2,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 7594.2,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 7806.5,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 7.648156,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 7806.5,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 7806.5,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 7806.6,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 8071.6,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 7.914084,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 8071.7,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 8071.7,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 8071.7,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 8093.1,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 7.93505,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 8093.1,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 8093.1,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 8093.1,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 8338.2,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 8.180055,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 8338.2,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 8338.2,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 8338.2,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 8593.3,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 8.435192,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 8593.4,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 8593.5,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 8593.6,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 8602.9,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 8.444523,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 8603,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 8603,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 8603,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 8869.8,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 8.712387,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 8869.9,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 8870,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 8870,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 9093,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 8.935114,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 9093,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 9093,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 9093,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 9134.7,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 8.977083,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 9134.7,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 9134.8,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 9134.8,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 9401,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 9.242397,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 9401.1,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 9401.2,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 9401.2,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 9593.2,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 9.43353,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 9593.2,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 9593.2,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 9593.2,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 9665.4,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 9.507904,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 9665.5,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 9665.5,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 9665.5,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 9931.8,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 9.774102,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 9931.9,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 9931.9,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 9931.9,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 10093.5,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 9.93568,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 10093.6,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 10093.6,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 10093.7,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 10197.4,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 10.039715,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 10197.4,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 10197.4,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 10197.4,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 10463,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 10.305286,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 10463.1,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 10463.1,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 10463.1,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 10593.2,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 10.435694,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 10593.2,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 10593.2,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 10593.2,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 10728.7,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 10.571039,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 10728.7,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 10728.7,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 10728.7,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 10994.7,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 10.836615,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 10994.7,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 10994.7,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 10994.7,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 11093.8,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 10.936382,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 11093.8,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 11093.8,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 11093.9,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 11259.1,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 11.100033,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 11259.2,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 11259.2,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 11259.2,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 11525.8,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 11.367928,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 11525.8,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 11525.8,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 11525.9,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 11594.3,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 11.436756,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 11594.4,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 11594.4,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 11594.4,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ },
+ {
+  "ms": 11791.3,
+  "event": "sync_enter",
+  "phase": "sync",
+  "forceSeek": false,
+  "allowPlayback": true,
+  "videoTime": 11.633098,
+  "videoPaused": false,
+  "sidecars": 2
+ },
+ {
+  "ms": 11791.4,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "output",
+  "phase": "sync"
+ },
+ {
+  "ms": 11791.4,
+  "event": "sidecar_play_skipped_already_playing",
+  "audioTrackId": "microphone",
+  "phase": "sync"
+ },
+ {
+  "ms": 11791.4,
+  "event": "sync_exit",
+  "phase": "sync",
+  "awaited": 0
+ }
+]

@@ -2370,9 +2370,26 @@ fn valid_sidecar_activation_reads_latest_player_state_without_swapping_video() {
     assert!(activate.contains("video.paused"));
     // The transaction pauses every source before aligning: `prepared` is already
     // playing from the load pass but is not yet in `activeReviewAudioSidecars`, so
-    // no video pause handler reaches it.
-    assert!(activate.contains("for (const sidecar of prepared) sidecar.element.pause();"));
-    assert!(activate.contains("for (const sidecar of previous) sidecar.element.pause();"));
+    // no video pause handler reaches it. Re-pausing happens per attempt, because a
+    // user pressing Play mid-handover restarts the video and a retry that did not
+    // re-pause would align against a moving playhead.
+    let pause_all = js_function_body(&review, "pauseAllHandoverSources");
+    assert!(pause_all.contains("for (const sidecar of prepared) sidecar.element.pause();"));
+    assert!(pause_all.contains("for (const sidecar of previous) sidecar.element.pause();"));
+    assert!(pause_all.contains("video.pause()"));
+    let pause_call = activate
+        .find("pauseAllHandoverSources(prepared, previous);")
+        .expect("activation pauses every source it owns");
+    let align_call = activate
+        .find("await alignSidecarsWhilePaused(")
+        .expect("activation aligns from a stationary position");
+    assert!(
+        pause_call < align_call,
+        "sources must be paused before the alignment reads the playhead"
+    );
+    // Every non-committing exit restores the transport, or a cancelled handover
+    // strands playback paused and the next activation inherits it.
+    assert!(activate.contains("restoreHandoverTransport(snapshot, intentSince)"));
     let align = activate
         .find("await alignSidecarsWhilePaused(")
         .expect("activation aligns every sidecar from a stationary position");

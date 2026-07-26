@@ -151,6 +151,25 @@ function claimSidecarAlignment(sidecar, target) {
   return token;
 }
 
+/// Mute an audible sidecar for the duration of a seek, restoring it once the
+/// seek settles. Applies to whatever token is current when the seek completes, so
+/// overlapping seeks cannot unmute early.
+function silenceSidecarAcrossSeek(sidecar) {
+  const audio = sidecar.element;
+  if (audio.muted) return;
+  const token = sidecar.seekToken;
+  audio.muted = true;
+  const restore = () => {
+    audio.removeEventListener("seeked", restore);
+    // A newer seek has taken over; it owns the unmute.
+    if (sidecar.seekToken !== token) return;
+    // Respect the output decision rather than blindly unmuting: the selection
+    // may have moved to `direct` or `muted` while this seek was in flight.
+    applyReviewAudioOutput();
+  };
+  audio.addEventListener("seeked", restore);
+}
+
 /// Snapshot for `PlayerCore.sidecarHandoverDecision`.
 function sidecarAlignmentStates(sidecars, generation) {
   return (sidecars || []).map((sidecar) => ({
@@ -224,6 +243,11 @@ async function syncReviewAudioSidecarSet(sidecars, options = {}) {
       // Claim the alignment before assigning, so a completion is attributed to
       // this seek's token and cannot settle a later one.
       claimSidecarAlignment(sidecar, decision.seekTime);
+      // Never seek an *audible* element: setting `currentTime` starts an async
+      // seek and the element may keep emitting already-decoded pre-seek audio
+      // until `seeked`. Mute across the seek and restore on settle — this is the
+      // same exposure the clip-start fault had, and it still reaches user scrubs.
+      silenceSidecarAcrossSeek(sidecar);
       audio.currentTime = decision.seekTime;
     }
     audio.playbackRate = decision.playbackRate;
@@ -320,9 +344,15 @@ var reviewTransportEpoch = 0;
 /// The user's latest play/pause request, or "internal-pause" for the handover's
 /// own pause — which must never be mistaken for user intent.
 var reviewTransportIntent = null;
+/// Monotonic counter for `reviewTransportIntent`, so a handover can tell intent
+/// recorded *during* it from global history left by an earlier interaction.
+var reviewTransportIntentEpoch = 0;
 
 function noteReviewTransportIntent(intent) {
   reviewTransportIntent = intent;
+  reviewTransportIntentEpoch += 1;
+  // The transaction's own pause is not a transport change: bumping the transport
+  // epoch here would make every handover restart itself.
   if (intent !== "internal-pause") reviewTransportEpoch += 1;
 }
 
@@ -351,6 +381,30 @@ async function alignSidecarsWhilePaused(sidecars, target, generation, capturedEp
   }
 }
 
+/// Pause the video and every sidecar the transaction owns. Called once per
+/// alignment attempt: a user pressing Play mid-handover starts the video again,
+/// and a retry that did not re-pause would align against a moving playhead while
+/// the previous output is still flowing.
+function pauseAllHandoverSources(prepared, previous) {
+  if (!video.paused) {
+    noteReviewTransportIntent("internal-pause");
+    video.pause();
+  }
+  for (const sidecar of prepared) sidecar.element.pause();
+  for (const sidecar of previous) sidecar.element.pause();
+}
+
+/// Undo the transaction's internal pause. Every non-committing exit runs this —
+/// stale selection and gate refusal included — or a cancelled handover strands
+/// playback paused and the next activation inherits that artificial state.
+function restoreHandoverTransport(snapshot, intentSince) {
+  const intent = reviewTransportIntentEpoch > intentSince ? reviewTransportIntent : null;
+  if (PlayerCore.handoverResumeDecision(snapshot, { intent }).play) {
+    void video.play().catch(() => syncPlayState());
+  }
+  refreshReviewAudioDriftTimer();
+}
+
 async function activatePreparedReviewAudioSidecars(prepared, request) {
   if (!previewRequestStillCurrent(request)) throw new Error("stale audio selection");
 
@@ -359,79 +413,82 @@ async function activatePreparedReviewAudioSidecars(prepared, request) {
     mode: reviewAudioMode,
     sidecars: previous.map((sidecar) => sidecar.audioTrackId),
   };
+  // `ended` matters: `play()` on ended media restarts it, so a stale "play"
+  // intent must not resurrect a finished clip during a later track change.
   const snapshot = { wasPlaying: !video.paused && !video.ended };
+  // Only intent recorded *after* this point is this transaction's business;
+  // `reviewTransportIntent` is otherwise global history.
+  const intentSince = reviewTransportIntentEpoch;
 
-  // Pause every source, not just the video: `prepared` is already playing from
-  // the load pass but is not yet in `activeReviewAudioSidecars`, so no video
-  // pause handler reaches it. Without this, sidecars keep advancing while their
-  // siblings seek and "nothing is flowing" would be false.
-  const resumeAfter = snapshot.wasPlaying;
-  if (resumeAfter) {
-    noteReviewTransportIntent("internal-pause");
-    video.pause();
-  }
-  for (const sidecar of prepared) sidecar.element.pause();
-  for (const sidecar of previous) sidecar.element.pause();
-
-  let outcome = "restart";
-  for (let attempt = 0; attempt < HANDOVER_ALIGNMENT_ATTEMPTS && outcome === "restart"; attempt++) {
-    if (!previewRequestStillCurrent(request)) throw new Error("stale audio selection");
-    const capturedEpoch = reviewTransportEpoch;
-    const target = reviewPlayheadTime();
-    // eslint-disable-next-line no-await-in-loop -- each attempt supersedes the last
-    outcome = await alignSidecarsWhilePaused(
-      prepared,
-      target,
-      request.sidecarGeneration,
-      capturedEpoch,
-    );
-  }
-  if (!previewRequestStillCurrent(request)) throw new Error("stale audio selection");
-
-  if (outcome !== "ready") {
-    // Restore the complete previous output state. Reverting to `direct` would
-    // make embedded audio audible after a `muted` selection and would discard a
-    // valid sidecar set during a mid-play track change.
-    const fallback = PlayerCore.handoverTimeoutDecision(previousState);
-    warnAudioHandover("restored the previous output", { outcome, mode: fallback.mode });
-    reviewAudioMode = fallback.mode;
-    applyReviewAudioOutput();
-    disposeReviewAudioSidecarSet(prepared);
-    if (PlayerCore.handoverResumeDecision(snapshot, { intent: reviewTransportIntent }).play) {
-      void video.play().catch(() => syncPlayState());
+  let committed = false;
+  try {
+    let outcome = "restart";
+    for (let attempt = 0; attempt < HANDOVER_ALIGNMENT_ATTEMPTS && outcome === "restart"; attempt++) {
+      if (!previewRequestStillCurrent(request)) throw new Error("stale audio selection");
+      // Re-pause every attempt, not just the first.
+      pauseAllHandoverSources(prepared, previous);
+      const capturedEpoch = reviewTransportEpoch;
+      const target = reviewPlayheadTime();
+      // eslint-disable-next-line no-await-in-loop -- each attempt supersedes the last
+      outcome = await alignSidecarsWhilePaused(
+        prepared,
+        target,
+        request.sidecarGeneration,
+        capturedEpoch,
+      );
     }
-    refreshReviewAudioDriftTimer();
-    throw new Error(`audio handover did not settle (${outcome})`);
+    if (!previewRequestStillCurrent(request)) throw new Error("stale audio selection");
+
+    if (outcome !== "ready") {
+      // Restore the complete previous output state. Reverting to `direct` would
+      // make embedded audio audible after a `muted` selection and would discard a
+      // valid sidecar set during a mid-play track change.
+      const fallback = PlayerCore.handoverTimeoutDecision(previousState);
+      warnAudioHandover("restored the previous output", { outcome, mode: fallback.mode });
+      reviewAudioMode = fallback.mode;
+      applyReviewAudioOutput();
+      throw new Error(`audio handover did not settle (${outcome})`);
+    }
+
+    // Final gate immediately before the switch: readiness was proved a tick ago,
+    // and a transport change since then must still block an unmute at a stale
+    // position.
+    const gate = PlayerCore.sidecarHandoverDecision(
+      sidecarAlignmentStates(prepared, request.sidecarGeneration),
+      request.sidecarGeneration,
+      { capturedTransport: reviewTransportEpoch, currentTransport: reviewTransportEpoch },
+    );
+    if (!gate.ready) {
+      warnAudioHandover("gate refused the switch", { outstanding: gate.outstanding });
+      throw new Error("audio handover gate refused the switch");
+    }
+
+    for (const { element: audio } of previous) audio.muted = true;
+    activeReviewAudioSidecars = prepared;
+    reviewAudioMode = "sidecars";
+    committed = true;
+    applyReviewAudioOutput();
+    disposeReviewAudioSidecarSet(previous);
+  } catch (error) {
+    // Never leave the transport paused by our own pause.
+    restoreHandoverTransport(snapshot, intentSince);
+    throw error;
   }
 
-  // Final gate immediately before the switch: the loop above proved readiness a
-  // tick ago, and a transport change or a fresh seek since then must still block
-  // an unmute at a stale position.
-  const gate = PlayerCore.sidecarHandoverDecision(
-    sidecarAlignmentStates(prepared, request.sidecarGeneration),
-    request.sidecarGeneration,
-    { capturedTransport: reviewTransportEpoch, currentTransport: reviewTransportEpoch },
-  );
-  if (!gate.ready) {
-    warnAudioHandover("gate refused the switch", { outstanding: gate.outstanding });
-    disposeReviewAudioSidecarSet(prepared);
-    throw new Error("audio handover gate refused the switch");
-  }
-
-  for (const { element: audio } of previous) audio.muted = true;
-  activeReviewAudioSidecars = prepared;
-  reviewAudioMode = "sidecars";
-  applyReviewAudioOutput();
-  disposeReviewAudioSidecarSet(previous);
-
-  // Restore the user's latest intent, not the pre-pause snapshot: they may have
-  // paused or pressed play while the alignment ran, and their action wins.
-  const resume = PlayerCore.handoverResumeDecision(snapshot, { intent: reviewTransportIntent });
-  if (resume.play) {
-    void video.play().catch(() => syncPlayState());
-    await syncReviewAudioSidecarSet(prepared, { tracePhase: "handover_resume" });
+  // Past the commit point, nothing may throw: the caller disposes `prepared` on
+  // error, and `prepared` is now the *active* set — disposing it would leave the
+  // mode on `sidecars` with the video muted, i.e. silence.
+  try {
+    const intent = reviewTransportIntentEpoch > intentSince ? reviewTransportIntent : null;
+    if (PlayerCore.handoverResumeDecision(snapshot, { intent }).play) {
+      void video.play().catch(() => syncPlayState());
+      await syncReviewAudioSidecarSet(prepared);
+    }
+  } catch (error) {
+    warnAudioHandover("resume after commit failed", { error: String(error) });
   }
   refreshReviewAudioDriftTimer();
+  return committed;
 }
 
 function assignReviewVideoSource(path, options = {}) {
