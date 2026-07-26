@@ -4,6 +4,48 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-26): Review audio alignment — STOPPED, specification only
+
+**The bug users reported is fixed and shipped.** The split-second audio repeat at the start of every
+clip was settlement forcing a sidecar realignment; PR **#109** (`b99c385`) fixed it and is merged to
+`develop`. Nothing described below is required for that.
+
+**Branch `review-audio-alignment` is specification-only and must not be merged.** It contains **zero
+production changes** — verify with `git diff --name-only origin/develop...review-audio-alignment`
+(tests, one plan, one gate script). **7 tests fail on purpose** in `tests/player_core.rs` (103 pass):
+they specify a reducer that was never implemented. Do not delete them to get green.
+
+Plan: `docs/superpowers/plans/2026-07-26-review-audio-alignment.md`. Residual defects are enumerated
+under "Out of scope" in `2026-07-26-review-audio-settlement.md`. Both are pre-existing, affect **scrub
+and track-switch paths only**, and were broken before this effort began.
+
+**Why it stopped.** Six review rounds, each finding valid P1 concurrency defects, several introduced by
+the previous round's own fix. Three separate pieces of my own verification turned out unable to fail: a
+runtime gate whose safety timer forced the convergence it reported as proof; two harnesses that
+reported clean while measuring nothing (one queried `<audio>` elements, but sidecars are built with
+`new Audio()` and never appended); and a test suite red only because a constructor was absent. The
+decision to stop was economic, not an admission the work was worthless — the residual behaviour is
+non-shipping-critical, while each hardening round created or admitted new holes.
+
+**What is genuinely useful here:**
+
+- `scripts/gate-review-audio-alignment.ps1` — a **negative control**, proven red on `develop`: 34
+  samples with a sidecar `muted === false` while `seeking === true` during a scrub. It cannot prove the
+  converse; 4 ms polling can miss a ~2 ms window. A durable gate must assert over an audit emitted at
+  the single `muted` write.
+- Seven **paired discriminating properties** in `tests/player_core.rs`: each asserted against the real
+  reducer (red) and against a deliberately-wrong implementation it must reject (green). Each control was
+  verified to reject for its specific defect.
+- The **seven Task 3 entry criteria** in the plan: activation models preemption not serialization;
+  promotion makes an unaligned sidecar audible; request currentness is unrepresented; the hard
+  stale-observation case is untested; no property promotes or changes mode *while* alignment is
+  outstanding; the audit control is incidental; lifecycle vocabulary is incomplete (`TOL` unused).
+
+**If resumed:** do not reuse this execution model. Batching pure model work is what repeatedly let
+interactions escape. Review the vocabulary first, one targeted mutant per invariant, one vertical
+transition at a time, review after each, wire each through the DOM immediately, and finish with
+actual-write audit plus loopback evidence. Full rationale under "If this is picked up again" in the plan.
+
 ## Checkpoint (2026-07-25): FFmpeg thumbnail reliability
 
 Plan: `docs/superpowers/plans/2026-07-25-ffmpeg-thumbnail-reliability.md`.

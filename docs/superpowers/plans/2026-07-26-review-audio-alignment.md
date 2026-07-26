@@ -1,5 +1,23 @@
 # Review Audio Alignment
 
+> ## STATUS: SPECIFICATION ONLY — STOPPED, INTENTIONALLY RED, NOT MERGEABLE
+>
+> Branch `review-audio-alignment` contains **no production changes** — only tests, this plan, and a
+> gate script. Verify with
+> `git diff --name-only origin/develop...review-audio-alignment`.
+>
+> **7 tests fail on purpose** in `apps/clipline-app/tests/player_core.rs` (103 pass): they specify a
+> reducer that was never implemented. Do not "fix" them by deleting them and do not merge this branch.
+>
+> **The bug users reported — the split-second audio repeat at the start of every clip — is already
+> fixed and shipped** by PR #109 (`b99c385` on `develop`). Nothing here is needed for that.
+>
+> This effort was stopped after six review rounds, each finding valid P1 concurrency defects, several
+> introduced by the previous round's own fix. The residual defects are pre-existing, affect scrub and
+> track-switch paths only, and are enumerated under "Out of scope" in
+> `2026-07-26-review-audio-settlement.md`. See "Task 2b outcome" below for the seven entry criteria any
+> future attempt must meet, and "If this is picked up again" for why batching failed.
+
 > **For agentic workers:** Execute this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for
 > tracking and remain unticked by repository convention.
 
@@ -237,6 +255,29 @@ sampling never can.
       press Play during a handover, and hide/restore — none may produce silence, a repeat, or stranded
       pause.
 - [ ] Update `handoff.md`.
+
+## If this is picked up again
+
+Do not resume from this branch's execution model. Six rounds failed the same way: a batch of pure model
+work was proposed, reviewed, found to admit the interaction it was meant to exclude, patched, and
+re-reviewed. **Batching is what let interactions escape** — each round added a mechanism (token, epoch,
+intent string, safety timer) and the defects lived between them.
+
+Start fresh from then-current `develop`, port this specification selectively, and change the cadence:
+
+1. Review the reducer **vocabulary** before writing it — the seven entry criteria above are mostly
+   vocabulary gaps, not logic bugs.
+2. One **targeted mutant per invariant**, not a multi-defect stub. The single `Degenerate` stub here
+   made some controls pass incidentally (see gap 6).
+3. Implement **one vertical state transition at a time**.
+4. Review after **each** transition — especially request ownership, alignment settlement, and activation
+   serialization.
+5. **Wire each transition through the DOM immediately.** Completing the pure model as a batch is
+   precisely what produced a correct-looking reducer with the bugs in the glue.
+6. Finish with the **actual-write audit** and **loopback** evidence, not DOM-state inference.
+
+Independent review cadence matters more than who implements it. This subsystem is genuinely hard: the
+elements are shared, the events carry no provenance, and several sets are live at once.
 
 ## Out of scope
 
