@@ -116,6 +116,54 @@ function reviewAudioTransportState() {
   };
 }
 
+// ---------------------------------------------------------------------------
+// TEMPORARY: audio handover instrumentation (plan 2026-07-25-review-audio-handover,
+// Task 1). Confirms whether the second forced seek's `seeked` lands after the
+// output switch. Remove in Task 5 -- this must not ship.
+// Read from DevTools with: window.__audioHandoverTrace
+// ---------------------------------------------------------------------------
+var audioHandoverTrace = [];
+var audioHandoverTraceStart = 0;
+var audioHandoverAwaitingFirstDrift = false;
+
+function traceAudioHandover(event, detail) {
+  const now = (window.performance && performance.now) ? performance.now() : 0;
+  if (!audioHandoverTraceStart) audioHandoverTraceStart = now;
+  const entry = {
+    ms: Math.round((now - audioHandoverTraceStart) * 10) / 10,
+    event,
+    ...(detail || {}),
+  };
+  audioHandoverTrace.push(entry);
+  if (audioHandoverTrace.length > 400) audioHandoverTrace.shift();
+  window.__audioHandoverTrace = audioHandoverTrace;
+  console.log(`[audio-handover] +${entry.ms}ms ${event}`, detail || "");
+}
+
+function resetAudioHandoverTrace(reason) {
+  audioHandoverTrace = [];
+  audioHandoverTraceStart = 0;
+  window.__audioHandoverTrace = audioHandoverTrace;
+  traceAudioHandover("trace_reset", { reason });
+}
+
+/// One-shot `seeking`/`seeked` witnesses so an unresolved seek is visible as a
+/// missing `seeked` rather than inferred.
+function watchAudioSeek(audio, audioTrackId, target, phase) {
+  const onSeeking = () => traceAudioHandover("sidecar_seeking", {
+    audioTrackId, phase, currentTime: audio.currentTime,
+  });
+  const onSeeked = () => {
+    traceAudioHandover("sidecar_seeked", {
+      audioTrackId, phase, target, currentTime: audio.currentTime, muted: audio.muted,
+    });
+    audio.removeEventListener("seeking", onSeeking);
+    audio.removeEventListener("seeked", onSeeked);
+  };
+  audio.addEventListener("seeking", onSeeking);
+  audio.addEventListener("seeked", onSeeked);
+}
+
 function disposeReviewAudioSidecarSet(sidecars) {
   for (const sidecar of sidecars || []) {
     const audio = sidecar.element;
@@ -158,7 +206,16 @@ function clearReviewAudioSidecars(mode = "direct") {
 async function syncReviewAudioSidecarSet(sidecars, options = {}) {
   const videoState = options.videoState || reviewAudioTransportState();
   const playPromises = [];
-  for (const { element: audio } of sidecars || []) {
+  const phase = options.tracePhase || "sync";
+  traceAudioHandover("sync_enter", {
+    phase,
+    forceSeek: options.forceSeek === true,
+    allowPlayback: options.allowPlayback !== false,
+    videoTime: videoState.currentTime,
+    videoPaused: videoState.paused,
+    sidecars: (sidecars || []).length,
+  });
+  for (const { element: audio, audioTrackId } of sidecars || []) {
     const decision = PlayerCore.audioSidecarSyncDecision(
       videoState,
       {
@@ -168,15 +225,36 @@ async function syncReviewAudioSidecarSet(sidecars, options = {}) {
       },
       { forceSeek: options.forceSeek === true },
     );
-    if (decision.seekTime != null) audio.currentTime = decision.seekTime;
+    if (decision.seekTime != null) {
+      traceAudioHandover("sidecar_seek_assigned", {
+        audioTrackId, phase, from: audio.currentTime, target: decision.seekTime,
+        paused: audio.paused, muted: audio.muted,
+      });
+      watchAudioSeek(audio, audioTrackId, decision.seekTime, phase);
+      audio.currentTime = decision.seekTime;
+    }
     audio.playbackRate = decision.playbackRate;
     if (decision.shouldPlay && options.allowPlayback !== false) {
-      if (audio.paused) playPromises.push(Promise.resolve(audio.play()));
+      if (audio.paused) {
+        // The asymmetry under investigation: on the second activation pass the
+        // sidecar is already playing, so nothing is pushed here and the await
+        // below resolves against an empty array while a seek is still in flight.
+        traceAudioHandover("sidecar_play_requested", { audioTrackId, phase });
+        playPromises.push(Promise.resolve(audio.play()).then(() => {
+          traceAudioHandover("sidecar_play_resolved", {
+            audioTrackId, phase, currentTime: audio.currentTime,
+          });
+        }));
+      } else {
+        traceAudioHandover("sidecar_play_skipped_already_playing", { audioTrackId, phase });
+      }
     } else if (!audio.paused) {
       audio.pause();
+      traceAudioHandover("sidecar_paused", { audioTrackId, phase });
     }
   }
   await Promise.all(playPromises);
+  traceAudioHandover("sync_exit", { phase, awaited: playPromises.length });
 }
 
 function handleReviewAudioSidecarFailure(generation, error) {
@@ -191,6 +269,18 @@ function handleReviewAudioSidecarFailure(generation, error) {
 
 function syncReviewAudioSidecars(options = {}) {
   if (reviewAudioMode !== "sidecars" || activeReviewAudioSidecars.length === 0) return;
+  if (audioHandoverAwaitingFirstDrift) {
+    audioHandoverAwaitingFirstDrift = false;
+    // A backward seek from here would be an independent second source of
+    // repetition, distinct from the activation race.
+    traceAudioHandover("drift_first_tick", {
+      videoTime: reviewPlayheadTime(),
+      sidecarTimes: activeReviewAudioSidecars.map((s) => ({
+        audioTrackId: s.audioTrackId,
+        currentTime: s.element.currentTime,
+      })),
+    });
+  }
   const generation = reviewAudioSidecarGeneration;
   void syncReviewAudioSidecarSet(activeReviewAudioSidecars, options)
     .catch((error) => handleReviewAudioSidecarFailure(generation, error));
@@ -237,7 +327,11 @@ async function prepareReviewAudioSidecars(sidecars, generation) {
       if (audio.readyState >= 3) ready();
     })));
     if (generation !== reviewAudioSidecarGeneration) throw new Error("stale audio sidecar");
-    await syncReviewAudioSidecarSet(prepared, { forceSeek: true, allowPlayback: false });
+    await syncReviewAudioSidecarSet(prepared, {
+      forceSeek: true,
+      allowPlayback: false,
+      tracePhase: "prepare",
+    });
     return prepared;
   } catch (error) {
     disposeReviewAudioSidecarSet(prepared);
@@ -253,9 +347,15 @@ async function activatePreparedReviewAudioSidecars(prepared, request) {
     paused: video.paused,
     ended: video.ended,
   };
+  traceAudioHandover("activation_begin", {
+    videoTime: activationState.currentTime,
+    videoPaused: activationState.paused,
+    sidecars: (prepared || []).length,
+  });
   await syncReviewAudioSidecarSet(prepared, {
     forceSeek: true,
     videoState: activationState,
+    tracePhase: "activate_first",
   });
   if (!previewRequestStillCurrent(request)) throw new Error("stale audio selection");
 
@@ -268,6 +368,7 @@ async function activatePreparedReviewAudioSidecars(prepared, request) {
   await syncReviewAudioSidecarSet(prepared, {
     forceSeek: true,
     videoState: finalState,
+    tracePhase: "activate_second",
   });
   if (!previewRequestStillCurrent(request)) throw new Error("stale audio selection");
 
@@ -275,12 +376,25 @@ async function activatePreparedReviewAudioSidecars(prepared, request) {
   for (const { element: audio } of previous) audio.muted = true;
   activeReviewAudioSidecars = prepared;
   reviewAudioMode = "sidecars";
+  // The moment under investigation: if `activate_second`'s `sidecar_seeked`
+  // has not appeared above this line, the sidecar unmutes mid-seek.
+  traceAudioHandover("output_switched_to_sidecars", {
+    videoTime: reviewPlayheadTime(),
+    sidecarTimes: prepared.map((s) => ({
+      audioTrackId: s.audioTrackId,
+      currentTime: s.element.currentTime,
+      seeking: s.element.seeking,
+    })),
+  });
   applyReviewAudioOutput();
+  audioHandoverAwaitingFirstDrift = true;
   disposeReviewAudioSidecarSet(previous);
   refreshReviewAudioDriftTimer();
 }
 
 function assignReviewVideoSource(path, options = {}) {
+  // One trace per clip open, so timestamps are relative to this handover.
+  resetAudioHandoverTrace(`source_assigned ${path}`);
   clearReviewAudioSidecars("direct");
   clearReviewSourceErrorHandler();
   const { resumeTime = 0, onLoadedMetadata = null } = options;

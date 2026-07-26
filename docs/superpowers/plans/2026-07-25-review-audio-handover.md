@@ -56,6 +56,49 @@ first so the fix is measured against something real.
 - [ ] Note whether the first drift tick (`:209`, 500 ms) issues its own backward seek, which would
       be a second, independent source of repetition.
 
+### Task 1 outcome — ordering confirmed, magnitude complicates it
+
+Captured on a release build via CDP, cold cache (`audio-previews` emptied) and warm.
+
+**The predicted ordering is confirmed verbatim, in both runs.** Cold:
+
+```
+205.9ms  sync_exit                    phase=activate_second  awaited=0
+206.0ms  output_switched_to_sidecars  seeking=true (both sidecars)
+207.8ms  sidecar_seeked               phase=activate_second  muted=False
+```
+
+`awaited=0` proves the second pass pushed no play promise, and the switch happens with
+`seeking: true` on every sidecar. Warm is identical in shape (switch 92.3 ms, `seeked` 94.2 ms).
+So the plan's stop-condition did **not** trigger — the root cause stands.
+
+**But the wall-clock window is only ~2 ms**, which alone is too short to perceive as a repeat. Two
+readings, and the fix covers both:
+
+1. **The leaked *audio* is not bounded by that 2 ms.** A media element can have a decoded buffer of
+   tens of milliseconds already queued; unmuting for even 2 ms mid-seek can let a whole pre-seek
+   buffer through. This remains the most likely explanation and is consistent with the symptom.
+2. **The video→sidecar crossover is a second candidate.** Until the switch the video's own audio is
+   audible (mode `direct`, 206 ms cold / 92 ms warm of real playback). Muting a media element does
+   not necessarily flush already-queued audio, so both copies of the same content can briefly
+   overlap at the instant of handover.
+
+A stationary handover (Task 3) addresses both, because switching while paused means no audio is
+flowing from either source at the switch instant. Note this is a *different* reason than "await
+`seeked`" alone — keep the pause, do not reduce Task 3 to just gating on `seeked`.
+
+**Two further measurements worth recording:**
+
+- **The drift timer never corrects.** Cold, at the first tick the sidecars sit ~71 ms behind the
+  video (video 0.224 s, sidecars 0.153 s) and every subsequent sync reports `forceSeek=False` with
+  no seek assigned — `audioSidecarSyncDecision` treats that offset as within tolerance. So there is
+  a persistent, uncorrected A/V offset after handover, separate from the artefact under
+  investigation. Out of scope here; worth its own look.
+- **Cold sidecar generation measured ~202 ms, not 0.5–2 s.** That was one argument for rejecting
+  muting-at-open, and on this hardware and clip length it does not hold. The decision stands on the
+  other grounds — the tested direct-fallback invariant, and no exit path from pending-muted for
+  clips that never request sidecars — but the timing claim should not be repeated as fact.
+
 ## Task 2: Failing tests for a completion-gated stationary handover
 
 - [ ] Extend `player-core.js` with a pure decision for the handover — given video state, sidecar
