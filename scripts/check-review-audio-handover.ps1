@@ -78,4 +78,3 @@ try {
 } finally {
     Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
 }
-
