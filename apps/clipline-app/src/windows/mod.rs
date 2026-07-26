@@ -1,12 +1,14 @@
 //! Safe wrappers for the small Win32 surface owned by the application shell.
 
 mod credential_store;
+mod webview_memory;
 
 use std::ffi::{c_void, OsStr};
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 
 pub(crate) use credential_store::CredentialStore;
+pub(crate) use webview_memory::{set_memory_target, MemoryTarget};
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_INVALID_PARAMETER, FILETIME, HANDLE,
 };

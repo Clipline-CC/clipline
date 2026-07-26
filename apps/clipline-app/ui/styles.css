@@ -577,6 +577,33 @@ label span { white-space: nowrap; }
   white-space: nowrap;
 }
 
+/* Child processes (webview runtime, and ffmpeg on the CPU encoder path) read as
+   subordinate to Clipline's own figure. Explicit [hidden] because a `display`
+   rule on this element would otherwise defeat the attribute. */
+.memory-children {
+  grid-column: 1;
+  grid-row: 3;
+  min-width: 0;
+  padding-left: calc(var(--brand-logo-size) + var(--brand-gap));
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+  white-space: nowrap;
+  opacity: 0.75;
+}
+
+.memory-children[hidden] { display: none; }
+
+.app.rail .memory-children {
+  grid-column: auto;
+  grid-row: auto;
+  padding-left: 0;
+  text-align: center;
+  white-space: normal;
+}
+
 .sidebar-rail button:hover { background: var(--panel-2); color: var(--text); }
 
 .sidebar-rail {

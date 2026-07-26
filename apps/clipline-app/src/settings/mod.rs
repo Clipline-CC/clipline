@@ -195,6 +195,11 @@ impl AppSettings {
                 replay_buffer_seconds(self),
                 self.effective_bitrate_mbps(),
             ),
+            // Derived, never read from `self.buffer_seconds`: persistence
+            // normalizes only a clone, so the live field can be stale, and
+            // validation accepts `buffer_seconds == replay_window_s` — which
+            // would leave the ring zero GOP headroom.
+            buffer_seconds: replay_buffer_seconds(self),
             replay_storage: self.replay_storage.to_service_options()?,
             disk_quota_bytes: quota_bytes_from_gb(self.disk_quota_gb)?,
             recording_mode: RecordingMode::ReplaysOnly,

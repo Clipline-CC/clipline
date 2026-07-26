@@ -557,6 +557,10 @@ pub struct ServiceOptions {
     pub replay_window_s: f64,
     /// Ring budget in bytes.
     pub buffer_bytes: usize,
+    /// Replay retention window (s) — the save window plus GOP headroom. Bounds
+    /// the ring by span as well as bytes, so steady-state memory tracks the
+    /// footage a save can use instead of the overshoot-padded byte budget.
+    pub buffer_seconds: f64,
     /// Where the rolling replay buffer stores encoded GOP segments.
     pub replay_storage: ReplayStorageOptions,
     /// Saved clip disk quota. None disables save-time GC.
@@ -588,6 +592,7 @@ impl Default for ServiceOptions {
             replay_window_s: 60.0,
             // ~2 min at 12 Mbps video + audio headroom.
             buffer_bytes: 220 * 1024 * 1024,
+            buffer_seconds: 75.0,
             replay_storage: ReplayStorageOptions::Memory,
             disk_quota_bytes: Some(DEFAULT_DISK_QUOTA_BYTES),
             recording_mode: RecordingMode::ReplaysOnly,
@@ -849,6 +854,17 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
 
     let (encoder, active) = build_encoder(&device, &opts, in_w, in_h, enc_w, enc_h, events)?;
     let encoder_status = encoder_label(active);
+    // `encoder_label` intentionally shows only backend and codec, so an MFT and
+    // an FFmpeg path render identically ("AMD AMF · H.264"). Log the API too:
+    // the two have very different memory and readback behaviour, and telling
+    // them apart from a support bundle was otherwise guesswork.
+    tracing::info!(
+        event = "encoder_selected",
+        api = ?active.api,
+        backend = ?active.backend,
+        codec = ?active.codec,
+        label = %encoder_status,
+    );
 
     let (clips_dir, fell_back) = clips_dir_resolved(&opts.media_dir, default_clips_dir)?;
     let _ = events.send(Event::MediaRootResolved {
@@ -880,9 +896,11 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
     let replay_storage = match &opts.replay_storage {
         ReplayStorageOptions::Memory => ReplayStorageConfig::Memory {
             max_bytes: opts.buffer_bytes,
+            retention_s: opts.buffer_seconds,
         },
         ReplayStorageOptions::Disk { .. } => ReplayStorageConfig::Disk {
             max_bytes: prepared_replay.max_bytes,
+            retention_s: opts.buffer_seconds,
             dir: replay_cache_dir
                 .clone()
                 .ok_or_else(|| "disk replay cache was not prepared".to_string())?,
