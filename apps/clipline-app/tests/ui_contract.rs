@@ -2157,6 +2157,56 @@ fn review_player_applies_logical_seek_only_for_current_metadata() {
     assert!(!review.contains("reviewSeekRevision"));
 }
 
+/// The pure handover decisions are only worth having if they are actually
+/// consulted. Every assertion here would still pass with the helpers exported but
+/// unwired, which is precisely the gap this guards.
+#[test]
+fn review_player_wires_the_audio_handover_decisions() {
+    let review = read_ui_js("review-player.js");
+
+    // Settlement must not force a realignment; provenance decides.
+    let seeked_handler = review
+        .split("video.addEventListener(\"seeked\"")
+        .nth(1)
+        .expect("review player handles the video seeked event");
+    assert!(
+        seeked_handler.contains("PlayerCore.sidecarRealignmentForced("),
+        "the seeked handler must ask whether a realignment is warranted rather than always forcing"
+    );
+    assert!(
+        seeked_handler.contains("confirmedSource"),
+        "forcing must be driven by the confirmed seek provenance"
+    );
+
+    // Output may only switch once the handover decision says so.
+    let activate = js_function_body(&review, "activatePreparedReviewAudioSidecars");
+    assert!(
+        activate.contains("PlayerCore.sidecarHandoverDecision("),
+        "activation must consult the handover decision before switching output"
+    );
+    let switch_index = activate
+        .find("reviewAudioMode = \"sidecars\"")
+        .expect("activation switches the audio mode");
+    let decision_index = activate
+        .find("PlayerCore.sidecarHandoverDecision(")
+        .expect("activation consults the handover decision");
+    assert!(
+        decision_index < switch_index,
+        "the handover decision must be consulted before the output switch, not after"
+    );
+
+    // The transaction pauses the prepared set too: pausing the video alone cannot
+    // reach sidecars that are playing but not yet in `activeReviewAudioSidecars`.
+    assert!(
+        activate.contains("PlayerCore.handoverResumeDecision("),
+        "activation must restore transport via the resume decision, not a raw snapshot"
+    );
+    assert!(
+        activate.contains("PlayerCore.handoverTimeoutDecision("),
+        "activation must restore the complete previous output state on timeout"
+    );
+}
+
 #[test]
 fn audio_sidecar_preparation_consumes_validated_hits_once() {
     let library = library_rs();

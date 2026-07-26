@@ -197,8 +197,57 @@ landed at 0.014 — where it already was. It pays an audible cost for nothing.
       passes untouched — the direct-fallback invariant is not what is changing.
 - [ ] Run the focused tests and confirm they fail on current code.
 
+### Task 2b outcome — five corrections to the first test pass
+
+**A guard was already failing and I reported green.** `ui_contract.rs:2134` builds a prohibited
+identifier as `["pending", "Seek"].concat()` — deliberately obfuscated so the guard cannot trip on
+itself — and scans `tests/player_core.rs` via `include_str!`. My first test block used exactly that
+name. It did not show up because `cargo test --workspace` reused a **stale `ui_contract` binary**:
+cargo did not rebuild it when only `player_core.rs` changed, so the embedded copy was the old file.
+It only surfaced after `touch`ing `ui_contract.rs`. **Any change to a file consumed by `include_str!`
+needs the consuming test touched, or the run is meaningless.** `reviewSeekRevision` and
+`audioPreviewSeq` are prohibited in `review-player.js` too.
+
+The identifier ban is not cosmetic: a single shared pending-seek flag previously caused ownership
+bugs. Several seeks overlap inside one generation — prepare, first activation, final alignment, and
+possibly a user seek — so a late `seeked` can clear a flag belonging to a newer assignment.
+**Ownership is therefore per-sidecar and token-revisioned:** each carries `seekToken` and
+`settledToken`, settlement matches tokens, stale generations are ignored rather than globally
+cleared, and disposal aborts its own listeners and timeout.
+
+Four further gaps the first pass left open, now pinned:
+
+- **Provenance across source replacement.** `beginSourceAssignment` deliberately carries a pending
+  logical target; if that target came from the user it must keep `targetSource: "user"` rather than
+  being relabelled `assignment`, or a replacement silently downgrades a real reposition.
+- **Stale completions must not confirm newer targets.** `assignment(0) → user(12) → seeked(0)` must
+  yield `confirmed=false`, `confirmedSource=null`, `applyTime=12`, and state still carrying
+  `targetSource="user"`. Only `seeked(12)` confirms.
+- **A target already satisfied settles without `seeked`.** Browsers may skip the event for a no-op
+  seek; without this the backstop timeout becomes the normal path.
+- **Mid-handover user seeks.** A user seek does not advance the sidecar-selection generation, so
+  sidecars can settle at the captured `t0`, look "ready", and switch while the video targets `t1`.
+  The transaction carries a transport revision and **restarts** the alignment when it changes.
+
+**The timeout decision in the first pass was wrong, not merely incomplete.**
+`hadAudibleSidecars ? "sidecars" : "direct"` discards a valid previous `muted` mode. Reachable: the
+user selects no tracks (entering `muted`), then requests tracks needing sidecars, and preparation
+times out — the clip's embedded audio would become audible against an empty selection. It now
+restores the complete previous state: mode (`direct` / `sidecars` / `muted`), the previous sidecar
+set, and transport.
+
+**Wiring is now guarded separately.** Every pure test above would pass with the helpers exported but
+never called, leaving behaviour unchanged. `review_player_wires_the_audio_handover_decisions` pins
+that the `seeked` handler consults `sidecarRealignmentForced` with `confirmedSource`, that
+`sidecarHandoverDecision` is consulted **before** the output switch (by source position, not just
+presence), and that the resume and timeout decisions are used rather than a raw snapshot.
+
 ## Task 3: Stationary, completion-gated handover
 
+- [ ] Use per-sidecar `seekToken` / `settledToken` ownership from Task 2b. Do **not** reintroduce a
+      shared pending flag — `ui_contract.rs` prohibits that identifier, and the ownership bug it
+      caused is the reason. Disposal and cancellation must abort their own listeners and timeout
+      rather than clearing shared state.
 - [ ] **Pause all three sets, not just the video.** Pausing the video does not pause the prepared
       sidecars: they were started during the first activation pass but are not yet in
       `activeReviewAudioSidecars`, so no video pause handler reaches them. "Nothing is flowing" is

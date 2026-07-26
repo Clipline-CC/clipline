@@ -3010,17 +3010,22 @@ fn region_helpers_set_align_and_clamp_to_display() {
 }
 
 // --- Review audio handover (plan 2026-07-25-review-audio-handover, Task 2) ---
+//
+// Ownership is per-sidecar and token-revisioned, not a shared boolean: several
+// seeks overlap within one generation (prepare, first activation, final
+// alignment, and possibly a user seek), so a late `seeked` from an older
+// assignment must not settle a newer one. `ui_contract.rs` prohibits the legacy
+// single-flag identifier for exactly that reason.
 
 /// A `seeked` from the initial source assignment must not be treated as a user
-/// reposition. Traced warm, the settlement's forced sidecar seek lands on
-/// already-audible elements and drags them backward ~20 ms for no correction:
-/// the drift was well inside `AUDIO_SIDECAR_HARD_SEEK_TOLERANCE_S`, and after
-/// seeking the element returned to where it started.
+/// reposition. Traced warm, the settlement's forced sidecar seek dragged
+/// already-audible elements backward ~20 ms for no correction: the drift was far
+/// inside `AUDIO_SIDECAR_HARD_SEEK_TOLERANCE_S`, and the element landed back
+/// where it started.
 #[test]
 fn settlement_seeks_are_distinguished_from_user_repositions() {
     let mut ctx = player_core_context();
 
-    // A source assignment's own resume seek is tagged as assignment-sourced.
     assert_eq!(
         eval(
             &mut ctx,
@@ -3028,7 +3033,6 @@ fn settlement_seeks_are_distinguished_from_user_repositions() {
         ),
         "assignment"
     );
-    // An explicit seek is tagged as user-sourced, even over a pending assignment.
     assert_eq!(
         eval(
             &mut ctx,
@@ -3036,8 +3040,6 @@ fn settlement_seeks_are_distinguished_from_user_repositions() {
         ),
         "user"
     );
-    // `seekedDecision` reports which one confirmed, so the caller can decide
-    // whether a forced sidecar realignment is warranted.
     assert_eq!(
         eval_json(
             &mut ctx,
@@ -3054,9 +3056,56 @@ fn settlement_seeks_are_distinguished_from_user_repositions() {
     );
 }
 
+/// `beginSourceAssignment` deliberately carries a pending logical target across a
+/// source replacement. If that target came from the user, its provenance must
+/// survive too, or a replacement would silently downgrade it to settlement and
+/// skip the realignment the user asked for.
+#[test]
+fn source_replacement_preserves_user_seek_provenance() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "(() => { let s = PlayerCore.requestLogicalSeek(PlayerCore.createLogicalSeekState(), 12, 60); s = PlayerCore.beginSourceAssignment(s, 2, 0, 60); return s.targetSource; })()"
+        ),
+        "user"
+    );
+    // The carried target itself is preserved, not replaced by the resume time.
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "(() => { let s = PlayerCore.requestLogicalSeek(PlayerCore.createLogicalSeekState(), 12, 60); s = PlayerCore.beginSourceAssignment(s, 2, 0, 60); return s.targetTime; })()"
+        ),
+        "12"
+    );
+}
+
+/// A late `seeked` for a superseded target must not confirm the newer one. The
+/// old completion has to re-apply the current target instead, and leave its
+/// provenance intact so only the real arrival confirms it.
+#[test]
+fn a_stale_seek_completion_cannot_confirm_a_newer_user_target() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "(() => { let s = PlayerCore.beginSourceAssignment(PlayerCore.createLogicalSeekState(), 1, 0, 30); s = PlayerCore.metadataSeekDecision(s, 1, 30).state; s = PlayerCore.requestLogicalSeek(s, 12, 30); const d = PlayerCore.seekedDecision(s, 1, 0, 30); return { confirmed: d.confirmed, source: d.confirmedSource, applyTime: d.applyTime, targetSource: d.state.targetSource }; })()"
+        ),
+        "{\"confirmed\":false,\"source\":null,\"applyTime\":12,\"targetSource\":\"user\"}"
+    );
+    // Only the arrival at the user's target confirms it.
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "(() => { let s = PlayerCore.beginSourceAssignment(PlayerCore.createLogicalSeekState(), 1, 0, 30); s = PlayerCore.metadataSeekDecision(s, 1, 30).state; s = PlayerCore.requestLogicalSeek(s, 12, 30); s = PlayerCore.seekedDecision(s, 1, 0, 30).state; const d = PlayerCore.seekedDecision(s, 1, 12, 30); return { confirmed: d.confirmed, source: d.confirmedSource }; })()"
+        ),
+        "{\"confirmed\":true,\"source\":\"user\"}"
+    );
+}
+
 /// Only a user reposition justifies bypassing the drift tolerance. Settlement
-/// must fall through to the ordinary tolerance path, which -- measured -- assigns
-/// no seek at all for the ~20 ms it was correcting.
+/// falls through to the ordinary tolerance path, which -- measured -- assigned no
+/// seek at all for the ~20 ms it was "correcting".
 #[test]
 fn only_user_repositions_force_a_sidecar_realignment() {
     let mut ctx = player_core_context();
@@ -3068,75 +3117,113 @@ fn only_user_repositions_force_a_sidecar_realignment() {
         eval(&mut ctx, "PlayerCore.sidecarRealignmentForced('assignment')"),
         "false"
     );
-    // Nothing confirmed: an incidental `seeked` forces nothing.
     assert_eq!(
         eval(&mut ctx, "PlayerCore.sidecarRealignmentForced(null)"),
         "false"
     );
 }
 
-/// Output must not switch to sidecars while any current-generation sidecar still
-/// has a seek in flight -- that is the activation race, where the element is
-/// unmuted while `seeking` is still true and can emit pre-seek audio.
+/// Output must not switch while any current-generation sidecar still owes an
+/// alignment. Settlement is per-sidecar and token-matched, so a completion for an
+/// older token leaves the newer one outstanding.
 #[test]
-fn handover_waits_for_every_current_generation_seek_to_settle() {
+fn handover_waits_for_every_current_generation_alignment() {
     let mut ctx = player_core_context();
+    let settled = "{ audioTrackId: 'output', generation: 7, seekToken: 3, settledToken: 3, seeking: false, currentTime: 5, targetTime: 5 }";
+    let outstanding = "{ audioTrackId: 'microphone', generation: 7, seekToken: 4, settledToken: 3, seeking: true, currentTime: 1, targetTime: 5 }";
 
     assert_eq!(
         eval(
             &mut ctx,
-            "PlayerCore.sidecarHandoverDecision([{ audioTrackId: 'output', generation: 7, pendingSeek: false, seeking: false }, { audioTrackId: 'microphone', generation: 7, pendingSeek: false, seeking: false }], 7).ready"
+            &format!("PlayerCore.sidecarHandoverDecision([{settled}], 7, {{ capturedTransport: 2, currentTransport: 2 }}).ready")
         ),
         "true"
     );
-    // One still seeking blocks the switch, and is reported so a timeout can name it.
     assert_eq!(
         eval_json(
             &mut ctx,
-            "(() => { const d = PlayerCore.sidecarHandoverDecision([{ audioTrackId: 'output', generation: 7, pendingSeek: false, seeking: true }, { audioTrackId: 'microphone', generation: 7, pendingSeek: false, seeking: false }], 7); return { ready: d.ready, pending: d.pending }; })()"
+            &format!("(() => {{ const d = PlayerCore.sidecarHandoverDecision([{settled}, {outstanding}], 7, {{ capturedTransport: 2, currentTransport: 2 }}); return {{ ready: d.ready, outstanding: d.outstanding }}; }})()")
         ),
-        "{\"ready\":false,\"pending\":[\"output\"]}"
+        "{\"ready\":false,\"outstanding\":[\"microphone\"]}"
     );
-    // An assigned-but-unacknowledged seek blocks it too: `seeking` alone is not
-    // enough, because the element may not have entered the seeking state yet.
+    // A completion for an older token does not settle the newer one.
     assert_eq!(
         eval(
             &mut ctx,
-            "PlayerCore.sidecarHandoverDecision([{ audioTrackId: 'output', generation: 7, pendingSeek: true, seeking: false }], 7).ready"
+            "PlayerCore.sidecarHandoverDecision([{ audioTrackId: 'output', generation: 7, seekToken: 4, settledToken: 3, seeking: false, currentTime: 1, targetTime: 5 }], 7, { capturedTransport: 2, currentTransport: 2 }).ready"
         ),
         "false"
     );
 }
 
-/// A stale generation's outstanding seek must never hold up the current handover,
-/// or a superseded track selection could wedge the player.
+/// A target already satisfied counts as settled even if the element never emits
+/// `seeked` -- browsers may skip the event when the seek is a no-op. Otherwise the
+/// backstop timeout becomes the normal path.
 #[test]
-fn stale_generation_seeks_do_not_block_the_handover() {
+fn an_already_satisfied_target_settles_without_a_seeked_event() {
     let mut ctx = player_core_context();
     assert_eq!(
         eval(
             &mut ctx,
-            "PlayerCore.sidecarHandoverDecision([{ audioTrackId: 'output', generation: 7, pendingSeek: false, seeking: false }, { audioTrackId: 'stale', generation: 6, pendingSeek: true, seeking: true }], 7).ready"
+            "PlayerCore.sidecarHandoverDecision([{ audioTrackId: 'output', generation: 7, seekToken: 9, settledToken: 8, seeking: false, currentTime: 5.0001, targetTime: 5 }], 7, { capturedTransport: 2, currentTransport: 2 }).ready"
         ),
         "true"
     );
-    // An empty current generation is not "ready" -- there is nothing to switch to.
+}
+
+/// A stale generation's outstanding alignment must never hold up the current
+/// handover, or a superseded selection could wedge the player.
+#[test]
+fn stale_generation_alignments_do_not_block_the_handover() {
+    let mut ctx = player_core_context();
     assert_eq!(
         eval(
             &mut ctx,
-            "PlayerCore.sidecarHandoverDecision([{ audioTrackId: 'stale', generation: 6, pendingSeek: false, seeking: false }], 7).ready"
+            "PlayerCore.sidecarHandoverDecision([{ audioTrackId: 'output', generation: 7, seekToken: 3, settledToken: 3, seeking: false, currentTime: 5, targetTime: 5 }, { audioTrackId: 'stale', generation: 6, seekToken: 9, settledToken: 1, seeking: true, currentTime: 0, targetTime: 5 }], 7, { capturedTransport: 2, currentTransport: 2 }).ready"
+        ),
+        "true"
+    );
+    // Nothing in the current generation: there is nothing to switch to.
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.sidecarHandoverDecision([{ audioTrackId: 'stale', generation: 6, seekToken: 1, settledToken: 1, seeking: false, currentTime: 5, targetTime: 5 }], 7, { capturedTransport: 2, currentTransport: 2 }).ready"
         ),
         "false"
     );
 }
 
-/// The handover pauses to seek from a stationary position, so it must restore
-/// what the user last asked for -- not the snapshot taken before the pause. A
-/// user who paused during extraction must not be resumed by the handover.
+/// A user seek during the handover does not advance the sidecar-selection
+/// generation, so alignment against the captured stationary time can go stale
+/// while still looking settled. The transaction must notice and realign against
+/// the latest logical target rather than switching to a stale position.
+#[test]
+fn a_mid_handover_transport_change_restarts_the_alignment() {
+    let mut ctx = player_core_context();
+    let settled = "{ audioTrackId: 'output', generation: 7, seekToken: 3, settledToken: 3, seeking: false, currentTime: 5, targetTime: 5 }";
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            &format!("(() => {{ const d = PlayerCore.sidecarHandoverDecision([{settled}], 7, {{ capturedTransport: 2, currentTransport: 3 }}); return {{ ready: d.ready, restart: d.restart }}; }})()")
+        ),
+        "{\"ready\":false,\"restart\":true}"
+    );
+    // Unchanged transport does not request a restart.
+    assert_eq!(
+        eval(
+            &mut ctx,
+            &format!("PlayerCore.sidecarHandoverDecision([{settled}], 7, {{ capturedTransport: 2, currentTransport: 2 }}).restart")
+        ),
+        "false"
+    );
+}
+
+/// The handover pauses to align from a stationary position, so it must restore
+/// the user's latest intent rather than the snapshot taken before the pause -- and
+/// its own internal pause must never be mistaken for a user pause.
 #[test]
 fn handover_restores_the_latest_user_intent_not_the_pre_pause_snapshot() {
     let mut ctx = player_core_context();
-    // Was playing, user did nothing: resume.
     assert_eq!(
         eval(
             &mut ctx,
@@ -3144,7 +3231,6 @@ fn handover_restores_the_latest_user_intent_not_the_pre_pause_snapshot() {
         ),
         "true"
     );
-    // Was playing, user paused mid-handover: stay paused.
     assert_eq!(
         eval(
             &mut ctx,
@@ -3152,7 +3238,6 @@ fn handover_restores_the_latest_user_intent_not_the_pre_pause_snapshot() {
         ),
         "false"
     );
-    // Was paused, user pressed play mid-handover: honour the play.
     assert_eq!(
         eval(
             &mut ctx,
@@ -3160,7 +3245,6 @@ fn handover_restores_the_latest_user_intent_not_the_pre_pause_snapshot() {
         ),
         "true"
     );
-    // Was paused, user did nothing: stay paused.
     assert_eq!(
         eval(
             &mut ctx,
@@ -3168,25 +3252,51 @@ fn handover_restores_the_latest_user_intent_not_the_pre_pause_snapshot() {
         ),
         "false"
     );
+    // The transaction's own pause is not user intent.
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.handoverResumeDecision({ wasPlaying: true }, { intent: 'internal-pause' }).play"
+        ),
+        "true"
+    );
 }
 
-/// On timeout the previously audible selection must survive. Reverting to
-/// `direct` unconditionally would destroy a valid sidecar selection during a
-/// mid-play track change.
+/// On timeout the *complete* previous output state must be restored -- including
+/// `muted`. Reachable: the user selects no tracks (entering `muted`), then
+/// requests tracks needing sidecars, and preparation times out. Falling back to
+/// `direct` would make the clip's embedded audio audible against an empty
+/// selection.
 #[test]
-fn handover_timeout_preserves_a_previously_audible_selection() {
+fn handover_timeout_restores_the_complete_previous_output_state() {
     let mut ctx = player_core_context();
     assert_eq!(
         eval(
             &mut ctx,
-            "PlayerCore.handoverTimeoutDecision({ hadAudibleSidecars: true }).mode"
+            "PlayerCore.handoverTimeoutDecision({ mode: 'muted', sidecars: [] }).mode"
         ),
-        "sidecars"
+        "muted"
     );
     assert_eq!(
         eval(
             &mut ctx,
-            "PlayerCore.handoverTimeoutDecision({ hadAudibleSidecars: false }).mode"
+            "PlayerCore.handoverTimeoutDecision({ mode: 'direct', sidecars: [] }).mode"
+        ),
+        "direct"
+    );
+    // A mid-play track change keeps the previously audible set, not just the mode.
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "(() => { const d = PlayerCore.handoverTimeoutDecision({ mode: 'sidecars', sidecars: ['output', 'microphone'] }); return { mode: d.mode, restore: d.restoreSidecars }; })()"
+        ),
+        "{\"mode\":\"sidecars\",\"restore\":[\"output\",\"microphone\"]}"
+    );
+    // An unknown previous mode degrades to direct rather than silence.
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.handoverTimeoutDecision({ mode: null, sidecars: [] }).mode"
         ),
         "direct"
     );
