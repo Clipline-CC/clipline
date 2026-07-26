@@ -136,6 +136,49 @@ in the glue, not in any helper. So the sequences above exercise a single state m
 `review-player.js` delegates to, and a contract test pins that the DOM layer holds no decision logic of
 its own.
 
+### Task 2b outcome, and the entry criteria Task 3 has not met
+
+Paired discriminating properties landed (`077206c`): each is asserted against the real reducer (red)
+and against a deliberately-wrong implementation it must reject (green), and each control was verified
+to reject for its *specific* defect. That fixed the previous problem — tests red only because the
+constructor was absent.
+
+**It is still not sufficient to begin Task 3.** Seven model gaps let a wrong reducer pass, and they are
+the entry criteria for implementation:
+
+1. **Activation models preemption, not serialization.** The property asserts B becomes owner
+   immediately, so a last-request-wins implementation with correct stale classification passes while
+   both async bodies still interleave. A must *remain* owner, B must be *pending*, and ownership must
+   transfer only after A unwinds — or the model must otherwise prove B cannot run pause/align/commit
+   concurrently.
+2. **Promotion makes an unaligned sidecar audible.** `armed()` promotes with **zero** alignment
+   actions, and the identity property expects `a2` audible straight after promotion. Registration must
+   create an *unready* instance, and promotion must be refused until every expected instance for that
+   request has satisfied alignment. Otherwise claim-before-`currentTime` stays a DOM convention rather
+   than a state invariant.
+3. **Request currentness is not represented.** `requestRevision` is only sidecar metadata: there is no
+   `beginRequest`, no cancellation, no authoritative current-request state. So the machine cannot yet
+   prove that beginning request 2 leaves request 1 audible, that stale request 1 cannot promote, that
+   request 2 cannot promote before its whole set is ready, or that selecting direct/muted cancels it.
+4. **The hard stale-observation case is untested.** The clearing property rejects the stale event only
+   because it reports time 5 while the live claim targets 9. The real case is A's queued event arriving
+   after the element already reports time 9 with `seeking === false` — a naive `!seeking && onTarget`
+   reducer passes. B needs evidence from its *own* lifecycle, plus an explicit no-op-seek path. And
+   `alignmentTimedOut` carries only a key: unlike `seeked`, a timer *can* carry the reducer-issued
+   claim id, and without it a stale timer can time out a live claim.
+5. **Unsafe mechanism interactions still pass.** No property promotes or changes mode *while* an
+   alignment is outstanding, and the promotion property only operates on non-outstanding sidecars. A
+   reducer that bypasses alignment specifically during promotion or `direct → sidecars` passes both —
+   which is exactly the interaction class this rebuild exists to eliminate.
+6. **The audit control is incidental.** `Degenerate` never mutes on claim, so there is no mute→unmute
+   transition to audit; a *correct* bidirectional audit would still fail the property. And the property
+   checks only field presence, so fabricated values, a null reason, or a wrong mode/eligibility pass.
+   Both directions and exact context need asserting, including the claim-induced mute.
+7. **Lifecycle vocabulary is incomplete.** No retire/remove, late callback after removal,
+   duplicate-key policy, timeout recovery, internal-pause release, or tolerance-boundary case — `TOL`
+   is declared and unused. These are what would behaviourally pin the live-registry bijection and rule
+   out permanent pause/mute states.
+
 ## Task 3: Single-writer reconciliation, and the durable gate it enables
 
 - [ ] One `reconcileSidecarOutput()` computes and assigns `muted` for every sidecar from the invariant
