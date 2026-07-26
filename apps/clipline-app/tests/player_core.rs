@@ -3116,265 +3116,330 @@ fn only_user_repositions_force_a_sidecar_realignment() {
     );
 }
 
+
 // --- Audio output state machine (plan 2026-07-26-review-audio-alignment, Task 2) ---
 //
-// One reducer that production delegates to. The previous attempt failed because
-// individually-correct pure helpers were wired together by untested DOM glue and
-// every P1 lived in the glue, so these are *sequences* over a single machine, and
-// `sidecarMuteMap` is the only source of truth the DOM layer may assign from.
+// Every property below is asserted twice: once against `PlayerCore` (red until the
+// reducer exists) and once against a deliberately-wrong stub that it must reject
+// (green now). Without that second half, "red" only means "nothing is implemented"
+// — which is how this effort previously shipped a circular gate and two harnesses
+// that measured nothing.
+//
+// The model corrections this encodes:
+//   * Identity is an opaque per-instance `key`; `trackId` is metadata, because the
+//     outgoing and prepared sets routinely both hold logical "output".
+//   * `requestRevision` (which request is current) is separate from promotion, so
+//     starting a request does not make the still-audible set stale.
+//   * Promotion is atomic — an unsafe intermediate state is unrepresentable rather
+//     than merely avoided by call order.
+//   * The reducer allocates claims and receives *raw* observations. Native `seeked`
+//     carries no claim identity, so provenance must never be invented by a callback.
 
-/// Build a state with one active sidecar in `sidecars` mode, ready to align.
-fn audio_state(ctx: &mut Context) -> String {
-    eval(
-        ctx,
-        "(() => { \
-           let s = PlayerCore.createAudioOutputState(); \
-           s = PlayerCore.audioOutputReduce(s, { type: 'setMode', mode: 'sidecars' }); \
-           s = PlayerCore.audioOutputReduce(s, { type: 'addSidecar', id: 'output', generation: 1, role: 'active' }); \
-           s = PlayerCore.audioOutputReduce(s, { type: 'setGeneration', generation: 1 }); \
-           window.__s = s; return 'ok'; \
-         })()",
-    )
-}
-
-/// A completion for a superseded claim must not clear the live claim's alignment.
-/// This is the exact race that shipped twice: a stale `seeked` unmuting an element
-/// whose newer seek is still in flight.
-#[test]
-fn a_stale_seek_completion_leaves_the_live_alignment_outstanding() {
+/// Loads player-core plus a `Props` object of property checks. Each property takes
+/// an implementation namespace and returns a list of violation strings, so the same
+/// check can be run against the real reducer and against a wrong one.
+fn audio_props_context() -> Context {
     let mut ctx = player_core_context();
-    audio_state(&mut ctx);
-    assert_eq!(
-        eval_json(
-            &mut ctx,
-            "(() => { \
-               let s = window.__s; \
-               s = PlayerCore.audioOutputReduce(s, { type: 'claimAlignment', id: 'output', claim: 1, target: 5 }); \
-               s = PlayerCore.audioOutputReduce(s, { type: 'claimAlignment', id: 'output', claim: 2, target: 9 }); \
-               s = PlayerCore.audioOutputReduce(s, { type: 'observeSeek', id: 'output', claim: 1, seeking: false, currentTime: 5 }); \
-               return { outstanding: PlayerCore.hasOutstandingAlignment(s, 'output'), muted: PlayerCore.sidecarMuteMap(s).output }; \
-             })()"
-        ),
-        "{\"outstanding\":true,\"muted\":true}"
-    );
+    let props = r#"
+    globalThis.Props = (() => {
+      const TOL = 0.1;
+      // Build a state with one active sidecar in `sidecars` mode.
+      const armed = (I) => {
+        let s = I.createAudioOutputState();
+        s = I.reduce(s, { type: 'setMode', mode: 'sidecars' });
+        s = I.reduce(s, { type: 'addSidecar', key: 'a1', trackId: 'output', requestRevision: 1, role: 'prepared' });
+        s = I.reduce(s, { type: 'promote', requestRevision: 1 });
+        return s;
+      };
+
+      // An unmute may never happen while an alignment is outstanding, whatever the
+      // action. Exhaustive over writes: it inspects the audit, not a final snapshot.
+      const noUnmuteWhileOutstanding = (I) => {
+        const bad = [];
+        let s = I.reduce(armed(I), { type: 'claimAlignment', key: 'a1', target: 5 });
+        const actions = [
+          { type: 'setVolume', volume: 0.2 },
+          { type: 'setUserMuted', muted: false },
+          { type: 'observeSeek', key: 'a1', seeking: true, currentTime: 5 },
+          { type: 'observeSeek', key: 'a1', seeking: false, currentTime: 2 },
+          { type: 'alignmentTimedOut', key: 'a1' },
+          { type: 'userPlay' },
+        ];
+        for (const a of actions) {
+          const next = I.reduce(s, a);
+          for (const e of I.audit(s, next)) {
+            if (e.to === false && I.hasOutstanding(next, e.key)) {
+              bad.push('unmuted while outstanding via ' + a.type);
+            }
+          }
+          if (I.muteMap(next).a1 === false && I.hasOutstanding(next, 'a1')) {
+            bad.push('muteMap audible while outstanding after ' + a.type);
+          }
+          s = next;
+        }
+        return bad;
+      };
+
+      // The audit must record legitimate unmutes too. An audit that only records
+      // mutes would satisfy the invariant above while being useless as a gate.
+      const auditRecordsUnmutes = (I) => {
+        const bad = [];
+        let s = I.reduce(armed(I), { type: 'claimAlignment', key: 'a1', target: 5 });
+        const next = I.reduce(s, { type: 'observeSeek', key: 'a1', seeking: false, currentTime: 5 });
+        if (I.muteMap(next).a1 !== false) { bad.push('satisfied alignment did not unmute'); return bad; }
+        const entries = I.audit(s, next).filter((e) => e.to === false);
+        if (entries.length !== 1) { bad.push('unmute not recorded exactly once'); return bad; }
+        const e = entries[0];
+        for (const field of ['key', 'from', 'to', 'reason', 'mode', 'eligible', 'outstanding']) {
+          if (!(field in e)) bad.push('audit entry missing ' + field);
+        }
+        return bad;
+      };
+
+      // Clearing requires the current claim AND !seeking AND on-target.
+      const clearingRequiresAllThree = (I) => {
+        const bad = [];
+        const base = I.reduce(armed(I), { type: 'claimAlignment', key: 'a1', target: 5 });
+        if (!I.hasOutstanding(I.reduce(base, { type: 'observeSeek', key: 'a1', seeking: true, currentTime: 5 }), 'a1')) {
+          bad.push('cleared while still seeking');
+        }
+        if (!I.hasOutstanding(I.reduce(base, { type: 'observeSeek', key: 'a1', seeking: false, currentTime: 2 }), 'a1')) {
+          bad.push('cleared while off target');
+        }
+        if (I.hasOutstanding(I.reduce(base, { type: 'observeSeek', key: 'a1', seeking: false, currentTime: 5 }), 'a1')) {
+          bad.push('did not clear when satisfied');
+        }
+        // A superseding claim must not be cleared by the older seek's completion.
+        const superseded = I.reduce(base, { type: 'claimAlignment', key: 'a1', target: 9 });
+        if (!I.hasOutstanding(I.reduce(superseded, { type: 'observeSeek', key: 'a1', seeking: false, currentTime: 5 }), 'a1')) {
+          bad.push('stale position satisfied the superseding claim');
+        }
+        return bad;
+      };
+
+      // A timeout may report; it may never manufacture readiness.
+      const timeoutNeverClears = (I) => {
+        const bad = [];
+        const s = I.reduce(armed(I), { type: 'claimAlignment', key: 'a1', target: 5 });
+        const next = I.reduce(s, { type: 'alignmentTimedOut', key: 'a1' });
+        if (!I.hasOutstanding(next, 'a1')) bad.push('timeout cleared the alignment');
+        if (I.muteMap(next).a1 === false) bad.push('timeout made it audible');
+        if (I.timedOut(next, 'a1') !== true) bad.push('timeout not reported');
+        return bad;
+      };
+
+      // Two instances of the same logical track: only the promoted one is audible.
+      // Keyed identity is what makes this expressible at all.
+      const identityIsPerInstance = (I) => {
+        const bad = [];
+        let s = armed(I);
+        s = I.reduce(s, { type: 'addSidecar', key: 'a2', trackId: 'output', requestRevision: 2, role: 'prepared' });
+        const m1 = I.muteMap(s);
+        if (m1.a1 !== false) bad.push('promoted instance not audible');
+        if (m1.a2 !== true) bad.push('prepared instance of the same track is audible');
+        // Promotion is atomic: after it, a1 is outgoing and inaudible, a2 audible.
+        const p = I.reduce(s, { type: 'promote', requestRevision: 2 });
+        const m2 = I.muteMap(p);
+        if (m2.a2 !== false) bad.push('newly promoted instance not audible');
+        if (m2.a1 !== true) bad.push('outgoing instance still audible after promotion');
+        // No mode other than `sidecars` may make anything audible.
+        const d = I.reduce(p, { type: 'setMode', mode: 'direct' });
+        if (Object.values(I.muteMap(d)).some((v) => v === false)) bad.push('audible in direct mode');
+        return bad;
+      };
+
+      // Transport: a seek moves position, not intent; the internal pause moves
+      // neither and must be observably distinct from doing nothing at all.
+      const transportSeparatesIntentFromPosition = (I) => {
+        const bad = [];
+        let s = armed(I);
+        if (s.transport.desiredPlaying !== false) bad.push('initial intent is not paused');
+        const afterPlay = I.reduce(s, { type: 'userPlay' });
+        if (afterPlay.transport.desiredPlaying !== true) bad.push('userPlay did not set intent');
+        const rev = afterPlay.transport.positionRevision;
+        const afterSeek = I.reduce(afterPlay, { type: 'userSeek' });
+        if (afterSeek.transport.desiredPlaying !== true) bad.push('seek cleared play intent');
+        if (afterSeek.transport.positionRevision <= rev) bad.push('seek did not move the position revision');
+        if (I.reduce(afterPlay, { type: 'userPause' }).transport.desiredPlaying !== false) {
+          bad.push('userPause did not clear intent');
+        }
+        const afterInternal = I.reduce(afterPlay, { type: 'internalPause' });
+        if (afterInternal.transport.desiredPlaying !== true) bad.push('internal pause changed intent');
+        if (afterInternal.transport.positionRevision !== rev) bad.push('internal pause moved the position revision');
+        if (afterInternal.transport.internallyPaused !== true) {
+          bad.push('internal pause is indistinguishable from a no-op');
+        }
+        return bad;
+      };
+
+      // Activation ownership: A acquires, B waits, A goes stale, B commits.
+      const activationOwnershipIsExclusive = (I) => {
+        const bad = [];
+        let s = armed(I);
+        const a = I.reduce(s, { type: 'beginActivation', requestRevision: 2 });
+        if (I.activationOwner(a) !== 2) bad.push('A did not acquire ownership');
+        const b = I.reduce(a, { type: 'beginActivation', requestRevision: 3 });
+        if (I.activationOwner(b) !== 3) bad.push('B did not take ownership from a superseded A');
+        if (I.activationOutcome(b, { requestRevision: 2, committed: true, error: null }) !== 'stale') {
+          bad.push('superseded A did not report stale');
+        }
+        if (I.activationOutcome(b, { requestRevision: 3, committed: true, error: 'play rejected' }) !== 'committed-with-error') {
+          bad.push('post-commit failure did not report committed-with-error');
+        }
+        if (I.activationOutcome(b, { requestRevision: 3, committed: true, error: null }) !== 'current') {
+          bad.push('B did not report current');
+        }
+        // A stale transaction must not be able to strand B: releasing A leaves B owning.
+        const released = I.reduce(b, { type: 'endActivation', requestRevision: 2 });
+        if (I.activationOwner(released) !== 3) bad.push('stale A released B’s ownership');
+        return bad;
+      };
+
+      return {
+        noUnmuteWhileOutstanding, auditRecordsUnmutes, clearingRequiresAllThree,
+        timeoutNeverClears, identityIsPerInstance,
+        transportSeparatesIntentFromPosition, activationOwnershipIsExclusive,
+      };
+    })();
+
+    // The real implementation surface, once Task 3 provides it.
+    globalThis.Real = {
+      createAudioOutputState: () => PlayerCore.createAudioOutputState(),
+      reduce: (s, a) => PlayerCore.audioOutputReduce(s, a),
+      muteMap: (s) => PlayerCore.sidecarMuteMap(s),
+      hasOutstanding: (s, k) => PlayerCore.hasOutstandingAlignment(s, k),
+      timedOut: (s, k) => PlayerCore.alignmentTimedOut(s, k),
+      audit: (p, n) => PlayerCore.audioOutputAudit(p, n),
+      activationOutcome: (s, r) => PlayerCore.activationOutcome(s, r),
+      activationOwner: (s) => PlayerCore.activationOwner(s),
+    };
+
+    // A plausible-but-wrong implementation, of the shape this effort actually
+    // shipped: state is a flat bag, a completion clears whatever is outstanding
+    // without checking claim/seeking/position, a timeout forces readiness, the
+    // audit only records mutes, promotion is not atomic, `internalPause` is a
+    // no-op, and activation ownership is last-writer-wins.
+    globalThis.Degenerate = (() => {
+      const clone = (s) => JSON.parse(JSON.stringify(s));
+      return {
+        createAudioOutputState: () => ({
+          mode: 'direct', volume: 1, userMuted: false, sidecars: {}, owner: null,
+          transport: { desiredPlaying: false, positionRevision: 0 },
+        }),
+        reduce: (s0, a) => {
+          const s = clone(s0);
+          switch (a.type) {
+            case 'setMode': s.mode = a.mode; break;
+            case 'setVolume': s.volume = a.volume; break;
+            case 'setUserMuted': s.userMuted = a.muted; break;
+            case 'addSidecar': s.sidecars[a.key] = { trackId: a.trackId, outstanding: false, timedOut: false }; break;
+            case 'promote': break; // not atomic: promotion does nothing
+            case 'claimAlignment': s.sidecars[a.key].outstanding = true; break;
+            case 'observeSeek': s.sidecars[a.key].outstanding = false; break; // no checks at all
+            case 'alignmentTimedOut': s.sidecars[a.key].outstanding = false; s.sidecars[a.key].timedOut = true; break;
+            case 'userPlay': s.transport.desiredPlaying = true; s.transport.positionRevision += 1; break;
+            case 'userPause': s.transport.desiredPlaying = false; break;
+            case 'userSeek': break; // forgets to move the revision
+            case 'internalPause': break; // indistinguishable from nothing
+            case 'beginActivation': s.owner = a.requestRevision; break;
+            case 'endActivation': s.owner = null; break; // any transaction can release
+            default: break;
+          }
+          return s;
+        },
+        muteMap: (s) => {
+          const m = {};
+          for (const [k, v] of Object.entries(s.sidecars)) m[k] = s.mode !== 'sidecars' || s.userMuted;
+          return m;
+        },
+        hasOutstanding: (s, k) => Boolean(s.sidecars[k] && s.sidecars[k].outstanding),
+        timedOut: (s, k) => Boolean(s.sidecars[k] && s.sidecars[k].timedOut),
+        audit: (p, n) => {
+          const out = [];
+          const pm = globalThis.Degenerate.muteMap(p);
+          const nm = globalThis.Degenerate.muteMap(n);
+          for (const k of Object.keys(nm)) {
+            if (pm[k] !== nm[k] && nm[k] === true) out.push({ key: k, from: pm[k], to: nm[k] });
+          }
+          return out;
+        },
+        activationOutcome: (s, r) => (r.error ? 'committed-with-error' : 'current'),
+        activationOwner: (s) => s.owner,
+      };
+    })();
+    "#;
+    ctx.eval(Source::from_bytes(props))
+        .unwrap_or_else(|e| panic!("property harness evaluates: {e}"));
+    ctx
 }
 
-/// Clearing requires the current claim AND `!seeking` AND position within
-/// tolerance. Each missing condition keeps the alignment outstanding.
-#[test]
-fn clearing_an_alignment_requires_claim_settled_and_on_target() {
-    let mut ctx = player_core_context();
-    audio_state(&mut ctx);
-    // Right claim, still seeking: outstanding.
-    assert_eq!(
-        eval(
-            &mut ctx,
-            "(() => { let s = PlayerCore.audioOutputReduce(window.__s, { type: 'claimAlignment', id: 'output', claim: 1, target: 5 }); \
-               s = PlayerCore.audioOutputReduce(s, { type: 'observeSeek', id: 'output', claim: 1, seeking: true, currentTime: 5 }); \
-               return PlayerCore.hasOutstandingAlignment(s, 'output'); })()"
-        ),
-        "true"
-    );
-    // Right claim, settled, but off target: outstanding.
-    assert_eq!(
-        eval(
-            &mut ctx,
-            "(() => { let s = PlayerCore.audioOutputReduce(window.__s, { type: 'claimAlignment', id: 'output', claim: 1, target: 5 }); \
-               s = PlayerCore.audioOutputReduce(s, { type: 'observeSeek', id: 'output', claim: 1, seeking: false, currentTime: 2 }); \
-               return PlayerCore.hasOutstandingAlignment(s, 'output'); })()"
-        ),
-        "true"
-    );
-    // All three satisfied: cleared, and only then audible.
-    assert_eq!(
-        eval_json(
-            &mut ctx,
-            "(() => { let s = PlayerCore.audioOutputReduce(window.__s, { type: 'claimAlignment', id: 'output', claim: 1, target: 5 }); \
-               s = PlayerCore.audioOutputReduce(s, { type: 'observeSeek', id: 'output', claim: 1, seeking: false, currentTime: 5 }); \
-               return { outstanding: PlayerCore.hasOutstandingAlignment(s, 'output'), muted: PlayerCore.sidecarMuteMap(s).output }; })()"
-        ),
-        "{\"outstanding\":false,\"muted\":false}"
-    );
+/// Run a property and return its violations, newline-joined ("" when it holds).
+fn prop(ctx: &mut Context, name: &str, impl_name: &str) -> String {
+    eval(ctx, &format!("Props.{name}({impl_name}).join('\\n')"))
 }
 
-/// A timeout may report, but must never manufacture readiness. #108's runtime
-/// evidence was circular precisely because a safety timer forced the convergence
-/// it then reported as proof.
-#[test]
-fn a_timeout_never_clears_an_alignment() {
-    let mut ctx = player_core_context();
-    audio_state(&mut ctx);
-    assert_eq!(
-        eval_json(
-            &mut ctx,
-            "(() => { let s = PlayerCore.audioOutputReduce(window.__s, { type: 'claimAlignment', id: 'output', claim: 1, target: 5 }); \
-               s = PlayerCore.audioOutputReduce(s, { type: 'alignmentTimedOut', id: 'output', claim: 1 }); \
-               return { outstanding: PlayerCore.hasOutstandingAlignment(s, 'output'), muted: PlayerCore.sidecarMuteMap(s).output, timedOut: PlayerCore.alignmentTimedOut(s, 'output') }; })()"
-        ),
-        "{\"outstanding\":true,\"muted\":true,\"timedOut\":true}"
-    );
+macro_rules! discriminating_property {
+    ($holds:ident, $rejects:ident, $prop:literal) => {
+        /// Holds for the real reducer. Red until Task 3 implements it.
+        #[test]
+        fn $holds() {
+            let mut ctx = audio_props_context();
+            assert_eq!(prop(&mut ctx, $prop, "Real"), "");
+        }
+
+        /// Rejects a plausible-but-wrong implementation. Green now — this is what
+        /// makes the red test above mean "discriminating" and not merely "absent".
+        #[test]
+        fn $rejects() {
+            let mut ctx = audio_props_context();
+            let violations = prop(&mut ctx, $prop, "Degenerate");
+            assert!(
+                !violations.is_empty(),
+                "property `{}` passed a deliberately-wrong implementation and so proves nothing",
+                $prop
+            );
+        }
+    };
 }
 
-/// Reconciling for an unrelated input — a volume change — must not unmute an
-/// element mid-alignment. On `develop` the global write does exactly that.
-#[test]
-fn a_volume_change_mid_alignment_does_not_unmute() {
-    let mut ctx = player_core_context();
-    audio_state(&mut ctx);
-    assert_eq!(
-        eval(
-            &mut ctx,
-            "(() => { let s = PlayerCore.audioOutputReduce(window.__s, { type: 'claimAlignment', id: 'output', claim: 1, target: 5 }); \
-               s = PlayerCore.audioOutputReduce(s, { type: 'setVolume', volume: 0.4 }); \
-               return PlayerCore.sidecarMuteMap(s).output; })()"
-        ),
-        "true"
-    );
-}
+discriminating_property!(
+    no_unmute_while_an_alignment_is_outstanding,
+    the_no_unmute_property_rejects_a_wrong_implementation,
+    "noUnmuteWhileOutstanding"
+);
 
-/// Prepared, outgoing, and stale-generation sidecars are ineligible by
-/// construction — not by check order — so no ordering mistake can expose them.
-#[test]
-fn only_the_current_generations_active_set_is_ever_audible() {
-    let mut ctx = player_core_context();
-    audio_state(&mut ctx);
-    assert_eq!(
-        eval_json(
-            &mut ctx,
-            "(() => { \
-               let s = window.__s; \
-               s = PlayerCore.audioOutputReduce(s, { type: 'addSidecar', id: 'prepared', generation: 2, role: 'prepared' }); \
-               s = PlayerCore.audioOutputReduce(s, { type: 'addSidecar', id: 'outgoing', generation: 1, role: 'outgoing' }); \
-               s = PlayerCore.audioOutputReduce(s, { type: 'addSidecar', id: 'stale', generation: 0, role: 'active' }); \
-               const m = PlayerCore.sidecarMuteMap(s); \
-               return { active: m.output, prepared: m.prepared, outgoing: m.outgoing, stale: m.stale }; \
-             })()"
-        ),
-        "{\"active\":false,\"prepared\":true,\"outgoing\":true,\"stale\":true}"
-    );
-    // And no mode other than `sidecars` may make any of them audible.
-    assert_eq!(
-        eval(
-            &mut ctx,
-            "(() => { const s = PlayerCore.audioOutputReduce(window.__s, { type: 'setMode', mode: 'direct' }); \
-               return Object.values(PlayerCore.sidecarMuteMap(s)).every(Boolean); })()"
-        ),
-        "true"
-    );
-}
+discriminating_property!(
+    the_audit_records_legitimate_unmutes_with_full_context,
+    the_audit_property_rejects_an_audit_that_only_records_mutes,
+    "auditRecordsUnmutes"
+);
 
-/// A seek changes position, not intent. A handover that began paused and then
-/// received Play must finish playing even if the user also scrubbed.
-#[test]
-fn seeking_bumps_the_position_revision_without_clearing_play_intent() {
-    let mut ctx = player_core_context();
-    audio_state(&mut ctx);
-    assert_eq!(
-        eval_json(
-            &mut ctx,
-            "(() => { \
-               let s = window.__s; \
-               const r0 = s.transport.positionRevision; \
-               s = PlayerCore.audioOutputReduce(s, { type: 'userPlay' }); \
-               s = PlayerCore.audioOutputReduce(s, { type: 'userSeek' }); \
-               return { desired: s.transport.desiredPlaying, revisionMoved: s.transport.positionRevision > r0 }; \
-             })()"
-        ),
-        "{\"desired\":true,\"revisionMoved\":true}"
-    );
-}
+discriminating_property!(
+    clearing_an_alignment_requires_claim_settled_and_on_target,
+    the_clearing_property_rejects_an_unconditional_completion,
+    "clearingRequiresAllThree"
+);
 
-/// The transaction's own pause is not user intent, and must not move the position
-/// revision either — bumping it there would make every handover restart itself.
-#[test]
-fn an_internal_pause_changes_neither_intent_nor_position_revision() {
-    let mut ctx = player_core_context();
-    audio_state(&mut ctx);
-    assert_eq!(
-        eval_json(
-            &mut ctx,
-            "(() => { \
-               let s = PlayerCore.audioOutputReduce(window.__s, { type: 'userPlay' }); \
-               const r0 = s.transport.positionRevision; \
-               s = PlayerCore.audioOutputReduce(s, { type: 'internalPause' }); \
-               return { desired: s.transport.desiredPlaying, revision: s.transport.positionRevision === r0 }; \
-             })()"
-        ),
-        "{\"desired\":true,\"revision\":true}"
-    );
-}
+discriminating_property!(
+    a_timeout_reports_but_never_clears_an_alignment,
+    the_timeout_property_rejects_a_timeout_that_forces_readiness,
+    "timeoutNeverClears"
+);
 
-/// Every activation reports a structured outcome, so a stale request cannot
-/// overwrite a newer one's bookkeeping and a post-commit failure cannot pass as
-/// success.
-#[test]
-fn activation_outcomes_are_structured_not_boolean() {
-    let mut ctx = player_core_context();
-    audio_state(&mut ctx);
-    assert_eq!(
-        eval(
-            &mut ctx,
-            "PlayerCore.activationOutcome(window.__s, { generation: 0, committed: true, error: null })"
-        ),
-        "stale"
-    );
-    assert_eq!(
-        eval(
-            &mut ctx,
-            "PlayerCore.activationOutcome(window.__s, { generation: 1, committed: true, error: 'play rejected' })"
-        ),
-        "committed-with-error"
-    );
-    assert_eq!(
-        eval(
-            &mut ctx,
-            "PlayerCore.activationOutcome(window.__s, { generation: 1, committed: true, error: null })"
-        ),
-        "current"
-    );
-}
+discriminating_property!(
+    audibility_follows_instance_identity_and_atomic_promotion,
+    the_identity_property_rejects_non_atomic_promotion,
+    "identityIsPerInstance"
+);
 
-/// The audit trail the durable gate asserts over: every mute change is recorded
-/// with its justification, and an unmute while outstanding is unrepresentable.
-#[test]
-fn the_audit_records_every_mute_change_with_a_reason() {
-    let mut ctx = player_core_context();
-    audio_state(&mut ctx);
-    assert_eq!(
-        eval_json(
-            &mut ctx,
-            "(() => { \
-               const before = window.__s; \
-               let after = PlayerCore.audioOutputReduce(before, { type: 'claimAlignment', id: 'output', claim: 1, target: 5 }); \
-               const entries = PlayerCore.audioOutputAudit(before, after); \
-               return entries.map((e) => ({ id: e.id, from: e.from, to: e.to, reason: e.reason })); \
-             })()"
-        ),
-        "[{\"id\":\"output\",\"from\":false,\"to\":true,\"reason\":\"alignment-outstanding\"}]"
-    );
-    // No audit entry may ever unmute an element that still has an outstanding
-    // alignment -- the property the gate asserts exhaustively over writes.
-    assert_eq!(
-        eval(
-            &mut ctx,
-            "(() => { \
-               let s = PlayerCore.audioOutputReduce(window.__s, { type: 'claimAlignment', id: 'output', claim: 1, target: 5 }); \
-               const actions = [ \
-                 { type: 'setVolume', volume: 0.2 }, \
-                 { type: 'observeSeek', id: 'output', claim: 0, seeking: false, currentTime: 5 }, \
-                 { type: 'alignmentTimedOut', id: 'output', claim: 1 }, \
-                 { type: 'userPlay' }, \
-               ]; \
-               for (const a of actions) { \
-                 const next = PlayerCore.audioOutputReduce(s, a); \
-                 const bad = PlayerCore.audioOutputAudit(s, next) \
-                   .some((e) => e.to === false && PlayerCore.hasOutstandingAlignment(next, e.id)); \
-                 if (bad) return 'unmuted while outstanding'; \
-                 s = next; \
-               } \
-               return 'never unmuted while outstanding'; \
-             })()"
-        ),
-        "never unmuted while outstanding"
-    );
-}
+discriminating_property!(
+    transport_separates_play_intent_from_position,
+    the_transport_property_rejects_a_no_op_internal_pause,
+    "transportSeparatesIntentFromPosition"
+);
+
+discriminating_property!(
+    activation_ownership_is_exclusive_and_outcomes_are_structured,
+    the_ownership_property_rejects_last_writer_wins,
+    "activationOwnershipIsExclusive"
+);
