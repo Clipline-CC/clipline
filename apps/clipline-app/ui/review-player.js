@@ -1287,6 +1287,9 @@ function renderRuler() {
 
 function seekTo(time, options = {}) {
   if (!currentClip || !Number.isFinite(time)) return;
+  // TEMPORARY (Task 1b): distinguish an explicit reposition from the initial
+  // source settlement, which reaches the same forced-sync path.
+  traceAudioHandover("seek_to", { time, videoTime: video.currentTime, audioMode: reviewAudioMode });
   if (!options.keepGameEventSelection) clearGameEventSelection();
   if (!options.keepGamePlaySelection) clearGamePlaySelection();
   reviewSeekState = PlayerCore.requestLogicalSeek(reviewSeekState, time, clipDuration());
@@ -1314,6 +1317,20 @@ video.addEventListener("seeked", () => {
   paintTimeline();
   syncGameEventRail(current);
   syncGamePlayRail(current);
+  // TEMPORARY (Task 1b): prove this handler is the origin of the forced sidecar
+  // seek that lands on already-audible elements, and record whether it is the
+  // initial source settlement or a genuine reposition.
+  traceAudioHandover("video_seeked_forces_sidecar_sync", {
+    videoTime: video.currentTime,
+    logicalTime: current,
+    metadataGeneration: reviewSeekState.metadataGeneration,
+    sourceGeneration: reviewSourceGeneration,
+    appliedTime: decision.applyTime,
+    audioMode: reviewAudioMode,
+    activeSidecars: activeReviewAudioSidecars.length,
+    sidecarsAudible: reviewAudioMode === "sidecars"
+      && activeReviewAudioSidecars.some((s) => !s.element.muted),
+  });
   syncReviewAudioSidecars({ forceSeek: true });
 });
 

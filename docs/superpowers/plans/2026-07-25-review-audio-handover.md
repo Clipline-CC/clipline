@@ -131,6 +131,59 @@ sidecar seek needs completion gating while audible.
 - [ ] Retain sanitized cold and warm traces in the repo (or attach them to the PR). The complete
       evidence currently exists only under `%TEMP%` and will not survive.
 
+### Task 1b outcome — origin proven, and the fault is ordering-dependent
+
+The origin is **not** `seekTo`. An earlier note in this plan mis-attributed it: line 1317 sits inside
+the top-level `video.addEventListener("seeked", …)` handler (`review-player.js:1303`), not inside
+`seekTo` (`:1288`). Instrumented and re-traced; no `seek_to` event appears at all, so no explicit
+reposition is involved.
+
+**Warm — the forced seek lands on audible sidecars:**
+
+```
+ 86.8ms  output_switched_to_sidecars       (sidecars unmuted)
+116.8ms  video_seeked_forces_sidecar_sync  videoTime=0.0014  metadataGeneration=1
+                                           audioMode=sidecars  sidecarsAudible=True
+116.9ms  sidecar_seek_assigned  from=0.021791  target=0.0014  muted=False   <- backward ~20ms
+123.3ms  sidecar_seeked         target=0.0014  currentTime=0.014  muted=False
+```
+
+`sidecarsAudible=True` is now measured, not inferred. `metadataGeneration === sourceGeneration` and
+`appliedTime` empty confirm this is the **initial source settlement**, not a user reposition.
+
+**Cold — the same handler fires harmlessly:**
+
+```
+ 99.4ms  video_seeked_forces_sidecar_sync  audioMode=direct  activeSidecars=0  sidecarsAudible=False
+175.6ms  output_switched_to_sidecars
+```
+
+Cold contains **no** forced sidecar seek while unmuted at all.
+
+**So the fault is ordering-dependent:** it occurs only when the sidecar handover completes *before*
+the video's initial seek settles. Warm handover is fast (~87 ms) and loses that race; cold handover
+is slow (~176 ms) and wins it. Since a populated preview cache is the normal steady state, warm is
+the case users actually hit — consistent with the artefact being reported on *every* clip.
+
+This also gives a discriminator between the two candidate mechanisms: the activation race (unmute
+mid-seek) is present in **both** cold and warm, whereas the audible backward seek is **warm-only**. An
+artefact heard consistently therefore points at the warm-only seek.
+
+**The seek is also pure churn.** `forceSeek: true` bypasses the tolerance entirely
+(`seekTime: validVideoTime && forceSeek ? videoTime : null`), and the drift was ~20 ms against
+`AUDIO_SIDECAR_HARD_SEEK_TOLERANCE_S = 0.5` / `AUDIO_SIDECAR_DRIFT_DEADBAND_S = 0.025`. The
+non-forced drift sync 0.4 ms earlier assigned no seek. After seeking backward to 0.0014 the element
+landed at 0.014 — where it already was. It pays an audible cost for nothing.
+
+**Boundary decided: Task 3's activation barrier is necessary but NOT sufficient. Both are required.**
+
+- **Primary:** the initial source-settlement `seeked` must not force a sidecar seek. Forcing is
+  correct for a genuine user reposition — after a scrub you want immediate realignment rather than up
+  to 500 ms of tolerance — so distinguish settlement from reposition rather than dropping the force
+  outright.
+- **Defence in depth:** never issue a seek on an *audible* sidecar without completion gating. The same
+  unguarded pattern applies to user scrubs, where it is merely masked by the scrub itself.
+
 ## Task 2: Failing tests for a completion-gated stationary handover
 
 - [ ] Extend `player-core.js` with a pure decision for the handover — given video state, sidecar
@@ -165,6 +218,15 @@ sidecar seek needs completion gating while audible.
       drop back to `direct`. Only fall back to `direct` when there was no prior audible sidecar set.
 - [ ] Measure post-resume skew as acceptance (see Task 1b's correction): a stationary handover should
       not leave the sidecars tens of milliseconds behind the video.
+- [ ] **Stop the initial source settlement from forcing a sidecar seek** (`review-player.js:1303`).
+      Per Task 1b this is the warm-only, audible, backward seek and the likeliest cause of the
+      reported artefact — the activation barrier alone does not touch it. Distinguish settlement from
+      a genuine reposition rather than removing the force, which scrubs still need.
+- [ ] **Gate any seek issued to an audible sidecar** on `seeked`, so the same pattern cannot bite on
+      user scrubs where it is currently just masked.
+- [ ] Re-trace cold **and** warm after the fix. Warm is the case that must change; cold must not
+      regress, and its handover currently wins the race by being slow — do not let a faster handover
+      silently introduce the warm fault into cold.
 - [ ] Preserve every existing escape hatch: stale generation checks (`previewRequestStillCurrent`),
       cancellation, preview failure, and manual Play during the handover.
 - [ ] Do **not** crossfade. Crossfading two misaligned copies produces echo or comb filtering —
