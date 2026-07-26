@@ -2244,7 +2244,18 @@ fn audio_sidecar_transport_follows_only_the_video_clock() {
         .nth(1)
         .and_then(|tail| tail.split("function seekBy").next())
         .expect("seeked handler");
-    assert!(seeked.contains("syncReviewAudioSidecars({ forceSeek: true });"));
+    // Deliberately changed: this previously pinned `forceSeek: true`, i.e. *every*
+    // video `seeked` bypassing the drift tolerance. Traced on a warm cache, that
+    // made the initial source settlement re-seek already-audible sidecars backward
+    // ~20 ms for no correction — far inside the tolerance, landing back where it
+    // started — which was the audible repeat at the start of every clip. Forcing is
+    // now driven by seek provenance, so a user reposition still realigns
+    // immediately while settlement does not.
+    assert!(seeked.contains("PlayerCore.sidecarRealignmentForced(decision.confirmedSource)"));
+    assert!(
+        !seeked.contains("forceSeek: true"),
+        "settlement must not bypass the sidecar drift tolerance"
+    );
     assert!(review.contains("window.setInterval(() => syncReviewAudioSidecars(), 500)"));
 }
 
