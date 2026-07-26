@@ -3008,3 +3008,186 @@ fn region_helpers_set_align_and_clamp_to_display() {
         r#"{"display_id":"DISPLAY2","x":2000,"y":0,"width":800,"height":450}"#
     );
 }
+
+// --- Review audio handover (plan 2026-07-25-review-audio-handover, Task 2) ---
+
+/// A `seeked` from the initial source assignment must not be treated as a user
+/// reposition. Traced warm, the settlement's forced sidecar seek lands on
+/// already-audible elements and drags them backward ~20 ms for no correction:
+/// the drift was well inside `AUDIO_SIDECAR_HARD_SEEK_TOLERANCE_S`, and after
+/// seeking the element returned to where it started.
+#[test]
+fn settlement_seeks_are_distinguished_from_user_repositions() {
+    let mut ctx = player_core_context();
+
+    // A source assignment's own resume seek is tagged as assignment-sourced.
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.beginSourceAssignment(PlayerCore.createLogicalSeekState(), 1, 0, 30).targetSource"
+        ),
+        "assignment"
+    );
+    // An explicit seek is tagged as user-sourced, even over a pending assignment.
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.requestLogicalSeek(PlayerCore.beginSourceAssignment(PlayerCore.createLogicalSeekState(), 1, 0, 30), 12, 30).targetSource"
+        ),
+        "user"
+    );
+    // `seekedDecision` reports which one confirmed, so the caller can decide
+    // whether a forced sidecar realignment is warranted.
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "(() => { let s = PlayerCore.beginSourceAssignment(PlayerCore.createLogicalSeekState(), 1, 0, 30); s = PlayerCore.metadataSeekDecision(s, 1, 30).state; const d = PlayerCore.seekedDecision(s, 1, 0, 30); return { confirmed: d.confirmed, source: d.confirmedSource }; })()"
+        ),
+        "{\"confirmed\":true,\"source\":\"assignment\"}"
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "(() => { let s = PlayerCore.beginSourceAssignment(PlayerCore.createLogicalSeekState(), 1, 0, 30); s = PlayerCore.metadataSeekDecision(s, 1, 30).state; s = PlayerCore.requestLogicalSeek(s, 12, 30); const d = PlayerCore.seekedDecision(s, 1, 12, 30); return { confirmed: d.confirmed, source: d.confirmedSource }; })()"
+        ),
+        "{\"confirmed\":true,\"source\":\"user\"}"
+    );
+}
+
+/// Only a user reposition justifies bypassing the drift tolerance. Settlement
+/// must fall through to the ordinary tolerance path, which -- measured -- assigns
+/// no seek at all for the ~20 ms it was correcting.
+#[test]
+fn only_user_repositions_force_a_sidecar_realignment() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.sidecarRealignmentForced('user')"),
+        "true"
+    );
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.sidecarRealignmentForced('assignment')"),
+        "false"
+    );
+    // Nothing confirmed: an incidental `seeked` forces nothing.
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.sidecarRealignmentForced(null)"),
+        "false"
+    );
+}
+
+/// Output must not switch to sidecars while any current-generation sidecar still
+/// has a seek in flight -- that is the activation race, where the element is
+/// unmuted while `seeking` is still true and can emit pre-seek audio.
+#[test]
+fn handover_waits_for_every_current_generation_seek_to_settle() {
+    let mut ctx = player_core_context();
+
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.sidecarHandoverDecision([{ audioTrackId: 'output', generation: 7, pendingSeek: false, seeking: false }, { audioTrackId: 'microphone', generation: 7, pendingSeek: false, seeking: false }], 7).ready"
+        ),
+        "true"
+    );
+    // One still seeking blocks the switch, and is reported so a timeout can name it.
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "(() => { const d = PlayerCore.sidecarHandoverDecision([{ audioTrackId: 'output', generation: 7, pendingSeek: false, seeking: true }, { audioTrackId: 'microphone', generation: 7, pendingSeek: false, seeking: false }], 7); return { ready: d.ready, pending: d.pending }; })()"
+        ),
+        "{\"ready\":false,\"pending\":[\"output\"]}"
+    );
+    // An assigned-but-unacknowledged seek blocks it too: `seeking` alone is not
+    // enough, because the element may not have entered the seeking state yet.
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.sidecarHandoverDecision([{ audioTrackId: 'output', generation: 7, pendingSeek: true, seeking: false }], 7).ready"
+        ),
+        "false"
+    );
+}
+
+/// A stale generation's outstanding seek must never hold up the current handover,
+/// or a superseded track selection could wedge the player.
+#[test]
+fn stale_generation_seeks_do_not_block_the_handover() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.sidecarHandoverDecision([{ audioTrackId: 'output', generation: 7, pendingSeek: false, seeking: false }, { audioTrackId: 'stale', generation: 6, pendingSeek: true, seeking: true }], 7).ready"
+        ),
+        "true"
+    );
+    // An empty current generation is not "ready" -- there is nothing to switch to.
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.sidecarHandoverDecision([{ audioTrackId: 'stale', generation: 6, pendingSeek: false, seeking: false }], 7).ready"
+        ),
+        "false"
+    );
+}
+
+/// The handover pauses to seek from a stationary position, so it must restore
+/// what the user last asked for -- not the snapshot taken before the pause. A
+/// user who paused during extraction must not be resumed by the handover.
+#[test]
+fn handover_restores_the_latest_user_intent_not_the_pre_pause_snapshot() {
+    let mut ctx = player_core_context();
+    // Was playing, user did nothing: resume.
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.handoverResumeDecision({ wasPlaying: true }, { intent: null }).play"
+        ),
+        "true"
+    );
+    // Was playing, user paused mid-handover: stay paused.
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.handoverResumeDecision({ wasPlaying: true }, { intent: 'pause' }).play"
+        ),
+        "false"
+    );
+    // Was paused, user pressed play mid-handover: honour the play.
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.handoverResumeDecision({ wasPlaying: false }, { intent: 'play' }).play"
+        ),
+        "true"
+    );
+    // Was paused, user did nothing: stay paused.
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.handoverResumeDecision({ wasPlaying: false }, { intent: null }).play"
+        ),
+        "false"
+    );
+}
+
+/// On timeout the previously audible selection must survive. Reverting to
+/// `direct` unconditionally would destroy a valid sidecar selection during a
+/// mid-play track change.
+#[test]
+fn handover_timeout_preserves_a_previously_audible_selection() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.handoverTimeoutDecision({ hadAudibleSidecars: true }).mode"
+        ),
+        "sidecars"
+    );
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.handoverTimeoutDecision({ hadAudibleSidecars: false }).mode"
+        ),
+        "direct"
+    );
+}
