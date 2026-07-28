@@ -4,6 +4,31 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-26): Nightly 0.1.42
+
+Plan: `docs/superpowers/plans/2026-07-26-nightly-0.1.42.md`.
+
+Nightly 0.1.42 publishes the merged memory-footprint and review-audio work: **#109** (clip-start audio
+repeat), **#106** (replay retention, hidden-webview memory, split meter), and **#107** (memory
+follow-ups, native software H.264 MFT, FFmpeg thumbnail hardening).
+
+User-visible since 0.1.41: the split-second audio repeat at the start of every clip is gone; replay
+memory tracks the footage a save can use rather than the byte budget's 2× overshoot headroom (85.8 MB
+→ ~45 MB retained at the dev machine's settings, recording process 147–180 MB → ~103 MB); hiding to
+the tray releases WebView2 rendering resources instead of keeping them resident (tray-idle tree ~335 MB
+→ ~155 MB) and a cold autostart no longer renders indefinitely; the RAM meter separates Clipline's own
+process from child processes; and large-library rendering is bounded with self-recovering thumbnails,
+taskbar lifecycle recovery without focus, and active clip sources protected during upload.
+
+All three PRs were manually verified on hardware before release: warm-path clip open and scrub for the
+audio fix, the rail meter and a five-minute tray hide with hotkey saves for the memory work, and a
+full pass on the merged `develop` build.
+
+**Not in this release:** the scrub and track-switch audio alignment work is specification only and
+deliberately unimplemented — issue #110, branch `review-audio-alignment`. Those defects predate this
+release and are unchanged by it. The brief echo when switching audio tracks mid-playback is a known,
+accepted residual.
+
 ## Checkpoint (2026-07-25): FFmpeg thumbnail reliability
 
 Plan: `docs/superpowers/plans/2026-07-25-ffmpeg-thumbnail-reliability.md`.
