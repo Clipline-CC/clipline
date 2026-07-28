@@ -3705,7 +3705,7 @@ fn deck_status_success_toasts_auto_clear() {
         "setDeckStatus(audioSelectionLabel(currentClip), { transient: true })",
         "setDeckStatus(\"clip renamed\", { transient: true })",
         "setDeckStatus(`exported ${exportedLabel} · keyframe-aligned ${fmtTenths(exported.aligned_start_s)} – ${fmtTenths(exported.aligned_end_s)}`, { transient: true })",
-        "setDeckStatus(\"clip copied to clipboard\", { transient: true })",
+        "setDeckStatus(original ? \"original clip copied\" : \"shareable clip copied\", { transient: true })",
         "setDeckStatus(\"cloud link copied\", { transient: true })",
         "setDeckStatus(\"cloud upload ready\", { transient: true })",
     ] {
@@ -3730,13 +3730,15 @@ fn deck_status_success_toasts_auto_clear() {
 }
 
 #[test]
-fn clipboard_copy_sends_selected_audio_tracks() {
+fn clipboard_copy_distinguishes_shareable_and_original_paths() {
     let js = main_js();
+    let html = index_html();
     let app = app_rs();
     let library = library_rs();
 
     assert!(
         library.contains("pub struct CopyClipToClipboardRequest")
+            && library.contains("pub original: bool")
             && library.contains("request: CopyClipToClipboardRequest")
             && library.contains("window: tauri::WebviewWindow")
             && library.contains(".hwnd()")
@@ -3752,9 +3754,31 @@ fn clipboard_copy_sends_selected_audio_tracks() {
         js.contains("await invoke(\"copy_clip_to_clipboard\", {")
             && js.contains("request: {")
             && js.contains("path: currentClip.path")
-            && js.contains("audioTrackIds: clipAudioTracks(currentClip).length")
+            && js.contains("audioTrackIds: original")
+            && js.contains(": clipAudioTracks(currentClip).length")
             && js.contains("selectedAudioTrackIdsForClip(currentClip)"),
-        "copy should send the current selected audio tracks to the native clipboard exporter"
+        "normal copy should send selected audio while original copy should bypass audio selection"
+    );
+    assert!(
+        js.contains("async function copyClipToClipboard(event)")
+            && js.contains("const original = Boolean(event?.shiftKey);")
+            && js.contains("original,")
+            && js.contains("setDeckStatus(\"preparing shareable clip...\")")
+            && js.contains(
+                "setDeckStatus(original ? \"original clip copied\" : \"shareable clip copied\", { transient: true })"
+            )
+            && js.contains(
+                "$(\"copy-clip\").addEventListener(\"click\", (event) => copyClipToClipboard(event));"
+            ),
+        "copy interaction should reserve Shift+click for the untouched original"
+    );
+    assert!(
+        html.contains("title=\"Copy shareable clip to clipboard (Shift+click for original)\""),
+        "the otherwise-hidden Shift+click behavior must be documented in the tooltip"
+    );
+    assert!(
+        library.contains("\"share-export-v2-aac-h264\""),
+        "share export cache must not reuse v1 Opus files"
     );
 }
 

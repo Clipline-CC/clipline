@@ -11,18 +11,21 @@ use naming::{
 
 use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::io::{self, Read};
 use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::ptr;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use clipline_capture::Codec;
 use clipline_events::{is_review_event, ClipMarker, ClipMarkers, ClipPlay};
 use clipline_mp4::{
-    remux_with_mixed_audio_track_file, remux_with_selected_audio_tracks_file,
-    trim_keyframe_aligned_file, MediaTrackCounts,
+    media_video_codecs_file, remux_with_mixed_audio_track_file,
+    remux_with_selected_audio_tracks_file, trim_keyframe_aligned_file, MediaTrackCounts,
+    MediaVideoCodec,
 };
 use clipline_storage::storage_status as read_storage_status;
 use windows_sys::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
@@ -233,6 +236,8 @@ pub struct CopyClipToClipboardRequest {
     pub path: String,
     #[serde(default, rename = "audioTrackIds")]
     pub audio_track_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub original: bool,
 }
 
 #[tauri::command]
@@ -1373,44 +1378,57 @@ enum ShareAudioExportMode {
     Mix(Vec<u32>),
 }
 
-fn clipboard_share_path(
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ShareVideoExportMode {
+    Copy,
+    Encode(String),
+}
+
+fn clipboard_copy_path(
     source: &Path,
     selected_audio_track_ids: Option<&[String]>,
+    original: bool,
 ) -> Result<PathBuf, String> {
-    clipboard_share_path_with_exporter(
+    clipboard_copy_path_with_exporter(
         source,
         selected_audio_track_ids,
+        original,
         &crate::settings::share_export_cache_dir(),
-        |source, target, mode| {
-            match mode {
-                ShareAudioExportMode::Remux(indices) => {
-                    remux_with_selected_audio_tracks_file(source, target, &indices)
-                        .map_err(|e| e.to_string())?;
-                }
-                ShareAudioExportMode::Mix(indices) => {
-                    remux_with_mixed_audio_track_file(source, target, &indices)
-                        .map_err(|e| e.to_string())?;
-                }
-            }
-            Ok(())
-        },
+        |source, target, mode| export_share_compatible_file(source, target, mode.as_ref()),
     )
+}
+
+fn clipboard_copy_path_with_exporter(
+    source: &Path,
+    selected_audio_track_ids: Option<&[String]>,
+    original: bool,
+    export_dir: &Path,
+    export_audio: impl FnMut(&Path, &Path, Option<ShareAudioExportMode>) -> Result<(), String>,
+) -> Result<PathBuf, String> {
+    if original {
+        return Ok(source.to_path_buf());
+    }
+    clipboard_share_path_with_exporter(source, selected_audio_track_ids, export_dir, export_audio)
 }
 
 fn clipboard_share_path_with_exporter(
     source: &Path,
     selected_audio_track_ids: Option<&[String]>,
     export_dir: &Path,
-    mut export_audio: impl FnMut(&Path, &Path, ShareAudioExportMode) -> Result<(), String>,
+    mut export_audio: impl FnMut(&Path, &Path, Option<ShareAudioExportMode>) -> Result<(), String>,
 ) -> Result<PathBuf, String> {
-    let Some(mode) = clipboard_share_export_mode(source, selected_audio_track_ids)? else {
-        return Ok(source.to_path_buf());
-    };
+    let mode = clipboard_share_export_mode(source, selected_audio_track_ids)?;
 
     let meta = std::fs::metadata(source).map_err(|e| format!("read clip metadata: {e}"))?;
     std::fs::create_dir_all(export_dir).map_err(|e| format!("create share export cache: {e}"))?;
     prune_old_share_exports(export_dir);
-    let export = share_export_path(export_dir, source, &meta, selected_audio_track_ids, &mode);
+    let export = share_export_path(
+        export_dir,
+        source,
+        &meta,
+        selected_audio_track_ids,
+        mode.as_ref(),
+    );
     if export.exists() {
         return Ok(export);
     }
@@ -1465,10 +1483,10 @@ fn share_export_path(
     source: &Path,
     meta: &std::fs::Metadata,
     selected_audio_track_ids: Option<&[String]>,
-    mode: &ShareAudioExportMode,
+    mode: Option<&ShareAudioExportMode>,
 ) -> PathBuf {
     let mut hasher = DefaultHasher::new();
-    "share-export-v1".hash(&mut hasher);
+    "share-export-v2-aac-h264".hash(&mut hasher);
     source.display().to_string().hash(&mut hasher);
     meta.len().hash(&mut hasher);
     meta.modified().ok().hash(&mut hasher);
@@ -1479,6 +1497,261 @@ fn share_export_path(
         }
     }
     export_dir.join(format!("share-export-{:016x}.mp4", hasher.finish()))
+}
+
+fn export_share_compatible_file(
+    source: &Path,
+    target: &Path,
+    audio_mode: Option<&ShareAudioExportMode>,
+) -> Result<(), String> {
+    let mut intermediate = None;
+    let (input, has_audio) = match audio_mode {
+        Some(ShareAudioExportMode::Remux(indices)) => {
+            let path = cached_export_tmp_path(target)?;
+            remux_with_selected_audio_tracks_file(source, &path, indices)
+                .map_err(|error| error.to_string())?;
+            let has_audio = !indices.is_empty();
+            intermediate = Some(path.clone());
+            (path, has_audio)
+        }
+        Some(ShareAudioExportMode::Mix(indices)) => {
+            let path = cached_export_tmp_path(target)?;
+            remux_with_mixed_audio_track_file(source, &path, indices)
+                .map_err(|error| error.to_string())?;
+            intermediate = Some(path.clone());
+            (path, true)
+        }
+        None => {
+            let counts = clipline_mp4::media_track_counts_file(source)
+                .map_err(|error| format!("inspect share audio tracks: {error}"))?;
+            (source.to_path_buf(), counts.audio > 0)
+        }
+    };
+
+    let result = transcode_share_file_with_ffmpeg(source, &input, target, has_audio);
+    if let Some(intermediate) = intermediate {
+        let _ = std::fs::remove_file(intermediate);
+    }
+    result
+}
+
+fn transcode_share_file_with_ffmpeg(
+    source: &Path,
+    input: &Path,
+    target: &Path,
+    has_audio: bool,
+) -> Result<(), String> {
+    let ffmpeg = clipline_capture::ffmpeg::locate()
+        .ok_or_else(|| "ffmpeg is not available for a shareable clipboard export".to_string())?;
+    let video_modes = share_video_export_modes(source)?;
+    let timeout = share_export_timeout(source);
+    let mut last_error = String::new();
+
+    for mode in video_modes {
+        let _ = std::fs::remove_file(target);
+        let mut command = Command::new(&ffmpeg);
+        suppress_console(&mut command);
+        command
+            .args(ffmpeg_share_export_args(input, target, has_audio, &mode))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        match run_share_ffmpeg(&mut command, timeout) {
+            Ok(output) if output.status.success() => return Ok(()),
+            Ok(output) => {
+                last_error = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                if last_error.is_empty() {
+                    last_error = format!("ffmpeg exited with {}", output.status);
+                }
+            }
+            Err(error) => last_error = error,
+        }
+    }
+
+    let _ = std::fs::remove_file(target);
+    Err(format!("prepare shareable clipboard clip: {last_error}"))
+}
+
+fn share_video_export_modes(source: &Path) -> Result<Vec<ShareVideoExportMode>, String> {
+    let codecs = media_video_codecs_file(source)
+        .map_err(|error| format!("inspect share video codec: {error}"))?;
+    if codecs.as_slice() == [MediaVideoCodec::H264] {
+        return Ok(vec![ShareVideoExportMode::Copy]);
+    }
+    if codecs.len() != 1 {
+        return Err(format!(
+            "shareable export requires exactly one video track, found {}",
+            codecs.len()
+        ));
+    }
+
+    let mut encoders = Vec::new();
+    for capability in clipline_capture::ffmpeg::probe() {
+        if !capability.codecs.contains(&Codec::H264) {
+            continue;
+        }
+        let Some(name) = clipline_capture::ffmpeg::encoder_name(capability.backend, Codec::H264)
+        else {
+            continue;
+        };
+        if !encoders.iter().any(|existing| existing == name) {
+            encoders.push(name.to_string());
+        }
+    }
+    if encoders.is_empty() {
+        return Err("no usable FFmpeg H.264 encoder is available for this clip".into());
+    }
+    Ok(encoders
+        .into_iter()
+        .map(ShareVideoExportMode::Encode)
+        .collect())
+}
+
+fn ffmpeg_share_export_args(
+    input: &Path,
+    target: &Path,
+    has_audio: bool,
+    video_mode: &ShareVideoExportMode,
+) -> Vec<String> {
+    let mut args = vec![
+        "-hide_banner".into(),
+        "-loglevel".into(),
+        "error".into(),
+        "-nostdin".into(),
+        "-y".into(),
+        "-i".into(),
+        input.display().to_string(),
+        "-map".into(),
+        "0:v:0".into(),
+    ];
+    if has_audio {
+        args.extend(["-map".into(), "0:a:0".into()]);
+    }
+    args.extend([
+        "-map_metadata".into(),
+        "-1".into(),
+        "-map_chapters".into(),
+        "-1".into(),
+        "-c:v".into(),
+    ]);
+    match video_mode {
+        ShareVideoExportMode::Copy => args.push("copy".into()),
+        ShareVideoExportMode::Encode(encoder) => {
+            args.push(encoder.clone());
+            if encoder == "h264_mf" {
+                args.extend(["-hw_encoding".into(), "0".into()]);
+            }
+            args.extend(["-pix_fmt".into(), "nv12".into()]);
+        }
+    }
+    if has_audio {
+        args.extend([
+            "-c:a".into(),
+            "aac".into(),
+            "-profile:a".into(),
+            "aac_low".into(),
+            "-b:a".into(),
+            "192k".into(),
+            "-ac".into(),
+            "2".into(),
+            "-ar".into(),
+            "48000".into(),
+        ]);
+    }
+    args.extend([
+        "-movflags".into(),
+        "+faststart".into(),
+        "-f".into(),
+        "mp4".into(),
+        target.display().to_string(),
+    ]);
+    args
+}
+
+fn share_export_timeout(source: &Path) -> Duration {
+    const MIN_SECONDS: u64 = 2 * 60;
+    const MAX_SECONDS: u64 = 6 * 60 * 60;
+    let duration = clipline_mp4::movie_duration_s_file(source)
+        .ok()
+        .flatten()
+        .unwrap_or(60.0);
+    let seconds = (duration * 4.0 + 60.0).ceil().max(0.0) as u64;
+    Duration::from_secs(seconds.clamp(MIN_SECONDS, MAX_SECONDS))
+}
+
+struct ShareFfmpegOutput {
+    status: ExitStatus,
+    stderr: Vec<u8>,
+}
+
+fn run_share_ffmpeg(command: &mut Command, timeout: Duration) -> Result<ShareFfmpegOutput, String> {
+    const MAX_STDERR_BYTES: usize = 128 * 1024;
+
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("spawn ffmpeg share export: {error}"))?;
+    let Some(stderr) = child.stderr.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("spawn ffmpeg share export: stderr pipe unavailable".into());
+    };
+    let reader = match std::thread::Builder::new()
+        .name("clipline-share-ffmpeg-stderr".into())
+        .spawn(move || read_bounded_share_stderr(stderr, MAX_STDERR_BYTES))
+    {
+        Ok(reader) => reader,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("spawn ffmpeg share stderr reader: {error}"));
+        }
+    };
+
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .unwrap_or_else(Instant::now);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err(format!(
+                    "ffmpeg share export timed out after {} seconds",
+                    timeout.as_secs()
+                ));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err(format!("wait for ffmpeg share export: {error}"));
+            }
+        }
+    };
+    let stderr = reader
+        .join()
+        .map_err(|_| "ffmpeg share stderr reader panicked".to_string())?
+        .map_err(|error| format!("read ffmpeg share stderr: {error}"))?;
+    Ok(ShareFfmpegOutput {
+        status: status?,
+        stderr,
+    })
+}
+
+fn read_bounded_share_stderr(mut reader: impl Read, max_bytes: usize) -> io::Result<Vec<u8>> {
+    let mut retained = Vec::new();
+    let mut chunk = [0_u8; 16 * 1024];
+    loop {
+        let read = reader.read(&mut chunk)?;
+        if read == 0 {
+            return Ok(retained);
+        }
+        let keep = read.min(max_bytes.saturating_sub(retained.len()));
+        retained.extend_from_slice(&chunk[..keep]);
+    }
 }
 
 fn share_export_tmp_path(export: &Path) -> Result<PathBuf, String> {
@@ -1788,12 +2061,13 @@ pub async fn copy_clip_to_clipboard(
 ) -> Result<(), String> {
     let target = validate_clip_path(&settings, &request.path)?;
     let audio_track_ids = request.audio_track_ids;
+    let original = request.original;
     let owner = window
         .hwnd()
         .map_err(|error| format!("get Clipline window handle: {error}"))?
         .0 as isize;
     tauri::async_runtime::spawn_blocking(move || {
-        let share_path = clipboard_share_path(&target, audio_track_ids.as_deref())?;
+        let share_path = clipboard_copy_path(&target, audio_track_ids.as_deref(), original)?;
         copy_file_to_clipboard(&share_path, owner as HWND)
     })
     .await
@@ -2604,7 +2878,7 @@ mod tests {
             &export_dir,
             |input, target, mode| {
                 assert_eq!(input, source.as_path());
-                assert_eq!(mode, ShareAudioExportMode::Mix(vec![0, 1]));
+                assert_eq!(mode, Some(ShareAudioExportMode::Mix(vec![0, 1])));
                 std::fs::write(target, b"mixed share mp4").unwrap();
                 Ok(())
             },
@@ -2616,7 +2890,7 @@ mod tests {
     }
 
     #[test]
-    fn clipboard_share_without_audio_selection_uses_original_path() {
+    fn clipboard_share_without_audio_selection_prepares_compatibility_export() {
         let dir = TestDir::new("clipline-library", "clipboard-share-original");
         let source = dir.path().join("clip.mp4");
         std::fs::write(&source, b"source mp4").unwrap();
@@ -2626,11 +2900,83 @@ mod tests {
             &source,
             selected,
             &dir.path().join("share"),
-            |_, _, _| panic!("clipboard copy without explicit audio selection must not export"),
+            |input, target, mode| {
+                assert_eq!(input, source);
+                assert_eq!(mode, None);
+                std::fs::write(target, b"compatible mp4").unwrap();
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_ne!(chosen, source);
+        assert_eq!(std::fs::read(chosen).unwrap(), b"compatible mp4");
+    }
+
+    #[test]
+    fn original_clipboard_copy_bypasses_share_export() {
+        let dir = TestDir::new("clipline-library", "clipboard-original-bypass");
+        let source = dir.path().join("clip.mp4");
+        std::fs::write(&source, b"source mp4").unwrap();
+
+        let chosen = clipboard_copy_path_with_exporter(
+            &source,
+            Some(&["output".to_string()]),
+            true,
+            &dir.path().join("share"),
+            |_, _, _| panic!("original copy must not prepare a share export"),
         )
         .unwrap();
 
         assert_eq!(chosen, source);
+    }
+
+    #[test]
+    fn ffmpeg_share_export_stream_copies_h264_and_encodes_aac_lc() {
+        let args = ffmpeg_share_export_args(
+            Path::new("selected.mp4"),
+            Path::new("share.mp4.tmp"),
+            true,
+            &ShareVideoExportMode::Copy,
+        );
+
+        assert!(args.windows(2).any(|pair| pair == ["-c:v", "copy"]));
+        assert!(args.windows(2).any(|pair| pair == ["-map", "0:a:0"]));
+        assert!(args.windows(2).any(|pair| pair == ["-c:a", "aac"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-profile:a", "aac_low"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-movflags", "+faststart"]));
+        assert_eq!(args.last().map(String::as_str), Some("share.mp4.tmp"));
+    }
+
+    #[test]
+    fn ffmpeg_share_export_omits_audio_for_muted_selection() {
+        let args = ffmpeg_share_export_args(
+            Path::new("muted.mp4"),
+            Path::new("share.mp4.tmp"),
+            false,
+            &ShareVideoExportMode::Copy,
+        );
+
+        assert!(!args.iter().any(|arg| arg == "0:a:0"));
+        assert!(!args.iter().any(|arg| arg == "-c:a"));
+    }
+
+    #[test]
+    fn ffmpeg_share_export_can_transcode_video_with_mf_fallback() {
+        let args = ffmpeg_share_export_args(
+            Path::new("av1.mp4"),
+            Path::new("share.mp4.tmp"),
+            true,
+            &ShareVideoExportMode::Encode("h264_mf".into()),
+        );
+
+        assert!(args.windows(2).any(|pair| pair == ["-c:v", "h264_mf"]));
+        assert!(args.windows(2).any(|pair| pair == ["-hw_encoding", "0"]));
+        assert!(args.windows(2).any(|pair| pair == ["-pix_fmt", "nv12"]));
     }
 
     #[test]

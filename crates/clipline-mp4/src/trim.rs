@@ -358,6 +358,23 @@ pub fn media_track_counts_file(path: &Path) -> Result<MediaTrackCounts, TrimErro
     media_track_counts_reader(&mut file)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaVideoCodec {
+    H264,
+    Hevc,
+    Av1,
+}
+
+pub fn media_video_codecs(input: &[u8]) -> Result<Vec<MediaVideoCodec>, TrimError> {
+    finalized_movie_video_codecs(input)
+}
+
+pub fn media_video_codecs_file(path: &Path) -> Result<Vec<MediaVideoCodec>, TrimError> {
+    let mut file = File::open(path)?;
+    let moov = read_finalized_moov_bytes(&mut file)?;
+    finalized_movie_video_codecs(&moov)
+}
+
 pub fn movie_duration_s_file(path: &Path) -> Result<Option<f64>, TrimError> {
     let mut file = File::open(path)?;
     let moov = read_finalized_moov_bytes(&mut file)?;
@@ -394,6 +411,32 @@ fn finalized_movie_track_counts(input: &[u8]) -> Result<MediaTrackCounts, TrimEr
         return Err(TrimError::Unsupported("no tracks found".into()));
     }
     Ok(counts)
+}
+
+fn finalized_movie_video_codecs(input: &[u8]) -> Result<Vec<MediaVideoCodec>, TrimError> {
+    let top = walk(input);
+    let moov = find(&top, b"moov")
+        .ok_or_else(|| TrimError::Unsupported("missing finalized moov".into()))?
+        .clone();
+    let moov_children = children(input, &moov);
+    if find(&moov_children, b"mvex").is_some() {
+        return Err(TrimError::Unsupported(
+            "fragmented/unfinalized files are not trim-ready".into(),
+        ));
+    }
+
+    let mut codecs = Vec::new();
+    for trak in moov_children.iter().filter(|b| &b.fourcc == b"trak") {
+        let TrackConfig::Video(video) = parse_track_cfg(input, trak)? else {
+            continue;
+        };
+        codecs.push(match video.codec {
+            VideoCodecParams::H264 { .. } => MediaVideoCodec::H264,
+            VideoCodecParams::Hevc { .. } => MediaVideoCodec::Hevc,
+            VideoCodecParams::Av1 { .. } => MediaVideoCodec::Av1,
+        });
+    }
+    Ok(codecs)
 }
 
 pub fn remux_with_mixed_audio_track(
@@ -2935,6 +2978,28 @@ mod tests {
         assert_eq!(
             media_track_counts(&clipline_audio_only_fixture()).unwrap(),
             MediaTrackCounts { video: 0, audio: 1 }
+        );
+    }
+
+    #[test]
+    fn media_video_codecs_reports_each_supported_video_sample_entry() {
+        let h264 = single_video_fixture(VideoCodecParams::H264 {
+            sps: vec![vec![0x67, 0x42, 0x00, 0x1f]],
+            pps: vec![vec![0x68, 0xce, 0x06, 0xe2]],
+        });
+        let hevc = single_video_fixture(VideoCodecParams::Hevc {
+            vps: vec![vec![0x40, 0x01, 0x0c]],
+            sps: vec![vec![0x42, 0x01, 0x01]],
+            pps: vec![vec![0x44, 0x01, 0xc0]],
+        });
+
+        assert_eq!(
+            media_video_codecs(&h264).unwrap(),
+            vec![MediaVideoCodec::H264]
+        );
+        assert_eq!(
+            media_video_codecs(&hevc).unwrap(),
+            vec![MediaVideoCodec::Hevc]
         );
     }
 

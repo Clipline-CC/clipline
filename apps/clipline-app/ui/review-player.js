@@ -1851,22 +1851,30 @@ async function openFolder() {
   }
 }
 
-async function copyClipToClipboard() {
+async function copyClipToClipboard(event) {
   if (!currentClip) return;
   if (isCloudOnlyReviewClip(currentClip)) return;
+  const original = Boolean(event?.shiftKey);
   $("copy-clip").disabled = true;
   $("error").textContent = "";
-  setDeckStatus("");
+  if (original) {
+    setDeckStatus("");
+  } else {
+    setDeckStatus("preparing shareable clip...");
+  }
   try {
     await invoke("copy_clip_to_clipboard", {
       request: {
         path: currentClip.path,
-        audioTrackIds: clipAudioTracks(currentClip).length
-          ? selectedAudioTrackIdsForClip(currentClip)
-          : null,
+        audioTrackIds: original
+          ? null
+          : clipAudioTracks(currentClip).length
+            ? selectedAudioTrackIdsForClip(currentClip)
+            : null,
+        original,
       },
     });
-    setDeckStatus("clip copied to clipboard", { transient: true });
+    setDeckStatus(original ? "original clip copied" : "shareable clip copied", { transient: true });
   } catch (e) {
     setDeckStatus("");
     $("error").textContent = e;
