@@ -29,6 +29,22 @@ deliberately unimplemented — issue #110, branch `review-audio-alignment`. Thos
 release and are unchanged by it. The brief echo when switching audio tracks mid-playback is a known,
 accepted residual.
 
+**Published** on the rolling `nightly` prerelease from `develop` commit `e97c750`, seven assets. Both
+installers were verified after publication by downloading them from their public URLs and confirming
+the signature in each manifest validates the downloaded bytes under the updater public key in
+`tauri.conf.json` — the same check the updater performs:
+
+| asset | bytes | sha256 |
+| --- | --- | --- |
+| `Clipline_0.1.42_x64-setup.exe` | 54,308,414 | `7a0e000d58bd90cd6c3651bcff7431d58ce5a66f596b2c4a52e3d13f574628fa` |
+| `Clipline_0.1.42_x64-standalone-setup.exe` | 276,937,081 | `69476973aedad680c7f9b74623b90f13eeabe5864b8c24a97c746ae52438b258` |
+
+GitHub CI did not run on `e97c750`: `ci.yml` triggers only on pushes to `main` and on pull requests,
+so a version-bump push to `develop` produces zero checks. Gates were run locally instead — 1210
+workspace tests, fresh-cache warning-denied Clippy, and both release-input preflights — and the
+release commit's code is byte-identical to CI-green merge commit `ae34662`, the delta being three
+version strings and two docs. `docs/release-updates.md` now records this and the other release traps.
+
 ## Checkpoint (2026-07-25): FFmpeg thumbnail reliability
 
 Plan: `docs/superpowers/plans/2026-07-25-ffmpeg-thumbnail-reliability.md`.
