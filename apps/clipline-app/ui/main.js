@@ -392,7 +392,7 @@ $("export-clip").addEventListener("click", exportTrim);
 $("deck-status-action").addEventListener("click", runDeckStatusAction);
 $("delete-clip").addEventListener("click", () => deleteClip());
 $("open-folder").addEventListener("click", openFolder);
-$("copy-clip").addEventListener("click", copyClipToClipboard);
+$("copy-clip").addEventListener("click", (event) => copyClipToClipboard(event));
 $("rename-clip").addEventListener("click", () => beginClipRename());
 $("clip-title-edit").addEventListener("submit", saveClipRename);
 $("rename-cancel").addEventListener("click", cancelClipRename);

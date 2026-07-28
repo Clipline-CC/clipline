@@ -4,6 +4,48 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-28): shareable clipboard PR review follow-ups
+
+Plan: `docs/superpowers/plans/2026-07-28-pr130-review-followups.md`.
+
+PR #130 review feedback is implemented. HEVC/AV1 share exports now reuse the capture pipeline's
+proven per-backend H.264 rate-control flags at an 8 Mbps target and 16 Mbps buffer, instead of
+relying on encoder defaults. The entire ordered encoder fallback sequence shares one
+duration-scaled deadline, so each failed backend cannot restart the full timeout. Cache pruning now
+recognizes both legacy `.mp4.tmp` files and the unique, potentially nested
+`.mp4.<pid>.<counter>.tmp` intermediates left by abandoned exports while retaining malformed or
+unowned lookalikes.
+
+The cache namespace is `share-export-v3-aac-h264-cbr8m`, invalidating prior HEVC/AV1 transcodes made
+with default encoder settings. Focused regressions, the CI-mode full workspace suite, and
+warning-denied workspace Clippy pass. The unrelated interactive-desktop WGC device test timed out
+waiting for its first frame in both the initial non-CI workspace run and an isolated retry; it is
+self-skipped under the repository's documented CI condition and no WGC code changed in this work.
+
+## Checkpoint (2026-07-27): shareable clipboard export
+
+Plan: `docs/superpowers/plans/2026-07-27-shareable-clipboard-export.md`.
+
+The review Copy button now prepares a broadly shareable MP4 by default. It preserves the current
+audio selection, natively remuxes one selected Opus track or mixes multiple selected tracks, then
+uses the separately spawned bundled LGPL FFmpeg process to encode one 48 kHz stereo AAC-LC track.
+H.264 video is stream-copied without quality loss. Explicit HEVC/AV1 recordings are detected from
+their MP4 sample entries and tried through the machine's proven FFmpeg H.264 encoders instead of
+silently producing another incompatible file. Shift+click copies the untouched source MP4 with all
+original codecs and tracks.
+
+The cache namespace is `share-export-v3-aac-h264-cbr8m`, so earlier Opus-in-MP4 clipboard exports
+cannot be reused. FFmpeg work runs off the UI thread, drains bounded diagnostics, has a
+duration-scaled hard timeout, cleans intermediate/partial files, and publishes the cache entry
+atomically. The button tooltip documents Shift+click, and progress/success text distinguishes
+shareable and original copies.
+
+The pinned release FFmpeg runtime was staged and a real cached H.264/Opus clip was converted to
+H.264 plus one `mp4a` AAC-LC 48 kHz stereo track. Focused MP4/library/UI tests pass, the full
+workspace suite passes, and warning-denied workspace Clippy is clean. The first workspace run was
+concurrent with Clippy and triggered the existing real-device WGC timing assertion under load; the
+device test passed immediately in isolation and the sequential full workspace rerun passed.
+
 ## Checkpoint (2026-07-26): Nightly 0.1.42
 
 Plan: `docs/superpowers/plans/2026-07-26-nightly-0.1.42.md`.
