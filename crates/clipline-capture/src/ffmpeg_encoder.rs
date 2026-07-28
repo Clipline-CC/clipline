@@ -652,8 +652,13 @@ fn rec709_limited_flags() -> Vec<String> {
 /// a target bitrate and a realtime preset — it rejects `-maxrate/-bufsize`
 /// (verified live: `Init failed`/exit -22), so those stay hardware-only.
 /// Unknown flags would make ffmpeg fail to open the encoder, so each family
-/// sticks to widely-supported options.
-fn backend_rate_control(backend: EncoderBackend, bitrate_bps: u32, bufsize: u64) -> Vec<String> {
+/// sticks to widely-supported options. Derived-media exports reuse this proven
+/// argument set when they need the same compatibility.
+pub fn backend_rate_control(
+    backend: EncoderBackend,
+    bitrate_bps: u32,
+    bufsize: u64,
+) -> Vec<String> {
     let s = |v: &str| v.to_string();
     let b = bitrate_bps.to_string();
     let cbr_capped = || {

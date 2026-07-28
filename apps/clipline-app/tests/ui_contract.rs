@@ -3777,8 +3777,8 @@ fn clipboard_copy_distinguishes_shareable_and_original_paths() {
         "the otherwise-hidden Shift+click behavior must be documented in the tooltip"
     );
     assert!(
-        library.contains("\"share-export-v2-aac-h264\""),
-        "share export cache must not reuse v1 Opus files"
+        library.contains("\"share-export-v3-aac-h264-cbr8m\""),
+        "share export cache must not reuse Opus or default-quality transcodes"
     );
 }
 

@@ -4,6 +4,24 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-28): shareable clipboard PR review follow-ups
+
+Plan: `docs/superpowers/plans/2026-07-28-pr130-review-followups.md`.
+
+PR #130 review feedback is implemented. HEVC/AV1 share exports now reuse the capture pipeline's
+proven per-backend H.264 rate-control flags at an 8 Mbps target and 16 Mbps buffer, instead of
+relying on encoder defaults. The entire ordered encoder fallback sequence shares one
+duration-scaled deadline, so each failed backend cannot restart the full timeout. Cache pruning now
+recognizes both legacy `.mp4.tmp` files and the unique, potentially nested
+`.mp4.<pid>.<counter>.tmp` intermediates left by abandoned exports while retaining malformed or
+unowned lookalikes.
+
+The cache namespace is `share-export-v3-aac-h264-cbr8m`, invalidating prior HEVC/AV1 transcodes made
+with default encoder settings. Focused regressions, the CI-mode full workspace suite, and
+warning-denied workspace Clippy pass. The unrelated interactive-desktop WGC device test timed out
+waiting for its first frame in both the initial non-CI workspace run and an isolated retry; it is
+self-skipped under the repository's documented CI condition and no WGC code changed in this work.
+
 ## Checkpoint (2026-07-27): shareable clipboard export
 
 Plan: `docs/superpowers/plans/2026-07-27-shareable-clipboard-export.md`.
@@ -16,7 +34,7 @@ their MP4 sample entries and tried through the machine's proven FFmpeg H.264 enc
 silently producing another incompatible file. Shift+click copies the untouched source MP4 with all
 original codecs and tracks.
 
-The cache namespace is `share-export-v2-aac-h264`, so the earlier Opus-in-MP4 clipboard exports
+The cache namespace is `share-export-v3-aac-h264-cbr8m`, so earlier Opus-in-MP4 clipboard exports
 cannot be reused. FFmpeg work runs off the UI thread, drains bounded diagnostics, has a
 duration-scaled hard timeout, cleans intermediate/partial files, and publishes the cache entry
 atomically. The button tooltip documents Shift+click, and progress/success text distinguishes

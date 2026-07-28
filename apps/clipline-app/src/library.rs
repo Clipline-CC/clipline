@@ -20,7 +20,7 @@ use std::ptr;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use clipline_capture::Codec;
+use clipline_capture::{Codec, EncoderBackend};
 use clipline_events::{is_review_event, ClipMarker, ClipMarkers, ClipPlay};
 use clipline_mp4::{
     media_video_codecs_file, remux_with_mixed_audio_track_file,
@@ -1381,8 +1381,14 @@ enum ShareAudioExportMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ShareVideoExportMode {
     Copy,
-    Encode(String),
+    Encode {
+        encoder: String,
+        backend: EncoderBackend,
+    },
 }
+
+const SHARE_H264_BITRATE_BPS: u32 = 8_000_000;
+const SHARE_H264_BUFSIZE_BITS: u64 = 16_000_000;
 
 fn clipboard_copy_path(
     source: &Path,
@@ -1486,7 +1492,7 @@ fn share_export_path(
     mode: Option<&ShareAudioExportMode>,
 ) -> PathBuf {
     let mut hasher = DefaultHasher::new();
-    "share-export-v2-aac-h264".hash(&mut hasher);
+    "share-export-v3-aac-h264-cbr8m".hash(&mut hasher);
     source.display().to_string().hash(&mut hasher);
     meta.len().hash(&mut hasher);
     meta.modified().ok().hash(&mut hasher);
@@ -1545,9 +1551,19 @@ fn transcode_share_file_with_ffmpeg(
         .ok_or_else(|| "ffmpeg is not available for a shareable clipboard export".to_string())?;
     let video_modes = share_video_export_modes(source)?;
     let timeout = share_export_timeout(source);
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .unwrap_or_else(Instant::now);
     let mut last_error = String::new();
 
     for mode in video_modes {
+        let Some(remaining) = remaining_share_export_timeout(deadline, Instant::now()) else {
+            last_error = format!(
+                "ffmpeg share export exhausted its {} second timeout",
+                timeout.as_secs()
+            );
+            break;
+        };
         let _ = std::fs::remove_file(target);
         let mut command = Command::new(&ffmpeg);
         suppress_console(&mut command);
@@ -1556,7 +1572,7 @@ fn transcode_share_file_with_ffmpeg(
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
-        match run_share_ffmpeg(&mut command, timeout) {
+        match run_share_ffmpeg(&mut command, remaining) {
             Ok(output) if output.status.success() => return Ok(()),
             Ok(output) => {
                 last_error = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -1585,7 +1601,7 @@ fn share_video_export_modes(source: &Path) -> Result<Vec<ShareVideoExportMode>, 
         ));
     }
 
-    let mut encoders = Vec::new();
+    let mut encoders: Vec<(String, EncoderBackend)> = Vec::new();
     for capability in clipline_capture::ffmpeg::probe() {
         if !capability.codecs.contains(&Codec::H264) {
             continue;
@@ -1594,8 +1610,8 @@ fn share_video_export_modes(source: &Path) -> Result<Vec<ShareVideoExportMode>, 
         else {
             continue;
         };
-        if !encoders.iter().any(|existing| existing == name) {
-            encoders.push(name.to_string());
+        if !encoders.iter().any(|(existing, _)| existing == name) {
+            encoders.push((name.to_string(), capability.backend));
         }
     }
     if encoders.is_empty() {
@@ -1603,7 +1619,7 @@ fn share_video_export_modes(source: &Path) -> Result<Vec<ShareVideoExportMode>, 
     }
     Ok(encoders
         .into_iter()
-        .map(ShareVideoExportMode::Encode)
+        .map(|(encoder, backend)| ShareVideoExportMode::Encode { encoder, backend })
         .collect())
 }
 
@@ -1636,11 +1652,13 @@ fn ffmpeg_share_export_args(
     ]);
     match video_mode {
         ShareVideoExportMode::Copy => args.push("copy".into()),
-        ShareVideoExportMode::Encode(encoder) => {
+        ShareVideoExportMode::Encode { encoder, backend } => {
             args.push(encoder.clone());
-            if encoder == "h264_mf" {
-                args.extend(["-hw_encoding".into(), "0".into()]);
-            }
+            args.extend(clipline_capture::ffmpeg_encoder::backend_rate_control(
+                *backend,
+                SHARE_H264_BITRATE_BPS,
+                SHARE_H264_BUFSIZE_BITS,
+            ));
             args.extend(["-pix_fmt".into(), "nv12".into()]);
         }
     }
@@ -1677,6 +1695,12 @@ fn share_export_timeout(source: &Path) -> Duration {
         .unwrap_or(60.0);
     let seconds = (duration * 4.0 + 60.0).ceil().max(0.0) as u64;
     Duration::from_secs(seconds.clamp(MIN_SECONDS, MAX_SECONDS))
+}
+
+fn remaining_share_export_timeout(deadline: Instant, now: Instant) -> Option<Duration> {
+    deadline
+        .checked_duration_since(now)
+        .filter(|remaining| !remaining.is_zero())
 }
 
 struct ShareFfmpegOutput {
@@ -1790,11 +1814,28 @@ fn prune_cached_mp4_files(export_dir: &Path, max_age: std::time::Duration) {
 }
 
 fn is_cached_mp4_file(path: &Path) -> bool {
-    path.extension().and_then(|ext| ext.to_str()) == Some("mp4")
-        || path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.ends_with(".mp4.tmp"))
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    if !name.starts_with("share-export-") {
+        return false;
+    }
+    if name.ends_with(".mp4") || name.ends_with(".mp4.tmp") {
+        return true;
+    }
+    let Some((_, suffix)) = name.split_once(".mp4.") else {
+        return false;
+    };
+    let parts = suffix.split('.').collect::<Vec<_>>();
+    !parts.is_empty()
+        && parts.len().is_multiple_of(3)
+        && parts.chunks_exact(3).all(|chunk| {
+            !chunk[0].is_empty()
+                && chunk[0].bytes().all(|byte| byte.is_ascii_digit())
+                && !chunk[1].is_empty()
+                && chunk[1].bytes().all(|byte| byte.is_ascii_digit())
+                && chunk[2] == "tmp"
+        })
 }
 
 fn extract_audio_sidecars_with_ffmpeg(
@@ -2971,12 +3012,75 @@ mod tests {
             Path::new("av1.mp4"),
             Path::new("share.mp4.tmp"),
             true,
-            &ShareVideoExportMode::Encode("h264_mf".into()),
+            &ShareVideoExportMode::Encode {
+                encoder: "h264_mf".into(),
+                backend: clipline_capture::EncoderBackend::MfSoftware,
+            },
         );
 
         assert!(args.windows(2).any(|pair| pair == ["-c:v", "h264_mf"]));
         assert!(args.windows(2).any(|pair| pair == ["-hw_encoding", "0"]));
         assert!(args.windows(2).any(|pair| pair == ["-pix_fmt", "nv12"]));
+        assert!(args.windows(2).any(|pair| pair == ["-b:v", "8000000"]));
+    }
+
+    #[test]
+    fn ffmpeg_share_export_applies_backend_specific_rate_control() {
+        use clipline_capture::EncoderBackend;
+
+        for (encoder, backend, required) in [
+            (
+                "h264_nvenc",
+                EncoderBackend::Nvenc,
+                ["-rc", "cbr", "-preset", "p4"],
+            ),
+            (
+                "h264_amf",
+                EncoderBackend::Amf,
+                ["-rc", "cbr", "-usage", "lowlatency"],
+            ),
+            (
+                "h264_qsv",
+                EncoderBackend::QuickSync,
+                ["-low_power", "0", "-maxrate", "8000000"],
+            ),
+        ] {
+            let args = ffmpeg_share_export_args(
+                Path::new("source.mp4"),
+                Path::new("share.mp4.tmp"),
+                true,
+                &ShareVideoExportMode::Encode {
+                    encoder: encoder.into(),
+                    backend,
+                },
+            );
+            let joined = args.join(" ");
+            for pair in required.chunks_exact(2) {
+                assert!(
+                    joined.contains(&pair.join(" ")),
+                    "{encoder} missing {} in {joined}",
+                    pair.join(" ")
+                );
+            }
+            assert!(joined.contains("-b:v 8000000"), "{encoder}: {joined}");
+            assert!(joined.contains("-bufsize 16000000"), "{encoder}: {joined}");
+        }
+    }
+
+    #[test]
+    fn remaining_share_export_timeout_uses_one_deadline() {
+        let start = Instant::now();
+        let deadline = start + Duration::from_secs(10);
+
+        assert_eq!(
+            remaining_share_export_timeout(deadline, start + Duration::from_secs(3)),
+            Some(Duration::from_secs(7))
+        );
+        assert_eq!(remaining_share_export_timeout(deadline, deadline), None);
+        assert_eq!(
+            remaining_share_export_timeout(deadline, deadline + Duration::from_secs(1)),
+            None
+        );
     }
 
     #[test]
@@ -2997,13 +3101,22 @@ mod tests {
         let dir = TestDir::new("clipline-library", "share-export-prune-tmp");
         let export = dir.path().join("share-export-old.mp4");
         let orphan = dir.path().join("share-export-old.mp4.tmp");
+        let unique = share_export_tmp_path(&export).unwrap();
+        let nested_unique = cached_export_tmp_path(&unique).unwrap();
+        let malformed = dir.path().join("share-export-old.mp4.pid.counter.tmp");
         std::fs::write(&export, b"old export").unwrap();
         std::fs::write(&orphan, b"orphan").unwrap();
+        std::fs::write(&unique, b"unique orphan").unwrap();
+        std::fs::write(&nested_unique, b"nested unique orphan").unwrap();
+        std::fs::write(&malformed, b"not an owned temp shape").unwrap();
 
         prune_cached_mp4_files(dir.path(), std::time::Duration::ZERO);
 
         assert!(!export.exists());
         assert!(!orphan.exists());
+        assert!(!unique.exists());
+        assert!(!nested_unique.exists());
+        assert!(malformed.exists());
     }
 
     #[test]
