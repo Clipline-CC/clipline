@@ -4,6 +4,26 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-28): cloud upload review completion
+
+Plan: `docs/superpowers/plans/2026-07-28-cloud-upload-review-completion.md`.
+
+Cloud upload completion no longer ejects freshly exported trims from review merely because Windows
+spells the canonical export path as `\\?\D:\…` and the authoritative Library rescan spells the same
+path as `D:\…`. Active-clip reconciliation now uses the existing Windows-aware path identity helper
+instead of raw string equality, so uploads that preserve the local MP4 keep the viewer open.
+
+`CloudUploadResult` now explicitly reports `local_deleted`. When `Delete local after upload`
+successfully removes the primary MP4, the authoritative refresh intentionally returns to the
+Library and the global notice surface confirms `cloud upload ready · local copy deleted`. If cloud
+media verification or primary deletion fails, the local review remains open; backend post-upload
+or cleanup errors are surfaced globally instead of being hidden behind a generic ready status.
+Primary deletion is still reported accurately if a later sidecar cleanup fails.
+
+Focused red/green regressions cover path-equivalent refresh behavior, the post-delete notice
+contract, cleanup-error visibility, and upload-result serialization. `cargo test --workspace` is
+green and a fresh-cache `cargo clippy --workspace --all-targets -- -D warnings` pass is clean.
+
 ## Checkpoint (2026-07-28): shareable clipboard PR review follow-ups
 
 Plan: `docs/superpowers/plans/2026-07-28-pr130-review-followups.md`.

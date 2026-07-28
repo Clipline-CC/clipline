@@ -1627,6 +1627,43 @@ fn local_library_refresh_rejects_stale_snapshots_and_reports_event_errors() {
 }
 
 #[test]
+fn cloud_upload_completion_preserves_equivalent_paths_and_reports_local_deletion() {
+    let library = read_ui_js("library.js");
+    let cloud = read_ui_js("cloud.js");
+    let refresh_clips = js_function_body(&library, "refreshClips");
+    let upload = js_function_body(&cloud, "uploadClipToCloud");
+
+    assert!(
+        refresh_clips
+            .contains("PlayerCore.sameClipPath(clip.path, currentPath)"),
+        "post-upload Library refreshes must preserve reviews across equivalent Windows path spellings"
+    );
+    assert!(
+        !refresh_clips.contains("clip.path === currentPath"),
+        "active clip reconciliation must not use raw path-string equality"
+    );
+
+    let refresh = upload
+        .find("await refresh();")
+        .expect("cloud upload completion refreshes the authoritative local Library");
+    let deletion_notice = upload
+        .find("if (result && result.local_deleted)")
+        .expect("cloud upload completion handles confirmed local deletion");
+    assert!(
+        refresh < deletion_notice
+            && upload.contains(
+                "setNotice(\"cloud upload ready · local copy deleted\", { transient: true });"
+            ),
+        "intentional post-upload deletion must be confirmed on the global notice surface after the viewer closes"
+    );
+    assert!(
+        upload.contains("if (result.record.error)")
+            && upload.contains("$(\"error\").textContent = result.record.error;"),
+        "post-upload cleanup failures must remain visible while the local review stays open"
+    );
+}
+
+#[test]
 fn keyboard_shortcuts_document_j_l_frame_step_and_arrows_seek() {
     let html = index_html();
 

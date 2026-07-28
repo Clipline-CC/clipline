@@ -126,6 +126,7 @@ pub struct CloudUploadProgressEvent {
 pub struct CloudUploadResult {
     pub record: CloudUploadRecord,
     pub clip: Option<ClipDetailResponse>,
+    pub local_deleted: bool,
 }
 
 #[derive(Debug)]
@@ -1430,7 +1431,11 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
         .map_err(cloud_error)?;
     let local_clip_id = local_clip_id(&target, &meta, &checksum)?;
     if let Some(record) = existing_uploaded_record(&cloud, Some(&local_clip_id), &request.path) {
-        return Ok(CloudUploadResult { record, clip: None });
+        return Ok(CloudUploadResult {
+            record,
+            clip: None,
+            local_deleted: false,
+        });
     }
     let token_target = cloud
         .credential_target
@@ -1508,7 +1513,11 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
             record.updated_at_unix = unix_now();
             persist_record(&state, &record)?;
             emit_upload_progress(&app, &record, 0, payload_size, record.error.clone());
-            return Ok(CloudUploadResult { record, clip: None });
+            return Ok(CloudUploadResult {
+                record,
+                clip: None,
+                local_deleted: false,
+            });
         }
     };
 
@@ -1537,12 +1546,20 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
             );
             record.updated_at_unix = unix_now();
             persist_post_upload_record(&app, &state, &record, progress.file_size_bytes)?;
-            return Ok(CloudUploadResult { record, clip: None });
+            return Ok(CloudUploadResult {
+                record,
+                clip: None,
+                local_deleted: false,
+            });
         }
         Ok(ReadyClipOutcome::TimedOut) => {
             mark_ready_timeout(&mut record);
             persist_post_upload_record(&app, &state, &record, progress.file_size_bytes)?;
-            return Ok(CloudUploadResult { record, clip: None });
+            return Ok(CloudUploadResult {
+                record,
+                clip: None,
+                local_deleted: false,
+            });
         }
         Err(error) => {
             mark_post_upload_problem(
@@ -1553,7 +1570,11 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
                 ),
             );
             persist_post_upload_record(&app, &state, &record, progress.file_size_bytes)?;
-            return Ok(CloudUploadResult { record, clip: None });
+            return Ok(CloudUploadResult {
+                record,
+                clip: None,
+                local_deleted: false,
+            });
         }
     };
 
@@ -1590,7 +1611,11 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
                     ),
                 );
                 persist_post_upload_record(&app, &state, &record, progress.file_size_bytes)?;
-                return Ok(CloudUploadResult { record, clip: None });
+                return Ok(CloudUploadResult {
+                    record,
+                    clip: None,
+                    local_deleted: false,
+                });
             }
             Err(error) => {
                 mark_post_upload_problem(
@@ -1601,7 +1626,11 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
                     ),
                 );
                 persist_post_upload_record(&app, &state, &record, progress.file_size_bytes)?;
-                return Ok(CloudUploadResult { record, clip: None });
+                return Ok(CloudUploadResult {
+                    record,
+                    clip: None,
+                    local_deleted: false,
+                });
             }
         }
     };
@@ -1621,20 +1650,29 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
             return Ok(CloudUploadResult {
                 record,
                 clip: Some(clip),
+                local_deleted: false,
             });
         }
-        if let Err(error) = delete_uploaded_local_files(&target) {
+        let cleanup_result = delete_uploaded_local_files(&target);
+        let local_deleted = cleanup_result.is_ok() || matches!(target.try_exists(), Ok(false));
+        if let Err(error) = cleanup_result {
             record.error = Some(format!(
                 "cloud upload is ready, but local cleanup failed: {error}"
             ));
             record.updated_at_unix = unix_now();
             persist_post_upload_record(&app, &state, &record, progress.file_size_bytes)?;
         }
+        return Ok(CloudUploadResult {
+            record,
+            clip: Some(clip),
+            local_deleted,
+        });
     }
 
     Ok(CloudUploadResult {
         record,
         clip: Some(clip),
+        local_deleted: false,
     })
 }
 
@@ -2424,6 +2462,18 @@ mod tests {
             credential_target("https://clips.example.com", "user_1"),
             "Clipline Cloud:https://clips.example.com:user_1"
         );
+    }
+
+    #[test]
+    fn cloud_upload_result_serializes_confirmed_local_deletion() {
+        let result = CloudUploadResult {
+            record: upload_record("local", "clip.mp4", "uploaded_private", 1),
+            clip: None,
+            local_deleted: true,
+        };
+
+        let value = serde_json::to_value(result).unwrap();
+        assert_eq!(value["local_deleted"], true);
     }
 
     #[test]
