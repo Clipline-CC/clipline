@@ -4,6 +4,26 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-29): Nightly 0.1.43
+
+Plan: `docs/superpowers/plans/2026-07-29-nightly-0.1.43.md`.
+
+Nightly 0.1.43 publishes the merged sharing and cloud-upload reliability work: **#130** (shareable
+H.264/AAC clipboard exports), **#131** (stable review state and feedback after cloud uploads), and
+**#105** (canonical public Cloud share URLs).
+
+User-visible since 0.1.42: normal Copy now produces a broadly compatible H.264/AAC-LC MP4 while
+preserving the selected audio, and Shift+click copies the untouched original; HEVC/AV1 sources use a
+proven H.264 encoder fallback. Cloud upload completion keeps the current review open across
+equivalent Windows path spellings, confirms intentional local deletion after foreground refresh,
+and retains cleanup errors. Public and unlisted Cloud clips copy the API-provided canonical public
+URL so chat clients can unfurl title, poster, and video metadata; private clips expose no share-link
+action.
+
+All three PRs are merged to `develop` with green Ubuntu, Windows, and Greptile checks. Microsoft's
+current official stable WebView2 release remains 150.0.4078.83, matching the staged standalone
+runtime; its required review date was refreshed for this release.
+
 ## Checkpoint (2026-07-29): PR #131 Codex review follow-up
 
 Plan: `docs/superpowers/plans/2026-07-29-pr131-codex-review-followups.md`.
