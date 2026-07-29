@@ -208,9 +208,9 @@ async function refreshClips(
   );
   if (currentClip) {
     const currentPath = preferredCurrentPath || currentClip.path;
-    const fresh = clipsCache.find((clip) => clip.path === currentPath);
+    const fresh = clipsCache.find((clip) => PlayerCore.sameClipPath(clip.path, currentPath));
     if (fresh) {
-      currentClip = fresh;
+      currentClip = { ...fresh, path: currentPath };
       pruneSelectedAudioTracks(fresh);
       $("pname").textContent = clipDisplayTitle(fresh) || fresh.name;
       renderAudioTrackPanel();
