@@ -151,6 +151,9 @@ impl CloudSettings {
                     .then(|| (normalize_cloud_upload_key(&key, &record), record))
             })
             .collect();
+        for record in self.uploads.values_mut() {
+            clear_non_shareable_remote_url(record);
+        }
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -172,6 +175,25 @@ fn normalize_cloud_upload_key(key: &str, record: &CloudUploadRecord) -> String {
         record.local_clip_id.clone()
     } else {
         key.to_string()
+    }
+}
+
+fn clear_non_shareable_remote_url(record: &mut CloudUploadRecord) {
+    if record.visibility == "private" {
+        record.remote_url = None;
+        return;
+    }
+    let (Some(remote_clip_id), Some(remote_url)) = (
+        record.remote_clip_id.as_deref(),
+        record.remote_url.as_deref(),
+    ) else {
+        return;
+    };
+    if remote_url
+        .trim_end_matches('/')
+        .ends_with(&format!("/clip/{remote_clip_id}"))
+    {
+        record.remote_url = None;
     }
 }
 

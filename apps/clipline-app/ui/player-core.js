@@ -90,7 +90,7 @@ const PlayerCore = (() => {
     const entries = [];
 
     for (const clip of cloudClips || []) {
-      if (!clip || !clip.remote_url) continue;
+      if (!clip || (!clip.remote_clip_id && !clip.remote_url)) continue;
       const localId = String(clip.local_clip_id || "");
       const upload = localId ? uploadsByLocalId.get(localId) : null;
       const path = String(clip.path || (upload && upload.path) || "");
@@ -101,7 +101,7 @@ const PlayerCore = (() => {
         local_clip_id: localId,
         path,
         title: String(clip.title || clipNameStem(pathBaseName(path)) || remoteId || "Cloud clip"),
-        remote_url: String(clip.remote_url),
+        remote_url: String(clip.remote_url || ""),
         visibility: ["public", "unlisted", "private"].includes(clip.visibility)
           ? clip.visibility
           : "private",
@@ -119,7 +119,7 @@ const PlayerCore = (() => {
 
     entries.push(...uploadRecords
       .filter((record) => {
-        if (!record || !record.remote_url) return false;
+        if (!record || (!record.remote_clip_id && !record.remote_url)) return false;
         if (record.local_clip_id && seenLocalIds.has(String(record.local_clip_id))) return false;
         if (record.remote_clip_id && seenRemoteIds.has(String(record.remote_clip_id))) return false;
         const status = String(record.upload_status || "");
@@ -138,7 +138,7 @@ const PlayerCore = (() => {
           local_clip_id: String(record.local_clip_id || ""),
           path,
           title: clipNameStem(pathBaseName(path)) || String(record.remote_clip_id || "Cloud clip"),
-          remote_url: String(record.remote_url),
+          remote_url: String(record.remote_url || ""),
           visibility,
           upload_status: status,
           updated_at_unix: Number(record.updated_at_unix) || 0,

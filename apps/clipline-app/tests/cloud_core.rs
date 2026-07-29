@@ -127,6 +127,41 @@ fn plain_http_confirmation_requires_checked_exact_origin() {
 }
 
 #[test]
+fn remote_identity_and_public_shareability_are_independent() {
+    let mut context = context();
+    assert_eq!(
+        eval(
+            &mut context,
+            "const privateClip = {\
+               remote_clip_id: 'remote-private', remote_url: null,\
+               visibility: 'private', upload_status: 'uploaded_private'\
+             };\
+             const publicClip = {\
+               remote_clip_id: 'remote-public', remote_url: 'https://clips.example/c/c_public',\
+               visibility: 'public', upload_status: 'uploaded_public'\
+             };\
+             const unlistedClip = {\
+               remote_clip_id: 'remote-unlisted', remote_url: 'https://clips.example/c/c_hidden',\
+               visibility: 'unlisted', upload_status: 'uploaded_public'\
+             };\
+             const processingClip = {\
+               remote_clip_id: 'remote-processing', remote_url: null,\
+               visibility: 'public', upload_status: 'uploaded_processing'\
+             };\
+             JSON.stringify({\
+               privateUploaded: CloudCore.recordUploaded(privateClip),\
+               privateShare: CloudCore.shareUrl(privateClip),\
+               publicShare: CloudCore.shareUrl(publicClip),\
+               unlistedShare: CloudCore.shareUrl(unlistedClip),\
+               processingUploaded: CloudCore.recordUploaded(processingClip),\
+               processingShare: CloudCore.shareUrl(processingClip)\
+             })",
+        ),
+        r#"{"privateUploaded":true,"privateShare":"","publicShare":"https://clips.example/c/c_public","unlistedShare":"https://clips.example/c/c_hidden","processingUploaded":true,"processingShare":""}"#
+    );
+}
+
+#[test]
 fn upload_progress_reconciliation_distinguishes_bytes_from_card_state() {
     let mut context = context();
     assert_eq!(
