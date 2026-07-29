@@ -13,7 +13,7 @@ pub mod wgc;
 pub mod window;
 
 pub use dxgi_dup::DxgiDuplicationCapture;
-pub use mft::{MftConfig, MftH264Encoder};
+pub use mft::{MftConfig, MftH264Encoder, SoftwareMftH264Encoder};
 pub use wasapi::WasapiLoopback;
 pub use wgc::WgcCapture;
 pub use window::{

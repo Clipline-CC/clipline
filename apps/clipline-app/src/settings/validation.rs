@@ -13,8 +13,6 @@ use crate::service::OutputResolution;
 
 pub const MIN_REPLAY_WINDOW_S: f64 = 5.0;
 pub const MAX_REPLAY_WINDOW_S: f64 = 120.0;
-pub const MIN_BUFFER_SECONDS: f64 = 10.0;
-pub const MAX_BUFFER_SECONDS: f64 = 20.0 * 60.0;
 pub const MIN_BITRATE_MBPS: f64 = 1.0;
 pub const MAX_BITRATE_MBPS: f64 = 100.0;
 pub const MIN_EXACT_FPS: u32 = 1;
@@ -59,20 +57,11 @@ impl AppSettings {
             MAX_AUDIO_VOLUME,
         )?;
         validate_range(
-            "buffer seconds",
-            self.buffer_seconds,
-            MIN_BUFFER_SECONDS,
-            MAX_BUFFER_SECONDS,
-        )?;
-        validate_range(
             "replay seconds",
             self.replay_window_s,
             MIN_REPLAY_WINDOW_S,
             MAX_REPLAY_WINDOW_S,
         )?;
-        if self.replay_window_s > self.buffer_seconds {
-            return Err("replay seconds cannot be longer than buffer seconds".into());
-        }
         validate_range(
             "bitrate Mbps",
             self.effective_bitrate_mbps(),

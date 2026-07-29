@@ -15,6 +15,9 @@ if ($destination -ne $expectedDestination) {
 
 $manifestPath = Join-Path $appRoot "ffmpeg-runtime.json"
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+if ([int]$manifest.schema_version -ne 1) {
+  throw "FFmpeg resource manifest schema_version must be 1"
+}
 if ([string]::IsNullOrWhiteSpace($ArchivePath)) {
   $ArchivePath = Join-Path (Join-Path $env:LOCALAPPDATA "Clipline\release-inputs") $manifest.archive_name
 }

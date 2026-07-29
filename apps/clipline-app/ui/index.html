@@ -23,6 +23,11 @@
     <div id="app-status" class="app-status">
       <div id="notice"></div>
       <div id="error"></div>
+      <div id="poster-runtime-warning" class="poster-runtime-warning" role="alert" hidden>
+        <span>Thumbnails need Clipline's FFmpeg component, but it is missing or blocked. Update or
+          reinstall Clipline, check antivirus quarantine, then retry.</span>
+        <button id="poster-runtime-retry" type="button">Retry thumbnails</button>
+      </div>
     </div>
     <aside class="sidebar">
       <div class="sidebar-top">
@@ -31,6 +36,7 @@
           <span>Clip<b>line</b></span>
         </h1>
         <div id="memory-usage" class="memory-usage">Using -- RAM</div>
+        <div id="memory-children" class="memory-children" hidden></div>
         <div id="rail-hotkey" class="rail-hotkey" title="Save Replay: Alt+F10">Alt+F10</div>
         <div id="rail-game" class="rail-game" hidden></div>
       </div>
@@ -105,7 +111,7 @@
           </div>
           <div id="gallery-bulk-bar" class="gallery-bulk-bar" hidden>
             <span id="bulk-count" class="bulk-count"></span>
-            <button id="bulk-select-all" type="button">Select all</button>
+            <button id="bulk-select-all" type="button">Select page</button>
             <button id="bulk-clear" type="button">Clear</button>
             <span class="g-sep"></span>
             <button id="bulk-delete" class="danger-text" type="button">Delete</button>
@@ -113,6 +119,11 @@
         </div>
         <div id="gallery-grid" class="gallery-grid"></div>
         <div id="cloud-gallery-grid" class="cloud-gallery-grid" hidden></div>
+        <nav id="gallery-pagination" class="gallery-pagination" aria-label="Library pages" hidden>
+          <button id="gallery-page-prev" type="button" aria-label="Previous page">Previous</button>
+          <span id="gallery-page-label" aria-live="polite"></span>
+          <button id="gallery-page-next" type="button" aria-label="Next page">Next</button>
+        </nav>
       </section>
 
       <div id="review-viewer" class="review-viewer">
@@ -146,7 +157,7 @@
             <button id="open-folder" class="icon-button" title="Show this clip in Explorer">
               <svg viewBox="0 0 24 24"><path d="M10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2z"/></svg>
             </button>
-            <button id="copy-clip" class="icon-button" title="Copy clip to clipboard">
+            <button id="copy-clip" class="icon-button" title="Copy shareable clip to clipboard (Shift+click for original)">
               <svg viewBox="0 0 24 24"><path d="M9 2h6a2 2 0 0 1 2 2h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2a2 2 0 0 1 2-2zm0 3v2h6V5H9zM5 6v14h14V6h-2v3H7V6H5z"/></svg>
             </button>
             <button id="delete-clip" class="icon-button danger" title="Delete source clip from disk">
@@ -552,7 +563,7 @@
           </div>
 
           <div class="settings-section" id="settings-panel-recording" data-section="recording" role="tabpanel" aria-labelledby="settings-tab-recording" hidden>
-            <input id="set-buffer" type="hidden" value="75" />
+            <input id="set-buffer" type="hidden" value="60" />
             <div class="recording-mode-bar">
               <div class="segmented-control recording-mode-control" role="radiogroup" aria-label="Recording settings mode">
                 <label>
@@ -1067,6 +1078,8 @@
   <script src="presentation-core.js"></script>
   <script src="player-core.js"></script>
   <script src="cloud-core.js"></script>
+  <script src="gallery-window-core.js"></script>
+  <script src="window-lifecycle-core.js"></script>
   <script src="support-core.js"></script>
   <script src="app-core.js"></script>
   <script src="settings.js"></script>

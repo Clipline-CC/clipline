@@ -1,6 +1,6 @@
 [package]
 name = "clipline-app"
-version = "0.1.41"
+version = "0.1.42"
 edition.workspace = true
 license.workspace = true
 
@@ -24,12 +24,22 @@ serde_json = { workspace = true }
 sha2 = "0.10"
 tokio = { workspace = true, features = ["fs", "io-util"] }
 tokio-util = { version = "0.7", features = ["io", "rt"] }
-tauri = { version = "2", features = ["tray-icon", "protocol-asset"] }
-tauri-runtime = "2"
+# Pinned to 2.11.x, not open 2.x: `app.rs` reaches through `PlatformWebview`
+# into `ICoreWebView2Controller`, so Tauri's COM types must stay aligned with
+# the webview2-com pin below. A routine minor bump could silently change them.
+tauri = { version = "~2.11", features = ["tray-icon", "protocol-asset"] }
+tauri-runtime = "~2.11"
 tauri-plugin-autostart = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"
+# Pinned to the version Tauri 2.11 already resolves, so `PlatformWebview::controller`
+# hands back the same `ICoreWebView2Controller` type and no second COM binding
+# enters the dependency tree.
+webview2-com = "0.38"
+# Must match the windows-core that webview2-com-sys 0.38 resolves (0.61), or
+# `Interface::cast` is called against a different COM type system.
+windows-core = "0.61"
 chrono = "0.4.45"
 rfd = "0.15"
 png = "0.17"

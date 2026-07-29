@@ -3032,3 +3032,110 @@ fn region_helpers_set_align_and_clamp_to_display() {
         r#"{"display_id":"DISPLAY2","x":2000,"y":0,"width":800,"height":450}"#
     );
 }
+
+// --- Settlement vs user reposition (plan 2026-07-26-review-audio-settlement) ---
+
+/// A `seeked` from the initial source assignment must not be treated as a user
+/// reposition. Traced on a warm cache, the settlement's forced sidecar seek
+/// re-seeked already-audible sidecars backward ~20 ms for no correction: the drift
+/// was far inside `AUDIO_SIDECAR_HARD_SEEK_TOLERANCE_S` and the element landed
+/// back where it started. That was the audible repeat at the start of every clip.
+#[test]
+fn settlement_seeks_are_distinguished_from_user_repositions() {
+    let mut ctx = player_core_context();
+
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.beginSourceAssignment(PlayerCore.createLogicalSeekState(), 1, 0, 30).targetSource"
+        ),
+        "assignment"
+    );
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.requestLogicalSeek(PlayerCore.beginSourceAssignment(PlayerCore.createLogicalSeekState(), 1, 0, 30), 12, 30).targetSource"
+        ),
+        "user"
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "(() => { let s = PlayerCore.beginSourceAssignment(PlayerCore.createLogicalSeekState(), 1, 0, 30); s = PlayerCore.metadataSeekDecision(s, 1, 30).state; const d = PlayerCore.seekedDecision(s, 1, 0, 30); return { confirmed: d.confirmed, source: d.confirmedSource }; })()"
+        ),
+        "{\"confirmed\":true,\"source\":\"assignment\"}"
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "(() => { let s = PlayerCore.beginSourceAssignment(PlayerCore.createLogicalSeekState(), 1, 0, 30); s = PlayerCore.metadataSeekDecision(s, 1, 30).state; s = PlayerCore.requestLogicalSeek(s, 12, 30); const d = PlayerCore.seekedDecision(s, 1, 12, 30); return { confirmed: d.confirmed, source: d.confirmedSource }; })()"
+        ),
+        "{\"confirmed\":true,\"source\":\"user\"}"
+    );
+}
+
+/// `beginSourceAssignment` deliberately carries a pending logical target across a
+/// source replacement. If that target came from the user, its provenance must
+/// survive, or a replacement silently downgrades a real reposition to settlement
+/// and skips the realignment the user asked for.
+#[test]
+fn source_replacement_preserves_user_seek_provenance() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "(() => { let s = PlayerCore.requestLogicalSeek(PlayerCore.createLogicalSeekState(), 12, 60); s = PlayerCore.beginSourceAssignment(s, 2, 0, 60); return s.targetSource; })()"
+        ),
+        "user"
+    );
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "(() => { let s = PlayerCore.requestLogicalSeek(PlayerCore.createLogicalSeekState(), 12, 60); s = PlayerCore.beginSourceAssignment(s, 2, 0, 60); return s.targetTime; })()"
+        ),
+        "12"
+    );
+}
+
+/// A late `seeked` for a superseded target must not confirm the newer one: it
+/// re-applies the current target and leaves provenance intact, so only the real
+/// arrival confirms it.
+#[test]
+fn a_stale_seek_completion_cannot_confirm_a_newer_user_target() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "(() => { let s = PlayerCore.beginSourceAssignment(PlayerCore.createLogicalSeekState(), 1, 0, 30); s = PlayerCore.metadataSeekDecision(s, 1, 30).state; s = PlayerCore.requestLogicalSeek(s, 12, 30); const d = PlayerCore.seekedDecision(s, 1, 0, 30); return { confirmed: d.confirmed, source: d.confirmedSource, applyTime: d.applyTime, targetSource: d.state.targetSource }; })()"
+        ),
+        "{\"confirmed\":false,\"source\":null,\"applyTime\":12,\"targetSource\":\"user\"}"
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "(() => { let s = PlayerCore.beginSourceAssignment(PlayerCore.createLogicalSeekState(), 1, 0, 30); s = PlayerCore.metadataSeekDecision(s, 1, 30).state; s = PlayerCore.requestLogicalSeek(s, 12, 30); s = PlayerCore.seekedDecision(s, 1, 0, 30).state; const d = PlayerCore.seekedDecision(s, 1, 12, 30); return { confirmed: d.confirmed, source: d.confirmedSource }; })()"
+        ),
+        "{\"confirmed\":true,\"source\":\"user\"}"
+    );
+}
+
+/// Only a user reposition forces past the drift tolerance. Settlement falls
+/// through to the ordinary tolerance path, which — measured — assigned no seek at
+/// all for the ~20 ms it was "correcting".
+#[test]
+fn only_user_repositions_force_a_sidecar_realignment() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.sidecarRealignmentForced('user')"),
+        "true"
+    );
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.sidecarRealignmentForced('assignment')"),
+        "false"
+    );
+    // Nothing confirmed: an incidental `seeked` forces nothing.
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.sidecarRealignmentForced(null)"),
+        "false"
+    );
+}

@@ -54,6 +54,7 @@ New-Item -ItemType Directory -Path $ffmpegInputs -Force | Out-Null
 $ffmpegArchive = Join-Path $ffmpegInputs $ffmpegManifest.archive_name
 Invoke-WebRequest -Uri $ffmpegManifest.archive_url -OutFile $ffmpegArchive
 .\scripts\stage-ffmpeg-resource.ps1 -ArchivePath $ffmpegArchive
+.\scripts\verify-ffmpeg-resource.ps1
 
 # 1. Regular build (from apps/clipline-app so config discovery works)
 Set-Location apps/clipline-app
@@ -61,8 +62,16 @@ cargo tauri build
 # stage target/release/bundle/nsis/Clipline_<ver>_x64-setup.exe + .sig
 
 # 2. Standalone build (overlay merges over tauri.conf.json)
+#    Both builds write the SAME bundle path, so stage step 1's exe and .sig
+#    before starting this one or the regular installer is overwritten.
 cargo tauri build --config tauri.standalone.conf.json
-# stage and rename to Clipline_<ver>_x64-standalone-setup.exe + .sig
+# stage and rename to Clipline_<ver>_x64-standalone-setup.exe, then RE-SIGN it
+# under the new name — do not rename the .sig. A minisign trusted comment
+# embeds `file:<name>` and is covered by the signature, so a renamed .sig still
+# claims the regular installer's filename:
+#   cargo tauri signer sign -f ..\..\.local-secrets\clipline-updater.key -p ""
+#     <staged standalone exe>
+# The build's own key prompt dies in a non-interactive shell; pass -p "".
 
 # 3. Author latest.json and latest-standalone.json (version, pub_date,
 #    platforms.windows-x86_64.{signature,url}); the url in each must point at
@@ -87,8 +96,31 @@ staging script against the exact archive and review the logged provenance.
 Never use BtbN's floating `latest` asset. `apps/clipline-app/ffmpeg/` is a
 build staging directory and its binaries are intentionally git-ignored; its
 allowlisted `PROVENANCE.json` and license are bundled into both installers.
+Tauri runs `scripts/verify-ffmpeg-resource.ps1` again through
+`build.beforeBundleCommand` immediately before either installer is bundled.
+This offline preflight rejects a README-only, incomplete, modified, or
+misconfigured runtime; do not bypass it or replace it with a network fetch.
 A GitHub Actions workflow can automate this later, but pushing workflow files
 requires a token with GitHub's `workflow` scope.
+
+Two environment traps cost time on 0.1.42 and are worth expecting:
+
+- `ci.yml` triggers only on `push` to `main` and on `pull_request`, so the
+  version-bump commit pushed to `develop` gets **no** CI checks at all
+  (`gh api .../check-runs` returns `total_count: 0`). Do not read that as green.
+  Verify the release commit locally and confirm its code is identical to the
+  last CI-green merge commit — `git diff <merge> <release>` should show only
+  version strings and docs — then say so explicitly in the release notes.
+- If `beforeBundleCommand` fails with `Get-FileHash` not recognized, run
+  `cargo tauri build` from bash rather than pwsh. The verification script itself
+  is fine; do not edit or bypass it to work around the shell.
+
+After publishing, verify what is actually downloadable rather than what was
+staged: fetch each asset from its public URL, confirm the bytes match the staged
+installers, and check that the signature **in each manifest** validates the
+downloaded bytes under the `pubkey` in `tauri.conf.json`. That is precisely what
+the updater does, and it catches a mismatched, stale, or crossed-over signature
+that per-file checks miss.
 
 ## Signing
 

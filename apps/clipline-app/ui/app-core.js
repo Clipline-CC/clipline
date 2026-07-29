@@ -98,6 +98,9 @@ var stage = document.querySelector(".stage");
 var stageFrame = $("stage-frame");
 var currentClip = null;
 var clipsCache = [];
+var windowLifecycleState = WindowLifecycleCore.initialState();
+var foregroundBootCompleted = false;
+var foregroundBootPromise = null;
 // Gallery (library home) view state.
 var gallerySource = "local";
 var cloudClipsCache = [];
@@ -113,6 +116,8 @@ var galleryFilter = "all";
 var gallerySort = "new";
 var galleryGroup = "smart";
 var gallerySearch = "";
+var galleryPageState = GalleryWindowCore.initialState();
+var galleryPageTotal = 0;
 // Multi-select state for the local gallery. `selectMode` makes tile body
 // clicks toggle selection instead of opening the clip; `selectedClipPaths`
 // survives filter/sort/group/render rebuilds because it is keyed on `clip.path`.
@@ -120,6 +125,7 @@ var selectedClipPaths = new Set();
 var selectMode = false;
 var posterCache = new Map();
 var POSTER_UNAVAILABLE = Symbol("poster unavailable");
+var POSTER_CACHE_LIMIT = 120;
 var currentSettings = null;
 var settingsDraft = null;
 var recordingActive = false;
@@ -139,6 +145,7 @@ var gamePlugins = [];
 var gamePluginSettings = {};
 var customGames = [];
 var gameWindows = [];
+var gameWindowsScanId = 0;
 var detectedGameCandidates = [];
 var selectedDetectedGameIds = new Set();
 var detectedGamesScanId = 0;
@@ -430,17 +437,43 @@ function updateStageFrame() {
 
 /* ---- sidebar: status, settings, library ---- */
 
-async function refresh() {
-  await Promise.all([refreshClips(), refreshStorage()]);
+function captureForegroundWork() {
+  return WindowLifecycleCore.captureWork(windowLifecycleState);
 }
 
-async function refreshStorage() {
+function isForegroundWorkCurrent(work) {
+  return WindowLifecycleCore.isWorkCurrent(windowLifecycleState, work);
+}
+
+function requestWindowRefresh() {
+  const request = WindowLifecycleCore.requestRefresh(windowLifecycleState);
+  windowLifecycleState = request.state;
+  return request.refreshNow;
+}
+
+async function refresh() {
+  const work = captureForegroundWork();
+  if (!work) {
+    requestWindowRefresh();
+    return false;
+  }
+  await Promise.all([refreshClips(null, work), refreshStorage(work)]);
+  return isForegroundWorkCurrent(work);
+}
+
+async function refreshStorage(work = captureForegroundWork()) {
+  if (!work) {
+    requestWindowRefresh();
+    return false;
+  }
   const s = await invoke("storage_status");
+  if (!isForegroundWorkCurrent(work)) return false;
   const quotaGb = s.quota_bytes == null ? 0 : Number(s.quota_bytes) / (1024 * 1024 * 1024);
   $("rail-clips-count").textContent = compactCount(s.clip_count);
   $("rail-library-status").title = `${plural(s.clip_count, "clip")} in library`;
   $("gallery-storage-used").textContent =
     `· ${fmtLibraryStorageUsage(s.total_bytes, quotaGb)}`;
+  return true;
 }
 
 function compactCount(count) {
@@ -455,8 +488,22 @@ async function refreshMemoryUsage() {
   try {
     const s = await invoke("memory_status");
     // Compact for the 64px rail; the "RAM" caption is a CSS ::before label.
-    $("memory-usage").textContent = fmtBytes(s.private_working_set_bytes);
+    // Headline is Clipline's own process so a regression here is visible; the
+    // webview runtime and any ffmpeg child are real but not ours to allocate,
+    // and blending them hides a ring regression inside Edge's noise.
+    $("memory-usage").textContent = fmtBytes(s.process_private_working_set_bytes);
+    const children = $("memory-children");
+    if (children) {
+      const bytes = s.children_private_working_set_bytes;
+      children.textContent = bytes > 0 ? `+${fmtBytes(bytes)} child` : "";
+      children.hidden = !(bytes > 0);
+    }
   } catch (_) {
     $("memory-usage").textContent = "-- MB";
+    const children = $("memory-children");
+    if (children) {
+      children.textContent = "";
+      children.hidden = true;
+    }
   }
 }

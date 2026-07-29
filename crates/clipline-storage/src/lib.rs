@@ -158,6 +158,19 @@ pub fn enforce_quota(
     quota_bytes: Option<u64>,
     protect: Option<&Path>,
 ) -> io::Result<GcReport> {
+    enforce_quota_with_protection(dir, quota_bytes, protect, |_| false)
+}
+
+/// Enforces the clip quota while allowing the caller to protect additional
+/// managed files that are temporarily immutable, such as active upload
+/// sources. Protected bytes still count toward the quota; collection skips
+/// them and continues with the next-oldest deletable clip.
+pub fn enforce_quota_with_protection(
+    dir: &Path,
+    quota_bytes: Option<u64>,
+    protect: Option<&Path>,
+    additionally_protected: impl Fn(&Path) -> bool,
+) -> io::Result<GcReport> {
     let Some(quota) = quota_bytes else {
         return Ok(GcReport {
             deleted_clips: 0,
@@ -173,7 +186,7 @@ pub fn enforce_quota(
 
     let undeletable_bytes = clips
         .iter()
-        .filter(|clip| !clip.can_delete(protect))
+        .filter(|clip| !clip.can_delete(protect, &additionally_protected))
         .map(ClipFile::total_bytes)
         .sum::<u64>();
     if undeletable_bytes > quota {
@@ -194,12 +207,20 @@ pub fn enforce_quota(
         if total_bytes <= quota {
             break;
         }
-        if !clip.can_delete(protect) {
+        if !clip.can_delete(protect, &additionally_protected) {
             continue;
         }
 
         let clip_bytes = clip.total_bytes();
-        remove_file_if_exists(&clip.path)?;
+        if let Err(error) = remove_file_if_exists(&clip.path) {
+            // A lease can begin after the pre-delete protection check. If it
+            // now owns the file, keep collecting other clips instead of
+            // surfacing the kernel's sharing-violation text to the user.
+            if additionally_protected(&clip.path) {
+                continue;
+            }
+            return Err(error);
+        }
         for sidecar in &clip.sidecars {
             remove_file_if_exists(sidecar)?;
         }
@@ -241,8 +262,14 @@ impl ClipFile {
         self.mp4_bytes + self.sidecar_bytes
     }
 
-    fn can_delete(&self, protect: Option<&Path>) -> bool {
-        !self.recording && !protect.is_some_and(|protected| same_path(&self.path, protected))
+    fn can_delete(
+        &self,
+        protect: Option<&Path>,
+        additionally_protected: &impl Fn(&Path) -> bool,
+    ) -> bool {
+        !self.recording
+            && !protect.is_some_and(|protected| same_path(&self.path, protected))
+            && !additionally_protected(&self.path)
     }
 }
 
@@ -632,6 +659,30 @@ mod tests {
         assert!(!b.exists());
         assert!(c.exists());
         assert_eq!(report.status.total_bytes, 10);
+    }
+
+    #[test]
+    fn enforce_quota_skips_additionally_protected_uploads_and_keeps_collecting() {
+        let dir = TestDir::new("clipline-storage", "protect-active-upload");
+        let uploading = write_owned(&dir, "uploading.mp4", 10);
+        tick_mtime();
+        let next_oldest = write_owned(&dir, "next-oldest.mp4", 10);
+        tick_mtime();
+        let newest = write_owned(&dir, "newest.mp4", 10);
+
+        let report = enforce_quota_with_protection(dir.path(), Some(20), None, |path| {
+            same_path(path, &uploading)
+        })
+        .unwrap();
+
+        assert_eq!(report.deleted_clips, 1);
+        assert!(uploading.exists(), "an active upload is immutable");
+        assert!(
+            !next_oldest.exists(),
+            "GC must continue to the next deletable clip"
+        );
+        assert!(newest.exists());
+        assert_eq!(report.status.total_bytes, 20);
     }
 
     #[test]

@@ -53,10 +53,99 @@ function clipDisplayTitle(clip) {
   return title || PresentationCore.clipNameStem(clip && clip.name);
 }
 
+const CLOUD_POSTER_CACHE_PREFIX = "cloud-thumb:";
+const POSTER_UNAVAILABLE_RETRY_MS = 30_000;
+var posterUnavailableUntil = new Map();
+var posterRuntimeWarningReported = false;
+var localClipPathIndexSource = null;
+var localClipPathIndex = new Set();
+
+function posterCacheGet(key) {
+  if (posterCache.get(key) === POSTER_UNAVAILABLE) {
+    const retryAt = posterUnavailableUntil.get(key);
+    if (!Number.isFinite(retryAt) || Date.now() >= retryAt) {
+      posterCacheDelete(key);
+      return undefined;
+    }
+  }
+  // Map insertion order gives us a tiny LRU without retaining image elements
+  // or decoded bitmaps: the cache owns URL strings / the unavailable sentinel.
+  return GalleryWindowCore.cacheGet(posterCache, key);
+}
+
+function posterCacheSet(key, value) {
+  if (!key) return;
+  const evicted = GalleryWindowCore.cacheSet(
+    posterCache,
+    key,
+    value,
+    POSTER_CACHE_LIMIT,
+  );
+  for (const evictedKey of evicted) posterUnavailableUntil.delete(evictedKey);
+  if (value === POSTER_UNAVAILABLE) {
+    posterUnavailableUntil.set(key, Date.now() + POSTER_UNAVAILABLE_RETRY_MS);
+  } else {
+    posterUnavailableUntil.delete(key);
+  }
+}
+
+function posterCacheDelete(key) {
+  posterCache.delete(key);
+  posterUnavailableUntil.delete(key);
+}
+
+function clearCloudPosterCache() {
+  for (const key of [...posterCache.keys()]) {
+    if (String(key).startsWith(CLOUD_POSTER_CACHE_PREFIX)) {
+      posterCacheDelete(key);
+    }
+  }
+}
+
+function localClipPaths(clips) {
+  const source = Array.isArray(clips) ? clips : [];
+  if (source === localClipPathIndexSource) return localClipPathIndex;
+  const paths = new Set();
+  for (const clip of source) {
+    const key = GalleryWindowCore.clipPathKey(clip && clip.path);
+    if (key) paths.add(key);
+  }
+  localClipPathIndexSource = source;
+  localClipPathIndex = paths;
+  return paths;
+}
+
+function pruneLocalPosterCache(clips) {
+  const paths = localClipPaths(clips);
+  for (const key of [...posterCache.keys()]) {
+    if (String(key).startsWith(CLOUD_POSTER_CACHE_PREFIX)) continue;
+    if (!paths.has(GalleryWindowCore.clipPathKey(key))) {
+      posterCacheDelete(key);
+    }
+  }
+}
+
+function pruneCloudPosterCache(entries) {
+  const valid = new Set(
+    (Array.isArray(entries) ? entries : [])
+      .filter((entry) => entry && entry.remote_clip_id)
+      .map((entry) => cloudThumbnailKey(entry)),
+  );
+  for (const key of [...posterCache.keys()]) {
+    if (
+      String(key).startsWith(CLOUD_POSTER_CACHE_PREFIX)
+      && !valid.has(key)
+    ) {
+      posterCacheDelete(key);
+    }
+  }
+}
+
 function replacePosterCachePath(oldPath, newPath) {
   if (!oldPath || !newPath || oldPath === newPath || !posterCache.has(oldPath)) return;
-  posterCache.set(newPath, posterCache.get(oldPath));
-  posterCache.delete(oldPath);
+  const cached = posterCacheGet(oldPath);
+  posterCacheDelete(oldPath);
+  posterCacheSet(newPath, cached);
 }
 
 function replaceClipInCache(oldPath, renamed) {
@@ -86,9 +175,19 @@ function applyLocalLibraryWarnings(warnings) {
   }
 }
 
-async function refreshClips(preferredCurrentPath = null) {
+async function refreshClips(
+  preferredCurrentPath = null,
+  lifecycleWork = captureForegroundWork(),
+) {
+  if (!lifecycleWork) {
+    requestWindowRefresh();
+    return false;
+  }
   const request = localClipsRequestGate.begin("local-library");
-  const isCurrent = () => localClipsRequestGate.isCurrent(request, "local-library");
+  const isCurrent = () => (
+    isForegroundWorkCurrent(lifecycleWork)
+    && localClipsRequestGate.isCurrent(request, "local-library")
+  );
   let freshClips;
   let result;
   try {
@@ -101,6 +200,12 @@ async function refreshClips(preferredCurrentPath = null) {
   if (!isCurrent()) return false;
   applyLocalLibraryWarnings(result.warnings);
   clipsCache = freshClips;
+  pruneLocalPosterCache(clipsCache);
+  const availablePaths = localClipPaths(clipsCache);
+  selectedClipPaths = new Set(
+    [...selectedClipPaths].filter((path) =>
+      availablePaths.has(GalleryWindowCore.clipPathKey(path))),
+  );
   if (currentClip) {
     const currentPath = preferredCurrentPath || currentClip.path;
     const fresh = clipsCache.find((clip) => clip.path === currentPath);
@@ -847,25 +952,70 @@ function makePosterImg(url, onError = null) {
 }
 
 function markPosterUnavailable(path) {
-  posterCache.set(path, POSTER_UNAVAILABLE);
+  posterCacheSet(path, POSTER_UNAVAILABLE);
+}
+
+function showPosterRuntimeWarning(error) {
+  const warning = $("poster-runtime-warning");
+  if (warning) warning.hidden = false;
+  if (posterRuntimeWarningReported) return;
+  posterRuntimeWarningReported = true;
+  reportFrontendDiagnostic("warn", "poster_ffmpeg_unavailable", error);
+}
+
+function clearPosterRuntimeWarning() {
+  const warning = $("poster-runtime-warning");
+  if (warning) warning.hidden = true;
+}
+
+function retryUnavailablePosters() {
+  for (const [key, value] of [...posterCache.entries()]) {
+    if (
+      value === POSTER_UNAVAILABLE
+      && !String(key).startsWith(CLOUD_POSTER_CACHE_PREFIX)
+    ) {
+      posterCacheDelete(key);
+    }
+  }
+  clearPosterRuntimeWarning();
+  posterRuntimeWarningReported = false;
+  renderClips();
 }
 
 // Lazily fetch + cache a clip's poster, then drop it into its card thumbnail.
 // The backend caches the JPEG, so repeat calls are cheap after the first.
 function loadCardPoster(path, thumb) {
-  invoke("clip_poster", { path })
+  const lifecycleWork = captureForegroundWork();
+  if (!lifecycleWork) return Promise.resolve();
+  const cached = posterCacheGet(path);
+  if (cached === POSTER_UNAVAILABLE) return Promise.resolve();
+  if (cached) {
+    if (thumb.isConnected && !thumb.querySelector(".card-thumb-img")) {
+      insertThumbMedia(thumb, makePosterImg(cached, () => markPosterUnavailable(path)));
+    }
+    return Promise.resolve();
+  }
+  return invoke("clip_poster", { path })
     .then((posterPath) => {
+      if (!isForegroundWorkCurrent(lifecycleWork)) return;
+      if (!localClipPaths(clipsCache).has(GalleryWindowCore.clipPathKey(path))) return;
       if (!posterPath) {
         markPosterUnavailable(path);
         return;
       }
       const url = convertFileSrc(posterPath);
-      posterCache.set(path, url);
+      posterCacheSet(path, url);
       if (thumb.isConnected && !thumb.querySelector(".card-thumb-img")) {
         insertThumbMedia(thumb, makePosterImg(url, () => markPosterUnavailable(path)));
       }
     })
-    .catch(() => markPosterUnavailable(path));
+    .catch((error) => {
+      if (!isForegroundWorkCurrent(lifecycleWork)) return;
+      markPosterUnavailable(path);
+      if (GalleryWindowCore.posterRuntimeUnavailable(error)) {
+        showPosterRuntimeWarning(error);
+      }
+    });
 }
 
 // Extracting a poster is an ffmpeg spawn, so we only request one once its card
@@ -873,6 +1023,44 @@ function loadCardPoster(path, thumb) {
 // queue an extraction for every clip on the first render and peg CPU/disk.
 var posterQueue = new WeakMap();
 var cloudThumbnailInflight = new Map();
+var posterWorkQueue = [];
+var posterWorkActive = 0;
+var posterRenderGeneration = 0;
+const POSTER_WORK_LIMIT = 2;
+
+function pumpPosterWork() {
+  while (posterWorkActive < POSTER_WORK_LIMIT && posterWorkQueue.length) {
+    const job = posterWorkQueue.shift();
+    if (
+      job.generation !== posterRenderGeneration
+      || !job.thumb.isConnected
+      || !captureForegroundWork()
+    ) {
+      continue;
+    }
+    posterWorkActive += 1;
+    const work = job.request.type === "local-poster"
+      ? loadCardPoster(job.request.path, job.thumb)
+      : loadCloudThumbnail(job.request.entry, job.thumb);
+    Promise.resolve(work)
+      .catch(() => {})
+      .finally(() => {
+        posterWorkActive -= 1;
+        pumpPosterWork();
+      });
+  }
+}
+
+function queuePosterWork(request, thumb) {
+  if (!request || !thumb || !thumb.isConnected) return;
+  posterWorkQueue.push({
+    request,
+    thumb,
+    generation: posterRenderGeneration,
+  });
+  pumpPosterWork();
+}
+
 var posterObserver =
   typeof IntersectionObserver === "function"
     ? new IntersectionObserver(
@@ -883,11 +1071,7 @@ var posterObserver =
             obs.unobserve(thumb);
             const request = posterQueue.get(thumb);
             posterQueue.delete(thumb);
-            if (request && request.type === "local-poster") {
-              loadCardPoster(request.path, thumb);
-            } else if (request && request.type === "cloud-thumbnail") {
-              loadCloudThumbnail(request.entry, thumb);
-            }
+            queuePosterWork(request, thumb);
           }
         },
         { rootMargin: "400px 0px" },
@@ -897,11 +1081,13 @@ var posterObserver =
 // Request a clip's poster when its thumbnail nears the viewport — or right away
 // when IntersectionObserver is unavailable.
 function observePoster(path, thumb) {
+  if (!captureForegroundWork()) return;
+  const request = { type: "local-poster", path };
   if (!posterObserver) {
-    loadCardPoster(path, thumb);
+    Promise.resolve().then(() => queuePosterWork(request, thumb));
     return;
   }
-  posterQueue.set(thumb, { type: "local-poster", path });
+  posterQueue.set(thumb, request);
   posterObserver.observe(thumb);
 }
 
@@ -933,14 +1119,9 @@ function clipCard(c) {
   const thumb = document.createElement("div");
   thumb.className = "card-thumb";
   thumb.style.cssText = thumbGradient(c);
-  const cachedPoster = posterCache.get(c.path);
-  if (cachedPoster === POSTER_UNAVAILABLE) {
-    // Keep the stable gradient placeholder when extraction or image loading failed.
-  } else if (cachedPoster) {
-    insertThumbMedia(thumb, makePosterImg(cachedPoster, () => markPosterUnavailable(c.path)));
-  } else {
-    observePoster(c.path, thumb);
-  }
+  // Cached and uncached posters share the same viewport gate so revisiting a
+  // page does not immediately decode every image in that page.
+  observePoster(c.path, thumb);
 
   const play = document.createElement("div");
   play.className = "card-play";
@@ -1093,7 +1274,7 @@ function clearSelection() {
 }
 
 function selectAllVisible() {
-  selectedClipPaths = new Set();
+  selectedClipPaths = new Set(selectedClipPaths);
   for (const card of document.querySelectorAll("#gallery-grid .card[data-clip-path]")) {
     if (!card.dataset.clipPath) continue;
     selectedClipPaths.add(card.dataset.clipPath);
@@ -1143,18 +1324,25 @@ function syncBulkBar() {
 /* ---- gallery: filter / sort / group ---- */
 
 function filterGalleryClips(clips) {
-  return clips.filter((c) => {
+  const items = [];
+  let maxModifiedUnix = 0;
+  for (const c of clips) {
     const kind = clipKind(c);
     if ((galleryFilter === "replay" || galleryFilter === "session" || galleryFilter === "trim")
-      && kind !== galleryFilter) return false;
-    if (galleryFilter === "marked" && !clipMarkers(c).length) return false;
+      && kind !== galleryFilter) continue;
+    if (galleryFilter === "marked" && !clipMarkers(c).length) continue;
     if (gallerySearch) {
       const champ = c.markers && c.markers.player_summary ? c.markers.player_summary.champion_name : "";
       const hay = `${clipDisplayTitle(c)} ${c.name} ${champ} ${c.session || ""} ${c.game ? c.game.name : ""}`.toLowerCase();
-      if (!hay.includes(gallerySearch)) return false;
+      if (!hay.includes(gallerySearch)) continue;
     }
-    return true;
-  });
+    items.push(c);
+    const modifiedUnix = Number(c && c.modified_unix);
+    if (Number.isFinite(modifiedUnix)) {
+      maxModifiedUnix = Math.max(maxModifiedUnix, modifiedUnix);
+    }
+  }
+  return { items, maxModifiedUnix };
 }
 
 function sortGalleryClips(clips) {
@@ -1227,7 +1415,88 @@ function galleryGroups(clips) {
   }
 }
 
+function galleryIdentityKey(item) {
+  return String(
+    item && (item.path || item.remote_clip_id || item.name) || "",
+  );
+}
+
+function groupedGalleryIdentity(
+  prefix,
+  total,
+  firstItem,
+  lastItem,
+  maxModifiedUnix,
+) {
+  const modified = Number(maxModifiedUnix);
+  return JSON.stringify([
+    prefix,
+    total,
+    galleryIdentityKey(firstItem),
+    galleryIdentityKey(lastItem),
+    Number.isFinite(modified) ? modified : 0,
+  ]);
+}
+
+function syncGalleryPagination(info) {
+  const pagination = $("gallery-pagination");
+  if (!pagination) return;
+  const page = info || {
+    page: 0,
+    pageCount: 0,
+    total: 0,
+    start: 0,
+    end: 0,
+    hasPrevious: false,
+    hasNext: false,
+  };
+  galleryPageTotal = page.total;
+  pagination.hidden = page.pageCount <= 1;
+  $("gallery-page-prev").disabled = !page.hasPrevious;
+  $("gallery-page-next").disabled = !page.hasNext;
+  $("gallery-page-label").textContent = page.pageCount
+    ? `${page.start + 1}\u2013${page.end} of ${page.total} \u00b7 page ${page.page + 1} of ${page.pageCount}`
+    : "";
+}
+
+function changeGalleryPage(delta) {
+  const requested = galleryPageState.page + delta;
+  const next = GalleryWindowCore.setPage(
+    galleryPageState,
+    requested,
+    galleryPageTotal,
+  );
+  if (next.page === galleryPageState.page) return;
+  galleryPageState = next;
+  renderClips();
+  const root = gallerySource === "cloud"
+    ? $("cloud-gallery-grid")
+    : $("gallery-grid");
+  if (root) root.scrollTop = 0;
+}
+
+function releaseGalleryRoot(root) {
+  if (!root) return;
+  root.querySelectorAll("img").forEach((img) => {
+    img.removeAttribute("src");
+  });
+  root.replaceChildren();
+}
+
+function beginBoundedGalleryRender() {
+  if (posterObserver) posterObserver.disconnect();
+  posterRenderGeneration += 1;
+  posterQueue = new WeakMap();
+  posterWorkQueue = [];
+  releaseGalleryRoot($("gallery-grid"));
+  releaseGalleryRoot($("cloud-gallery-grid"));
+}
+
 function renderClips() {
+  if (!captureForegroundWork()) {
+    requestWindowRefresh();
+    return;
+  }
   syncUploadClipButton();
   syncReviewLocalActions();
   // Keep the home in sync: empty library shows the capture preview, otherwise
@@ -1251,11 +1520,29 @@ function renderClips() {
     loadCloudClips();
     return;
   }
-  // Drop the previous render's pending poster observations before rebuilding;
-  // the detached cards would otherwise linger in the observer.
-  if (posterObserver) posterObserver.disconnect();
-  root.replaceChildren();
-  const filtered = filterGalleryClips(clipsCache);
+  beginBoundedGalleryRender();
+  pruneLocalPosterCache(clipsCache);
+  const filteredResult = filterGalleryClips(clipsCache);
+  const filtered = filteredResult.items;
+  const sorted = sortGalleryClips(filtered);
+  const groups = galleryGroups(sorted);
+  const firstGroup = groups[0];
+  const lastGroup = groups[groups.length - 1];
+  const firstItems = firstGroup && firstGroup.clips || [];
+  const lastItems = lastGroup && lastGroup.clips || [];
+  const identity = groupedGalleryIdentity(
+    `local|${galleryFilter}|${gallerySort}|${galleryGroup}|${gallerySearch}`,
+    filtered.length,
+    firstItems[0],
+    lastItems[lastItems.length - 1],
+    filteredResult.maxModifiedUnix,
+  );
+  galleryPageState = GalleryWindowCore.updateState(galleryPageState, {
+    identity,
+    total: filtered.length,
+  });
+  const page = GalleryWindowCore.windowGroups(groups, galleryPageState);
+  syncGalleryPagination(page);
   $("gallery-count").textContent = clipsCache.length
     ? `${filtered.length} of ${clipsCache.length}`
     : "";
@@ -1273,7 +1560,7 @@ function renderClips() {
     root.appendChild(empty);
     return;
   }
-  for (const group of galleryGroups(sortGalleryClips(filtered))) {
+  for (const group of page.groups) {
     if (group.label !== null) {
       const head = document.createElement("div");
       head.className = "gallery-group-head";
@@ -1281,21 +1568,47 @@ function renderClips() {
       label.textContent = group.label;
       const count = document.createElement("span");
       count.className = "gcount";
-      count.textContent = group.clips.length;
+      count.textContent = group.totalCount;
       head.append(label, count);
       root.appendChild(head);
     }
-    for (const c of group.clips) root.appendChild(clipCard(c));
+    for (const c of group.items) root.appendChild(clipCard(c));
   }
 }
 
 function renderCloudClips() {
+  if (!captureForegroundWork()) {
+    requestWindowRefresh();
+    return;
+  }
   const root = $("cloud-gallery-grid");
   if (!root) return;
-  if (posterObserver) posterObserver.disconnect();
-  root.replaceChildren();
+  beginBoundedGalleryRender();
   const entries = cloudLibraryRecords();
-  const filtered = entries.filter(cloudEntryMatchesSearch);
+  const filtered = [];
+  let maxModifiedUnix = 0;
+  for (const entry of entries) {
+    if (!cloudEntryMatchesSearch(entry)) continue;
+    filtered.push(entry);
+    const modifiedUnix = Number(entry && (entry.updated_at_unix || entry.modified_unix));
+    if (Number.isFinite(modifiedUnix)) {
+      maxModifiedUnix = Math.max(maxModifiedUnix, modifiedUnix);
+    }
+  }
+  const groups = [{ label: null, clips: filtered }];
+  const identity = groupedGalleryIdentity(
+    `cloud|${cloudAccountKey()}|${gallerySearch}`,
+    filtered.length,
+    filtered[0],
+    filtered[filtered.length - 1],
+    maxModifiedUnix,
+  );
+  galleryPageState = GalleryWindowCore.updateState(galleryPageState, {
+    identity,
+    total: filtered.length,
+  });
+  const page = GalleryWindowCore.windowItems(filtered, galleryPageState);
+  syncGalleryPagination(page);
   $("gallery-count").textContent = entries.length
     ? `${filtered.length} of ${entries.length}`
     : "";
@@ -1327,11 +1640,26 @@ function renderCloudClips() {
     root.appendChild(empty);
     return;
   }
-  for (const entry of filtered) {
+  for (const entry of page.items) {
     const localClip = cloudLocalClipForEntry(entry);
     root.appendChild(localClip ? clipCard(localClip) : cloudClipCard(entry));
   }
 }
+
+function clearHeavyGalleryDom() {
+  if (posterObserver) posterObserver.disconnect();
+  posterRenderGeneration += 1;
+  posterQueue = new WeakMap();
+  posterWorkQueue = [];
+  cloudThumbnailInflight.clear();
+  for (const id of ["gallery-grid", "cloud-gallery-grid"]) {
+    releaseGalleryRoot($(id));
+  }
+  syncGalleryPagination(null);
+}
+
+$("gallery-page-prev").addEventListener("click", () => changeGalleryPage(-1));
+$("gallery-page-next").addEventListener("click", () => changeGalleryPage(1));
 
 function showClipContextMenu(ev, clip) {
   ev.preventDefault();

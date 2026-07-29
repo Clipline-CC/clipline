@@ -21,7 +21,26 @@ use windows_sys::Win32::System::Threading::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct MemoryStatus {
+    /// Whole-tree total. Retained with its original meaning for one release so
+    /// an older frontend against a newer backend is not silently wrong.
     pub private_working_set_bytes: u64,
+    /// The Rust process alone — the memory this codebase actually allocates.
+    pub process_private_working_set_bytes: u64,
+    /// Every descendant summed. Deliberately **not** labelled "WebView2": the
+    /// walk also picks up the long-lived `ffmpeg.exe` child when the CPU encoder
+    /// path is active.
+    pub children_private_working_set_bytes: u64,
+}
+
+fn memory_status_from_parts(root: u64, children: impl IntoIterator<Item = u64>) -> MemoryStatus {
+    let children_total = children
+        .into_iter()
+        .fold(0u64, |total, bytes| total.saturating_add(bytes));
+    MemoryStatus {
+        private_working_set_bytes: root.saturating_add(children_total),
+        process_private_working_set_bytes: root,
+        children_private_working_set_bytes: children_total,
+    }
 }
 
 const MEMORY_SAMPLE_CACHE_TTL: Duration = Duration::from_secs(1);
@@ -79,17 +98,15 @@ impl MemorySampler {
 
 pub fn current_process_tree_memory() -> Result<MemoryStatus, String> {
     let current_pid = unsafe { GetCurrentProcessId() };
-    let mut total = query_process_private_working_set(unsafe { GetCurrentProcess() })?;
+    let root = query_process_private_working_set(unsafe { GetCurrentProcess() })?;
 
-    for pid in child_process_ids(current_pid)? {
-        if let Ok(bytes) = query_process_private_working_set_for_pid(pid) {
-            total = total.saturating_add(bytes);
-        }
-    }
+    // One walk backs every field, so the split cannot drift between them and
+    // the sampler's cache TTL still covers a single snapshot.
+    let children = child_process_ids(current_pid)?
+        .into_iter()
+        .filter_map(|pid| query_process_private_working_set_for_pid(pid).ok());
 
-    Ok(MemoryStatus {
-        private_working_set_bytes: total,
-    })
+    Ok(memory_status_from_parts(root, children))
 }
 
 fn child_process_ids(root_pid: u32) -> Result<Vec<u32>, String> {
@@ -385,6 +402,41 @@ mod tests {
     }
 
     #[test]
+    fn status_separates_the_root_process_from_its_descendants() {
+        let status = memory_status_from_parts(100, [20, 30]);
+
+        assert_eq!(status.process_private_working_set_bytes, 100);
+        assert_eq!(status.children_private_working_set_bytes, 50);
+    }
+
+    #[test]
+    fn status_keeps_the_summed_field_for_backward_compatibility() {
+        // The frontend shipped reading `private_working_set_bytes` as the tree
+        // total; keep that meaning so an older UI against a newer backend is
+        // not silently wrong.
+        let status = memory_status_from_parts(100, [20, 30]);
+
+        assert_eq!(status.private_working_set_bytes, 150);
+    }
+
+    #[test]
+    fn status_without_descendants_reports_only_the_root() {
+        let status = memory_status_from_parts(100, []);
+
+        assert_eq!(status.children_private_working_set_bytes, 0);
+        assert_eq!(status.private_working_set_bytes, 100);
+        assert_eq!(status.process_private_working_set_bytes, 100);
+    }
+
+    #[test]
+    fn status_saturates_instead_of_overflowing() {
+        let status = memory_status_from_parts(u64::MAX, [1, 1]);
+
+        assert_eq!(status.children_private_working_set_bytes, 2);
+        assert_eq!(status.private_working_set_bytes, u64::MAX);
+    }
+
+    #[test]
     fn current_process_private_working_set_is_available_without_vm_read() {
         let bytes = query_process_private_working_set_for_pid(std::process::id())
             .expect("the current process should expose extended memory counters");
@@ -433,9 +485,7 @@ mod tests {
                     .sample_with(move || {
                         calls.fetch_add(1, Ordering::SeqCst);
                         std::thread::sleep(Duration::from_millis(25));
-                        Ok(MemoryStatus {
-                            private_working_set_bytes: 42,
-                        })
+                        Ok(memory_status_from_parts(42, []))
                     })
                     .await
             }));
@@ -467,9 +517,7 @@ mod tests {
             sampler
                 .sample_with(move || {
                     cached_calls.fetch_add(1, Ordering::SeqCst);
-                    Ok(MemoryStatus {
-                        private_working_set_bytes: 7,
-                    })
+                    Ok(memory_status_from_parts(7, []))
                 })
                 .await,
             Err("sample failed".to_string())
@@ -480,9 +528,7 @@ mod tests {
             sampler
                 .sample_with(move || {
                     retry_calls.fetch_add(1, Ordering::SeqCst);
-                    Ok(MemoryStatus {
-                        private_working_set_bytes: 7,
-                    })
+                    Ok(memory_status_from_parts(7, []))
                 })
                 .await
                 .unwrap()

@@ -897,7 +897,7 @@ dependencies = [
 
 [[package]]
 name = "clipline-app"
-version = "0.1.41"
+version = "0.1.42"
 dependencies = [
  "base64 0.22.1",
  "boa_engine",
@@ -932,6 +932,8 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "webview2-com",
+ "windows-core 0.61.2",
  "windows-sys 0.61.2",
  "zip",
 ]

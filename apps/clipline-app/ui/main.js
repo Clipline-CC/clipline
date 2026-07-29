@@ -25,6 +25,7 @@ listen("status", (e) => {
 });
 
 function requestRefresh() {
+  if (!requestWindowRefresh()) return;
   refresh().catch((error) => {
     $("error").textContent = String(error);
   });
@@ -70,11 +71,16 @@ listen("mic-test-stopped", () => {
   if (micTestRunning) stopMicTestUi("stopped");
 });
 
-listen("suspend-review-playback", () => suspendReviewPlayback());
+var windowLifecycleListenerReady = listen("window-lifecycle", (event) => {
+  applyWindowLifecycleSnapshot(event.payload);
+});
 
 listen("game-detection", (e) => {
   activeDetectedGame = e.payload || null;
-  if (activeDetectedGame?.active) loadGamePlugins();
+  if (activeDetectedGame?.active) {
+    if (captureForegroundWork()) loadGamePlugins();
+    else requestWindowRefresh();
+  }
   updateCaptureStatus();
   updateGameDetectionStatus();
   maybeWarnElevatedGame(activeDetectedGame);
@@ -125,6 +131,7 @@ $("gallery-select-toggle").addEventListener("click", () => {
 $("bulk-select-all").addEventListener("click", selectAllVisible);
 $("bulk-clear").addEventListener("click", clearSelection);
 $("bulk-delete").addEventListener("click", bulkDeleteSelected);
+$("poster-runtime-retry").addEventListener("click", retryUnavailablePosters);
 $("gallery-sort").addEventListener("change", (ev) => { gallerySort = ev.target.value; renderClips(); });
 $("gallery-group").addEventListener("change", (ev) => { galleryGroup = ev.target.value; renderClips(); });
 $("gallery-filter").addEventListener("click", (ev) => {
@@ -385,7 +392,7 @@ $("export-clip").addEventListener("click", exportTrim);
 $("deck-status-action").addEventListener("click", runDeckStatusAction);
 $("delete-clip").addEventListener("click", () => deleteClip());
 $("open-folder").addEventListener("click", openFolder);
-$("copy-clip").addEventListener("click", copyClipToClipboard);
+$("copy-clip").addEventListener("click", (event) => copyClipToClipboard(event));
 $("rename-clip").addEventListener("click", () => beginClipRename());
 $("clip-title-edit").addEventListener("submit", saveClipRename);
 $("rename-cancel").addEventListener("click", cancelClipRename);
@@ -695,44 +702,107 @@ updateViews();
 syncPlayState();
 syncVolume();
 syncAllRangeProgress();
-function reportFrontendReady() {
-  invoke("frontend_ready")
-    .then((warnings) => {
-      if (Array.isArray(warnings) && warnings.length) {
-        $("error").textContent = warnings.join(" ");
+
+function releaseBackgroundUi() {
+  localClipsRequestGate.invalidate();
+  cloudClipsRequestGate.invalidate();
+  cloudClipsLoading = false;
+  if (micTestRunning || micAudioContext) stopMicTestUi("stopped");
+  releaseBackgroundSettingsUi();
+  suspendReviewPlayback({ renderGallery: false });
+  clearHeavyGalleryDom();
+}
+
+function startForegroundBootWork() {
+  if (foregroundBootCompleted || foregroundBootPromise) return;
+  const lifecycleWork = captureForegroundWork();
+  if (!lifecycleWork) return;
+  const pending = loadInitialSettings(lifecycleWork)
+    .then((completed) => {
+      if (completed && isForegroundWorkCurrent(lifecycleWork)) {
+        foregroundBootCompleted = true;
       }
     })
-    .catch((e) => console.warn("frontend_ready failed:", e));
+    .catch((e) => {
+      if (isForegroundWorkCurrent(lifecycleWork)) $("error").textContent = e;
+    })
+    .finally(() => {
+      if (foregroundBootPromise !== pending) return;
+      const supersededByNewForeground =
+        !foregroundBootCompleted
+        && !isForegroundWorkCurrent(lifecycleWork)
+        && !!captureForegroundWork();
+      foregroundBootPromise = null;
+      if (supersededByNewForeground) startForegroundBootWork();
+    });
+  foregroundBootPromise = pending;
+  refreshMemoryUsage();
 }
-async function loadInitialSettings() {
-  await loadGamePlugins();
+
+function applyWindowLifecycleSnapshot(snapshot) {
+  const wasKnown = windowLifecycleState.known;
+  const transition = WindowLifecycleCore.applySnapshot(
+    windowLifecycleState,
+    snapshot,
+  );
+  if (!transition.accepted) return;
+  windowLifecycleState = transition.state;
+
+  if (transition.missedBackground) releaseBackgroundUi();
+  if (windowLifecycleState.backgrounded) {
+    if (!wasKnown || transition.enteredBackground) releaseBackgroundUi();
+    return;
+  }
+
+  if (transition.enteredForeground || transition.missedBackground) {
+    startForegroundBootWork();
+    resumeForegroundSettingsWork();
+    if (transition.refreshRequired) requestRefresh();
+  }
+}
+
+async function reportFrontendReady() {
+  try {
+    await windowLifecycleListenerReady;
+    const response = await invoke("frontend_ready");
+    const warnings = response && response.warnings;
+    if (Array.isArray(warnings) && warnings.length) {
+      $("error").textContent = warnings.join(" ");
+    }
+    applyWindowLifecycleSnapshot(response && response.window_lifecycle);
+  } catch (e) {
+    console.warn("frontend_ready failed:", e);
+  }
+}
+async function loadInitialSettings(lifecycleWork = captureForegroundWork()) {
+  if (!lifecycleWork) return false;
+  await loadGamePlugins(lifecycleWork);
+  if (!isForegroundWorkCurrent(lifecycleWork)) return false;
   let settings = await invoke("get_settings");
+  if (!isForegroundWorkCurrent(lifecycleWork)) return false;
   // The registry Run key is the ground truth for startup. Reconcile the UI
   // in case the entry was changed externally since the last save.
   try {
     settings = { ...settings, open_on_startup: await invoke("get_autostart_status") };
   } catch (e) {
+    if (!isForegroundWorkCurrent(lifecycleWork)) return false;
     console.warn("could not read autostart status:", e);
   }
+  if (!isForegroundWorkCurrent(lifecycleWork)) return false;
   fillSettings(settings);
-  window.setTimeout(() => checkForUpdates({ manual: false }), 1500);
+  window.setTimeout(() => {
+    if (isForegroundWorkCurrent(lifecycleWork)) {
+      checkForUpdates({ manual: false });
+    }
+  }, 1500);
   // Custom-game icons live in settings; refresh clip badges once they load.
   if (clipsCache.length) renderClips();
+  return true;
 }
-loadInitialSettings().catch((e) => $("error").textContent = e);
-afterNextPaint().then(() => {
-  refresh().catch((e) => $("error").textContent = e);
-  refreshMemoryUsage();
-  ensureDisplaysLoaded().catch((e) => $("error").textContent = e);
-  window.setTimeout(() => {
-    ensureAudioDevicesLoaded().catch((e) => $("error").textContent = e);
-    ensureVideoEncodersLoaded().catch((e) => $("error").textContent = e);
-  }, 750);
-});
 reportFrontendReady();
 setInterval(() => {
-  if (!document.hidden) refreshMemoryUsage();
+  if (!document.hidden && captureForegroundWork()) refreshMemoryUsage();
 }, 2000);
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) refreshMemoryUsage();
+  if (!document.hidden && captureForegroundWork()) refreshMemoryUsage();
 });

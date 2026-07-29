@@ -41,6 +41,13 @@ cd clipline
 cargo run -p clipline-app
 ```
 
+The verified FFmpeg payload is intentionally not stored in git. A source build
+automatically reuses it from a current per-user Clipline installation under
+`%LOCALAPPDATA%\Clipline\ffmpeg`; `CLIPLINE_FFMPEG`, `%APPDATA%\Clipline\ffmpeg`,
+and `PATH` remain supported for clean development machines without an installed
+Nightly. If none is available, recording still uses the native Windows encoder
+path and the Library shows an actionable thumbnail warning.
+
 Useful checks:
 
 ```powershell

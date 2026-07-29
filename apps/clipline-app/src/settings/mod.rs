@@ -47,10 +47,6 @@ pub use types::{
     CustomGameSettings, ReplayStorageMode, ReplayStorageSettings, VideoQuality,
 };
 
-/// The replay ring holds the save window plus this margin (for keyframe
-/// alignment and eviction timing). Sizing the ring to the window - rather than
-/// a fixed 2 minutes - keeps memory proportional to what is actually saved.
-pub const BUFFER_HEADROOM_S: f64 = 15.0;
 const DEFAULT_REPLAY_CACHE_QUOTA_GB: f64 = 2.0;
 
 /// UI color theme. Booth is the warm amber default; Classic restores the
@@ -75,6 +71,8 @@ pub struct AppSettings {
     pub games: GameSettings,
     #[serde(default)]
     pub audio: AudioSettings,
+    /// Legacy persistence mirror of `replay_window_s`; ignored at runtime and
+    /// normalized whenever settings cross the persistence boundary.
     pub buffer_seconds: f64,
     pub replay_window_s: f64,
     #[serde(default)]
@@ -131,7 +129,7 @@ impl Default for AppSettings {
             capture_region: CaptureRegionSettings::default(),
             games: GameSettings::default(),
             audio: AudioSettings::default(),
-            buffer_seconds: 60.0 + BUFFER_HEADROOM_S,
+            buffer_seconds: 60.0,
             replay_window_s: 60.0,
             video_quality: VideoQuality::Balanced,
             bitrate_mbps: 12.0,
@@ -192,7 +190,7 @@ impl AppSettings {
             lol_url,
             replay_window_s: self.replay_window_s,
             buffer_bytes: estimated_buffer_bytes(
-                replay_buffer_seconds(self),
+                self.replay_window_s,
                 self.effective_bitrate_mbps(),
             ),
             replay_storage: self.replay_storage.to_service_options()?,
@@ -223,15 +221,15 @@ impl AppSettings {
     }
 }
 
-fn replay_buffer_seconds(settings: &AppSettings) -> f64 {
-    settings.replay_window_s + BUFFER_HEADROOM_S
+fn compatibility_buffer_seconds(settings: &AppSettings) -> f64 {
+    settings.replay_window_s
 }
 
-fn estimated_buffer_bytes(buffer_seconds: f64, bitrate_mbps: f64) -> usize {
+fn estimated_buffer_bytes(replay_window_s: f64, bitrate_mbps: f64) -> usize {
     const MIN_BUFFER_BYTES: f64 = 64.0 * 1024.0 * 1024.0;
     const ENCODER_OVERSHOOT_HEADROOM: f64 = 2.0;
 
-    let video_bytes = bitrate_mbps * 1_000_000.0 / 8.0 * buffer_seconds;
+    let video_bytes = bitrate_mbps * 1_000_000.0 / 8.0 * replay_window_s;
     (video_bytes * ENCODER_OVERSHOOT_HEADROOM).max(MIN_BUFFER_BYTES) as usize
 }
 

@@ -83,14 +83,24 @@ function syncRailProfile(cloud = cloudSettings()) {
 
   railProfileAvatarKey = key;
   setRailProfileFallback(name);
-  refreshRailProfileIdentity(key);
-  loadRailProfileAvatar(key, name);
+  const lifecycleWork = captureForegroundWork();
+  if (!lifecycleWork) return;
+  refreshRailProfileIdentity(key, lifecycleWork);
+  loadRailProfileAvatar(key, name, lifecycleWork);
 }
 
-async function refreshRailProfileIdentity(key) {
+async function refreshRailProfileIdentity(
+  key,
+  lifecycleWork = captureForegroundWork(),
+) {
+  if (!lifecycleWork) return;
   try {
     const profile = await invoke("cloud_user_profile");
-    if (key !== railProfileAvatarKey || !profile) return;
+    if (
+      !isForegroundWorkCurrent(lifecycleWork)
+      || key !== railProfileAvatarKey
+      || !profile
+    ) return;
     const previousAccountKey = cloudAccountKey();
     const cloud = cloudSettings();
     cloud.connected_user_id = profile.user_id || cloud.connected_user_id;
@@ -112,11 +122,21 @@ async function refreshRailProfileIdentity(key) {
   }
 }
 
-async function loadRailProfileAvatar(key, name) {
+async function loadRailProfileAvatar(
+  key,
+  name,
+  lifecycleWork = captureForegroundWork(),
+) {
+  if (!lifecycleWork) return;
   const request = ++railProfileAvatarRequest;
   try {
     const dataUrl = await invoke("cloud_user_avatar");
-    if (request !== railProfileAvatarRequest || key !== railProfileAvatarKey || !dataUrl) return;
+    if (
+      !isForegroundWorkCurrent(lifecycleWork)
+      || request !== railProfileAvatarRequest
+      || key !== railProfileAvatarKey
+      || !dataUrl
+    ) return;
     setRailProfileImage(dataUrl, name);
   } catch (_) {
     // Keep the initials fallback when the account has no reachable avatar.
@@ -251,9 +271,15 @@ function resetCloudClipsCache() {
   cloudClipsLoaded = false;
   cloudClipsLoading = false;
   cloudClipsError = "";
+  clearCloudPosterCache();
 }
 
 async function loadCloudClips({ force = false } = {}) {
+  const lifecycleWork = captureForegroundWork();
+  if (!lifecycleWork) {
+    requestWindowRefresh();
+    return;
+  }
   if (!cloudConnected()) {
     resetCloudClipsCache();
     if (gallerySource === "cloud") renderCloudClips();
@@ -265,7 +291,10 @@ async function loadCloudClips({ force = false } = {}) {
 
   const accountKey = cloudAccountKey();
   const request = cloudClipsRequestGate.begin(accountKey);
-  const isCurrent = () => cloudClipsRequestGate.isCurrent(request, cloudAccountKey());
+  const isCurrent = () => (
+    isForegroundWorkCurrent(lifecycleWork)
+    && cloudClipsRequestGate.isCurrent(request, cloudAccountKey())
+  );
   cloudClipsLoading = true;
   cloudClipsError = "";
   if (gallerySource === "cloud") renderClips();
@@ -273,6 +302,7 @@ async function loadCloudClips({ force = false } = {}) {
     const result = await invoke("list_cloud_clips");
     if (!isCurrent()) return;
     cloudClipsCache = result && Array.isArray(result.clips) ? result.clips : [];
+    pruneCloudPosterCache(cloudClipsCache);
     cloudClipsError = result && result.truncated
       ? "Showing the first 10,000 unique cloud clips; refine the library on the server to see older items."
       : "";
@@ -333,11 +363,14 @@ async function openCloudEntryInApp(entry) {
     await openCloudClipUrl(entry);
     return;
   }
+  const lifecycleWork = captureForegroundWork();
+  if (!lifecycleWork) return;
   setDeckStatus("downloading cloud clip...");
   try {
     const clip = await invoke("cache_cloud_clip_media", {
       request: cloudClipAssetRequest(entry),
     });
+    if (!isForegroundWorkCurrent(lifecycleWork)) return;
     openClip({
       ...clip,
       cloud_remote_clip_id: entry.remote_clip_id,
@@ -346,40 +379,56 @@ async function openCloudEntryInApp(entry) {
     });
     setDeckStatus("");
   } catch (e) {
+    if (!isForegroundWorkCurrent(lifecycleWork)) return;
     $("error").textContent = String(e);
     setDeckStatus("could not play cloud clip", { transient: true });
   }
 }
 
 function cloudThumbnailKey(entry) {
-  return `cloud-thumb:${entry.remote_clip_id}:${entry.updated_at_unix || 0}`;
+  return `${CLOUD_POSTER_CACHE_PREFIX}${cloudAccountKey()}:${entry.remote_clip_id}:${entry.updated_at_unix || 0}`;
 }
 
 function loadCloudThumbnail(entry, thumb) {
   if (!entry || !entry.remote_clip_id) return;
+  const lifecycleWork = captureForegroundWork();
+  if (!lifecycleWork) return Promise.resolve();
   const key = cloudThumbnailKey(entry);
-  const cached = posterCache.get(key);
+  const cached = posterCacheGet(key);
+  if (cached === POSTER_UNAVAILABLE) return Promise.resolve();
   if (cached) {
     if (!thumb.querySelector(".card-thumb-img")) insertThumbMedia(thumb, makePosterImg(cached));
-    return;
+    return Promise.resolve();
   }
   let pending = cloudThumbnailInflight.get(key);
   if (!pending) {
     pending = invoke("cloud_clip_thumbnail", { request: cloudClipAssetRequest(entry) })
       .then((posterPath) => {
-        if (!posterPath) return null;
+        if (!isForegroundWorkCurrent(lifecycleWork)) return null;
+        if (!posterPath) {
+          posterCacheSet(key, POSTER_UNAVAILABLE);
+          return null;
+        }
         const url = convertFileSrc(posterPath);
-        posterCache.set(key, url);
+        posterCacheSet(key, url);
         return url;
       })
-      .catch(() => null)
+      .catch(() => {
+        if (isForegroundWorkCurrent(lifecycleWork)) {
+          posterCacheSet(key, POSTER_UNAVAILABLE);
+        }
+        return null;
+      })
       .finally(() => {
-        cloudThumbnailInflight.delete(key);
+        if (cloudThumbnailInflight.get(key) === pending) {
+          cloudThumbnailInflight.delete(key);
+        }
       });
     cloudThumbnailInflight.set(key, pending);
   }
-  pending
+  return pending
     .then((posterPath) => {
+      if (!isForegroundWorkCurrent(lifecycleWork)) return;
       const url = posterPath;
       if (!url) return;
       if (thumb.isConnected && !thumb.querySelector(".card-thumb-img")) {
@@ -391,17 +440,13 @@ function loadCloudThumbnail(entry, thumb) {
 
 function observeCloudThumbnail(entry, thumb) {
   if (!entry || !entry.remote_clip_id) return;
-  const key = cloudThumbnailKey(entry);
-  const cached = posterCache.get(key);
-  if (cached) {
-    insertThumbMedia(thumb, makePosterImg(cached));
-    return;
-  }
+  if (!captureForegroundWork()) return;
+  const request = { type: "cloud-thumbnail", entry };
   if (!posterObserver) {
-    loadCloudThumbnail(entry, thumb);
+    Promise.resolve().then(() => queuePosterWork(request, thumb));
     return;
   }
-  posterQueue.set(thumb, { type: "cloud-thumbnail", entry });
+  posterQueue.set(thumb, request);
   posterObserver.observe(thumb);
 }
 

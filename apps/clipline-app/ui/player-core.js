@@ -295,21 +295,29 @@ const PlayerCore = (() => {
     targetTime: null,
     sourceGeneration: 0,
     metadataGeneration: null,
+    // Provenance of `targetTime`: "user" for an explicit reposition, "assignment"
+    // for a source's own resume seek. Only a user reposition may bypass the
+    // sidecar drift tolerance — see `sidecarRealignmentForced`.
+    targetSource: null,
   });
 
   const requestLogicalSeek = (state, time, duration) => {
     if (!Number.isFinite(time)) return state;
-    return { ...state, targetTime: clampTime(time, duration) };
+    return { ...state, targetTime: clampTime(time, duration), targetSource: "user" };
   };
 
   const beginSourceAssignment = (state, sourceGeneration, resumeTime, duration) => {
-    const requested = Number.isFinite(state && state.targetTime)
+    const carried = Number.isFinite(state && state.targetTime);
+    const requested = carried
       ? state.targetTime
       : Number.isFinite(resumeTime) ? resumeTime : 0;
     return {
       targetTime: clampTime(requested, duration),
       sourceGeneration,
       metadataGeneration: null,
+      // A carried user target keeps its provenance across the replacement;
+      // relabelling it would silently downgrade a real reposition.
+      targetSource: carried && state.targetSource === "user" ? "user" : "assignment",
     };
   };
 
@@ -330,22 +338,38 @@ const PlayerCore = (() => {
         || state.metadataGeneration !== sourceGeneration
         || !Number.isFinite(state.targetTime)
         || !Number.isFinite(currentTime)) {
-      return { state, applyTime: null, confirmed: false };
+      return { state, applyTime: null, confirmed: false, confirmedSource: null };
     }
     const targetTime = clampTime(state.targetTime, duration);
     if (Math.abs(currentTime - targetTime) <= SEEK_CONFIRM_TOLERANCE_S) {
       return {
-        state: { ...state, targetTime: null },
+        state: { ...state, targetTime: null, targetSource: null },
         applyTime: null,
         confirmed: true,
+        // Reported so the caller can force a sidecar realignment for a user
+        // reposition while leaving settlement to the ordinary tolerance path.
+        confirmedSource: state.targetSource || null,
       };
     }
+    // A completion for a superseded position: re-apply the current target and
+    // keep its provenance, so only the real arrival can confirm it.
     return {
       state: { ...state, targetTime },
       applyTime: targetTime,
       confirmed: false,
+      confirmedSource: null,
     };
   };
+
+  /// Whether a confirmed seek justifies bypassing the sidecar drift tolerance.
+  ///
+  /// `forceSeek` skips the tolerance entirely, so forcing on *every* video
+  /// `seeked` meant the initial source settlement re-seeked already-audible
+  /// sidecars backward for no correction — measured at ~20 ms against a 0.5 s
+  /// tolerance, landing back where it started. A user reposition still needs the
+  /// bypass: after a scrub the sidecar is far away and tolerance alone would
+  /// leave it there.
+  const sidecarRealignmentForced = (confirmedSource) => confirmedSource === "user";
 
   const logicalPlaybackTime = (state, currentTime, duration) => {
     const time = Number.isFinite(state && state.targetTime)
@@ -2077,6 +2101,7 @@ const PlayerCore = (() => {
     beginSourceAssignment,
     metadataSeekDecision,
     seekedDecision,
+    sidecarRealignmentForced,
     logicalPlaybackTime,
     relativeSeekTarget,
     percentFor,

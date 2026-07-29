@@ -9,20 +9,23 @@ use naming::{
     normalized_clip_title,
 };
 
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::io::{self, Read};
 use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::ptr;
-use std::sync::Mutex;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
+use clipline_capture::{Codec, EncoderBackend};
 use clipline_events::{is_review_event, ClipMarker, ClipMarkers, ClipPlay};
 use clipline_mp4::{
-    remux_with_mixed_audio_track_file, remux_with_selected_audio_tracks_file,
-    trim_keyframe_aligned_file, MediaTrackCounts,
+    media_video_codecs_file, remux_with_mixed_audio_track_file,
+    remux_with_selected_audio_tracks_file, trim_keyframe_aligned_file, MediaTrackCounts,
+    MediaVideoCodec,
 };
 use clipline_storage::storage_status as read_storage_status;
 use windows_sys::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
@@ -233,6 +236,8 @@ pub struct CopyClipToClipboardRequest {
     pub path: String,
     #[serde(default, rename = "audioTrackIds")]
     pub audio_track_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub original: bool,
 }
 
 #[tauri::command]
@@ -385,6 +390,148 @@ fn game_from_markers(markers: Option<&ClipMarkers>) -> Option<ClipGame> {
     })
 }
 
+/// Only two heavyweight ffmpeg poster children may exist at once.
+const MAX_CONCURRENT_POSTER_EXTRACTIONS: usize = 2;
+type PosterExtractionResult = Result<PathBuf, String>;
+
+struct PosterExtractionFlight {
+    result: tokio::sync::watch::Sender<Option<PosterExtractionResult>>,
+}
+
+struct PosterExtractionCoordinator {
+    permits: Arc<tokio::sync::Semaphore>,
+    flights: tokio::sync::Mutex<HashMap<PathBuf, Arc<PosterExtractionFlight>>>,
+}
+
+impl PosterExtractionCoordinator {
+    fn new(max_concurrent: usize) -> Self {
+        assert!(
+            max_concurrent > 0,
+            "poster extraction concurrency must be non-zero"
+        );
+        Self {
+            permits: Arc::new(tokio::sync::Semaphore::new(max_concurrent)),
+            flights: tokio::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Run one blocking extraction per canonical clip path. The worker is
+    /// detached from any individual command future so a cancelled caller
+    /// cannot strand followers or release its concurrency permit while ffmpeg
+    /// is still alive.
+    async fn run(
+        self: &Arc<Self>,
+        canonical_clip: PathBuf,
+        work: impl FnOnce() -> PosterExtractionResult + Send + 'static,
+    ) -> PosterExtractionResult {
+        let (mut result, leader) = {
+            let mut flights = self.flights.lock().await;
+            if let Some(flight) = flights.get(&canonical_clip) {
+                (flight.result.subscribe(), None)
+            } else {
+                let (result_tx, result_rx) = tokio::sync::watch::channel(None);
+                let flight = Arc::new(PosterExtractionFlight { result: result_tx });
+                flights.insert(canonical_clip.clone(), Arc::clone(&flight));
+                (result_rx, Some(flight))
+            }
+        };
+
+        if let Some(flight) = leader {
+            let coordinator = Arc::clone(self);
+            tauri::async_runtime::spawn(async move {
+                let completed = coordinator.run_worker(work).await;
+                flight.result.send_replace(Some(completed));
+
+                let mut flights = coordinator.flights.lock().await;
+                if flights
+                    .get(&canonical_clip)
+                    .is_some_and(|current| Arc::ptr_eq(current, &flight))
+                {
+                    flights.remove(&canonical_clip);
+                }
+            });
+        }
+
+        loop {
+            if let Some(completed) = result.borrow().clone() {
+                return completed;
+            }
+            result
+                .changed()
+                .await
+                .map_err(|_| "poster extraction ended without a result".to_string())?;
+        }
+    }
+
+    async fn run_worker(
+        &self,
+        work: impl FnOnce() -> PosterExtractionResult + Send + 'static,
+    ) -> PosterExtractionResult {
+        let _permit = Arc::clone(&self.permits)
+            .acquire_owned()
+            .await
+            .map_err(|_| "poster extraction coordinator closed".to_string())?;
+        tauri::async_runtime::spawn_blocking(work)
+            .await
+            .map_err(|error| format!("clip poster task: {error}"))?
+    }
+
+    #[cfg(test)]
+    async fn joined_callers(&self, canonical_clip: &Path) -> usize {
+        self.flights
+            .lock()
+            .await
+            .get(canonical_clip)
+            .map_or(0, |flight| flight.result.receiver_count())
+    }
+}
+
+fn poster_extraction_coordinator() -> Arc<PosterExtractionCoordinator> {
+    static COORDINATOR: OnceLock<Arc<PosterExtractionCoordinator>> = OnceLock::new();
+    Arc::clone(COORDINATOR.get_or_init(|| {
+        Arc::new(PosterExtractionCoordinator::new(
+            MAX_CONCURRENT_POSTER_EXTRACTIONS,
+        ))
+    }))
+}
+
+fn poster_failure_kind(error: &str) -> &'static str {
+    if error
+        .trim()
+        .eq_ignore_ascii_case("ffmpeg is not available for poster extraction")
+    {
+        "runtime_unavailable"
+    } else if error.starts_with("spawn ffmpeg poster") {
+        "spawn_failed"
+    } else if error.contains("timed out") {
+        "timeout"
+    } else if error.starts_with("ffmpeg poster failed") {
+        "media_or_codec"
+    } else if error.contains("JPEG data") || error.contains("output limit") {
+        "invalid_output"
+    } else if error.contains("poster temp") || error.contains("finalize poster") {
+        "publish_failed"
+    } else {
+        "unknown"
+    }
+}
+
+fn log_poster_failure_once(error: &str) {
+    static REPORTED: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+    let kind = poster_failure_kind(error);
+    let reported = REPORTED.get_or_init(|| Mutex::new(HashSet::new()));
+    let should_report = match reported.lock() {
+        Ok(mut reported) => reported.insert(kind),
+        Err(_) => true,
+    };
+    if should_report {
+        // Keep clip paths and FFmpeg stderr out of the support log. The
+        // category is enough to distinguish discovery, execution, decoding,
+        // output, and Rust-owned publication failures.
+        tracing::warn!(event = "poster_extraction_failed", kind);
+    }
+}
+
 /// Return (generating on demand) the cached poster JPEG for a clip, as a path
 /// the webview loads through the asset protocol. Lazy and per-clip so the
 /// library listing never blocks on ffmpeg.
@@ -396,12 +543,18 @@ pub async fn clip_poster<R: Runtime>(
 ) -> Result<String, String> {
     let scope_root = settings.clips_dir()?;
     let target = validate_clip_path(&settings, &path)?;
-    let poster = tauri::async_runtime::spawn_blocking(move || {
-        let seek_s = poster_seek_seconds(&target);
-        crate::poster::ensure_poster(&target, seek_s)
-    })
-    .await
-    .map_err(|e| format!("clip poster task: {e}"))??;
+    let poster = if let Some(poster) = crate::poster::cached_poster(&target) {
+        poster
+    } else {
+        let canonical_clip = target.clone();
+        poster_extraction_coordinator()
+            .run(canonical_clip, move || {
+                let seek_s = poster_seek_seconds(&target);
+                crate::poster::ensure_poster(&target, seek_s)
+            })
+            .await
+            .inspect_err(|error| log_poster_failure_once(error))?
+    };
     allow_local_poster_asset(&app, &scope_root, &poster)?;
     Ok(poster.display().to_string())
 }
@@ -520,7 +673,12 @@ pub(crate) fn clip_sidecar_paths(target: &Path) -> [PathBuf; 4] {
 }
 
 fn remove_clip_files(target: &Path) -> Result<(), String> {
-    std::fs::remove_file(target).map_err(|e| e.to_string())?;
+    if let Some(error) = crate::cloud_upload::active_upload_source_error(target) {
+        return Err(error);
+    }
+    std::fs::remove_file(target).map_err(|error| {
+        crate::cloud_upload::active_upload_source_error(target).unwrap_or_else(|| error.to_string())
+    })?;
     for sidecar in clip_sidecar_paths(target) {
         let _ = std::fs::remove_file(sidecar);
     }
@@ -723,6 +881,9 @@ fn rename_clip_files(
     old_path: String,
     target_name: String,
 ) -> Result<RenamedClipInfo, String> {
+    if let Some(error) = crate::cloud_upload::active_upload_source_error(&source) {
+        return Err(error);
+    }
     let parent = source
         .parent()
         .ok_or_else(|| "clip has no containing folder".to_string())?;
@@ -753,7 +914,10 @@ fn rename_clip_files(
     let pending_osu_move = PreparedOsuSidecarMove::stage(&source, &target)?;
 
     if source != target {
-        std::fs::rename(&source, &target).map_err(|e| format!("rename clip: {e}"))?;
+        std::fs::rename(&source, &target).map_err(|error| {
+            crate::cloud_upload::active_upload_source_error(&source)
+                .unwrap_or_else(|| format!("rename clip: {error}"))
+        })?;
     }
     if source_markers.exists() && source_markers != target_markers {
         if let Err(error) = std::fs::rename(&source_markers, &target_markers) {
@@ -1214,44 +1378,63 @@ enum ShareAudioExportMode {
     Mix(Vec<u32>),
 }
 
-fn clipboard_share_path(
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ShareVideoExportMode {
+    Copy,
+    Encode {
+        encoder: String,
+        backend: EncoderBackend,
+    },
+}
+
+const SHARE_H264_BITRATE_BPS: u32 = 8_000_000;
+const SHARE_H264_BUFSIZE_BITS: u64 = 16_000_000;
+
+fn clipboard_copy_path(
     source: &Path,
     selected_audio_track_ids: Option<&[String]>,
+    original: bool,
 ) -> Result<PathBuf, String> {
-    clipboard_share_path_with_exporter(
+    clipboard_copy_path_with_exporter(
         source,
         selected_audio_track_ids,
+        original,
         &crate::settings::share_export_cache_dir(),
-        |source, target, mode| {
-            match mode {
-                ShareAudioExportMode::Remux(indices) => {
-                    remux_with_selected_audio_tracks_file(source, target, &indices)
-                        .map_err(|e| e.to_string())?;
-                }
-                ShareAudioExportMode::Mix(indices) => {
-                    remux_with_mixed_audio_track_file(source, target, &indices)
-                        .map_err(|e| e.to_string())?;
-                }
-            }
-            Ok(())
-        },
+        |source, target, mode| export_share_compatible_file(source, target, mode.as_ref()),
     )
+}
+
+fn clipboard_copy_path_with_exporter(
+    source: &Path,
+    selected_audio_track_ids: Option<&[String]>,
+    original: bool,
+    export_dir: &Path,
+    export_audio: impl FnMut(&Path, &Path, Option<ShareAudioExportMode>) -> Result<(), String>,
+) -> Result<PathBuf, String> {
+    if original {
+        return Ok(source.to_path_buf());
+    }
+    clipboard_share_path_with_exporter(source, selected_audio_track_ids, export_dir, export_audio)
 }
 
 fn clipboard_share_path_with_exporter(
     source: &Path,
     selected_audio_track_ids: Option<&[String]>,
     export_dir: &Path,
-    mut export_audio: impl FnMut(&Path, &Path, ShareAudioExportMode) -> Result<(), String>,
+    mut export_audio: impl FnMut(&Path, &Path, Option<ShareAudioExportMode>) -> Result<(), String>,
 ) -> Result<PathBuf, String> {
-    let Some(mode) = clipboard_share_export_mode(source, selected_audio_track_ids)? else {
-        return Ok(source.to_path_buf());
-    };
+    let mode = clipboard_share_export_mode(source, selected_audio_track_ids)?;
 
     let meta = std::fs::metadata(source).map_err(|e| format!("read clip metadata: {e}"))?;
     std::fs::create_dir_all(export_dir).map_err(|e| format!("create share export cache: {e}"))?;
     prune_old_share_exports(export_dir);
-    let export = share_export_path(export_dir, source, &meta, selected_audio_track_ids, &mode);
+    let export = share_export_path(
+        export_dir,
+        source,
+        &meta,
+        selected_audio_track_ids,
+        mode.as_ref(),
+    );
     if export.exists() {
         return Ok(export);
     }
@@ -1306,10 +1489,10 @@ fn share_export_path(
     source: &Path,
     meta: &std::fs::Metadata,
     selected_audio_track_ids: Option<&[String]>,
-    mode: &ShareAudioExportMode,
+    mode: Option<&ShareAudioExportMode>,
 ) -> PathBuf {
     let mut hasher = DefaultHasher::new();
-    "share-export-v1".hash(&mut hasher);
+    "share-export-v3-aac-h264-cbr8m".hash(&mut hasher);
     source.display().to_string().hash(&mut hasher);
     meta.len().hash(&mut hasher);
     meta.modified().ok().hash(&mut hasher);
@@ -1320,6 +1503,279 @@ fn share_export_path(
         }
     }
     export_dir.join(format!("share-export-{:016x}.mp4", hasher.finish()))
+}
+
+fn export_share_compatible_file(
+    source: &Path,
+    target: &Path,
+    audio_mode: Option<&ShareAudioExportMode>,
+) -> Result<(), String> {
+    let mut intermediate = None;
+    let (input, has_audio) = match audio_mode {
+        Some(ShareAudioExportMode::Remux(indices)) => {
+            let path = cached_export_tmp_path(target)?;
+            remux_with_selected_audio_tracks_file(source, &path, indices)
+                .map_err(|error| error.to_string())?;
+            let has_audio = !indices.is_empty();
+            intermediate = Some(path.clone());
+            (path, has_audio)
+        }
+        Some(ShareAudioExportMode::Mix(indices)) => {
+            let path = cached_export_tmp_path(target)?;
+            remux_with_mixed_audio_track_file(source, &path, indices)
+                .map_err(|error| error.to_string())?;
+            intermediate = Some(path.clone());
+            (path, true)
+        }
+        None => {
+            let counts = clipline_mp4::media_track_counts_file(source)
+                .map_err(|error| format!("inspect share audio tracks: {error}"))?;
+            (source.to_path_buf(), counts.audio > 0)
+        }
+    };
+
+    let result = transcode_share_file_with_ffmpeg(source, &input, target, has_audio);
+    if let Some(intermediate) = intermediate {
+        let _ = std::fs::remove_file(intermediate);
+    }
+    result
+}
+
+fn transcode_share_file_with_ffmpeg(
+    source: &Path,
+    input: &Path,
+    target: &Path,
+    has_audio: bool,
+) -> Result<(), String> {
+    let ffmpeg = clipline_capture::ffmpeg::locate()
+        .ok_or_else(|| "ffmpeg is not available for a shareable clipboard export".to_string())?;
+    let video_modes = share_video_export_modes(source)?;
+    let timeout = share_export_timeout(source);
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .unwrap_or_else(Instant::now);
+    let mut last_error = String::new();
+
+    for mode in video_modes {
+        let Some(remaining) = remaining_share_export_timeout(deadline, Instant::now()) else {
+            last_error = format!(
+                "ffmpeg share export exhausted its {} second timeout",
+                timeout.as_secs()
+            );
+            break;
+        };
+        let _ = std::fs::remove_file(target);
+        let mut command = Command::new(&ffmpeg);
+        suppress_console(&mut command);
+        command
+            .args(ffmpeg_share_export_args(input, target, has_audio, &mode))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        match run_share_ffmpeg(&mut command, remaining) {
+            Ok(output) if output.status.success() => return Ok(()),
+            Ok(output) => {
+                last_error = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                if last_error.is_empty() {
+                    last_error = format!("ffmpeg exited with {}", output.status);
+                }
+            }
+            Err(error) => last_error = error,
+        }
+    }
+
+    let _ = std::fs::remove_file(target);
+    Err(format!("prepare shareable clipboard clip: {last_error}"))
+}
+
+fn share_video_export_modes(source: &Path) -> Result<Vec<ShareVideoExportMode>, String> {
+    let codecs = media_video_codecs_file(source)
+        .map_err(|error| format!("inspect share video codec: {error}"))?;
+    if codecs.as_slice() == [MediaVideoCodec::H264] {
+        return Ok(vec![ShareVideoExportMode::Copy]);
+    }
+    if codecs.len() != 1 {
+        return Err(format!(
+            "shareable export requires exactly one video track, found {}",
+            codecs.len()
+        ));
+    }
+
+    let mut encoders: Vec<(String, EncoderBackend)> = Vec::new();
+    for capability in clipline_capture::ffmpeg::probe() {
+        if !capability.codecs.contains(&Codec::H264) {
+            continue;
+        }
+        let Some(name) = clipline_capture::ffmpeg::encoder_name(capability.backend, Codec::H264)
+        else {
+            continue;
+        };
+        if !encoders.iter().any(|(existing, _)| existing == name) {
+            encoders.push((name.to_string(), capability.backend));
+        }
+    }
+    if encoders.is_empty() {
+        return Err("no usable FFmpeg H.264 encoder is available for this clip".into());
+    }
+    Ok(encoders
+        .into_iter()
+        .map(|(encoder, backend)| ShareVideoExportMode::Encode { encoder, backend })
+        .collect())
+}
+
+fn ffmpeg_share_export_args(
+    input: &Path,
+    target: &Path,
+    has_audio: bool,
+    video_mode: &ShareVideoExportMode,
+) -> Vec<String> {
+    let mut args = vec![
+        "-hide_banner".into(),
+        "-loglevel".into(),
+        "error".into(),
+        "-nostdin".into(),
+        "-y".into(),
+        "-i".into(),
+        input.display().to_string(),
+        "-map".into(),
+        "0:v:0".into(),
+    ];
+    if has_audio {
+        args.extend(["-map".into(), "0:a:0".into()]);
+    }
+    args.extend([
+        "-map_metadata".into(),
+        "-1".into(),
+        "-map_chapters".into(),
+        "-1".into(),
+        "-c:v".into(),
+    ]);
+    match video_mode {
+        ShareVideoExportMode::Copy => args.push("copy".into()),
+        ShareVideoExportMode::Encode { encoder, backend } => {
+            args.push(encoder.clone());
+            args.extend(clipline_capture::ffmpeg_encoder::backend_rate_control(
+                *backend,
+                SHARE_H264_BITRATE_BPS,
+                SHARE_H264_BUFSIZE_BITS,
+            ));
+            args.extend(["-pix_fmt".into(), "nv12".into()]);
+        }
+    }
+    if has_audio {
+        args.extend([
+            "-c:a".into(),
+            "aac".into(),
+            "-profile:a".into(),
+            "aac_low".into(),
+            "-b:a".into(),
+            "192k".into(),
+            "-ac".into(),
+            "2".into(),
+            "-ar".into(),
+            "48000".into(),
+        ]);
+    }
+    args.extend([
+        "-movflags".into(),
+        "+faststart".into(),
+        "-f".into(),
+        "mp4".into(),
+        target.display().to_string(),
+    ]);
+    args
+}
+
+fn share_export_timeout(source: &Path) -> Duration {
+    const MIN_SECONDS: u64 = 2 * 60;
+    const MAX_SECONDS: u64 = 6 * 60 * 60;
+    let duration = clipline_mp4::movie_duration_s_file(source)
+        .ok()
+        .flatten()
+        .unwrap_or(60.0);
+    let seconds = (duration * 4.0 + 60.0).ceil().max(0.0) as u64;
+    Duration::from_secs(seconds.clamp(MIN_SECONDS, MAX_SECONDS))
+}
+
+fn remaining_share_export_timeout(deadline: Instant, now: Instant) -> Option<Duration> {
+    deadline
+        .checked_duration_since(now)
+        .filter(|remaining| !remaining.is_zero())
+}
+
+struct ShareFfmpegOutput {
+    status: ExitStatus,
+    stderr: Vec<u8>,
+}
+
+fn run_share_ffmpeg(command: &mut Command, timeout: Duration) -> Result<ShareFfmpegOutput, String> {
+    const MAX_STDERR_BYTES: usize = 128 * 1024;
+
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("spawn ffmpeg share export: {error}"))?;
+    let Some(stderr) = child.stderr.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("spawn ffmpeg share export: stderr pipe unavailable".into());
+    };
+    let reader = match std::thread::Builder::new()
+        .name("clipline-share-ffmpeg-stderr".into())
+        .spawn(move || read_bounded_share_stderr(stderr, MAX_STDERR_BYTES))
+    {
+        Ok(reader) => reader,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("spawn ffmpeg share stderr reader: {error}"));
+        }
+    };
+
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .unwrap_or_else(Instant::now);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err(format!(
+                    "ffmpeg share export timed out after {} seconds",
+                    timeout.as_secs()
+                ));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err(format!("wait for ffmpeg share export: {error}"));
+            }
+        }
+    };
+    let stderr = reader
+        .join()
+        .map_err(|_| "ffmpeg share stderr reader panicked".to_string())?
+        .map_err(|error| format!("read ffmpeg share stderr: {error}"))?;
+    Ok(ShareFfmpegOutput {
+        status: status?,
+        stderr,
+    })
+}
+
+fn read_bounded_share_stderr(mut reader: impl Read, max_bytes: usize) -> io::Result<Vec<u8>> {
+    let mut retained = Vec::new();
+    let mut chunk = [0_u8; 16 * 1024];
+    loop {
+        let read = reader.read(&mut chunk)?;
+        if read == 0 {
+            return Ok(retained);
+        }
+        let keep = read.min(max_bytes.saturating_sub(retained.len()));
+        retained.extend_from_slice(&chunk[..keep]);
+    }
 }
 
 fn share_export_tmp_path(export: &Path) -> Result<PathBuf, String> {
@@ -1358,11 +1814,28 @@ fn prune_cached_mp4_files(export_dir: &Path, max_age: std::time::Duration) {
 }
 
 fn is_cached_mp4_file(path: &Path) -> bool {
-    path.extension().and_then(|ext| ext.to_str()) == Some("mp4")
-        || path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.ends_with(".mp4.tmp"))
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    if !name.starts_with("share-export-") {
+        return false;
+    }
+    if name.ends_with(".mp4") || name.ends_with(".mp4.tmp") {
+        return true;
+    }
+    let Some((_, suffix)) = name.split_once(".mp4.") else {
+        return false;
+    };
+    let parts = suffix.split('.').collect::<Vec<_>>();
+    !parts.is_empty()
+        && parts.len().is_multiple_of(3)
+        && parts.chunks_exact(3).all(|chunk| {
+            !chunk[0].is_empty()
+                && chunk[0].bytes().all(|byte| byte.is_ascii_digit())
+                && !chunk[1].is_empty()
+                && chunk[1].bytes().all(|byte| byte.is_ascii_digit())
+                && chunk[2] == "tmp"
+        })
 }
 
 fn extract_audio_sidecars_with_ffmpeg(
@@ -1629,12 +2102,13 @@ pub async fn copy_clip_to_clipboard(
 ) -> Result<(), String> {
     let target = validate_clip_path(&settings, &request.path)?;
     let audio_track_ids = request.audio_track_ids;
+    let original = request.original;
     let owner = window
         .hwnd()
         .map_err(|error| format!("get Clipline window handle: {error}"))?
         .0 as isize;
     tauri::async_runtime::spawn_blocking(move || {
-        let share_path = clipboard_share_path(&target, audio_track_ids.as_deref())?;
+        let share_path = clipboard_copy_path(&target, audio_track_ids.as_deref(), original)?;
         copy_file_to_clipboard(&share_path, owner as HWND)
     })
     .await
@@ -2445,7 +2919,7 @@ mod tests {
             &export_dir,
             |input, target, mode| {
                 assert_eq!(input, source.as_path());
-                assert_eq!(mode, ShareAudioExportMode::Mix(vec![0, 1]));
+                assert_eq!(mode, Some(ShareAudioExportMode::Mix(vec![0, 1])));
                 std::fs::write(target, b"mixed share mp4").unwrap();
                 Ok(())
             },
@@ -2457,7 +2931,7 @@ mod tests {
     }
 
     #[test]
-    fn clipboard_share_without_audio_selection_uses_original_path() {
+    fn clipboard_share_without_audio_selection_prepares_compatibility_export() {
         let dir = TestDir::new("clipline-library", "clipboard-share-original");
         let source = dir.path().join("clip.mp4");
         std::fs::write(&source, b"source mp4").unwrap();
@@ -2467,11 +2941,146 @@ mod tests {
             &source,
             selected,
             &dir.path().join("share"),
-            |_, _, _| panic!("clipboard copy without explicit audio selection must not export"),
+            |input, target, mode| {
+                assert_eq!(input, source);
+                assert_eq!(mode, None);
+                std::fs::write(target, b"compatible mp4").unwrap();
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_ne!(chosen, source);
+        assert_eq!(std::fs::read(chosen).unwrap(), b"compatible mp4");
+    }
+
+    #[test]
+    fn original_clipboard_copy_bypasses_share_export() {
+        let dir = TestDir::new("clipline-library", "clipboard-original-bypass");
+        let source = dir.path().join("clip.mp4");
+        std::fs::write(&source, b"source mp4").unwrap();
+
+        let chosen = clipboard_copy_path_with_exporter(
+            &source,
+            Some(&["output".to_string()]),
+            true,
+            &dir.path().join("share"),
+            |_, _, _| panic!("original copy must not prepare a share export"),
         )
         .unwrap();
 
         assert_eq!(chosen, source);
+    }
+
+    #[test]
+    fn ffmpeg_share_export_stream_copies_h264_and_encodes_aac_lc() {
+        let args = ffmpeg_share_export_args(
+            Path::new("selected.mp4"),
+            Path::new("share.mp4.tmp"),
+            true,
+            &ShareVideoExportMode::Copy,
+        );
+
+        assert!(args.windows(2).any(|pair| pair == ["-c:v", "copy"]));
+        assert!(args.windows(2).any(|pair| pair == ["-map", "0:a:0"]));
+        assert!(args.windows(2).any(|pair| pair == ["-c:a", "aac"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-profile:a", "aac_low"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-movflags", "+faststart"]));
+        assert_eq!(args.last().map(String::as_str), Some("share.mp4.tmp"));
+    }
+
+    #[test]
+    fn ffmpeg_share_export_omits_audio_for_muted_selection() {
+        let args = ffmpeg_share_export_args(
+            Path::new("muted.mp4"),
+            Path::new("share.mp4.tmp"),
+            false,
+            &ShareVideoExportMode::Copy,
+        );
+
+        assert!(!args.iter().any(|arg| arg == "0:a:0"));
+        assert!(!args.iter().any(|arg| arg == "-c:a"));
+    }
+
+    #[test]
+    fn ffmpeg_share_export_can_transcode_video_with_mf_fallback() {
+        let args = ffmpeg_share_export_args(
+            Path::new("av1.mp4"),
+            Path::new("share.mp4.tmp"),
+            true,
+            &ShareVideoExportMode::Encode {
+                encoder: "h264_mf".into(),
+                backend: clipline_capture::EncoderBackend::MfSoftware,
+            },
+        );
+
+        assert!(args.windows(2).any(|pair| pair == ["-c:v", "h264_mf"]));
+        assert!(args.windows(2).any(|pair| pair == ["-hw_encoding", "0"]));
+        assert!(args.windows(2).any(|pair| pair == ["-pix_fmt", "nv12"]));
+        assert!(args.windows(2).any(|pair| pair == ["-b:v", "8000000"]));
+    }
+
+    #[test]
+    fn ffmpeg_share_export_applies_backend_specific_rate_control() {
+        use clipline_capture::EncoderBackend;
+
+        for (encoder, backend, required) in [
+            (
+                "h264_nvenc",
+                EncoderBackend::Nvenc,
+                ["-rc", "cbr", "-preset", "p4"],
+            ),
+            (
+                "h264_amf",
+                EncoderBackend::Amf,
+                ["-rc", "cbr", "-usage", "lowlatency"],
+            ),
+            (
+                "h264_qsv",
+                EncoderBackend::QuickSync,
+                ["-low_power", "0", "-maxrate", "8000000"],
+            ),
+        ] {
+            let args = ffmpeg_share_export_args(
+                Path::new("source.mp4"),
+                Path::new("share.mp4.tmp"),
+                true,
+                &ShareVideoExportMode::Encode {
+                    encoder: encoder.into(),
+                    backend,
+                },
+            );
+            let joined = args.join(" ");
+            for pair in required.chunks_exact(2) {
+                assert!(
+                    joined.contains(&pair.join(" ")),
+                    "{encoder} missing {} in {joined}",
+                    pair.join(" ")
+                );
+            }
+            assert!(joined.contains("-b:v 8000000"), "{encoder}: {joined}");
+            assert!(joined.contains("-bufsize 16000000"), "{encoder}: {joined}");
+        }
+    }
+
+    #[test]
+    fn remaining_share_export_timeout_uses_one_deadline() {
+        let start = Instant::now();
+        let deadline = start + Duration::from_secs(10);
+
+        assert_eq!(
+            remaining_share_export_timeout(deadline, start + Duration::from_secs(3)),
+            Some(Duration::from_secs(7))
+        );
+        assert_eq!(remaining_share_export_timeout(deadline, deadline), None);
+        assert_eq!(
+            remaining_share_export_timeout(deadline, deadline + Duration::from_secs(1)),
+            None
+        );
     }
 
     #[test]
@@ -2492,13 +3101,22 @@ mod tests {
         let dir = TestDir::new("clipline-library", "share-export-prune-tmp");
         let export = dir.path().join("share-export-old.mp4");
         let orphan = dir.path().join("share-export-old.mp4.tmp");
+        let unique = share_export_tmp_path(&export).unwrap();
+        let nested_unique = cached_export_tmp_path(&unique).unwrap();
+        let malformed = dir.path().join("share-export-old.mp4.pid.counter.tmp");
         std::fs::write(&export, b"old export").unwrap();
         std::fs::write(&orphan, b"orphan").unwrap();
+        std::fs::write(&unique, b"unique orphan").unwrap();
+        std::fs::write(&nested_unique, b"nested unique orphan").unwrap();
+        std::fs::write(&malformed, b"not an owned temp shape").unwrap();
 
         prune_cached_mp4_files(dir.path(), std::time::Duration::ZERO);
 
         assert!(!export.exists());
         assert!(!orphan.exists());
+        assert!(!unique.exists());
+        assert!(!nested_unique.exists());
+        assert!(malformed.exists());
     }
 
     #[test]
@@ -3261,6 +3879,40 @@ mod tests {
     }
 
     #[test]
+    fn poster_diagnostics_classify_failures_without_retaining_paths_or_stderr() {
+        assert_eq!(
+            poster_failure_kind("ffmpeg is not available for poster extraction"),
+            "runtime_unavailable"
+        );
+        assert_eq!(
+            poster_failure_kind("spawn ffmpeg poster: access denied"),
+            "spawn_failed"
+        );
+        assert_eq!(
+            poster_failure_kind("ffmpeg poster timed out after 30 seconds"),
+            "timeout"
+        );
+        assert_eq!(
+            poster_failure_kind("ffmpeg poster failed: C:\\private\\clip.mp4 is corrupt"),
+            "media_or_codec"
+        );
+        assert_eq!(
+            poster_failure_kind(
+                "ffmpeg poster failed: clip named ffmpeg is not available for poster extraction"
+            ),
+            "media_or_codec"
+        );
+        assert_eq!(
+            poster_failure_kind("ffmpeg poster produced no JPEG data"),
+            "invalid_output"
+        );
+        assert_eq!(
+            poster_failure_kind("finalize poster: sharing violation"),
+            "publish_failed"
+        );
+    }
+
+    #[test]
     fn poster_seek_seconds_prefers_local_player_marker_for_thumbnail() {
         let dir = TestDir::new("clipline-library", "poster-local-marker");
         let clip = dir.path().join("clip.mp4");
@@ -3283,6 +3935,144 @@ mod tests {
         .unwrap();
 
         assert_eq!(poster_seek_seconds(&clip), 8.0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn poster_extraction_is_single_flight_per_canonical_path() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let coordinator = Arc::new(PosterExtractionCoordinator::new(
+            MAX_CONCURRENT_POSTER_EXTRACTIONS,
+        ));
+        let dir = TestDir::new("clipline-library", "poster-single-flight");
+        let clip = dir.path().join("clip.mp4");
+        touch_mp4(&clip);
+        let key = clip.canonicalize().unwrap();
+        let expected_poster = crate::poster::poster_path(&key);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+
+        let leader = {
+            let coordinator = Arc::clone(&coordinator);
+            let key = key.clone();
+            let expected_poster = expected_poster.clone();
+            let calls = Arc::clone(&calls);
+            let release = Arc::clone(&release);
+            tokio::spawn(async move {
+                coordinator
+                    .run(key, move || {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        let (lock, ready) = &*release;
+                        let mut released = lock.lock().expect("release lock");
+                        while !*released {
+                            released = ready.wait(released).expect("release wait");
+                        }
+                        Ok(expected_poster)
+                    })
+                    .await
+            })
+        };
+
+        let leader_started = tokio::time::timeout(Duration::from_secs(2), async {
+            while calls.load(Ordering::SeqCst) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        if leader_started.is_err() {
+            let (lock, ready) = &*release;
+            *lock.lock().expect("release lock") = true;
+            ready.notify_all();
+        }
+        leader_started.expect("leader starts");
+
+        let follower = {
+            let coordinator = Arc::clone(&coordinator);
+            let key = key.clone();
+            let calls = Arc::clone(&calls);
+            tokio::spawn(async move {
+                coordinator
+                    .run(key, move || {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        Ok(PathBuf::from("unexpected-second-poster.jpg"))
+                    })
+                    .await
+            })
+        };
+
+        let joined = tokio::time::timeout(Duration::from_secs(2), async {
+            while coordinator.joined_callers(&key).await != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+
+        let (lock, ready) = &*release;
+        *lock.lock().expect("release lock") = true;
+        ready.notify_all();
+        joined.expect("follower joins the in-flight extraction");
+
+        let leader_result = leader.await.unwrap().unwrap();
+        let follower_result = follower.await.unwrap().unwrap();
+        assert_eq!(leader_result, follower_result);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+    async fn poster_extraction_runs_at_most_two_unique_paths_concurrently() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let coordinator = Arc::new(PosterExtractionCoordinator::new(
+            MAX_CONCURRENT_POSTER_EXTRACTIONS,
+        ));
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let mut tasks = Vec::new();
+
+        for index in 0..6 {
+            let coordinator = Arc::clone(&coordinator);
+            let active = Arc::clone(&active);
+            let peak = Arc::clone(&peak);
+            let release = Arc::clone(&release);
+            tasks.push(tokio::spawn(async move {
+                coordinator
+                    .run(
+                        PathBuf::from(format!(r"C:\clips\clip-{index}.mp4")),
+                        move || {
+                            let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                            peak.fetch_max(now, Ordering::SeqCst);
+                            let (lock, ready) = &*release;
+                            let mut released = lock.lock().expect("release lock");
+                            while !*released {
+                                released = ready.wait(released).expect("release wait");
+                            }
+                            active.fetch_sub(1, Ordering::SeqCst);
+                            Ok(PathBuf::from(format!(r"C:\clips\clip-{index}.poster.jpg")))
+                        },
+                    )
+                    .await
+            }));
+        }
+
+        let started = tokio::time::timeout(Duration::from_secs(2), async {
+            while active.load(Ordering::SeqCst) != MAX_CONCURRENT_POSTER_EXTRACTIONS {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+
+        let (lock, ready) = &*release;
+        *lock.lock().expect("release lock") = true;
+        ready.notify_all();
+        started.expect("two poster jobs start");
+        assert_eq!(peak.load(Ordering::SeqCst), 2);
+        for task in tasks {
+            task.await.unwrap().unwrap();
+        }
+        assert_eq!(peak.load(Ordering::SeqCst), 2);
     }
 
     #[test]
