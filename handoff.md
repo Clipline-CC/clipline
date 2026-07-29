@@ -24,6 +24,23 @@ All three PRs are merged to `develop` with green Ubuntu, Windows, and Greptile c
 current official stable WebView2 release remains 150.0.4078.83, matching the staged standalone
 runtime; its required review date was refreshed for this release.
 
+**Published** on the rolling `nightly` prerelease from `develop` commit `7af00d5`, seven assets.
+Both installers were downloaded again through their public release URLs, matched against the staged
+bytes, and verified using the signature in the corresponding downloaded manifest under the updater
+public key compiled into Clipline:
+
+| asset | bytes | sha256 |
+| --- | --- | --- |
+| `Clipline_0.1.43_x64-setup.exe` | 54,315,070 | `b4e4cb2aa8a8b3ff98be5de511299b04045c42b9d4a11c8ccfde00354b8bbd4d` |
+| `Clipline_0.1.43_x64-standalone-setup.exe` | 276,912,747 | `4efdfa6cbbc23fe2d9c806e833df82286047fa150209e6bed4d2550c5576393a` |
+
+GitHub CI did not run on release commit `7af00d5` because the workflow triggers on pull requests and
+pushes to `main`, not version-bump pushes to `develop`; GitHub reports zero check runs for that SHA.
+The release commit's application source is identical to CI-green merge `29b5109`. Its delta is
+limited to three version strings, the WebView2 review date, and two release documents. Full
+workspace tests, fresh-cache warning-denied Clippy, and both release-input preflights passed
+locally before packaging.
+
 ## Checkpoint (2026-07-29): PR #131 Codex review follow-up
 
 Plan: `docs/superpowers/plans/2026-07-29-pr131-codex-review-followups.md`.
