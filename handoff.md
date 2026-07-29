@@ -4,6 +4,58 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-29): PR #131 Codex review follow-up
+
+Plan: `docs/superpowers/plans/2026-07-29-pr131-codex-review-followups.md`.
+
+Two actionable Codex findings are fixed. When an authoritative Library refresh pairs equivalent
+Windows paths such as `\\?\D:\…` and `D:\…`, the refreshed clip metadata is now merged while the
+active review keeps its original path spelling. This prevents the video source and later
+path-keyed actions from being silently rewritten during alias reconciliation.
+
+Cloud-upload feedback also respects background refresh deferral. If an upload finishes while the
+Library is not foreground-current, its cleanup error and `Delete local after upload` confirmation
+are retained in one bounded pending slot. The next completed foreground refresh first reconciles
+the viewer, then publishes the deferred feedback exactly once. The other Codex comments required
+no new change: plan and implementation were already separate commits, and cleanup-error ordering
+was fixed in the preceding Greptile follow-up.
+
+Focused red/green UI contracts, `cargo test --workspace`, and a fresh-cache
+`cargo clippy --workspace --all-targets -- -D warnings` are green.
+
+## Checkpoint (2026-07-29): PR #131 review follow-up
+
+Plan: `docs/superpowers/plans/2026-07-29-pr131-review-followup.md`.
+
+Greptile's P1 review finding was valid: `uploadClipToCloud` published the backend cleanup error
+before the authoritative Library refresh, whose partial-scan warning handler owns the same global
+error surface and could overwrite the more actionable cleanup failure. Cleanup errors are now
+republished after `await refresh()`, while uploads without a backend error continue to leave any
+Library scan warning visible.
+
+The UI contract regression requires that ordering. Its red/green run, `cargo test --workspace`, and
+a fresh-cache `cargo clippy --workspace --all-targets -- -D warnings` pass are green.
+
+## Checkpoint (2026-07-28): cloud upload review completion
+
+Plan: `docs/superpowers/plans/2026-07-28-cloud-upload-review-completion.md`.
+
+Cloud upload completion no longer ejects freshly exported trims from review merely because Windows
+spells the canonical export path as `\\?\D:\…` and the authoritative Library rescan spells the same
+path as `D:\…`. Active-clip reconciliation now uses the existing Windows-aware path identity helper
+instead of raw string equality, so uploads that preserve the local MP4 keep the viewer open.
+
+`CloudUploadResult` now explicitly reports `local_deleted`. When `Delete local after upload`
+successfully removes the primary MP4, the authoritative refresh intentionally returns to the
+Library and the global notice surface confirms `cloud upload ready · local copy deleted`. If cloud
+media verification or primary deletion fails, the local review remains open; backend post-upload
+or cleanup errors are surfaced globally instead of being hidden behind a generic ready status.
+Primary deletion is still reported accurately if a later sidecar cleanup fails.
+
+Focused red/green regressions cover path-equivalent refresh behavior, the post-delete notice
+contract, cleanup-error visibility, and upload-result serialization. `cargo test --workspace` is
+green and a fresh-cache `cargo clippy --workspace --all-targets -- -D warnings` pass is clean.
+
 ## Checkpoint (2026-07-28): shareable clipboard PR review follow-ups
 
 Plan: `docs/superpowers/plans/2026-07-28-pr130-review-followups.md`.

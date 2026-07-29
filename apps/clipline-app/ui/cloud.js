@@ -722,7 +722,13 @@ async function uploadClipToCloud(clip, request = {}) {
         setDeckStatus("cloud upload processing");
       }
     }
-    await refresh();
+    const refreshCompleted = await refresh();
+    finishPostRefreshFeedback(refreshCompleted, {
+      error: result && result.record ? result.record.error : "",
+      notice: result && result.local_deleted
+        ? "cloud upload ready · local copy deleted"
+        : "",
+    });
     loadCloudClips({ force: true });
   } catch (e) {
     setDeckStatus("");
