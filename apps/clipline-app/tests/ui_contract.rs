@@ -1656,10 +1656,13 @@ fn cloud_upload_completion_preserves_equivalent_paths_and_reports_local_deletion
             ),
         "intentional post-upload deletion must be confirmed on the global notice surface after the viewer closes"
     );
+    let cleanup_error = upload
+        .find("if (result && result.record && result.record.error)")
+        .expect("cloud upload completion republishes backend errors");
     assert!(
-        upload.contains("if (result.record.error)")
+        refresh < cleanup_error
             && upload.contains("$(\"error\").textContent = result.record.error;"),
-        "post-upload cleanup failures must remain visible while the local review stays open"
+        "post-upload cleanup failures must be published after Library warnings while the local review stays open"
     );
 }
 

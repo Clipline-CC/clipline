@@ -4,6 +4,19 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-29): PR #131 review follow-up
+
+Plan: `docs/superpowers/plans/2026-07-29-pr131-review-followup.md`.
+
+Greptile's P1 review finding was valid: `uploadClipToCloud` published the backend cleanup error
+before the authoritative Library refresh, whose partial-scan warning handler owns the same global
+error surface and could overwrite the more actionable cleanup failure. Cleanup errors are now
+republished after `await refresh()`, while uploads without a backend error continue to leave any
+Library scan warning visible.
+
+The UI contract regression requires that ordering. Its red/green run, `cargo test --workspace`, and
+a fresh-cache `cargo clippy --workspace --all-targets -- -D warnings` pass are green.
+
 ## Checkpoint (2026-07-28): cloud upload review completion
 
 Plan: `docs/superpowers/plans/2026-07-28-cloud-upload-review-completion.md`.

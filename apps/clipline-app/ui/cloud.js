@@ -711,9 +711,6 @@ async function uploadClipToCloud(clip, request = {}) {
     });
     if (result && result.record) {
       upsertCloudUploadRecord(result.record);
-      if (result.record.error) {
-        $("error").textContent = result.record.error;
-      }
       if (result.record.remote_url && result.record.upload_status === "uploaded_processing") {
         setDeckStatus("cloud upload processing; link available", { transient: true });
       } else if (result.record.remote_url && result.record.upload_status.startsWith("uploaded_")) {
@@ -726,6 +723,9 @@ async function uploadClipToCloud(clip, request = {}) {
       }
     }
     await refresh();
+    if (result && result.record && result.record.error) {
+      $("error").textContent = result.record.error;
+    }
     if (result && result.local_deleted) {
       setNotice("cloud upload ready · local copy deleted", { transient: true });
     }
