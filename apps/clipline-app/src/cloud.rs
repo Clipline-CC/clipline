@@ -1751,7 +1751,13 @@ async fn update_cloud_clip_visibility(
                 error = %error,
                 "visibility changed, but refreshing the canonical public URL failed"
             );
-            Ok(updated)
+            if updated.visibility != "private" && updated.public_url.is_none() {
+                Err(CloudApiError::InvalidUpload(format!(
+                    "visibility changed, but refreshing the canonical public URL failed: {error}"
+                )))
+            } else {
+                Ok(updated)
+            }
         }
     }
 }
@@ -2987,6 +2993,40 @@ mod tests {
         assert_eq!(
             clip.public_url.as_deref(),
             Some("https://clips.example.com/c/c_post_fallback")
+        );
+        update.assert();
+        refresh.assert();
+    }
+
+    #[tokio::test]
+    async fn visibility_update_keeps_url_less_success_recoverable_if_refresh_fails() {
+        let server = MockServer::start();
+        let updated = clip_detail("remote-1", "public", "ready", None);
+        let update = server.mock(|when, then| {
+            when.method(POST).path("/api/v1/clips/remote-1/visibility");
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body_obj(&updated);
+        });
+        let refresh = server.mock(|when, then| {
+            when.method(GET).path("/api/v1/clips/remote-1");
+            then.status(503).body("try again later");
+        });
+
+        let error = update_cloud_clip_visibility(
+            &test_cloud_client(&server),
+            "token",
+            "remote-1",
+            "public",
+        )
+        .await
+        .expect_err("a URL-less public update must remain recoverable");
+
+        assert!(
+            error
+                .to_string()
+                .contains("refreshing the canonical public URL failed"),
+            "{error}"
         );
         update.assert();
         refresh.assert();

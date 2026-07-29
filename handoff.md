@@ -369,8 +369,11 @@ explicitly. Progress events omit absent `remote_url` fields so byte/status updat
 freshly synchronized share URL. The authenticated `/clip/{clip_id}` route remains isolated to the
 native open-page command and is never stored or copied as a share URL.
 Native/API, settings-migration, DOM-free Cloud/player, and UI contract regressions cover the
-transition matrix. Workspace tests and fresh-cache warning-denied Clippy are green; a live Cloud
-upload plus Discord unfurl remains the final deployment-dependent acceptance check.
+transition matrix. The PR #105 Greptile follow-up also keeps a URL-less public/unlisted visibility
+response in recoverable `uploaded_processing` state when the canonical detail refresh fails,
+instead of terminally recording a public upload with no share action. Workspace tests and
+fresh-cache warning-denied Clippy are green; a live Cloud upload plus Discord unfurl remains the
+final deployment-dependent acceptance check.
 
 ## Checkpoint (2026-07-23): Nightly 0.1.41
 
