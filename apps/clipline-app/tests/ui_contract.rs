@@ -1642,27 +1642,58 @@ fn cloud_upload_completion_preserves_equivalent_paths_and_reports_local_deletion
         !refresh_clips.contains("clip.path === currentPath"),
         "active clip reconciliation must not use raw path-string equality"
     );
+    assert!(
+        refresh_clips.contains("currentClip = { ...fresh, path: currentPath };"),
+        "Library reconciliation must preserve the active path spelling while merging fresh metadata"
+    );
 
     let refresh = upload
-        .find("await refresh();")
+        .find("const refreshCompleted = await refresh();")
         .expect("cloud upload completion refreshes the authoritative local Library");
-    let deletion_notice = upload
-        .find("if (result && result.local_deleted)")
-        .expect("cloud upload completion handles confirmed local deletion");
+    let feedback = upload
+        .find("finishPostRefreshFeedback(refreshCompleted, {")
+        .expect("cloud upload completion settles feedback against the refresh result");
     assert!(
-        refresh < deletion_notice
+        refresh < feedback
+            && upload.contains("error: result && result.record ? result.record.error : \"\",")
             && upload.contains(
-                "setNotice(\"cloud upload ready · local copy deleted\", { transient: true });"
+                "notice: result && result.local_deleted\n        ? \"cloud upload ready · local copy deleted\""
             ),
-        "intentional post-upload deletion must be confirmed on the global notice surface after the viewer closes"
+        "intentional deletion and upload errors must be delivered only after the authoritative refresh settles"
     );
-    let cleanup_error = upload
-        .find("if (result && result.record && result.record.error)")
-        .expect("cloud upload completion republishes backend errors");
+}
+
+#[test]
+fn post_upload_feedback_waits_for_a_completed_foreground_refresh() {
+    let app_core = read_ui_js("app-core.js");
+    let refresh = js_function_body(&app_core, "refresh");
+    let finish = js_function_body(&app_core, "finishPostRefreshFeedback");
+    let flush = js_function_body(&app_core, "flushDeferredPostRefreshFeedback");
+
     assert!(
-        refresh < cleanup_error
-            && upload.contains("$(\"error\").textContent = result.record.error;"),
-        "post-upload cleanup failures must be published after Library warnings while the local review stays open"
+        app_core.contains("var pendingPostRefreshFeedback = null;"),
+        "background upload feedback needs one bounded pending slot"
+    );
+    for required in [
+        "if (refreshCompleted)",
+        "showPostRefreshFeedback(feedback);",
+        "pendingPostRefreshFeedback = {",
+        "error: error || pending.error || \"\",",
+        "notice: notice || pending.notice || \"\",",
+    ] {
+        assert!(
+            finish.contains(required),
+            "post-refresh feedback settlement must include `{required}`"
+        );
+    }
+    assert!(
+        refresh.contains("if (completed) flushDeferredPostRefreshFeedback();"),
+        "a completed foreground refresh must publish feedback queued while backgrounded"
+    );
+    assert!(
+        flush.contains("pendingPostRefreshFeedback = null;")
+            && flush.contains("showPostRefreshFeedback(feedback);"),
+        "deferred feedback must be consumed exactly once"
     );
 }
 

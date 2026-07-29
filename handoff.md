@@ -4,6 +4,25 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-07-29): PR #131 Codex review follow-up
+
+Plan: `docs/superpowers/plans/2026-07-29-pr131-codex-review-followups.md`.
+
+Two actionable Codex findings are fixed. When an authoritative Library refresh pairs equivalent
+Windows paths such as `\\?\D:\…` and `D:\…`, the refreshed clip metadata is now merged while the
+active review keeps its original path spelling. This prevents the video source and later
+path-keyed actions from being silently rewritten during alias reconciliation.
+
+Cloud-upload feedback also respects background refresh deferral. If an upload finishes while the
+Library is not foreground-current, its cleanup error and `Delete local after upload` confirmation
+are retained in one bounded pending slot. The next completed foreground refresh first reconciles
+the viewer, then publishes the deferred feedback exactly once. The other Codex comments required
+no new change: plan and implementation were already separate commits, and cleanup-error ordering
+was fixed in the preceding Greptile follow-up.
+
+Focused red/green UI contracts, `cargo test --workspace`, and a fresh-cache
+`cargo clippy --workspace --all-targets -- -D warnings` are green.
+
 ## Checkpoint (2026-07-29): PR #131 review follow-up
 
 Plan: `docs/superpowers/plans/2026-07-29-pr131-review-followup.md`.

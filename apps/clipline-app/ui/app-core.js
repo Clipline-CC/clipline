@@ -182,6 +182,7 @@ var deckStatusToastTimer = 0;
 var deckStatusActionHandler = null;
 var NOTICE_TOAST_MS = 2600;
 var noticeToastTimer = 0;
+var pendingPostRefreshFeedback = null;
 var micTestRunning = false;
 var micAudioContext = null;
 var micAudioCursor = 0;
@@ -250,6 +251,33 @@ function setNotice(message, { transient = false } = {}) {
     }
     noticeToastTimer = 0;
   }, NOTICE_TOAST_MS);
+}
+
+function showPostRefreshFeedback(feedback) {
+  if (feedback.error) $("error").textContent = feedback.error;
+  if (feedback.notice) setNotice(feedback.notice, { transient: true });
+}
+
+function finishPostRefreshFeedback(refreshCompleted, feedback = {}) {
+  const error = String(feedback.error || "").trim();
+  const notice = String(feedback.notice || "").trim();
+  if (!error && !notice) return;
+  feedback = { error, notice };
+  if (refreshCompleted) {
+    showPostRefreshFeedback(feedback);
+    return;
+  }
+  const pending = pendingPostRefreshFeedback || {};
+  pendingPostRefreshFeedback = {
+    error: error || pending.error || "",
+    notice: notice || pending.notice || "",
+  };
+}
+
+function flushDeferredPostRefreshFeedback() {
+  const feedback = pendingPostRefreshFeedback;
+  pendingPostRefreshFeedback = null;
+  if (feedback) showPostRefreshFeedback(feedback);
 }
 
 function clipDuration() {
@@ -458,7 +486,9 @@ async function refresh() {
     return false;
   }
   await Promise.all([refreshClips(null, work), refreshStorage(work)]);
-  return isForegroundWorkCurrent(work);
+  const completed = isForegroundWorkCurrent(work);
+  if (completed) flushDeferredPostRefreshFeedback();
+  return completed;
 }
 
 async function refreshStorage(work = captureForegroundWork()) {
