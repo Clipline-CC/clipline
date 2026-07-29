@@ -39,7 +39,10 @@ pushes to `main`, not version-bump pushes to `develop`; GitHub reports zero chec
 The release commit's application source is identical to CI-green merge `29b5109`. Its delta is
 limited to three version strings, the WebView2 review date, and two release documents. Full
 workspace tests, fresh-cache warning-denied Clippy, and both release-input preflights passed
-locally before packaging.
+locally before packaging. The published standalone installer was then extracted into an isolated
+directory without installation: its packaged app launched seven processes from the bundled
+150.0.4078.83 runtime, played a 10-second H.264 clip plus both output and microphone Opus sidecars
+through `ended` with no media/page error, and reported H.264, HEVC, and AV1 decodable.
 
 ## Checkpoint (2026-07-29): PR #131 Codex review follow-up
 
