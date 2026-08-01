@@ -5,12 +5,17 @@ pub mod boxes;
 pub mod fragment;
 mod hvcc;
 pub mod init;
+pub mod playback_index;
 pub mod trim;
 pub mod walker;
 pub mod writer;
 
 pub use fragment::{FragSample, FragSampleRef, TrackRun};
 pub use init::{AudioTrackConfig, TrackConfig, VideoCodecParams, VideoTrackConfig};
+pub use playback_index::{
+    IndexedMovie, MovieIndex, PlaybackIndexError, PlaybackTime, PlaybackTrackConfig, SampleCursor,
+    SampleIndex, SeekPlan, TrackIndex, TrackSampleRange,
+};
 pub use trim::{
     media_track_counts, media_track_counts_file, media_video_codecs, media_video_codecs_file,
     movie_duration_s_file, remux_with_mixed_audio_track, remux_with_mixed_audio_track_file,

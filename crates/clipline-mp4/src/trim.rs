@@ -1,6 +1,7 @@
 //! Keyframe-aligned stream-copy trim for finalized Clipline MP4s.
 
-use std::collections::BTreeSet;
+use std::cmp::Reverse;
+use std::collections::{BTreeSet, BinaryHeap};
 use std::fs::{File, OpenOptions};
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
@@ -23,6 +24,13 @@ const MAX_FINALIZED_MOOV_BYTES: u64 = 64 * 1024 * 1024;
 /// more than 18 hours of video while preventing tiny hostile tables from
 /// expanding into multi-gigabyte allocations.
 const MAX_PARSED_SAMPLES: usize = 4_000_000;
+/// Finalized Clipline files currently contain at most three media tracks. This
+/// leaves ample room for future layouts without letting hostile files multiply
+/// the per-track metadata bound without limit.
+const MAX_PARSED_TRACKS: usize = 32;
+/// Aggregate cap across all tracks. This is checked before the parsed index is
+/// exposed to playback callers.
+const MAX_TOTAL_PARSED_SAMPLES: usize = 8_000_000;
 const MAX_OPUS_PACKET_BYTES: u32 = 1024 * 1024;
 const TEMP_FILE_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -393,7 +401,7 @@ fn finalized_movie_track_counts(input: &[u8]) -> Result<MediaTrackCounts, TrimEr
     let moov = find(&top, b"moov")
         .ok_or_else(|| TrimError::Unsupported("missing finalized moov".into()))?
         .clone();
-    let moov_children = children(input, &moov);
+    let moov_children = strict_children(input, &moov, "moov")?;
     if find(&moov_children, b"mvex").is_some() {
         return Err(TrimError::Unsupported(
             "fragmented/unfinalized files are not trim-ready".into(),
@@ -402,7 +410,7 @@ fn finalized_movie_track_counts(input: &[u8]) -> Result<MediaTrackCounts, TrimEr
 
     let mut counts = MediaTrackCounts { video: 0, audio: 0 };
     for trak in moov_children.iter().filter(|b| &b.fourcc == b"trak") {
-        match parse_track_cfg(input, trak)? {
+        match parse_track_cfg(input, trak)?.cfg {
             TrackConfig::Video(_) => counts.video += 1,
             TrackConfig::Audio(_) => counts.audio += 1,
         }
@@ -418,7 +426,7 @@ fn finalized_movie_video_codecs(input: &[u8]) -> Result<Vec<MediaVideoCodec>, Tr
     let moov = find(&top, b"moov")
         .ok_or_else(|| TrimError::Unsupported("missing finalized moov".into()))?
         .clone();
-    let moov_children = children(input, &moov);
+    let moov_children = strict_children(input, &moov, "moov")?;
     if find(&moov_children, b"mvex").is_some() {
         return Err(TrimError::Unsupported(
             "fragmented/unfinalized files are not trim-ready".into(),
@@ -427,7 +435,7 @@ fn finalized_movie_video_codecs(input: &[u8]) -> Result<Vec<MediaVideoCodec>, Tr
 
     let mut codecs = Vec::new();
     for trak in moov_children.iter().filter(|b| &b.fourcc == b"trak") {
-        let TrackConfig::Video(video) = parse_track_cfg(input, trak)? else {
+        let TrackConfig::Video(video) = parse_track_cfg(input, trak)?.cfg else {
             continue;
         };
         codecs.push(match video.codec {
@@ -1132,8 +1140,10 @@ fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::rename(from, to)
 }
 
-struct ParsedMovie {
-    tracks: Vec<ParsedTrack>,
+pub(crate) struct ParsedMovie {
+    pub(crate) movie_timescale: u32,
+    pub(crate) duration_ticks: u64,
+    pub(crate) tracks: Vec<ParsedTrack>,
 }
 
 struct TrimSelection {
@@ -1147,19 +1157,24 @@ struct TrimSelection {
     video_timescale: u32,
 }
 
-struct ParsedTrack {
-    cfg: TrackConfig,
-    timescale: u32,
-    samples: Vec<SampleRecord>,
+pub(crate) struct ParsedTrack {
+    pub(crate) id: u32,
+    pub(crate) cfg: TrackConfig,
+    pub(crate) timescale: u32,
+    pub(crate) nal_length_size: Option<u8>,
+    pub(crate) samples: Vec<SampleRecord>,
 }
 
 #[derive(Clone)]
-struct SampleRecord {
-    offset: usize,
-    size: u32,
-    duration: u32,
-    is_sync: bool,
-    start_ticks: u64,
+pub(crate) struct SampleRecord {
+    pub(crate) offset: usize,
+    pub(crate) size: u32,
+    pub(crate) duration: u32,
+    pub(crate) is_sync: bool,
+    /// Decode timestamp from the media sample table before edit-list mapping.
+    pub(crate) decode_ticks: u64,
+    /// Presentation timestamp after the track edit list is applied.
+    pub(crate) start_ticks: u64,
 }
 
 impl ParsedTrack {
@@ -1320,15 +1335,29 @@ fn seconds_to_ticks_ceil(seconds: f64, timescale: u32) -> Result<u64, TrimError>
 }
 
 fn parse_movie(input: &[u8]) -> Result<ParsedMovie, TrimError> {
-    parse_movie_with_source_len(input, input.len())
+    let top = strict_boxes_between(input, 0, input.len(), "top-level")?;
+    if top
+        .iter()
+        .filter(|box_info| &box_info.fourcc == b"moov")
+        .count()
+        > 1
+    {
+        return Err(TrimError::Corrupt("multiple moov boxes".into()));
+    }
+    let mdat_ranges = mdat_payload_ranges(&top)?;
+    parse_movie_with_source_len(input, input.len(), &mdat_ranges)
 }
 
-fn parse_movie_with_source_len(input: &[u8], source_len: usize) -> Result<ParsedMovie, TrimError> {
+fn parse_movie_with_source_len(
+    input: &[u8],
+    source_len: usize,
+    mdat_ranges: &[Range<u64>],
+) -> Result<ParsedMovie, TrimError> {
     let top = walk(input);
     let moov = find(&top, b"moov")
         .ok_or_else(|| TrimError::Unsupported("missing finalized moov".into()))?
         .clone();
-    let moov_children = children(input, &moov);
+    let moov_children = strict_children(input, &moov, "moov")?;
     if find(&moov_children, b"mvex").is_some() {
         return Err(TrimError::Unsupported(
             "fragmented/unfinalized files are not trim-ready".into(),
@@ -1337,23 +1366,63 @@ fn parse_movie_with_source_len(input: &[u8], source_len: usize) -> Result<Parsed
     let mvhd = find(&moov_children, b"mvhd")
         .ok_or_else(|| TrimError::Unsupported("missing mvhd".into()))?;
     let movie_timescale = parse_header_timescale(input, mvhd, "mvhd")?;
+    let duration_ticks = parse_header_duration(input, mvhd, "mvhd")?;
 
-    let tracks: Vec<ParsedTrack> = moov_children
+    let track_count = moov_children
         .iter()
-        .filter(|b| &b.fourcc == b"trak")
-        .map(|trak| parse_track(input, trak, source_len, movie_timescale))
-        .collect::<Result<_, _>>()?;
+        .filter(|box_info| &box_info.fourcc == b"trak")
+        .count();
+    if track_count > MAX_PARSED_TRACKS {
+        return Err(TrimError::Corrupt(format!(
+            "track count exceeds limit of {MAX_PARSED_TRACKS}"
+        )));
+    }
+
+    let mut tracks = Vec::with_capacity(track_count);
+    let mut remaining_samples = MAX_TOTAL_PARSED_SAMPLES;
+    for trak in moov_children
+        .iter()
+        .filter(|box_info| &box_info.fourcc == b"trak")
+    {
+        let track = parse_track(input, trak, source_len, movie_timescale, remaining_samples)?;
+        remaining_samples = remaining_samples
+            .checked_sub(track.samples.len())
+            .ok_or_else(|| TrimError::Corrupt("total sample count exceeds limit".into()))?;
+        tracks.push(track);
+    }
     if tracks.is_empty() {
         return Err(TrimError::Unsupported("no tracks found".into()));
     }
-    Ok(ParsedMovie { tracks })
+    validate_total_sample_count(tracks.iter().map(|track| track.samples.len()))?;
+    validate_sample_byte_layout(&tracks, mdat_ranges)?;
+    Ok(ParsedMovie {
+        movie_timescale,
+        duration_ticks,
+        tracks,
+    })
 }
 
-fn parse_movie_reader<R: Read + Seek>(reader: &mut R) -> Result<ParsedMovie, TrimError> {
-    let source_len = usize::try_from(reader.seek(SeekFrom::End(0))?)
+fn validate_total_sample_count(
+    counts: impl IntoIterator<Item = usize>,
+) -> Result<usize, TrimError> {
+    let total = counts.into_iter().try_fold(0_usize, |total, count| {
+        total
+            .checked_add(count)
+            .ok_or_else(|| TrimError::Corrupt("total sample count overflow".into()))
+    })?;
+    if total > MAX_TOTAL_PARSED_SAMPLES {
+        return Err(TrimError::Corrupt(format!(
+            "total sample count exceeds limit of {MAX_TOTAL_PARSED_SAMPLES}"
+        )));
+    }
+    Ok(total)
+}
+
+pub(crate) fn parse_movie_reader<R: Read + Seek>(reader: &mut R) -> Result<ParsedMovie, TrimError> {
+    let layout = read_finalized_layout(reader)?;
+    let source_len = usize::try_from(layout.source_len)
         .map_err(|_| TrimError::Unsupported("source file is too large to address".into()))?;
-    let moov = read_finalized_moov_bytes(reader)?;
-    parse_movie_with_source_len(&moov, source_len)
+    parse_movie_with_source_len(&layout.moov, source_len, &layout.mdat_ranges)
 }
 
 fn parse_track(
@@ -1361,21 +1430,25 @@ fn parse_track(
     trak: &BoxInfo,
     source_len: usize,
     movie_timescale: u32,
+    remaining_sample_budget: usize,
 ) -> Result<ParsedTrack, TrimError> {
-    let cfg = parse_track_cfg(input, trak)?;
+    let parsed_cfg = parse_track_cfg(input, trak)?;
+    let id = parse_track_id(input, trak)?;
     let mdia = require_child(input, trak, b"mdia")?;
     let mdhd = require_child(input, &mdia, b"mdhd")?;
     let timescale = parse_mdhd_timescale(input, &mdhd)?;
     let minf = require_child(input, &mdia, b"minf")?;
     let stbl = require_child(input, &minf, b"stbl")?;
-    let samples = parse_sample_table(input, &stbl, source_len)?;
+    let samples = parse_sample_table(input, &stbl, source_len, remaining_sample_budget)?;
     let samples = apply_track_edit_list(input, trak, samples, timescale, movie_timescale)?;
     if samples.is_empty() {
         return Err(TrimError::Unsupported("track has no samples".into()));
     }
     Ok(ParsedTrack {
-        cfg,
+        id,
+        cfg: parsed_cfg.cfg,
         timescale,
+        nal_length_size: parsed_cfg.nal_length_size,
         samples,
     })
 }
@@ -1529,7 +1602,12 @@ fn rescale_ticks(
     u64::try_from(scaled).map_err(|_| TrimError::Corrupt("timestamp rescale overflow".into()))
 }
 
-fn parse_track_cfg(input: &[u8], trak: &BoxInfo) -> Result<TrackConfig, TrimError> {
+struct ParsedTrackConfig {
+    cfg: TrackConfig,
+    nal_length_size: Option<u8>,
+}
+
+fn parse_track_cfg(input: &[u8], trak: &BoxInfo) -> Result<ParsedTrackConfig, TrimError> {
     let mdia = require_child(input, trak, b"mdia")?;
     let mdhd = require_child(input, &mdia, b"mdhd")?;
     let timescale = parse_mdhd_timescale(input, &mdhd)?;
@@ -1562,6 +1640,26 @@ fn parse_mdhd_timescale(input: &[u8], mdhd: &BoxInfo) -> Result<u32, TrimError> 
     parse_header_timescale(input, mdhd, "mdhd")
 }
 
+fn parse_track_id(input: &[u8], trak: &BoxInfo) -> Result<u32, TrimError> {
+    let tkhd = require_child(input, trak, b"tkhd")?;
+    let p = tkhd.payload_offset as usize;
+    let end = box_end(&tkhd)?;
+    let version = *input
+        .get(p)
+        .filter(|_| p < end)
+        .ok_or_else(|| TrimError::Corrupt("truncated tkhd".into()))?;
+    let id_offset = match version {
+        0 => p + 12,
+        1 => p + 20,
+        _ => return Err(TrimError::Unsupported("unknown tkhd version".into())),
+    };
+    let id = read_u32_bounded(input, id_offset, end, "tkhd")?;
+    if id == 0 {
+        return Err(TrimError::Corrupt("zero tkhd track id".into()));
+    }
+    Ok(id)
+}
+
 fn parse_header_timescale(input: &[u8], header: &BoxInfo, label: &str) -> Result<u32, TrimError> {
     let p = header.payload_offset as usize;
     let end = box_end(header)?;
@@ -1581,6 +1679,20 @@ fn parse_header_timescale(input: &[u8], header: &BoxInfo, label: &str) -> Result
     Ok(timescale)
 }
 
+fn parse_header_duration(input: &[u8], header: &BoxInfo, label: &str) -> Result<u64, TrimError> {
+    let p = header.payload_offset as usize;
+    let end = box_end(header)?;
+    let version = *input
+        .get(p)
+        .filter(|_| p < end)
+        .ok_or_else(|| TrimError::Corrupt(format!("truncated {label}")))?;
+    match version {
+        0 => Ok(u64::from(read_u32_bounded(input, p + 16, end, label)?)),
+        1 => read_u64_bounded(input, p + 24, end, label),
+        _ => Err(TrimError::Unsupported(format!("unknown {label} version"))),
+    }
+}
+
 fn parse_hdlr(input: &[u8], hdlr: &BoxInfo) -> Result<[u8; 4], TrimError> {
     let p = hdlr.payload_offset as usize;
     read_fourcc_bounded(input, p + 8, box_end(hdlr)?, "hdlr")
@@ -1591,7 +1703,7 @@ fn parse_stsd(
     stsd: &BoxInfo,
     handler: [u8; 4],
     timescale: u32,
-) -> Result<TrackConfig, TrimError> {
+) -> Result<ParsedTrackConfig, TrimError> {
     let p = stsd.payload_offset as usize;
     let stsd_end = box_end(stsd)?;
     let entry_count = read_u32_bounded(input, p + 4, stsd_end, "stsd")?;
@@ -1615,7 +1727,7 @@ fn parse_video_stsd(
     input: &[u8],
     entry: &BoxInfo,
     timescale: u32,
-) -> Result<TrackConfig, TrimError> {
+) -> Result<ParsedTrackConfig, TrimError> {
     let p = entry.payload_offset as usize;
     let entry_end = box_end(entry)?;
     if p + 78 > entry_end {
@@ -1625,26 +1737,32 @@ fn parse_video_stsd(
     let height = read_u16(input, p + 26)?;
     // The codec configuration box follows the 78-byte VisualSampleEntry
     // shell, which is identical for avc1/hvc1/av01.
-    let codec = match &entry.fourcc {
+    let (codec, nal_length_size) = match &entry.fourcc {
         b"avc1" => {
             let avcc = find_box_between(input, p + 78, entry_end, b"avcC")?
                 .ok_or_else(|| TrimError::Unsupported("missing avcC".into()))?;
-            let (sps, pps) = parse_avcc(input, &avcc)?;
-            VideoCodecParams::H264 { sps, pps }
+            let (sps, pps, nal_length_size) = parse_avcc(input, &avcc)?;
+            (VideoCodecParams::H264 { sps, pps }, Some(nal_length_size))
         }
         b"hvc1" | b"hev1" => {
             let hvcc = find_box_between(input, p + 78, entry_end, b"hvcC")?
                 .ok_or_else(|| TrimError::Unsupported("missing hvcC".into()))?;
-            let (vps, sps, pps) = parse_hvcc(input, &hvcc)?;
-            VideoCodecParams::Hevc { vps, sps, pps }
+            let (vps, sps, pps, nal_length_size) = parse_hvcc(input, &hvcc)?;
+            (
+                VideoCodecParams::Hevc { vps, sps, pps },
+                Some(nal_length_size),
+            )
         }
         b"av01" => {
             let av1c = find_box_between(input, p + 78, entry_end, b"av1C")?
                 .ok_or_else(|| TrimError::Unsupported("missing av1C".into()))?;
             let sequence_header_obu = parse_av1c(input, &av1c)?;
-            VideoCodecParams::Av1 {
-                sequence_header_obu,
-            }
+            (
+                VideoCodecParams::Av1 {
+                    sequence_header_obu,
+                },
+                None,
+            )
         }
         other => {
             return Err(TrimError::Unsupported(format!(
@@ -1653,15 +1771,18 @@ fn parse_video_stsd(
             )))
         }
     };
-    Ok(TrackConfig::Video(VideoTrackConfig {
-        width,
-        height,
-        timescale,
-        codec,
-    }))
+    Ok(ParsedTrackConfig {
+        cfg: TrackConfig::Video(VideoTrackConfig {
+            width,
+            height,
+            timescale,
+            codec,
+        }),
+        nal_length_size,
+    })
 }
 
-fn parse_audio_stsd(input: &[u8], entry: &BoxInfo) -> Result<TrackConfig, TrimError> {
+fn parse_audio_stsd(input: &[u8], entry: &BoxInfo) -> Result<ParsedTrackConfig, TrimError> {
     if &entry.fourcc != b"Opus" {
         return Err(TrimError::Unsupported(format!(
             "unsupported audio sample entry {}",
@@ -1680,20 +1801,34 @@ fn parse_audio_stsd(input: &[u8], entry: &BoxInfo) -> Result<TrackConfig, TrimEr
     let dops_end = box_end(&dops)?;
     let pre_skip = read_u16_bounded(input, dp + 2, dops_end, "dOps")?;
     let sample_rate = read_u32_bounded(input, dp + 4, dops_end, "dOps")?;
-    Ok(TrackConfig::Audio(AudioTrackConfig {
-        channels,
-        sample_rate,
-        pre_skip,
-    }))
+    Ok(ParsedTrackConfig {
+        cfg: TrackConfig::Audio(AudioTrackConfig {
+            channels,
+            sample_rate,
+            pre_skip,
+        }),
+        nal_length_size: None,
+    })
 }
 
-type H264ParamSets = (Vec<Vec<u8>>, Vec<Vec<u8>>);
+type H264ParamSets = (Vec<Vec<u8>>, Vec<Vec<u8>>, u8);
 
 fn parse_avcc(input: &[u8], avcc: &BoxInfo) -> Result<H264ParamSets, TrimError> {
     let p = avcc.payload_offset as usize;
     let end = box_end(avcc)?;
     if p + 7 > end {
         return Err(TrimError::Corrupt("truncated avcC".into()));
+    }
+    if input[p + 4] & 0xfc != 0xfc {
+        return Err(TrimError::Corrupt(
+            "invalid avcC length-size reserved bits".into(),
+        ));
+    }
+    let nal_length_size = (input[p + 4] & 0x03) + 1;
+    if !matches!(nal_length_size, 1 | 2 | 4) {
+        return Err(TrimError::Unsupported(format!(
+            "unsupported avcC NAL length size {nal_length_size}"
+        )));
     }
     let sps_count = input[p + 5] & 0x1f;
     if sps_count == 0 {
@@ -1722,11 +1857,11 @@ fn parse_avcc(input: &[u8], avcc: &BoxInfo) -> Result<H264ParamSets, TrimError> 
         pps.push(read_slice(input, pos, pps_len, end)?.to_vec());
         pos += pps_len;
     }
-    Ok((sps, pps))
+    Ok((sps, pps, nal_length_size))
 }
 
 /// (VPS, SPS, PPS) raw NAL units recovered from an `hvcC` record.
-type HevcParamSets = (Vec<Vec<u8>>, Vec<Vec<u8>>, Vec<Vec<u8>>);
+type HevcParamSets = (Vec<Vec<u8>>, Vec<Vec<u8>>, Vec<Vec<u8>>, u8);
 
 /// Recover every VPS/SPS/PPS NAL from an `hvcC` NAL-array section.
 fn parse_hvcc(input: &[u8], hvcc: &BoxInfo) -> Result<HevcParamSets, TrimError> {
@@ -1735,6 +1870,12 @@ fn parse_hvcc(input: &[u8], hvcc: &BoxInfo) -> Result<HevcParamSets, TrimError> 
     // The fixed configuration prefix is 22 bytes; numOfArrays is the 23rd.
     if p + 23 > end {
         return Err(TrimError::Corrupt("truncated hvcC".into()));
+    }
+    let nal_length_size = (input[p + 21] & 0x03) + 1;
+    if !matches!(nal_length_size, 1 | 2 | 4) {
+        return Err(TrimError::Unsupported(format!(
+            "unsupported hvcC NAL length size {nal_length_size}"
+        )));
     }
     let num_arrays = input[p + 22];
     let mut pos = p + 23;
@@ -1765,7 +1906,7 @@ fn parse_hvcc(input: &[u8], hvcc: &BoxInfo) -> Result<HevcParamSets, TrimError> 
     if vps.is_empty() || sps.is_empty() || pps.is_empty() {
         Err(TrimError::Unsupported("hvcC missing VPS/SPS/PPS".into()))
     } else {
-        Ok((vps, sps, pps))
+        Ok((vps, sps, pps, nal_length_size))
     }
 }
 
@@ -1788,20 +1929,27 @@ fn parse_sample_table(
     input: &[u8],
     stbl: &BoxInfo,
     source_len: usize,
+    remaining_sample_budget: usize,
 ) -> Result<Vec<SampleRecord>, TrimError> {
-    let stsz = require_child(input, stbl, b"stsz")?;
-    let sizes = parse_stsz(input, &stsz)?;
-    let stts = require_child(input, stbl, b"stts")?;
+    let stbl_children = strict_children(input, stbl, "stbl")?;
+    if find(&stbl_children, b"ctts").is_some() {
+        return Err(TrimError::Unsupported(
+            "composition offsets (ctts/B-frames) are not supported for native playback".into(),
+        ));
+    }
+    let stsz = required_child(&stbl_children, b"stsz")?;
+    let sizes = parse_stsz(input, &stsz, remaining_sample_budget)?;
+    let stts = required_child(&stbl_children, b"stts")?;
     let durations = parse_stts(input, &stts, sizes.len())?;
-    let sync = match child(input, stbl, b"stss") {
-        Some(stss) => parse_stss(input, &stss, sizes.len())?,
+    let sync = match find(&stbl_children, b"stss") {
+        Some(stss) => parse_stss(input, stss, sizes.len())?,
         None => vec![true; sizes.len()],
     };
-    let stsc = require_child(input, stbl, b"stsc")?;
-    let chunk_offsets = if let Some(co64) = child(input, stbl, b"co64") {
-        parse_co64(input, &co64)?
+    let stsc = required_child(&stbl_children, b"stsc")?;
+    let chunk_offsets = if let Some(co64) = find(&stbl_children, b"co64") {
+        parse_co64(input, co64)?
     } else {
-        let stco = require_child(input, stbl, b"stco")?;
+        let stco = required_child(&stbl_children, b"stco")?;
         parse_stco(input, &stco)?
     };
     let samples_per_chunk = parse_stsc(input, &stsc, chunk_offsets.len())?;
@@ -1830,6 +1978,11 @@ fn parse_stts(
     for _ in 0..count {
         let sample_count = read_u32(input, pos)? as usize;
         let delta = read_u32(input, pos + 4)?;
+        if sample_count == 0 || delta == 0 {
+            return Err(TrimError::Corrupt(
+                "stts contains a zero sample count or duration".into(),
+            ));
+        }
         let expanded = out
             .len()
             .checked_add(sample_count)
@@ -1851,11 +2004,20 @@ fn parse_stts(
     Ok(out)
 }
 
-fn parse_stsz(input: &[u8], stsz: &BoxInfo) -> Result<Vec<u32>, TrimError> {
+fn parse_stsz(
+    input: &[u8],
+    stsz: &BoxInfo,
+    remaining_sample_budget: usize,
+) -> Result<Vec<u32>, TrimError> {
     let p = stsz.payload_offset as usize;
     let sample_size = read_u32(input, p + 4)?;
     let sample_count = read_u32(input, p + 8)? as usize;
     validate_sample_count(sample_count, "stsz")?;
+    if sample_count > remaining_sample_budget {
+        return Err(TrimError::Corrupt(format!(
+            "total sample count exceeds limit of {MAX_TOTAL_PARSED_SAMPLES}"
+        )));
+    }
     if sample_size != 0 {
         return Ok(vec![sample_size; sample_count]);
     }
@@ -1864,7 +2026,13 @@ fn parse_stsz(input: &[u8], stsz: &BoxInfo) -> Result<Vec<u32>, TrimError> {
     validate_table_entries(sample_count, pos, end, 4, "stsz")?;
     let mut out = Vec::with_capacity(sample_count);
     for _ in 0..sample_count {
-        out.push(read_u32(input, pos)?);
+        let size = read_u32(input, pos)?;
+        if size == 0 {
+            return Err(TrimError::Corrupt(
+                "stsz contains a zero-sized sample".into(),
+            ));
+        }
+        out.push(size);
         pos += 4;
     }
     Ok(out)
@@ -1882,12 +2050,19 @@ fn parse_stss(input: &[u8], stss: &BoxInfo, sample_count: usize) -> Result<Vec<b
         ));
     }
     let mut sync = vec![false; sample_count];
+    let mut previous = 0_usize;
     for _ in 0..entry_count {
         let n = read_u32(input, pos)? as usize;
         if n == 0 || n > sample_count {
             return Err(TrimError::Corrupt("stss sample number out of range".into()));
         }
+        if n <= previous {
+            return Err(TrimError::Corrupt(
+                "stss entries must be unique and strictly increasing".into(),
+            ));
+        }
         sync[n - 1] = true;
+        previous = n;
         pos += 4;
     }
     Ok(sync)
@@ -1934,13 +2109,21 @@ fn parse_stsc(input: &[u8], stsc: &BoxInfo, chunk_count: usize) -> Result<Vec<u3
     validate_sample_count(entry_count, "stsc")?;
     validate_table_entries(entry_count, pos, end, 12, "stsc")?;
     let mut entries = Vec::with_capacity(entry_count);
+    let mut previous_first_chunk = 0_u32;
     for _ in 0..entry_count {
         let first_chunk = read_u32(input, pos)?;
         let samples_per_chunk = read_u32(input, pos + 4)?;
-        if first_chunk == 0 || samples_per_chunk == 0 {
+        let sample_description_index = read_u32(input, pos + 8)?;
+        if first_chunk == 0 || samples_per_chunk == 0 || sample_description_index != 1 {
             return Err(TrimError::Corrupt("invalid stsc entry".into()));
         }
+        if first_chunk <= previous_first_chunk {
+            return Err(TrimError::Corrupt(
+                "stsc first_chunk entries must be strictly increasing".into(),
+            ));
+        }
         entries.push((first_chunk, samples_per_chunk));
+        previous_first_chunk = first_chunk;
         pos += 12;
     }
     if chunk_count == 0 {
@@ -1971,7 +2154,13 @@ fn records_from_tables(
     chunk_offsets: &[u64],
     samples_per_chunk: &[u32],
 ) -> Result<Vec<SampleRecord>, TrimError> {
-    let expected: usize = samples_per_chunk.iter().map(|&n| n as usize).sum();
+    let expected = samples_per_chunk
+        .iter()
+        .try_fold(0_usize, |total, &count| {
+            total
+                .checked_add(count as usize)
+                .ok_or_else(|| TrimError::Corrupt("stsc sample count overflow".into()))
+        })?;
     if expected != sizes.len() {
         return Err(TrimError::Corrupt(format!(
             "stsc sample count {expected} does not match stsz count {}",
@@ -2000,9 +2189,12 @@ fn records_from_tables(
                 size,
                 duration: durations[sample_index],
                 is_sync: sync[sample_index],
+                decode_ticks: start_ticks,
                 start_ticks,
             });
-            start_ticks += durations[sample_index] as u64;
+            start_ticks = start_ticks
+                .checked_add(u64::from(durations[sample_index]))
+                .ok_or_else(|| TrimError::Corrupt("sample timestamp overflow".into()))?;
             offset = end;
             sample_index += 1;
         }
@@ -2017,8 +2209,22 @@ fn child(input: &[u8], parent: &BoxInfo, fourcc: &[u8; 4]) -> Option<BoxInfo> {
 }
 
 fn require_child(input: &[u8], parent: &BoxInfo, fourcc: &[u8; 4]) -> Result<BoxInfo, TrimError> {
-    child(input, parent, fourcc)
+    required_child(
+        &strict_children(input, parent, &fourcc_str(&parent.fourcc))?,
+        fourcc,
+    )
+}
+
+fn required_child(children: &[BoxInfo], fourcc: &[u8; 4]) -> Result<BoxInfo, TrimError> {
+    find(children, fourcc)
+        .cloned()
         .ok_or_else(|| TrimError::Unsupported(format!("missing {} box", fourcc_str(fourcc))))
+}
+
+fn strict_children(input: &[u8], parent: &BoxInfo, label: &str) -> Result<Vec<BoxInfo>, TrimError> {
+    let start = usize::try_from(parent.payload_offset)
+        .map_err(|_| TrimError::Corrupt(format!("{label} payload offset too large")))?;
+    strict_boxes_between(input, start, box_end(parent)?, label)
 }
 
 fn find_box_between(
@@ -2072,29 +2278,169 @@ fn read_box_at(input: &[u8], offset: usize, limit: usize) -> Result<BoxInfo, Tri
     })
 }
 
-fn read_finalized_moov_bytes<R: Read + Seek>(reader: &mut R) -> Result<Vec<u8>, TrimError> {
-    let file_len = reader.seek(SeekFrom::End(0))?;
+fn strict_boxes_between(
+    input: &[u8],
+    start: usize,
+    end: usize,
+    label: &str,
+) -> Result<Vec<BoxInfo>, TrimError> {
+    if start > end || end > input.len() {
+        return Err(TrimError::Corrupt(format!("invalid {label} box range")));
+    }
+    let mut boxes = Vec::new();
+    let mut offset = start;
+    while offset < end {
+        let box_info = read_box_at(input, offset, end)?;
+        let next = box_end(&box_info)?;
+        if next <= offset {
+            return Err(TrimError::Corrupt(format!(
+                "{label} box parser made no progress"
+            )));
+        }
+        boxes.push(box_info);
+        offset = next;
+    }
+    if offset != end {
+        return Err(TrimError::Corrupt(format!(
+            "trailing bytes in {label} box range"
+        )));
+    }
+    Ok(boxes)
+}
+
+fn mdat_payload_ranges(top: &[BoxInfo]) -> Result<Vec<Range<u64>>, TrimError> {
+    let ranges = top
+        .iter()
+        .filter(|box_info| &box_info.fourcc == b"mdat")
+        .map(|box_info| {
+            let end = box_info
+                .offset
+                .checked_add(box_info.size)
+                .ok_or_else(|| TrimError::Corrupt("mdat end overflow".into()))?;
+            Ok(box_info.payload_offset..end)
+        })
+        .collect::<Result<Vec<_>, TrimError>>()?;
+    if ranges.is_empty() {
+        return Err(TrimError::Unsupported("missing mdat".into()));
+    }
+    Ok(ranges)
+}
+
+fn validate_sample_byte_layout(
+    tracks: &[ParsedTrack],
+    mdat_ranges: &[Range<u64>],
+) -> Result<(), TrimError> {
+    let mut track_ids = BTreeSet::new();
+    for track in tracks {
+        if !track_ids.insert(track.id) {
+            return Err(TrimError::Corrupt(format!(
+                "duplicate track id {}",
+                track.id
+            )));
+        }
+        let mut previous_end = None;
+        for sample in &track.samples {
+            let (start, end) = sample_byte_range(sample)?;
+            if !mdat_ranges
+                .iter()
+                .any(|mdat| start >= mdat.start && end <= mdat.end)
+            {
+                return Err(TrimError::Corrupt(
+                    "sample byte range is not wholly inside an mdat payload".into(),
+                ));
+            }
+            if previous_end.is_some_and(|previous| start < previous) {
+                return Err(TrimError::Corrupt(
+                    "track sample byte ranges overlap or are out of file order".into(),
+                ));
+            }
+            previous_end = Some(end);
+        }
+    }
+
+    // Each track is now known to be ordered. Merge at most one range per
+    // track instead of allocating and sorting another entry for every sample.
+    let mut pending = BinaryHeap::with_capacity(tracks.len());
+    for (track_index, track) in tracks.iter().enumerate() {
+        if let Some(sample) = track.samples.first() {
+            let (start, end) = sample_byte_range(sample)?;
+            pending.push(Reverse((start, end, track_index, 0_usize)));
+        }
+    }
+    let mut previous_end = None;
+    while let Some(Reverse((start, end, track_index, sample_index))) = pending.pop() {
+        if previous_end.is_some_and(|previous| start < previous) {
+            return Err(TrimError::Corrupt("sample byte ranges overlap".into()));
+        }
+        previous_end = Some(end);
+        let next_index = sample_index + 1;
+        if let Some(sample) = tracks[track_index].samples.get(next_index) {
+            let (next_start, next_end) = sample_byte_range(sample)?;
+            pending.push(Reverse((next_start, next_end, track_index, next_index)));
+        }
+    }
+    Ok(())
+}
+
+fn sample_byte_range(sample: &SampleRecord) -> Result<(u64, u64), TrimError> {
+    let start = sample.offset as u64;
+    let end = start
+        .checked_add(u64::from(sample.size))
+        .ok_or_else(|| TrimError::Corrupt("sample byte range overflow".into()))?;
+    Ok((start, end))
+}
+
+struct FinalizedLayout {
+    source_len: u64,
+    moov: Vec<u8>,
+    mdat_ranges: Vec<Range<u64>>,
+}
+
+fn read_finalized_layout<R: Read + Seek>(reader: &mut R) -> Result<FinalizedLayout, TrimError> {
+    let source_len = reader.seek(SeekFrom::End(0))?;
     reader.seek(SeekFrom::Start(0))?;
 
     let mut offset = 0_u64;
-    while offset < file_len {
-        let top = read_top_level_box(reader, offset, file_len)?;
-        if &top.fourcc == b"moov" {
-            return read_box_bytes(reader, &top);
-        }
-        let next = top
+    let mut moov = None;
+    let mut mdat_ranges = Vec::new();
+    while offset < source_len {
+        let top = read_top_level_box(reader, offset, source_len)?;
+        let end = top
             .offset
             .checked_add(top.size)
             .ok_or_else(|| TrimError::Corrupt("top-level box offset overflow".into()))?;
-        if next <= offset {
+        match &top.fourcc {
+            b"moov" => {
+                if moov.is_some() {
+                    return Err(TrimError::Corrupt("multiple moov boxes".into()));
+                }
+                moov = Some(read_box_bytes(reader, &top)?);
+            }
+            b"mdat" => mdat_ranges.push(top.payload_offset..end),
+            _ => {}
+        }
+        if end <= offset {
             return Err(TrimError::Corrupt(
                 "top-level box parser made no progress".into(),
             ));
         }
-        offset = next;
+        offset = end;
     }
+    if offset != source_len {
+        return Err(TrimError::Corrupt(
+            "trailing bytes after top-level boxes".into(),
+        ));
+    }
+    let moov = moov.ok_or_else(|| TrimError::Unsupported("missing finalized moov".into()))?;
+    Ok(FinalizedLayout {
+        source_len,
+        moov,
+        mdat_ranges,
+    })
+}
 
-    Err(TrimError::Unsupported("missing finalized moov".into()))
+fn read_finalized_moov_bytes<R: Read + Seek>(reader: &mut R) -> Result<Vec<u8>, TrimError> {
+    Ok(read_finalized_layout(reader)?.moov)
 }
 
 fn read_top_level_box<R: Read + Seek>(
@@ -2314,6 +2660,16 @@ mod tests {
         assert!(read_u32_bounded(&bytes, 2, 4, "test box").is_err());
         assert!(read_u16_bounded(&bytes, 3, 4, "test box").is_err());
         assert!(read_fourcc_bounded(&bytes, 2, 4, "test box").is_err());
+    }
+
+    #[test]
+    fn aggregate_sample_limit_is_checked_without_allocating_sample_records() {
+        assert_eq!(
+            validate_total_sample_count([4_000_000, 4_000_000]).unwrap(),
+            MAX_TOTAL_PARSED_SAMPLES
+        );
+        assert!(validate_total_sample_count([4_000_000, 4_000_000, 1]).is_err());
+        assert!(validate_total_sample_count([usize::MAX, 1]).is_err());
     }
 
     fn video_track() -> TrackConfig {
@@ -2936,8 +3292,16 @@ mod tests {
         let input = crate::boxes::mp4_box(*b"stsz", payload);
         let info = walk(&input).remove(0);
 
-        let err = parse_stsz(&input, &info).unwrap_err();
+        let err = parse_stsz(&input, &info, MAX_TOTAL_PARSED_SAMPLES).unwrap_err();
         assert!(err.to_string().contains("sample count exceeds limit"));
+
+        let mut payload = vec![0_u8; 4];
+        payload.extend(1_u32.to_be_bytes());
+        payload.extend(2_u32.to_be_bytes());
+        let input = crate::boxes::mp4_box(*b"stsz", payload);
+        let info = walk(&input).remove(0);
+        let err = parse_stsz(&input, &info, 1).unwrap_err();
+        assert!(err.to_string().contains("total sample count exceeds limit"));
     }
 
     #[test]
