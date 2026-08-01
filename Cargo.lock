@@ -1013,6 +1013,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "clipline-playback"
+version = "0.1.0"
+dependencies = [
+ "clipline-mp4",
+ "shiguredo_opus",
+ "thiserror 2.0.18",
+ "windows 0.62.2",
+ "windows-core 0.62.2",
+]
+
+[[package]]
 name = "clipline-storage"
 version = "0.1.0"
 dependencies = [
