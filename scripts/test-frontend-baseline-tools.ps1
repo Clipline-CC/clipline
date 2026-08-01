@@ -21,6 +21,11 @@ function Assert-SequenceEqual {
     }
 }
 
+function Assert-True {
+    param([bool]$Condition, [string]$Message)
+    if (-not $Condition) { throw $Message }
+}
+
 $rootStart = [datetime]'2026-08-01T00:00:00Z'
 $rows = @(
     [pscustomobject]@{ ProcessId = 11; ParentProcessId = 10; CreationDate = $rootStart.AddSeconds(1) },
@@ -66,5 +71,14 @@ Assert-Equal 'root' (Get-CliplineProcessRole 'clipline-app.exe' '' $true) 'root 
 Assert-Equal 'webview-gpu' (Get-CliplineProcessRole 'msedgewebview2.exe' '--type=gpu-process' $false) 'GPU role'
 Assert-Equal 'webview-renderer' (Get-CliplineProcessRole 'msedgewebview2.exe' '--type=renderer' $false) 'renderer role'
 Assert-Equal 'ffmpeg' (Get-CliplineProcessRole 'ffmpeg.exe' '' $false) 'FFmpeg role'
+
+if ($env:OS -eq 'Windows_NT') {
+    $live = Get-CliplineNativeProcessSnapshot -ProcessId $PID
+    Assert-True ($live.PrivateWorkingSetBytes -gt 0) 'live private working set must be readable'
+    Assert-True ($live.PrivateCommitBytes -gt 0) 'live private commit must be readable'
+    Assert-True ($live.WorkingSetBytes -gt 0) 'live ordinary working set must be readable'
+    Assert-True ($live.HandleCount -gt 0) 'live handle count must be readable'
+    Assert-True ($live.ThreadCount -gt 0) 'live thread count must be readable'
+}
 
 Write-Host 'frontend baseline helper self-tests passed'

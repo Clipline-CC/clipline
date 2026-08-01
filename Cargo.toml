@@ -34,3 +34,10 @@ wayland-scanner = { git = "https://github.com/Smithay/wayland-rs", rev = "a55c54
 # Keep private symbols so release panic backtraces can be resolved from the
 # access-controlled CI artifact. Symbols are not bundled with the installer.
 debug = 1
+
+# Optimized build used only by the matched frontend benchmark harness. Keeping
+# debug assertions enabled is a safety property: Clipline deliberately skips
+# autostart-registry mutation when `cfg!(debug_assertions)` is true.
+[profile.benchmark]
+inherits = "release"
+debug-assertions = true

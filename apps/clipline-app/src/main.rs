@@ -2,11 +2,17 @@
 
 #[cfg(not(windows))]
 fn main() {
+    if print_benchmark_probe_if_requested() {
+        return;
+    }
     eprintln!("clipline-app is Windows-only (capture/encode are platform-bound)");
 }
 
 #[cfg(windows)]
 fn main() {
+    if print_benchmark_probe_if_requested() {
+        return;
+    }
     if let Err(error) = windows::wait_for_elevation_parent_from_args() {
         eprintln!("administrator restart handoff: {error}");
         return;
@@ -60,3 +66,42 @@ mod updates;
 mod util;
 #[cfg(windows)]
 mod windows;
+
+const BENCHMARK_PROBE_ARGUMENT: &str = "--clipline-benchmark-probe";
+
+fn benchmark_shell_is_safe(debug_assertions: bool, opt_level: &str) -> bool {
+    debug_assertions && !matches!(opt_level.trim(), "" | "0" | "unknown")
+}
+
+fn print_benchmark_probe_if_requested() -> bool {
+    if !std::env::args().any(|argument| argument == BENCHMARK_PROBE_ARGUMENT) {
+        return false;
+    }
+    let opt_level = env!("CLIPLINE_BUILD_OPT_LEVEL");
+    let safe = benchmark_shell_is_safe(cfg!(debug_assertions), opt_level);
+    println!(
+        concat!(
+            "{{\"schema\":1,\"benchmark_shell_safe\":{},",
+            "\"debug_assertions\":{},\"opt_level\":\"{}\",",
+            "\"autostart_registry_mutation\":{}}}"
+        ),
+        safe,
+        cfg!(debug_assertions),
+        opt_level,
+        !cfg!(debug_assertions)
+    );
+    true
+}
+
+#[cfg(test)]
+mod benchmark_probe_tests {
+    use super::benchmark_shell_is_safe;
+
+    #[test]
+    fn benchmark_probe_requires_optimization_and_registry_safe_assertions() {
+        assert!(benchmark_shell_is_safe(true, "3"));
+        assert!(benchmark_shell_is_safe(true, "s"));
+        assert!(!benchmark_shell_is_safe(true, "0"));
+        assert!(!benchmark_shell_is_safe(false, "3"));
+    }
+}
