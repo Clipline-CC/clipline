@@ -122,6 +122,68 @@ fn unsafe_application_platform_helpers_live_under_the_windows_module() {
 }
 
 #[test]
+fn playback_windows_interop_lives_under_the_windows_module() {
+    let source_root = workspace_root().join("crates/clipline-playback/src");
+    let windows_root = source_root.join("windows");
+    assert!(
+        windows_root.is_dir(),
+        "clipline-playback Windows interop must live below {}",
+        windows_root.display()
+    );
+
+    let sources = rust_sources_below(&source_root);
+    let neutral_sources: Vec<_> = sources
+        .iter()
+        .filter(|path| !path.starts_with(&windows_root))
+        .collect();
+    let unsafe_owners: Vec<_> = neutral_sources
+        .iter()
+        .filter(|path| {
+            fs::read_to_string(path)
+                .expect("read playback source")
+                .split_whitespace()
+                .any(|token| token == "unsafe" || token.starts_with("unsafe{"))
+        })
+        .collect();
+    assert!(
+        unsafe_owners.is_empty(),
+        "first-party unsafe must be confined below {} but appears in {unsafe_owners:?}",
+        windows_root.display()
+    );
+
+    for symbol in [
+        "windows::Win32::Media::MediaFoundation",
+        "windows::Win32::Media::Audio",
+        "windows::Win32::Graphics::Direct3D11",
+        "MFStartup(",
+        "MFShutdown(",
+        "MFTEnumEx(",
+        "MFCreateDXGIDeviceManager(",
+        "IMFTransform",
+        "IMFDXGIDeviceManager",
+        "IAudioClient",
+        "IAudioRenderClient",
+        "IAudioClock",
+        "D3D11CreateDevice(",
+        "ID3D11",
+    ] {
+        let escaped_owners: Vec<_> = neutral_sources
+            .iter()
+            .filter(|path| {
+                fs::read_to_string(path)
+                    .expect("read playback source")
+                    .contains(symbol)
+            })
+            .collect();
+        assert!(
+            escaped_owners.is_empty(),
+            "{symbol} must be confined below {} but appears in {escaped_owners:?}",
+            windows_root.display()
+        );
+    }
+}
+
+#[test]
 fn capture_diagnostics_and_snapshot_names_match_production_behavior() {
     let root = workspace_root();
     let wasapi_path = root.join("crates/clipline-capture/src/windows/wasapi.rs");

@@ -10,6 +10,9 @@ mod scheduler;
 mod state;
 mod worker;
 
+#[cfg(windows)]
+pub mod windows;
+
 pub use annexb::{
     AnnexBError, AnnexBLimits, ConvertedAnnexB, H264AnnexBConverter, H264DecoderConfig,
     NativeVideoCapability, ParameterSetSubmission, UnsupportedVideoCodec,
