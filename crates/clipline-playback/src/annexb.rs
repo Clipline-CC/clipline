@@ -250,6 +250,13 @@ pub enum AnnexBError {
     },
     #[error("parameter-set submission counter is exhausted")]
     SubmissionExhausted,
+    #[error("loaded video sample counter is exhausted")]
+    LoadedSampleCounterExhausted,
+    #[error("loaded video sample token {loaded_id} was superseded by {current_id:?}")]
+    LoadedSampleSuperseded {
+        loaded_id: u64,
+        current_id: Option<u64>,
+    },
     #[error(transparent)]
     Index(#[from] clipline_mp4::PlaybackIndexError),
 }

@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use clipline_mp4::{IndexedMovie, PlaybackTrackConfig, SampleIndex, TrackIndex};
 use clipline_playback::{
     plan_video_sample_buffers, AnnexBError, AnnexBLimits, H264AnnexBConverter, H264DecoderConfig,
-    NativeVideoCapability, UnsupportedVideoCodec, VideoSampleTransport, WorkGeneration,
+    NativeVideoCapability, PlaybackTime, UnsupportedVideoCodec, VideoSampleTransport,
+    WorkGeneration,
 };
 
 const OPEN_GENERATION: WorkGeneration = WorkGeneration::new(1, 0);
@@ -426,4 +427,42 @@ fn production_fixture_is_byte_exact_bounded_and_allocation_stable_after_warmup()
     }
     assert_eq!(seek_generation_injections, 1);
     assert_eq!(transport.buffer_telemetry(), warmed);
+}
+
+#[test]
+fn indexed_read_and_annex_b_conversion_are_separate_generation_safe_checkpoints() {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/playback/hybrid-writer-h264-two-opus-5s.mp4");
+    let movie = IndexedMovie::open(fixture).unwrap();
+    let video_track_index = movie
+        .index()
+        .tracks
+        .iter()
+        .position(|track| matches!(track.config, PlaybackTrackConfig::H264 { .. }))
+        .unwrap();
+    let mut transport =
+        VideoSampleTransport::new(movie, video_track_index, OPEN_GENERATION).unwrap();
+
+    let superseded = transport.read_encoded_sample(0, OPEN_GENERATION).unwrap();
+    let current = transport.read_encoded_sample(1, OPEN_GENERATION).unwrap();
+    assert!(matches!(
+        transport.convert_loaded_sample(superseded, OPEN_GENERATION),
+        Err(AnnexBError::LoadedSampleSuperseded { .. })
+    ));
+    let unit = transport
+        .convert_loaded_sample(current, OPEN_GENERATION)
+        .unwrap();
+    assert_eq!(unit.sample_index, 1);
+
+    let stale_generation = transport.read_encoded_sample(2, OPEN_GENERATION).unwrap();
+    transport.reset_for_generation(SEEK_GENERATION);
+    assert!(matches!(
+        transport.convert_loaded_sample(stale_generation, OPEN_GENERATION),
+        Err(AnnexBError::StaleGeneration { .. }) | Err(AnnexBError::LoadedSampleSuperseded { .. })
+    ));
+
+    let seek = transport
+        .seek_plan(&[], PlaybackTime::new(2_345, 1_000).unwrap())
+        .unwrap();
+    assert_eq!(seek.video_sync_sample.track_index, video_track_index);
 }

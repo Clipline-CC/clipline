@@ -75,6 +75,8 @@ pub enum CommandError {
     NoMedia,
     #[error("media is still opening")]
     MediaNotReady,
+    #[error("media playback failed; open or close before sending another command")]
+    MediaFailed,
     #[error("playback volume must be finite and between zero and one")]
     InvalidVolume,
     #[error("playback rate must be finite and positive")]
@@ -83,6 +85,8 @@ pub enum CommandError {
     UnsupportedRate { milli_rate: i32 },
     #[error("step count must be non-zero")]
     InvalidStep,
+    #[error("playback time must have a non-zero timescale")]
+    InvalidTime,
     #[error("audio track {track_index} was selected more than once")]
     DuplicateTrack { track_index: usize },
     #[error("playback generation counter is exhausted")]
@@ -145,6 +149,14 @@ impl PlaybackState {
     }
 
     pub fn apply(&mut self, command: PlaybackCommand) -> Result<WorkGeneration, CommandError> {
+        if self.phase == PlaybackPhase::Failed
+            && !matches!(
+                &command,
+                PlaybackCommand::Open { .. } | PlaybackCommand::Close
+            )
+        {
+            return Err(CommandError::MediaFailed);
+        }
         match command {
             PlaybackCommand::Open { path } => {
                 if path.as_os_str().is_empty() {
@@ -198,6 +210,7 @@ impl PlaybackState {
                 }
             }
             PlaybackCommand::Seek { position } => {
+                Self::validate_time(position)?;
                 self.require_ready_media()?;
                 self.begin_seek()?;
                 self.position = position;
@@ -247,7 +260,10 @@ impl PlaybackState {
     }
 
     pub fn complete_open(&mut self, generation: WorkGeneration, duration: PlaybackTime) -> bool {
-        if !self.accepts(generation) || self.phase != PlaybackPhase::Opening {
+        if !self.accepts(generation)
+            || self.phase != PlaybackPhase::Opening
+            || Self::validate_time(duration).is_err()
+        {
             return false;
         }
         self.duration = Some(duration);
@@ -260,7 +276,10 @@ impl PlaybackState {
     }
 
     pub fn complete_seek(&mut self, generation: WorkGeneration, position: PlaybackTime) -> bool {
-        if !self.accepts(generation) || self.phase != PlaybackPhase::Seeking {
+        if !self.accepts(generation)
+            || self.phase != PlaybackPhase::Seeking
+            || Self::validate_time(position).is_err()
+        {
             return false;
         }
         self.position = position;
@@ -269,6 +288,57 @@ impl PlaybackState {
         } else {
             PlaybackPhase::Paused
         };
+        true
+    }
+
+    pub fn begin_recovery_seek(
+        &mut self,
+        generation: WorkGeneration,
+        position: PlaybackTime,
+    ) -> bool {
+        if !self.accepts(generation)
+            || self.require_ready_media().is_err()
+            || Self::validate_time(position).is_err()
+        {
+            return false;
+        }
+        self.position = position;
+        self.phase = PlaybackPhase::Seeking;
+        true
+    }
+
+    pub fn update_position(&mut self, generation: WorkGeneration, position: PlaybackTime) -> bool {
+        if !self.accepts(generation)
+            || matches!(
+                self.phase,
+                PlaybackPhase::Closed
+                    | PlaybackPhase::Opening
+                    | PlaybackPhase::Ended
+                    | PlaybackPhase::Failed
+            )
+            || Self::validate_time(position).is_err()
+        {
+            return false;
+        }
+        self.position = position;
+        true
+    }
+
+    pub fn mark_ended(&mut self, generation: WorkGeneration, position: PlaybackTime) -> bool {
+        if !self.update_position(generation, position) {
+            return false;
+        }
+        self.phase = PlaybackPhase::Ended;
+        self.playing_intent = false;
+        true
+    }
+
+    pub fn fail(&mut self, generation: WorkGeneration) -> bool {
+        if !self.accepts(generation) || self.phase == PlaybackPhase::Closed {
+            return false;
+        }
+        self.phase = PlaybackPhase::Failed;
+        self.playing_intent = false;
         true
     }
 
@@ -298,6 +368,14 @@ impl PlaybackState {
         self.generation.seek = next_seek;
         self.phase = PlaybackPhase::Seeking;
         Ok(())
+    }
+
+    fn validate_time(time: PlaybackTime) -> Result<(), CommandError> {
+        if time.timescale == 0 {
+            Err(CommandError::InvalidTime)
+        } else {
+            Ok(())
+        }
     }
 }
 

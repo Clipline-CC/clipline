@@ -499,3 +499,82 @@ fn indexed_packet_reader_enforces_ranges_timeline_and_generation_before_io() {
     ));
     assert_eq!(ended.telemetry().packets_read, 0);
 }
+
+#[test]
+fn indexed_audio_ranges_are_reselected_transactionally_for_each_seek_plan() {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/playback/hybrid-writer-h264-two-opus-5s.mp4");
+    let movie = IndexedMovie::open(fixture).unwrap();
+    let track_index = movie
+        .index()
+        .tracks
+        .iter()
+        .position(|track| matches!(track.config, PlaybackTrackConfig::Opus { .. }))
+        .unwrap();
+    let mut reader = IndexedAudioPacketReader::new(
+        movie,
+        vec![TrackSampleRange {
+            track_index,
+            samples: 10..12,
+        }],
+        PlaybackTime::new(240_000, 48_000).unwrap(),
+        OPEN_GENERATION,
+    )
+    .unwrap();
+    let warmed = reader.telemetry();
+
+    reader
+        .reselect_ranges(
+            vec![TrackSampleRange {
+                track_index,
+                samples: 20..22,
+            }],
+            PlaybackTime::new(240_000, 48_000).unwrap(),
+            SEEK_GENERATION,
+        )
+        .unwrap();
+    assert!(matches!(
+        reader.read_packet(track_index, 10, SEEK_GENERATION),
+        Err(AudioError::PacketOutsideRange { .. })
+    ));
+    assert_eq!(
+        reader
+            .read_packet(track_index, 20, SEEK_GENERATION)
+            .unwrap()
+            .bytes
+            .len(),
+        160
+    );
+    assert_eq!(
+        reader.telemetry().packet_reserve_count,
+        warmed.packet_reserve_count
+    );
+
+    let rejected_generation = WorkGeneration::new(1, 2);
+    assert!(matches!(
+        reader.reselect_ranges(
+            vec![
+                TrackSampleRange {
+                    track_index,
+                    samples: 30..31,
+                },
+                TrackSampleRange {
+                    track_index,
+                    samples: 31..32,
+                },
+            ],
+            PlaybackTime::new(240_000, 48_000).unwrap(),
+            rejected_generation,
+        ),
+        Err(AudioError::DuplicatePacketRange { .. })
+    ));
+    assert_eq!(
+        reader
+            .read_packet(track_index, 21, SEEK_GENERATION)
+            .unwrap()
+            .bytes
+            .len(),
+        160,
+        "a rejected selection must not mutate the live range or generation"
+    );
+}

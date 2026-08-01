@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 
 use clipline_playback::{
-    CommandError, CommandInbox, EnqueueError, EnqueueOutcome, PlaybackCommand, PlaybackEvent,
-    PlaybackPhase, PlaybackState, PlaybackTime, WorkGeneration, COMMAND_INBOX_CAPACITY,
+    CommandError, CommandInbox, EnqueueError, EnqueueOutcome, MonotonicTime100ns, PlaybackCommand,
+    PlaybackEvent, PlaybackPhase, PlaybackState, PlaybackTime, WorkGeneration,
+    COMMAND_INBOX_CAPACITY,
 };
 
 fn open(path: &str) -> PlaybackCommand {
@@ -118,6 +119,59 @@ fn invalid_commands_fail_without_mutating_state() {
         state.apply(PlaybackCommand::Step { frames: 0 }),
         Err(CommandError::InvalidStep)
     );
+
+    let before = state.snapshot();
+    assert_eq!(
+        state.apply(PlaybackCommand::Seek {
+            position: PlaybackTime {
+                ticks: 1,
+                timescale: 0,
+            },
+        }),
+        Err(CommandError::InvalidTime)
+    );
+    assert_eq!(state.snapshot(), before);
+}
+
+#[test]
+fn backend_state_updates_are_generation_and_time_fenced() {
+    let mut state = PlaybackState::default();
+    let generation = state.apply(open("clip.mp4")).unwrap();
+    let forged = PlaybackTime {
+        ticks: 10,
+        timescale: 0,
+    };
+    assert!(!state.complete_open(generation, forged));
+    assert_eq!(state.snapshot().phase, PlaybackPhase::Opening);
+    assert!(state.complete_open(generation, at(10, 1)));
+
+    let stale = WorkGeneration::new(generation.open - 1, generation.seek);
+    assert!(!state.update_position(stale, at(2, 1)));
+    assert!(!state.update_position(generation, forged));
+    assert!(state.update_position(generation, at(2, 1)));
+    assert!(state.begin_recovery_seek(generation, at(2, 1)));
+    assert!(state.complete_seek(generation, at(2, 1)));
+    assert!(state.mark_ended(generation, at(10, 1)));
+    assert_eq!(state.snapshot().phase, PlaybackPhase::Ended);
+    assert!(!state.fail(stale));
+    assert!(state.fail(generation));
+    assert_eq!(state.snapshot().phase, PlaybackPhase::Failed);
+
+    for command in [
+        PlaybackCommand::Play,
+        PlaybackCommand::Pause,
+        PlaybackCommand::Seek { position: at(3, 1) },
+        PlaybackCommand::Step { frames: 1 },
+        PlaybackCommand::SetTracks {
+            audio_track_indices: vec![1],
+        },
+        PlaybackCommand::SetVolume { volume: 0.5 },
+        PlaybackCommand::SetRate { rate: 1.0 },
+    ] {
+        let before = state.snapshot();
+        assert_eq!(state.apply(command), Err(CommandError::MediaFailed));
+        assert_eq!(state.snapshot(), before);
+    }
 }
 
 #[test]
@@ -204,4 +258,31 @@ fn inbox_reserves_capacity_for_close_and_rejects_other_overflow() {
         EnqueueOutcome::Replaced
     );
     assert_eq!(inbox.len(), COMMAND_INBOX_CAPACITY);
+}
+
+#[test]
+fn coalesced_seek_retains_the_replacement_acceptance_time() {
+    let mut inbox = CommandInbox::new();
+    inbox
+        .enqueue_at(
+            PlaybackCommand::Seek { position: at(1, 1) },
+            MonotonicTime100ns::new(100),
+        )
+        .unwrap();
+    assert_eq!(
+        inbox
+            .enqueue_at(
+                PlaybackCommand::Seek { position: at(2, 1) },
+                MonotonicTime100ns::new(250),
+            )
+            .unwrap(),
+        EnqueueOutcome::Replaced
+    );
+
+    let accepted = inbox.pop_front_accepted().unwrap();
+    assert_eq!(
+        accepted.command,
+        PlaybackCommand::Seek { position: at(2, 1) }
+    );
+    assert_eq!(accepted.accepted_at, MonotonicTime100ns::new(250));
 }

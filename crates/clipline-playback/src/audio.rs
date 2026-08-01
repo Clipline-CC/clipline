@@ -741,6 +741,12 @@ pub struct IndexedAudioPacketReader<R: Read + Seek> {
     packets_read: u64,
 }
 
+struct PacketSelection {
+    ranges: BTreeMap<usize, Range<usize>>,
+    timeline_end_48k: u64,
+    max_packet_size: usize,
+}
+
 impl<R: Read + Seek> std::fmt::Debug for IndexedAudioPacketReader<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IndexedAudioPacketReader")
@@ -759,92 +765,22 @@ impl<R: Read + Seek> IndexedAudioPacketReader<R> {
         timeline_end: PlaybackTime,
         generation: WorkGeneration,
     ) -> Result<Self, AudioError> {
-        if timeline_end.timescale == 0 {
-            return Err(AudioError::InvalidTimelineEnd);
-        }
-        if ranges.len() > MAX_SELECTED_AUDIO_TRACKS {
-            return Err(AudioError::TooManyTracks {
-                selected: ranges.len(),
-                limit: MAX_SELECTED_AUDIO_TRACKS,
-            });
-        }
-        let timeline_end_48k = rescale_time_floor(timeline_end, PLAYBACK_SAMPLE_RATE);
-        let mut selected_ranges = BTreeMap::new();
-        let mut max_packet_size = 0;
-        for selected in ranges {
-            if selected_ranges.contains_key(&selected.track_index) {
-                return Err(AudioError::DuplicatePacketRange {
-                    track_index: selected.track_index,
-                });
-            }
-            let track = movie
-                .index()
-                .tracks
-                .get(selected.track_index)
-                .ok_or_else(|| {
-                    clipline_mp4::PlaybackIndexError::InvalidTrack(format!(
-                        "movie has no track {}",
-                        selected.track_index
-                    ))
-                })?;
-            let PlaybackTrackConfig::Opus {
-                channels,
-                sample_rate,
-                pre_skip,
-            } = track.config
-            else {
-                return Err(AudioError::NotOpusTrack {
-                    track_index: selected.track_index,
-                });
-            };
-            validate_opus_format(channels, sample_rate)?;
-            if track.timescale != PLAYBACK_SAMPLE_RATE {
-                return Err(AudioError::IncompatibleTrackTimescale {
-                    track_index: selected.track_index,
-                    timescale: track.timescale,
-                });
-            }
-            if selected.samples.start > selected.samples.end
-                || selected.samples.end > track.samples.len()
-            {
-                return Err(AudioError::InvalidPacketRange {
-                    track_index: selected.track_index,
-                    start: selected.samples.start,
-                    end: selected.samples.end,
-                    samples: track.samples.len(),
-                });
-            }
-            let first_pts = track.samples.first().map_or(0, |sample| sample.pts);
-            for sample in &track.samples[selected.samples.clone()] {
-                if audible_start_tick(sample.pts, first_pts, pre_skip) >= timeline_end_48k {
-                    continue;
-                }
-                let packet_size = sample.size as usize;
-                if packet_size > MAX_OPUS_PACKET_BYTES {
-                    return Err(AudioError::PacketTooLarge {
-                        size: packet_size,
-                        limit: MAX_OPUS_PACKET_BYTES,
-                    });
-                }
-                max_packet_size = max_packet_size.max(packet_size);
-            }
-            selected_ranges.insert(selected.track_index, selected.samples);
-        }
+        let selection = validate_packet_selection(movie.index(), ranges, timeline_end)?;
 
         let mut packet = Vec::new();
-        packet.try_reserve_exact(max_packet_size).map_err(|_| {
-            AudioError::PacketBufferAllocationFailed {
-                requested: max_packet_size,
-            }
-        })?;
+        packet
+            .try_reserve_exact(selection.max_packet_size)
+            .map_err(|_| AudioError::PacketBufferAllocationFailed {
+                requested: selection.max_packet_size,
+            })?;
         Ok(Self {
             movie,
-            ranges: selected_ranges,
-            timeline_end_48k,
+            ranges: selection.ranges,
+            timeline_end_48k: selection.timeline_end_48k,
             generation,
             packet,
             packet_high_water: 0,
-            packet_reserve_count: usize::from(max_packet_size != 0),
+            packet_reserve_count: usize::from(selection.max_packet_size != 0),
             packets_read: 0,
         })
     }
@@ -935,6 +871,32 @@ impl<R: Read + Seek> IndexedAudioPacketReader<R> {
         self.packet.clear();
     }
 
+    pub fn reselect_ranges(
+        &mut self,
+        ranges: Vec<TrackSampleRange>,
+        timeline_end: PlaybackTime,
+        generation: WorkGeneration,
+    ) -> Result<(), AudioError> {
+        let selection = validate_packet_selection(self.movie.index(), ranges, timeline_end)?;
+        if selection.max_packet_size > self.packet.capacity() {
+            self.packet.clear();
+            let prior_capacity = self.packet.capacity();
+            self.packet
+                .try_reserve_exact(selection.max_packet_size)
+                .map_err(|_| AudioError::PacketBufferAllocationFailed {
+                    requested: selection.max_packet_size,
+                })?;
+            if self.packet.capacity() != prior_capacity {
+                self.packet_reserve_count = self.packet_reserve_count.saturating_add(1);
+            }
+        }
+        self.packet.clear();
+        self.ranges = selection.ranges;
+        self.timeline_end_48k = selection.timeline_end_48k;
+        self.generation = generation;
+        Ok(())
+    }
+
     pub fn telemetry(&self) -> AudioPacketTelemetry {
         AudioPacketTelemetry {
             packet_capacity: self.packet.capacity(),
@@ -944,6 +906,85 @@ impl<R: Read + Seek> IndexedAudioPacketReader<R> {
             logical_packet_limit: MAX_OPUS_PACKET_BYTES,
         }
     }
+}
+
+fn validate_packet_selection(
+    index: &MovieIndex,
+    ranges: Vec<TrackSampleRange>,
+    timeline_end: PlaybackTime,
+) -> Result<PacketSelection, AudioError> {
+    if timeline_end.timescale == 0 {
+        return Err(AudioError::InvalidTimelineEnd);
+    }
+    if ranges.len() > MAX_SELECTED_AUDIO_TRACKS {
+        return Err(AudioError::TooManyTracks {
+            selected: ranges.len(),
+            limit: MAX_SELECTED_AUDIO_TRACKS,
+        });
+    }
+    let timeline_end_48k = rescale_time_floor(timeline_end, PLAYBACK_SAMPLE_RATE);
+    let mut selected_ranges = BTreeMap::new();
+    let mut max_packet_size = 0;
+    for selected in ranges {
+        if selected_ranges.contains_key(&selected.track_index) {
+            return Err(AudioError::DuplicatePacketRange {
+                track_index: selected.track_index,
+            });
+        }
+        let track = index.tracks.get(selected.track_index).ok_or_else(|| {
+            clipline_mp4::PlaybackIndexError::InvalidTrack(format!(
+                "movie has no track {}",
+                selected.track_index
+            ))
+        })?;
+        let PlaybackTrackConfig::Opus {
+            channels,
+            sample_rate,
+            pre_skip,
+        } = track.config
+        else {
+            return Err(AudioError::NotOpusTrack {
+                track_index: selected.track_index,
+            });
+        };
+        validate_opus_format(channels, sample_rate)?;
+        if track.timescale != PLAYBACK_SAMPLE_RATE {
+            return Err(AudioError::IncompatibleTrackTimescale {
+                track_index: selected.track_index,
+                timescale: track.timescale,
+            });
+        }
+        if selected.samples.start > selected.samples.end
+            || selected.samples.end > track.samples.len()
+        {
+            return Err(AudioError::InvalidPacketRange {
+                track_index: selected.track_index,
+                start: selected.samples.start,
+                end: selected.samples.end,
+                samples: track.samples.len(),
+            });
+        }
+        let first_pts = track.samples.first().map_or(0, |sample| sample.pts);
+        for sample in &track.samples[selected.samples.clone()] {
+            if audible_start_tick(sample.pts, first_pts, pre_skip) >= timeline_end_48k {
+                continue;
+            }
+            let packet_size = sample.size as usize;
+            if packet_size > MAX_OPUS_PACKET_BYTES {
+                return Err(AudioError::PacketTooLarge {
+                    size: packet_size,
+                    limit: MAX_OPUS_PACKET_BYTES,
+                });
+            }
+            max_packet_size = max_packet_size.max(packet_size);
+        }
+        selected_ranges.insert(selected.track_index, selected.samples);
+    }
+    Ok(PacketSelection {
+        ranges: selected_ranges,
+        timeline_end_48k,
+        max_packet_size,
+    })
 }
 
 fn audible_start_tick(sample_pts: i64, first_pts: i64, pre_skip: u16) -> u64 {
