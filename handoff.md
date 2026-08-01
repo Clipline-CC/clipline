@@ -4,6 +4,45 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-01): Slint replacement Milestone 2 playback index
+
+Plan: `docs/superpowers/plans/2026-08-01-slint-playback-index.md`.
+
+`clipline-mp4` now exposes a bounded, read-only playback boundary for finalized files through
+`IndexedMovie<File>::open` and the generic `IndexedMovie::from_reader`. `MovieIndex` carries typed
+H.264, HEVC, AV1, and Opus configuration plus per-sample byte range, DTS, edit-mapped PTS, duration,
+and sync metadata. `seek_plan` uses integer timescale comparisons to clamp before-start/after-end
+requests, restart video from the prior sync sample, and return bounded preroll ranges for each
+selected audio track. `read_sample_into` seeks and reads exactly one sample into a caller-owned
+buffer; index construction reads only top-level headers and the bounded `moov`, not `mdat` payloads.
+
+The implementation reuses the existing finalized-movie parser in `trim.rs`. That parser now rejects
+composition-offset tables, zero-sized/zero-duration samples, duplicate track IDs, malformed or
+oversized sample tables, samples outside `mdat`, cross-track byte overlap, and invalid NAL-length
+fields before playback begins. Bounds are 64 MiB for `moov`, 32 tracks, four million samples per
+track, and eight million samples in aggregate. `ctts` remains deliberately unsupported because
+Clipline records without B-frames; decode timestamps remain separate from edit-list-mapped
+presentation timestamps. The existing public trim/remux entry points deliberately inherit these
+stricter finalized-file checks, so malformed or loosely tiled foreign MP4s that were previously
+accepted may now be rejected before any output is written.
+
+The checked-in production mux oracle is
+`fixtures/playback/hybrid-writer-h264-two-opus-5s.mp4`: 460,840 bytes, SHA-256
+`8a32e046402aa5a6e7a1fce05a747d3705dc1a7dc868d08a8cc18573c0dd2a71`. It starts from the existing
+H.264 High/two-Opus decoder corpus but is finalized through the public `HybridMp4Writer` remux path,
+regenerates byte-for-byte without FFmpeg, and is full-decoded by the reviewed separate LGPL FFmpeg
+runtime during validation.
+
+Fresh-cache `clipline-mp4` Clippy, all crate/integration tests, fixture self-test and validation,
+the CI-mode full workspace suite, and warning-denied workspace Clippy pass. An independent Fable
+review confirmed parser reuse, timestamp semantics, bounded reads, and fixture provenance; its
+before-start seek finding and meaningful hardening suggestions were folded into the implementation.
+Milestone 1's matched
+baseline still awaits a run with the user's installed Clipline closed. Next: implement
+`crates/clipline-playback` as a neutral, generation-cancelable state machine plus Windows-only Media
+Foundation/WASAPI/D3D11 safe wrappers, then prove headless 1080p60 H.264 and multi-track Opus playback
+before any shipping frontend switches to Slint.
+
 ## Checkpoint (2026-08-01): Slint replacement Milestone 1 foundation
 
 Plans: `docs/superpowers/plans/2026-08-01-slint-frontend-replacement.md` and
