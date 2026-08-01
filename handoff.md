@@ -4,6 +4,40 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-01): Slint replacement Milestone 1 foundation
+
+Plans: `docs/superpowers/plans/2026-08-01-slint-frontend-replacement.md` and
+`docs/superpowers/plans/2026-08-01-slint-baseline-parity.md`.
+
+The first implementation milestone freezes the shipping frontend boundary before a Slint shell is
+introduced. `docs/slint/parity-ledger.md` inventories every registered Tauri command, emitted/listened
+event, major surface, dialog, shortcut, gesture, tray/lifecycle behavior, updater path, and packaging
+contract. `slint_migration_contract.rs` enforces the ledger in both directions so newly added or stale
+commands/events cannot silently escape the migration boundary.
+
+The matched measurement foundation is also in place. The shared Windows process-tree sampler records
+strict `PROCESS_MEMORY_COUNTERS_EX2` private working set and private commit, working set, CPU, handles,
+threads, child-read failures, and nullable GPU counters with creation-time protection against PID
+reuse. `measure-frontend-baseline.ps1` drives the Tauri UI through semantic CDP readiness markers while
+accepting a frontend-neutral Slint adapter later, isolates each run's settings/media/WebView data, and
+writes raw CSV plus machine/build/corpus/timing metadata and p50/p95 summaries. It only accepts the new
+`benchmark` Cargo profile after the executable reports that it is optimized, keeps debug assertions,
+and cannot mutate the user's autostart registry state. It also refuses to run while any other Clipline
+process exists; the user's installed PID 5548 was deliberately left running during this work.
+
+`fixtures/playback/` contains a byte-stable, hash-pinned H.264 High/Opus decoder corpus covering one
+audio track, two audio tracks plus marker sidecar, a long GOP, and changing frame content. The generator
+rejects GPL/nonfree FFmpeg configurations, validates complete decode, stream layout, keyframes, frame
+count, and changing decoded frames, and reproduced identical hashes on the same reviewed LGPL build.
+These files are intentionally marked `production_mux_oracle: false`: they are FFmpeg-muxed decoder
+oracles, not proof that a prospective native player accepts bytes written by Clipline's
+`HybridMp4Writer`. A small Clipline-writer-authored fixture remains a blocking media-prototype gate.
+
+No headline baseline number has been recorded yet because collecting one would require closing the
+user's running Clipline. Next: with Clipline closed, run each scenario three times using
+`target/benchmark/clipline-app.exe` and the protocol in `docs/slint/baseline-protocol.md`; then plan the
+first Slint shell/media vertical slice against those measurements and the frozen ledger.
+
 ## Checkpoint (2026-07-29): Nightly 0.1.43
 
 Plan: `docs/superpowers/plans/2026-07-29-nightly-0.1.43.md`.
