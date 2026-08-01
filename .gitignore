@@ -2,6 +2,15 @@
 .worktrees/
 **/*.rs.bk
 *.mp4
+# Keep only the four reviewed decoder-corpus oracles. Other generated media and
+# temporary probes remain ignored.
+fixtures/playback/*.mp4
+fixtures/playback/*.tmp
+fixtures/playback/*.tmp.mp4
+!fixtures/playback/h264-one-opus-3s.mp4
+!fixtures/playback/h264-two-opus-markers-5s.mp4
+!fixtures/playback/h264-long-gop-6s.mp4
+!fixtures/playback/h264-variable-content-2s.mp4
 .local-secrets/
 .playwright-mcp/
 # Release builds stage an LGPL ffmpeg bundle here before packaging. Keep the

@@ -1,0 +1,48 @@
+{
+  "recording_start_s": 0.0,
+  "duration_s": 5.0,
+  "audio_tracks": [
+    {
+      "id": "output",
+      "track_index": 0,
+      "label": "Output Audio",
+      "kind": "output"
+    },
+    {
+      "id": "microphone",
+      "track_index": 1,
+      "label": "Microphone",
+      "kind": "microphone"
+    }
+  ],
+  "markers": [
+    {
+      "t_s": 1.25,
+      "game_id": "LeagueOfLegends",
+      "kind": "ChampionKill",
+      "actor": "Fixture Player",
+      "victim": "Fixture Opponent",
+      "assisters": [
+        "Fixture Ally"
+      ],
+      "subtype": null,
+      "game_time_s": 61.25,
+      "recording_offset_s": 1.25,
+      "importance": 8,
+      "involves_local_player": true
+    },
+    {
+      "t_s": 3.5,
+      "game_id": "LeagueOfLegends",
+      "kind": "DragonKill",
+      "actor": "Fixture Team",
+      "victim": null,
+      "assisters": [],
+      "subtype": "Infernal",
+      "game_time_s": 63.5,
+      "recording_offset_s": 3.5,
+      "importance": 7,
+      "involves_local_player": true
+    }
+  ]
+}
