@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -125,11 +126,165 @@ fn registered_commands(app_rs: &str) -> Vec<String> {
         .map(|line| line.trim_end_matches(','))
         .filter(|line| !line.is_empty() && !line.starts_with("//"))
         .map(|symbol| symbol.rsplit("::").next().unwrap().to_owned())
+        .inspect(|command| {
+            assert!(
+                is_rust_identifier(command),
+                "unexpected syntax in generate_handler! entry: {command}"
+            );
+        })
         .collect()
 }
 
-fn first_string_arguments(source: &str, call: &str) -> Vec<String> {
+fn is_rust_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    matches!(chars.next(), Some('_' | 'a'..='z' | 'A'..='Z'))
+        && chars.all(|character| character == '_' || character.is_ascii_alphanumeric())
+}
+
+fn rust_files_below(directory: &Path) -> Vec<PathBuf> {
     let mut output = Vec::new();
+    for entry in fs::read_dir(directory)
+        .unwrap_or_else(|error| panic!("failed to enumerate {}: {error}", directory.display()))
+    {
+        let path = entry.expect("read Rust source directory entry").path();
+        if path.is_dir() {
+            output.extend(rust_files_below(&path));
+        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            output.push(path);
+        }
+    }
+    output.sort();
+    output
+}
+
+fn production_source(source: &str) -> &str {
+    source.split("\n#[cfg(test)]").next().unwrap_or(source)
+}
+
+fn string_constants(source: &str) -> BTreeMap<String, String> {
+    let mut output = BTreeMap::new();
+    for line in source.lines() {
+        let Some(const_index) = line.find("const ") else {
+            continue;
+        };
+        let tail = &line[const_index + "const ".len()..];
+        let Some(colon) = tail.find(':') else {
+            continue;
+        };
+        let name = tail[..colon].trim();
+        if !is_rust_identifier(name) || !tail[colon..].contains("&str") {
+            continue;
+        }
+        let Some(equals) = tail.find('=') else {
+            continue;
+        };
+        let value = tail[equals + 1..].trim();
+        let Some(value) = value.strip_prefix('"') else {
+            continue;
+        };
+        let Some(end) = value.find('"') else {
+            continue;
+        };
+        output.insert(name.to_owned(), value[..end].to_owned());
+    }
+    output
+}
+
+fn call_argument(source_after_open_paren: &str, wanted_index: usize) -> Option<&str> {
+    let mut start = 0;
+    let mut index = 0;
+    let mut depth = 0_u32;
+    let mut quote = None;
+    let mut escaped = false;
+
+    for (offset, character) in source_after_open_paren.char_indices() {
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        match character {
+            '"' | '\'' => quote = Some(character),
+            '(' | '[' | '{' => depth += 1,
+            ')' if depth == 0 => {
+                return (index == wanted_index)
+                    .then(|| source_after_open_paren[start..offset].trim())
+            }
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                if index == wanted_index {
+                    return Some(source_after_open_paren[start..offset].trim());
+                }
+                index += 1;
+                start = offset + character.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn resolve_event_argument(
+    expression: &str,
+    constants: &BTreeMap<String, String>,
+    path: &Path,
+) -> String {
+    if let Some(literal) = expression.strip_prefix('"') {
+        let end = literal.find('"').unwrap_or_else(|| {
+            panic!(
+                "unterminated event string in {}: {expression}",
+                path.display()
+            )
+        });
+        return literal[..end].to_owned();
+    }
+    let name = expression.rsplit("::").next().unwrap_or(expression).trim();
+    constants.get(name).cloned().unwrap_or_else(|| {
+        panic!(
+            "unresolved event argument in {}: {expression}; use a string constant or extend the migration extractor",
+            path.display()
+        )
+    })
+}
+
+fn rust_event_names(root: &Path) -> BTreeSet<String> {
+    let files = rust_files_below(&root.join("apps/clipline-app/src"));
+    let sources = files
+        .iter()
+        .map(|path| (path.clone(), read(path)))
+        .collect::<Vec<_>>();
+    let constants = sources
+        .iter()
+        .flat_map(|(_, source)| string_constants(production_source(source)))
+        .collect::<BTreeMap<_, _>>();
+    let mut output = BTreeSet::new();
+
+    for (path, source) in &sources {
+        let source = production_source(source);
+        for (call, argument_index) in [(".emit(", 0), (".emit_all(", 0), (".emit_to(", 1)] {
+            let mut remaining = source;
+            while let Some(index) = remaining.find(call) {
+                remaining = &remaining[index + call.len()..];
+                let argument = call_argument(remaining, argument_index).unwrap_or_else(|| {
+                    panic!(
+                        "could not parse {call} event argument in {}",
+                        path.display()
+                    )
+                });
+                output.insert(resolve_event_argument(argument, &constants, path));
+            }
+        }
+    }
+    output
+}
+
+fn javascript_string_arguments(source: &str, call: &str) -> BTreeSet<String> {
+    let mut output = BTreeSet::new();
     let mut remaining = source;
 
     while let Some(index) = remaining.find(call) {
@@ -141,19 +296,69 @@ fn first_string_arguments(source: &str, call: &str) -> Vec<String> {
         let Some(end) = value.find('"') else {
             continue;
         };
-        output.push(value[..end].to_owned());
+        output.insert(value[..end].to_owned());
         remaining = &value[end + 1..];
     }
-
-    output.sort();
-    output.dedup();
     output
 }
 
-fn assert_tokens(ledger: &str, tokens: impl IntoIterator<Item = String>) {
+fn ledger_rows(ledger: &str) -> BTreeMap<String, Vec<String>> {
+    let mut rows = BTreeMap::new();
+    for line in ledger.lines().filter(|line| line.starts_with("| `")) {
+        let cells = line
+            .trim_matches('|')
+            .split('|')
+            .map(str::trim)
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            cells.len(),
+            5,
+            "ledger row must have token, contract, owner, acceptance, and status: {line}"
+        );
+        let token = cells[0].trim_matches('`').to_owned();
+        assert!(
+            !cells[1].is_empty(),
+            "{token} must describe its current contract"
+        );
+        assert!(!cells[2].is_empty(), "{token} must name a target owner");
+        assert!(
+            cells[2].starts_with('M')
+                && cells[2]
+                    .chars()
+                    .nth(1)
+                    .is_some_and(|character| character.is_ascii_digit()),
+            "{token} owner must start with a milestone such as M5: {}",
+            cells[2]
+        );
+        assert!(
+            !cells[3].is_empty(),
+            "{token} must define acceptance evidence"
+        );
+        assert!(
+            [
+                "`not_started`",
+                "`in_progress`",
+                "`implemented`",
+                "`verified`",
+                "`waived`"
+            ]
+            .contains(&cells[4].as_str()),
+            "{token} has an invalid migration status: {}",
+            cells[4]
+        );
+        assert!(
+            rows.insert(token.clone(), cells).is_none(),
+            "duplicate Slint parity token: {token}"
+        );
+    }
+    rows
+}
+
+fn assert_tokens(rows: &BTreeMap<String, Vec<String>>, tokens: impl IntoIterator<Item = String>) {
     let missing = tokens
         .into_iter()
-        .filter(|token| !ledger.contains(&format!("`{token}`")))
+        .filter(|token| !rows.contains_key(token))
         .collect::<Vec<_>>();
     assert!(
         missing.is_empty(),
@@ -166,6 +371,7 @@ fn assert_tokens(ledger: &str, tokens: impl IntoIterator<Item = String>) {
 fn parity_ledger_covers_the_shipping_frontend_boundary() {
     let root = workspace_root();
     let ledger = read(root.join("docs/slint/parity-ledger.md"));
+    let rows = ledger_rows(&ledger);
     let app_rs = read(root.join("apps/clipline-app/src/app.rs"));
 
     let commands = registered_commands(&app_rs);
@@ -175,31 +381,39 @@ fn parity_ledger_covers_the_shipping_frontend_boundary() {
         "review new/removed production commands and update the ledger baseline"
     );
     assert_tokens(
-        &ledger,
+        &rows,
         commands
             .into_iter()
             .map(|command| format!("command:{command}")),
     );
 
-    let mut events = first_string_arguments(&app_rs, ".emit(");
-    for path in [
-        "apps/clipline-app/src/cloud.rs",
-        "apps/clipline-app/src/library.rs",
-        "apps/clipline-app/src/osu_api.rs",
-        "apps/clipline-app/src/app/support.rs",
-    ] {
-        events.extend(first_string_arguments(&read(root.join(path)), ".emit("));
-    }
-    events.extend(first_string_arguments(
+    let mut events = rust_event_names(&root);
+    events.extend(javascript_string_arguments(
         &read(root.join("apps/clipline-app/ui/main.js")),
         "listen(",
     ));
-    events.sort();
-    events.dedup();
-    assert_tokens(
-        &ledger,
-        events.into_iter().map(|event| format!("event:{event}")),
-    );
+    assert_tokens(&rows, events.iter().map(|event| format!("event:{event}")));
+
+    let code_commands = registered_commands(&app_rs)
+        .into_iter()
+        .map(|command| format!("command:{command}"))
+        .collect::<BTreeSet<_>>();
+    let code_events = events
+        .into_iter()
+        .map(|event| format!("event:{event}"))
+        .collect::<BTreeSet<_>>();
+    for token in rows.keys().filter(|token| token.starts_with("command:")) {
+        assert!(
+            code_commands.contains(token),
+            "stale command row no longer registered in production: {token}"
+        );
+    }
+    for token in rows.keys().filter(|token| token.starts_with("event:")) {
+        assert!(
+            code_events.contains(token),
+            "stale event row no longer emitted or listened to: {token}"
+        );
+    }
 
     let required = REQUIRED_SURFACES
         .iter()
@@ -209,7 +423,13 @@ fn parity_ledger_covers_the_shipping_frontend_boundary() {
         .chain(REQUIRED_TRAY_AND_LIFECYCLE)
         .chain(REQUIRED_UPDATER_AND_PACKAGE)
         .map(|token| (*token).to_owned());
-    assert_tokens(&ledger, required);
+    assert_tokens(&rows, required);
+
+    assert!(
+        rows.len() >= 140,
+        "ledger unexpectedly lost migration surface rows: {} remain",
+        rows.len()
+    );
 
     assert!(
         ledger.contains("Baseline commit: `5eea6c3`"),
