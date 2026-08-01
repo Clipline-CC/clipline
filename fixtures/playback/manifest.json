@@ -38,6 +38,43 @@
                             "ffprobe":  null,
                             "h264_encoder":  "h264_mf"
                         },
+    "production_mux_oracles":  [
+                                    {
+                                        "id":  "hybrid-writer-h264-two-opus-5s",
+                                        "file":  "hybrid-writer-h264-two-opus-5s.mp4",
+                                        "gating":  true,
+                                        "production_mux_oracle":  true,
+                                        "materializer":  "crates/clipline-mp4/examples/generate_production_playback_fixture.rs",
+                                        "source":  {
+                                                       "file":  "h264-two-opus-markers-5s.mp4",
+                                                       "sha256":  "d56ad7cec724fc9b2bfbbf8279762c8dd6eb63431ff3c997913691f9deadb930",
+                                                       "edit_list_policy":  "foreign FFmpeg edit boxes disabled; complete packets and dOps pre-skip retained"
+                                                   },
+                                        "writer_provenance":  {
+                                                                  "crate":  "clipline-mp4",
+                                                                  "api":  "remux_with_selected_audio_tracks -> HybridMp4Writer::new_multi",
+                                                                  "plan_commit":  "4735641"
+                                                              },
+                                        "expect":  {
+                                                       "duration_seconds":  5.0,
+                                                       "duration_tolerance_seconds":  0.1,
+                                                       "width":  640,
+                                                       "height":  360,
+                                                       "frame_rate":  30.0,
+                                                       "video_codec":  "h264",
+                                                       "video_profile":  "High",
+                                                       "audio_codec":  "opus",
+                                                       "audio_track_count":  2,
+                                                       "audio_sample_rate":  48000,
+                                                       "first_keyframe_max_seconds":  0.1,
+                                                       "maximum_keyframe_gap_seconds":  2.2
+                                                   },
+                                        "artifact":  {
+                                                         "sha256":  "8a32e046402aa5a6e7a1fce05a747d3705dc1a7dc868d08a8cc18573c0dd2a71",
+                                                         "bytes":  460840
+                                                     }
+                                    }
+                                ],
     "fixtures":  [
                      {
                          "id":  "h264-one-opus-3s",

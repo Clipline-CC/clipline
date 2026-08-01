@@ -90,6 +90,19 @@ function Assert-ManifestDefinition {
         }
     }
 
+    $productionOracles = @($Manifest.production_mux_oracles)
+    Assert-Condition ($productionOracles.Count -eq 1) "Exactly one production mux oracle is required"
+    $production = $productionOracles[0]
+    Assert-Condition ([bool]$production.gating) "Production mux oracle must be gating"
+    Assert-Condition ([bool]$production.production_mux_oracle) "Production mux oracle provenance flag is required"
+    Assert-Condition ([string]$production.file -eq [System.IO.Path]::GetFileName([string]$production.file)) "Production mux oracle must use a basename"
+    Assert-Condition (Test-Sha256 ([string]$production.artifact.sha256)) "Production mux oracle needs a SHA-256"
+    Assert-Condition ([int64]$production.artifact.bytes -gt 0) "Production mux oracle needs a byte count"
+    Assert-Condition (Test-Sha256 ([string]$production.source.sha256)) "Production mux oracle source needs a SHA-256"
+    Assert-Condition ([string]$production.materializer -eq "crates/clipline-mp4/examples/generate_production_playback_fixture.rs") "Unexpected production mux materializer"
+    Assert-Condition ([string]$production.expect.video_codec -eq "h264" -and [string]$production.expect.video_profile -eq "High") "Production mux oracle must be H.264 High"
+    Assert-Condition ([int]$production.expect.audio_track_count -eq 2) "Production mux oracle must contain two audio tracks"
+
     $markerFixture = @($fixtures | Where-Object { [string]$_.id -eq "h264-two-opus-markers-5s" })[0]
     $sidecarPath = Join-Path $FixtureDirectory ([string]$markerFixture.sidecar.file)
     Assert-Condition (Test-Path -LiteralPath $sidecarPath -PathType Leaf) "Marker sidecar is missing"
@@ -295,6 +308,10 @@ function Invoke-Validate {
     $ffprobe = Resolve-Ffprobe
     [void](Assert-ReviewedFfmpeg $ffmpeg)
     foreach ($fixture in @($Manifest.fixtures | Where-Object { [bool]$_.gating })) {
+        Assert-Media $fixture (Join-Path $FixtureDirectory ([string]$fixture.file)) $ffmpeg $ffprobe $true
+        Write-Host "Validated $($fixture.file)"
+    }
+    foreach ($fixture in @($Manifest.production_mux_oracles | Where-Object { [bool]$_.gating })) {
         Assert-Media $fixture (Join-Path $FixtureDirectory ([string]$fixture.file)) $ffmpeg $ffprobe $true
         Write-Host "Validated $($fixture.file)"
     }

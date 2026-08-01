@@ -11,6 +11,7 @@ fixtures/playback/*.tmp.mp4
 !fixtures/playback/h264-two-opus-markers-5s.mp4
 !fixtures/playback/h264-long-gop-6s.mp4
 !fixtures/playback/h264-variable-content-2s.mp4
+!fixtures/playback/hybrid-writer-h264-two-opus-5s.mp4
 .local-secrets/
 .playwright-mcp/
 # Release builds stage an LGPL ffmpeg bundle here before packaging. Keep the

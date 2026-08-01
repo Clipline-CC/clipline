@@ -13,11 +13,14 @@ The committed files are:
 - `../../scripts/generate-playback-fixtures.ps1`: generator and validator.
 - Four checked-in H.264 High + Opus MP4s: reviewed oracle bytes that keep tests
   and local experiments independent of the encoder installed on a machine.
+- `hybrid-writer-h264-two-opus-5s.mp4`: the same real H.264 High and two-track
+  Opus media remuxed and finalized by Clipline's `HybridMp4Writer`.
 
-These MP4s are deliberately labeled `production_mux_oracle: false`. FFmpeg
-muxed them, so they prove decode, track-selection, seeking, and lifecycle paths,
-but they do not prove Clipline's `HybridMp4Writer` layout. A production-authored
-H.264 + Opus fixture remains a blocking input to the Milestone 3 media gate.
+The four fixtures in `manifest.json` are deliberately labeled
+`production_mux_oracle: false`: FFmpeg muxed them, so they prove decode,
+track-selection, seeking, and lifecycle paths. The `hybrid-writer-*` fixture is
+the production mux oracle. Its checked-in bytes are reproduced exactly by a
+Rust contract test, and a full FFmpeg decode validates all three streams.
 
 ## Requirements
 
@@ -52,6 +55,19 @@ Validate an existing local materialization, including every recorded hash:
 ```powershell
 ./scripts/generate-playback-fixtures.ps1 -Mode Validate
 ```
+
+Regenerate the production mux oracle from the frozen two-audio decoder oracle:
+
+```powershell
+cargo run -p clipline-mp4 --example generate_production_playback_fixture
+cargo test -p clipline-mp4 --test production_playback_fixture
+```
+
+This path copies the frozen real codec packets into `HybridMp4Writer`; it does
+not invoke or link FFmpeg. The foreign MP4's edit-list boxes are disabled before
+parsing because its Opus edits begin at codec pre-skip within the first packet.
+Clipline carries that pre-skip in each track's `dOps` box and writes complete
+packets, matching the recorder's production layout.
 
 To choose a fallback encoder explicitly:
 
