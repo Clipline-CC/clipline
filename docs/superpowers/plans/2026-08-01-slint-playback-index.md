@@ -23,7 +23,8 @@ tooling is present; its measurements remain pending while the user's installed C
 
 - [ ] Add failing integration tests for opening a finalized file without reading `mdat`, exposing
       ordered track metadata and sample offsets/sizes, and reporting separate DTS/PTS/duration/sync
-      fields. Clipline forbids B-frames, so accepted files initially require PTS equal to DTS.
+      fields. Clipline forbids B-frames, so composition PTS equals DTS within the media timeline;
+      track edit lists may still map those samples to a different presentation timestamp.
 - [ ] Define public typed H.264, HEVC, AV1, and Opus configuration. Preserve H.264 SPS/PPS and the
       MP4 NAL-length field; preserve equivalent HEVC arrays/length size and AV1 config bytes without
       promising decoder availability.
