@@ -18,22 +18,16 @@ mod windows_app {
     use std::fs::{self, OpenOptions};
     use std::io::{self, ErrorKind, Write};
     use std::path::{Path, PathBuf};
+    use std::thread::{self, JoinHandle};
     use std::time::{Duration, Instant};
 
-    use clipline_mp4::{IndexedMovie, PlaybackTime, PlaybackTrackConfig, TrackSampleRange};
     use clipline_playback::windows::{
-        D3D11VideoSurface, DecoderPreference, WasapiInitializationPath, WindowsH264Decoder,
-        WindowsWasapiRenderer,
+        session_channel, D3D11VideoSurface, SessionClient, SessionExit, SessionReport,
+        SessionRunError, SessionUpdatePayload, WasapiInitializationPath,
     };
     use clipline_playback::{
-        plan_audio_fill, plan_video_sample_buffers, AdmitOutcome, AudioAvailability, AudioRenderer,
-        AudioResetPoint, AudioTrackSpec, DecodedVideoFrame, EncodedVideoPacket, EndOfStreamTracker,
-        FramePublisher, FrameScheduler, IndexedAudioPacketReader, MonotonicTime100ns,
-        OpusDecoderBank, PipelineToken, PlaybackMetrics, PublicationReceipt, RebasedAudioClock,
-        SeekTarget, SubmitStatus, TimelineAudioMixer, TimelineDuration, TimelinePosition,
-        VideoAcceleration, VideoDecoder, VideoSampleTransport, WorkGeneration,
-        MAX_AUDIO_QUEUE_FRAMES, MAX_AUDIO_WRITE_FRAMES, MAX_OPUS_FRAME_SAMPLES,
-        PLAYBACK_TIMELINE_HZ,
+        DecodedVideoFrame, FramePublisher, PipelineToken, PlaybackCommand, PlaybackEvent,
+        PlaybackPhase, PlaybackTime, PublicationReceipt, VideoAcceleration,
     };
     use serde::Serialize;
 
@@ -350,11 +344,7 @@ mod windows_app {
             self.endpoint_buffer_frames =
                 self.endpoint_buffer_frames.max(run.endpoint_buffer_frames);
             self.endpoint_epoch = self.endpoint_epoch.max(run.endpoint_epoch);
-            if self.decoder_acceleration.is_empty() {
-                self.decoder_acceleration = run.decoder_acceleration;
-            } else if self.decoder_acceleration != run.decoder_acceleration {
-                self.decoder_acceleration = "mixed".to_owned();
-            }
+            merge_descriptor(&mut self.decoder_acceleration, run.decoder_acceleration);
             self.decoder_presentable_frames = self
                 .decoder_presentable_frames
                 .saturating_add(run.decoder_presentable_frames);
@@ -439,62 +429,8 @@ mod windows_app {
     }
 
     #[derive(Default)]
-    struct SchedulerTotals {
-        decoded_eligible_frames: u64,
-        presented_frames: u64,
-        late_frames: u64,
-        scheduler_dropped_frames: u64,
-        presentation_backpressured_frames: u64,
-        presentation_occluded_frames: u64,
-        late_or_dropped_frames: u64,
-        max_av_error_ticks: u64,
-        av_error_p95_ms: Option<u16>,
-        av_error_histogram_overflowed: bool,
-    }
-
-    impl SchedulerTotals {
-        fn absorb(&mut self, metrics: &PlaybackMetrics) {
-            self.decoded_eligible_frames = self
-                .decoded_eligible_frames
-                .saturating_add(metrics.decoded_eligible_frames);
-            self.presented_frames = self
-                .presented_frames
-                .saturating_add(metrics.presented_frames);
-            self.late_frames = self.late_frames.saturating_add(metrics.late_frames);
-            self.scheduler_dropped_frames = self
-                .scheduler_dropped_frames
-                .saturating_add(metrics.scheduler_dropped_frames);
-            self.presentation_backpressured_frames = self
-                .presentation_backpressured_frames
-                .saturating_add(metrics.presentation_backpressured_frames);
-            self.presentation_occluded_frames = self
-                .presentation_occluded_frames
-                .saturating_add(metrics.presentation_occluded_frames);
-            self.late_or_dropped_frames = self
-                .late_or_dropped_frames
-                .saturating_add(metrics.late_or_dropped_frames);
-            self.max_av_error_ticks = self.max_av_error_ticks.max(metrics.max_av_error_ticks);
-            self.av_error_p95_ms = merge_fail_closed_percentile(
-                self.av_error_p95_ms,
-                metrics.av_error_histogram.percentile_millis(95),
-                &mut self.av_error_histogram_overflowed,
-                metrics.av_error_histogram.overflow() != 0,
-            );
-        }
-    }
-
     struct DropPublisher {
         presented: u64,
-        last_sample_index: Option<usize>,
-    }
-
-    impl DropPublisher {
-        const fn new() -> Self {
-            Self {
-                presented: 0,
-                last_sample_index: None,
-            }
-        }
     }
 
     impl FramePublisher<D3D11VideoSurface> for DropPublisher {
@@ -503,659 +439,181 @@ mod windows_app {
             frame: DecodedVideoFrame<D3D11VideoSurface>,
         ) -> Result<PublicationReceipt, clipline_playback::BackendError> {
             self.presented = self.presented.saturating_add(1);
-            self.last_sample_index = Some(frame.sample_index());
             drop(frame);
             Ok(PublicationReceipt::Presented)
         }
 
         fn clear(&mut self, _token: PipelineToken) -> Result<(), clipline_playback::BackendError> {
-            self.last_sample_index = None;
             Ok(())
         }
     }
 
     struct HeadlessSession {
-        video: VideoSampleTransport<std::fs::File>,
-        decoder: WindowsH264Decoder,
-        renderer: WindowsWasapiRenderer,
-        audio_reader: IndexedAudioPacketReader<std::fs::File>,
-        audio_bank: OpusDecoderBank,
-        audio_mixer: TimelineAudioMixer,
-        scheduler: FrameScheduler<D3D11VideoSurface>,
-        publisher: DropPublisher,
-        clock: RebasedAudioClock,
-        eos: EndOfStreamTracker,
-        token: PipelineToken,
-        generation: WorkGeneration,
-        video_timescale: u32,
-        video_sample_count: usize,
-        next_video_sample: usize,
-        video_drain_sent: bool,
-        audio_tracks: Vec<usize>,
-        audio_sample_count: usize,
-        next_audio_sample: usize,
-        audio_finished: bool,
-        audio_playback_start: u64,
-        video_end: TimelinePosition,
-        audio_mix_scratch: Vec<f32>,
-        audio_output: Vec<f32>,
-        started: bool,
-        run_anchor: Instant,
+        client: SessionClient,
+        playback: Option<JoinHandle<Result<SessionReport<DropPublisher>, SessionRunError>>>,
+        duration: PlaybackTime,
         requested_seeks: u64,
-        seek_latencies_ms: Vec<u16>,
-        last_recorded_settled_seeks: u64,
-        seek_target_sample: usize,
-        scheduler_totals: SchedulerTotals,
-        last_observed_underruns: u64,
-        audio_midstream_underruns: u64,
-        audio_terminal_playout_episodes: u64,
-        decoder_acceleration: String,
+        ended: bool,
     }
 
     impl HeadlessSession {
         fn open(path: &Path) -> AppResult<Self> {
-            let generation = WorkGeneration::new(1, 0);
-            let token = PipelineToken::new(generation, 0);
-            let video_movie = IndexedMovie::open(path)?;
-            let video_track_index = find_video_track(video_movie.index())?;
-            let video_track = &video_movie.index().tracks[video_track_index];
-            let video_plan = plan_video_sample_buffers(video_track, Default::default())?;
-            let video_timescale = video_track.timescale;
-            let video_sample_count = video_track.samples.len();
-            let video_end = video_track
-                .samples
-                .last()
-                .ok_or_else(|| invalid("H.264 track has no samples"))
-                .and_then(|sample| {
-                    let pts = u64::try_from(sample.pts)
-                        .map_err(|_| invalid("fixture has a negative final video PTS"))?;
-                    let end = pts
-                        .checked_add(u64::from(sample.duration))
-                        .ok_or_else(|| invalid("final video interval overflow"))?;
-                    Ok(TimelinePosition::new(rescale_to_timeline(
-                        end,
-                        video_timescale,
-                    )?))
-                })?;
-            let video = VideoSampleTransport::new(video_movie, video_track_index, generation)?;
+            let (client, runtime) = session_channel();
+            let playback = thread::Builder::new()
+                .name("clipline-headless-session".to_owned())
+                .spawn(move || runtime.run(DropPublisher::default()))?;
+            client.try_send(PlaybackCommand::Open {
+                path: path.to_owned(),
+            })?;
+            let mut session = Self {
+                client,
+                playback: Some(playback),
+                duration: PlaybackTime::new(0, 1)?,
+                requested_seeks: 0,
+                ended: false,
+            };
+            session.duration = session.wait_for_open()?;
+            Ok(session)
+        }
 
-            let audio_movie = IndexedMovie::open(path)?;
-            let audio_tracks = find_audio_tracks(audio_movie.index());
-            let mut audio_specs = Vec::with_capacity(audio_tracks.len());
-            let mut audio_ranges = Vec::with_capacity(audio_tracks.len());
-            let mut audio_sample_count = None;
-            for &track_index in &audio_tracks {
-                let track = &audio_movie.index().tracks[track_index];
-                let PlaybackTrackConfig::Opus {
-                    channels,
-                    sample_rate,
-                    pre_skip,
-                } = track.config
-                else {
-                    unreachable!("audio track search returned a non-Opus track");
-                };
-                if let Some(expected) = audio_sample_count {
-                    if expected != track.samples.len() {
-                        return Err(invalid(
-                            "headless fixture requires selected Opus tracks with aligned packet counts",
-                        ));
+        fn seek(&mut self, requested: PlaybackTime) -> AppResult<()> {
+            self.drain_before_command()?;
+            self.client.try_send(PlaybackCommand::Seek {
+                position: requested,
+            })?;
+            let deadline = Instant::now() + DEVICE_STALL_TIMEOUT;
+            loop {
+                while let Some(update) = self.client.try_recv_update() {
+                    match update.payload {
+                        SessionUpdatePayload::Event(PlaybackEvent::SeekSettled { .. }) => {
+                            self.requested_seeks = self.requested_seeks.saturating_add(1);
+                            return Ok(());
+                        }
+                        SessionUpdatePayload::Event(PlaybackEvent::Error { message, .. }) => {
+                            return Err(invalid(format!("seek failed: {message}")));
+                        }
+                        SessionUpdatePayload::Event(PlaybackEvent::Ended { .. }) => {
+                            self.ended = true;
+                        }
+                        _ => {}
                     }
-                } else {
-                    audio_sample_count = Some(track.samples.len());
                 }
-                audio_specs.push(AudioTrackSpec::new(
-                    track_index,
-                    channels,
-                    sample_rate,
-                    pre_skip,
-                )?);
-                audio_ranges.push(TrackSampleRange {
-                    track_index,
-                    samples: 0..track.samples.len(),
-                });
+                self.ensure_running("seek")?;
+                if Instant::now() >= deadline {
+                    return Err(invalid("seek did not settle before the device timeout"));
+                }
+                thread::sleep(LOOP_SLEEP);
             }
-            let timeline_end = PlaybackTime::new(video_end.ticks(), PLAYBACK_TIMELINE_HZ)?;
-            let audio_reader =
-                IndexedAudioPacketReader::new(audio_movie, audio_ranges, timeline_end, generation)?;
-            let mut audio_bank = OpusDecoderBank::new();
-            audio_bank.select_tracks(&audio_specs, generation, AudioResetPoint::FileStart)?;
-            let audio_mixer = TimelineAudioMixer::new(MAX_AUDIO_QUEUE_FRAMES, 0)?;
+        }
 
-            let mut decoder = WindowsH264Decoder::new(DecoderPreference::PreferHardware)?;
-            decoder.configure(&video_plan.config, token)?;
-            let decoder_info = decoder
-                .info()
-                .ok_or_else(|| invalid("configured H.264 decoder did not report its format"))?;
+        fn play(&mut self, wall_limit: Option<Duration>) -> AppResult<bool> {
+            self.drain_before_command()?;
+            self.client.try_send(PlaybackCommand::Play)?;
+            let media_timeout = playback_duration(self.duration) + PLAYBACK_TIMEOUT_HEADROOM;
+            let deadline = Instant::now() + wall_limit.unwrap_or(media_timeout).min(media_timeout);
+            loop {
+                while let Some(update) = self.client.try_recv_update() {
+                    match update.payload {
+                        SessionUpdatePayload::Event(PlaybackEvent::Ended { .. }) => {
+                            self.ended = true;
+                            return Ok(true);
+                        }
+                        SessionUpdatePayload::Event(PlaybackEvent::Error { message, .. }) => {
+                            return Err(invalid(format!("playback failed: {message}")));
+                        }
+                        _ => {}
+                    }
+                }
+                self.ensure_running("playback")?;
+                if Instant::now() >= deadline {
+                    if wall_limit.is_some() {
+                        self.pause_and_wait()?;
+                        return Ok(false);
+                    }
+                    return Err(invalid(
+                        "playback did not reach EOF before the media timeout",
+                    ));
+                }
+                thread::sleep(LOOP_SLEEP);
+            }
+        }
+
+        fn finish(mut self, ended: bool) -> AppResult<RunMetrics> {
+            self.client.try_send(PlaybackCommand::Close)?;
+            let report = self
+                .playback
+                .take()
+                .expect("headless playback thread is joined exactly once")
+                .join()
+                .map_err(|_| invalid("headless playback thread panicked"))??;
+            if report.exit != SessionExit::Closed {
+                return Err(invalid(format!(
+                    "headless playback exited unexpectedly: {:?}",
+                    report.exit
+                )));
+            }
+            let telemetry = report
+                .telemetry
+                .ok_or_else(|| invalid("opened session returned no final telemetry"))?;
+            let metrics = telemetry.metrics;
+            if report.publisher.presented != metrics.presented_frames {
+                return Err(invalid(
+                    "scheduler and publication backend disagree on presented frames",
+                ));
+            }
+            let decoder_info = telemetry.decoder_info.ok_or_else(|| {
+                invalid("configured H.264 decoder did not report its final format")
+            })?;
             let decoder_acceleration = match decoder_info.acceleration {
                 VideoAcceleration::Hardware => "hardware",
                 VideoAcceleration::Software => "software",
             }
             .to_owned();
-
-            let mut renderer = WindowsWasapiRenderer::open_default()?;
-            renderer.reset(token)?;
-            let raw = renderer.raw_clock()?;
-            let clock = RebasedAudioClock::new(raw, TimelinePosition::new(0));
-            let seek_target = SeekTarget::new(TimelinePosition::new(0), 0);
-
-            Ok(Self {
-                video,
-                decoder,
-                renderer,
-                audio_reader,
-                audio_bank,
-                audio_mixer,
-                scheduler: FrameScheduler::new(token, seek_target),
-                publisher: DropPublisher::new(),
-                clock,
-                eos: EndOfStreamTracker::new(video_end),
-                token,
-                generation,
-                video_timescale,
-                video_sample_count,
-                next_video_sample: 0,
-                video_drain_sent: false,
-                audio_tracks,
-                audio_sample_count: audio_sample_count.unwrap_or(0),
-                next_audio_sample: 0,
-                audio_finished: false,
-                audio_playback_start: 0,
-                video_end,
-                audio_mix_scratch: vec![0.0; MAX_OPUS_FRAME_SAMPLES * 2],
-                audio_output: vec![0.0; MAX_AUDIO_WRITE_FRAMES * 2],
-                started: false,
-                run_anchor: Instant::now(),
-                requested_seeks: 0,
-                seek_latencies_ms: Vec::new(),
-                last_recorded_settled_seeks: 0,
-                seek_target_sample: 0,
-                scheduler_totals: SchedulerTotals::default(),
-                last_observed_underruns: 0,
-                audio_midstream_underruns: 0,
-                audio_terminal_playout_episodes: 0,
-                decoder_acceleration,
-            })
-        }
-
-        fn seek(&mut self, requested: PlaybackTime) -> AppResult<()> {
-            if self.started {
-                self.renderer.pause(self.token)?;
-                self.started = false;
-            }
-            self.observe_renderer_underruns(self.clock.position());
-            let next_seek = self
-                .generation
-                .seek
-                .checked_add(1)
-                .ok_or_else(|| invalid("seek generation overflow"))?;
-            self.generation = WorkGeneration::new(self.generation.open, next_seek);
-            self.token = PipelineToken::new(self.generation, next_seek);
-            let plan = self.video.seek_plan(&self.audio_tracks, requested)?;
-            let target_sample = plan
-                .video_preroll
-                .samples
-                .end
-                .checked_sub(1)
-                .ok_or_else(|| invalid("seek plan has no target video sample"))?;
-            let target_tick =
-                rescale_to_timeline(plan.target_time.ticks, plan.target_time.timescale)?;
-            let target = TimelinePosition::new(target_tick);
-
-            self.snapshot_scheduler_quality();
-            self.decoder.flush(self.token)?;
-            self.video.reset_for_generation(self.generation);
-            self.renderer.reset(self.token)?;
-            let raw = self.renderer.raw_clock()?;
-            self.clock.rebase(raw, target);
-            self.scheduler.begin_seek(
-                self.token,
-                SeekTarget::new(target, target_sample),
-                self.monotonic_now(),
-            );
-            self.seek_target_sample = target_sample;
-            self.last_recorded_settled_seeks = 0;
-            self.publisher.clear(self.token)?;
-            self.eos = EndOfStreamTracker::new(self.video_end);
-            self.next_video_sample = plan.video_preroll.samples.start;
-            self.video_drain_sent = false;
-
-            let mut ranges = Vec::with_capacity(self.audio_tracks.len());
-            let mut first_audio_sample = None;
-            for selected in &plan.audio_preroll {
-                if let Some(expected) = first_audio_sample {
-                    if expected != selected.samples.start {
-                        return Err(invalid(
-                            "headless fixture requires aligned audio seek ranges",
-                        ));
-                    }
-                } else {
-                    first_audio_sample = Some(selected.samples.start);
-                }
-                let end = self.audio_reader.index().tracks[selected.track_index]
-                    .samples
-                    .len();
-                ranges.push(TrackSampleRange {
-                    track_index: selected.track_index,
-                    samples: selected.samples.start..end,
-                });
-            }
-            self.audio_reader.reselect_ranges(
-                ranges,
-                PlaybackTime::new(self.video_end.ticks(), PLAYBACK_TIMELINE_HZ)?,
-                self.generation,
-            )?;
-            self.audio_bank
-                .reset_for_seek(self.generation, AudioResetPoint::MidStream)?;
-            self.audio_mixer.reset_at(target_tick);
-            self.next_audio_sample = first_audio_sample.unwrap_or(0);
-            self.audio_finished = self.audio_tracks.is_empty();
-            self.audio_playback_start = target_tick;
-            self.requested_seeks = self.requested_seeks.saturating_add(1);
-            Ok(())
-        }
-
-        fn play(&mut self, wall_limit: Option<Duration>) -> AppResult<bool> {
-            self.prime()?;
-            self.renderer.start(self.token)?;
-            self.started = true;
-            let started_at = Instant::now();
-            let media_timeout_ticks = self
-                .video_end
-                .ticks()
-                .saturating_sub(self.clock.position().ticks());
-            let media_timeout = Duration::from_secs_f64(
-                media_timeout_ticks as f64 / f64::from(PLAYBACK_TIMELINE_HZ),
-            ) + PLAYBACK_TIMEOUT_HEADROOM;
-            let deadline = started_at + wall_limit.unwrap_or(media_timeout).min(media_timeout);
-
-            loop {
-                let before = self.sample_clock()?;
-                self.service_audio(before)?;
-                self.pump_video(before)?;
-                self.tick_scheduler(before)?;
-                if self.publisher.last_sample_index == self.video_sample_count.checked_sub(1) {
-                    self.eos.mark_final_frame_consumed();
-                }
-                let after = self.sample_clock()?;
-                self.record_seek_latency();
-                if self.eos.update(after) {
-                    self.renderer.pause(self.token)?;
-                    self.started = false;
-                    return Ok(true);
-                }
-                if Instant::now() >= deadline {
-                    if wall_limit.is_some() {
-                        self.renderer.pause(self.token)?;
-                        self.started = false;
-                        return Ok(false);
-                    }
-                    return Err(invalid(
-                        "native playback did not reach EOF before its deadline",
-                    ));
-                }
-                std::thread::sleep(LOOP_SLEEP);
-            }
-        }
-
-        fn prime(&mut self) -> AppResult<()> {
-            let deadline = Instant::now() + DEVICE_STALL_TIMEOUT;
-            loop {
-                let clock = self.sample_clock()?;
-                self.service_audio(clock)?;
-                self.pump_video(clock)?;
-                self.tick_scheduler(clock)?;
-                let writable_frames = self.renderer.writable_frames()?;
-                let audio_full = writable_frames == 0 || self.clock.position() >= self.video_end;
-                let target_published = self
-                    .publisher
-                    .last_sample_index
-                    .is_some_and(|sample| sample >= self.scheduler_target_sample());
-                if audio_full && target_published {
-                    return Ok(());
-                }
-                if Instant::now() >= deadline {
-                    return Err(invalid(format!(
-                        "native playback could not prime audio/video in time: target sample {}, \
-                         last published {:?}, pending {}, next video {}, writable audio {}, clock {}",
-                        self.scheduler_target_sample(),
-                        self.publisher.last_sample_index,
-                        self.scheduler.pending_frames(),
-                        self.next_video_sample,
-                        writable_frames,
-                        clock.ticks(),
-                    )));
-                }
-                std::thread::yield_now();
-            }
-        }
-
-        fn scheduler_target_sample(&self) -> usize {
-            self.seek_target_sample
-        }
-
-        fn sample_clock(&mut self) -> AppResult<TimelinePosition> {
-            let raw = self.renderer.raw_clock()?;
-            Ok(self.clock.sample(raw)?)
-        }
-
-        fn service_audio(&mut self, clock: TimelinePosition) -> AppResult<()> {
-            let writable = self.renderer.writable_frames()?;
-            self.observe_renderer_underruns(clock);
-            if writable == 0 || clock >= self.video_end {
-                return Ok(());
-            }
-            let target = writable.min(MAX_AUDIO_WRITE_FRAMES);
-            self.decode_audio_until(target)?;
-            let queued = self.audio_mixer.queued_frames();
-            let availability = if queued != 0 {
-                AudioAvailability::Pcm { frames: queued }
-            } else if self.audio_tracks.is_empty() {
-                AudioAvailability::NoTracks
-            } else if self.audio_finished {
-                AudioAvailability::Ended
-            } else {
-                return Err(invalid(
-                    "audio decoder made no progress before endpoint fill",
-                ));
-            };
-            let plan = plan_audio_fill(clock, self.video_end, writable, availability);
-            if plan.pcm_frames != 0 {
-                let samples = plan.pcm_frames * 2;
-                let drained = self
-                    .audio_mixer
-                    .drain_into(&mut self.audio_output[..samples])?;
-                if drained != plan.pcm_frames {
-                    return Err(invalid("audio mixer returned fewer frames than planned"));
-                }
-                let written = self
-                    .renderer
-                    .write_stereo_frames(&self.audio_output[..samples], self.token)?;
-                if written != drained {
-                    return Err(invalid(
-                        "WASAPI accepted fewer frames than its padding report",
-                    ));
-                }
-            } else if plan.silence_frames != 0 {
-                let samples = plan.silence_frames * 2;
-                self.audio_output[..samples].fill(0.0);
-                let written = self
-                    .renderer
-                    .write_stereo_frames(&self.audio_output[..samples], self.token)?;
-                if written != plan.silence_frames {
-                    return Err(invalid("WASAPI accepted fewer silence frames than planned"));
-                }
-            }
-            Ok(())
-        }
-
-        fn observe_renderer_underruns(&mut self, clock: TimelinePosition) {
-            let telemetry = self.renderer.telemetry();
-            let new_episodes = telemetry
-                .underruns
-                .saturating_sub(self.last_observed_underruns);
-            if new_episodes == 0 {
-                return;
-            }
-            if is_terminal_playout(clock, self.video_end, telemetry.buffer_frames) {
-                self.audio_terminal_playout_episodes = self
-                    .audio_terminal_playout_episodes
-                    .saturating_add(new_episodes);
-            } else {
-                self.audio_midstream_underruns =
-                    self.audio_midstream_underruns.saturating_add(new_episodes);
-            }
-            self.last_observed_underruns = telemetry.underruns;
-        }
-
-        fn decode_audio_until(&mut self, target_frames: usize) -> AppResult<()> {
-            while self.audio_mixer.queued_frames() < target_frames && !self.audio_finished {
-                if self.audio_tracks.is_empty() {
-                    self.audio_finished = true;
-                    break;
-                }
-                if self.next_audio_sample >= self.audio_sample_count {
-                    self.audio_mixer.finish_at(self.video_end.ticks())?;
-                    self.audio_finished = true;
-                    break;
-                }
-                if self.audio_mixer.queued_frames()
-                    > MAX_AUDIO_QUEUE_FRAMES.saturating_sub(MAX_OPUS_FRAME_SAMPLES)
-                {
-                    break;
-                }
-
-                self.audio_bank.clear_pending_frames();
-                let mut audible_start = None;
-                let mut frames = None;
-                for &track_index in &self.audio_tracks {
-                    let packet = self.audio_reader.read_packet(
-                        track_index,
-                        self.next_audio_sample,
-                        self.generation,
-                    )?;
-                    if let Some(expected) = audible_start {
-                        if expected != packet.audible_start_tick {
-                            return Err(invalid("selected Opus packets are not timeline-aligned"));
-                        }
-                    } else {
-                        audible_start = Some(packet.audible_start_tick);
-                    }
-                    self.audio_bank.decode_indexed(
-                        track_index,
-                        packet.bytes,
-                        packet.indexed_duration_frames,
-                        self.generation,
-                    )?;
-                    let decoded = self.audio_bank.pending_frames(track_index)?;
-                    if let Some(expected) = frames {
-                        if expected != decoded {
-                            return Err(invalid(
-                                "selected Opus packets decoded unequal frame counts",
-                            ));
-                        }
-                    } else {
-                        frames = Some(decoded);
-                    }
-                }
-
-                let frames = frames.unwrap_or(0);
-                let audible_start = audible_start.unwrap_or(self.audio_playback_start);
-                self.audio_bank.mix_pending_into(
-                    &self.audio_tracks,
-                    frames,
-                    &mut self.audio_mix_scratch[..frames * 2],
-                )?;
-                let skipped =
-                    usize::try_from(self.audio_playback_start.saturating_sub(audible_start))
-                        .unwrap_or(usize::MAX)
-                        .min(frames);
-                let kept_start = audible_start.saturating_add(skipped as u64);
-                let timeline_remaining = self.video_end.ticks().saturating_sub(kept_start);
-                let kept = (frames - skipped)
-                    .min(usize::try_from(timeline_remaining).unwrap_or(usize::MAX));
-                if kept != 0 {
-                    self.audio_mixer.mix_at(
-                        kept_start,
-                        kept,
-                        &[Some(&self.audio_mix_scratch[skipped * 2..frames * 2])],
-                    )?;
-                }
-                self.next_audio_sample = self
-                    .next_audio_sample
-                    .checked_add(1)
-                    .ok_or_else(|| invalid("audio sample cursor overflow"))?;
-            }
-            Ok(())
-        }
-
-        fn pump_video(&mut self, clock: TimelinePosition) -> AppResult<()> {
-            if self.scheduler.pending_frames() != 0 {
-                return Ok(());
-            }
-            for _ in 0..64 {
-                if let Some(frame) = self.decoder.receive()? {
-                    match self.scheduler.admit(frame, clock) {
-                        Ok(AdmitOutcome::Preroll | AdmitOutcome::Stale) => continue,
-                        Ok(_) => return Ok(()),
-                        Err(frame) => {
-                            drop(frame);
-                            return Err(invalid(
-                                "scheduler rejected a second future presentation surface",
-                            ));
-                        }
-                    }
-                }
-                if self.next_video_sample < self.video_sample_count {
-                    let submission = {
-                        let unit = self
-                            .video
-                            .read_sample(self.next_video_sample, self.generation)?;
-                        let status = self.decoder.submit(
-                            EncodedVideoPacket {
-                                bytes: unit.bytes,
-                                sample_index: unit.sample_index,
-                                pts: timeline_position(unit.pts, self.video_timescale)?,
-                                duration: timeline_duration(unit.duration, self.video_timescale)?,
-                                is_sync: unit.is_sync,
-                            },
-                            self.token,
-                        )?;
-                        (status, unit.parameter_set_submission)
-                    };
-                    if submission.0 == SubmitStatus::Accepted {
-                        if let Some(parameter_sets) = submission.1 {
-                            if !self.video.commit_parameter_sets(parameter_sets) {
-                                return Err(invalid(
-                                    "decoder accepted stale H.264 parameter-set submission",
-                                ));
-                            }
-                        }
-                        self.next_video_sample = self
-                            .next_video_sample
-                            .checked_add(1)
-                            .ok_or_else(|| invalid("video sample cursor overflow"))?;
-                    }
-                } else if !self.video_drain_sent {
-                    self.decoder.drain(self.token)?;
-                    self.video_drain_sent = true;
-                } else {
-                    return Ok(());
-                }
-            }
-            Ok(())
-        }
-
-        fn tick_scheduler(&mut self, before: TimelinePosition) -> AppResult<bool> {
-            let now = self.monotonic_now();
-            let renderer = &mut self.renderer;
-            let clock = &mut self.clock;
-            let scheduler = &mut self.scheduler;
-            let publisher = &mut self.publisher;
-            let mut backend_error = None;
-            let tick = scheduler.tick(
-                before,
-                publisher,
-                || match renderer.raw_clock() {
-                    Ok(raw) => clock.sample(raw),
-                    Err(error) => {
-                        backend_error = Some(error);
-                        Err(clipline_playback::ClockError::TimelineOverflow)
-                    }
-                },
-                now,
-            );
-            if let Some(error) = backend_error {
-                return Err(Box::new(error));
-            }
-            Ok(tick?)
-        }
-
-        fn record_seek_latency(&mut self) {
-            let metrics = self.scheduler.metrics();
-            if metrics.settled_seeks > self.last_recorded_settled_seeks {
-                if let Some(latency) = metrics.latest_seek_latency_100ns {
-                    let millis = latency.saturating_add(9_999) / 10_000;
-                    self.seek_latencies_ms
-                        .push(u16::try_from(millis).unwrap_or(u16::MAX));
-                }
-                self.last_recorded_settled_seeks = metrics.settled_seeks;
-            }
-        }
-
-        fn snapshot_scheduler_quality(&mut self) {
-            self.scheduler_totals.absorb(self.scheduler.metrics());
-        }
-
-        fn monotonic_now(&self) -> MonotonicTime100ns {
-            let ticks = self.run_anchor.elapsed().as_nanos() / 100;
-            MonotonicTime100ns::new(u64::try_from(ticks).unwrap_or(u64::MAX))
-        }
-
-        fn finish(mut self, ended: bool) -> AppResult<RunMetrics> {
-            if self.started {
-                self.renderer.pause(self.token)?;
-                self.started = false;
-            }
-            self.observe_renderer_underruns(self.clock.position());
-            let stale_results = self.scheduler.metrics().stale_results;
-            self.snapshot_scheduler_quality();
-            if self.scheduler_totals.presented_frames != self.publisher.presented {
-                return Err(invalid(
-                    "scheduler and publication backend disagree on presented frames",
-                ));
-            }
-            let decoder_info = self.decoder.ownership_telemetry();
-            let renderer_info = self.renderer.telemetry();
-            let video_buffers = self.video.buffer_telemetry();
-            let audio_packets = self.audio_reader.telemetry();
-            let audio_decode = self.audio_bank.stats();
-            let audio_mix = self.audio_mixer.stats();
-            let seek_settle_p95_ms = percentile_u16(&mut self.seek_latencies_ms, 95);
-            self.decoder.close();
-            self.renderer.close();
+            let renderer = telemetry.renderer;
+            let video_buffers = telemetry.video_buffers;
+            let audio_packets = telemetry.audio_packets;
+            let audio_decode = telemetry.audio_decode;
+            let audio_mix = telemetry.audio_mix;
+            let ownership = telemetry.decoder_ownership;
 
             Ok(RunMetrics {
-                ended,
+                ended: ended || self.ended,
                 requested_seeks: self.requested_seeks,
-                settled_seeks: self.seek_latencies_ms.len() as u64,
-                decoded_frames: decoder_info.presentable_frames,
-                decoded_eligible_frames: self.scheduler_totals.decoded_eligible_frames,
-                presented_frames: self.scheduler_totals.presented_frames,
-                late_frames: self.scheduler_totals.late_frames,
-                scheduler_dropped_frames: self.scheduler_totals.scheduler_dropped_frames,
-                presentation_backpressured_frames: self
-                    .scheduler_totals
-                    .presentation_backpressured_frames,
-                presentation_occluded_frames: self.scheduler_totals.presentation_occluded_frames,
-                late_or_dropped_frames: self.scheduler_totals.late_or_dropped_frames,
-                stale_results,
-                max_av_error_ticks: self.scheduler_totals.max_av_error_ticks,
-                av_error_p95_ms: self.scheduler_totals.av_error_p95_ms,
-                av_error_histogram_overflowed: self.scheduler_totals.av_error_histogram_overflowed,
-                seek_settle_p95_ms,
-                audio_underruns: renderer_info.underruns,
-                audio_midstream_underruns: self.audio_midstream_underruns,
-                audio_terminal_playout_episodes: self.audio_terminal_playout_episodes,
-                audio_underrun_frames_estimate: renderer_info.underrun_frames,
+                settled_seeks: metrics.settled_seeks,
+                decoded_frames: ownership.presentable_frames,
+                decoded_eligible_frames: metrics.decoded_eligible_frames,
+                presented_frames: metrics.presented_frames,
+                late_frames: metrics.late_frames,
+                scheduler_dropped_frames: metrics.scheduler_dropped_frames,
+                presentation_backpressured_frames: metrics.presentation_backpressured_frames,
+                presentation_occluded_frames: metrics.presentation_occluded_frames,
+                late_or_dropped_frames: metrics.late_or_dropped_frames,
+                stale_results: metrics.stale_results,
+                max_av_error_ticks: metrics.max_av_error_ticks,
+                av_error_p95_ms: metrics.av_error_histogram.percentile_millis(95),
+                av_error_histogram_overflowed: metrics.av_error_histogram.overflow() != 0,
+                seek_settle_p95_ms: metrics.seek_latency_histogram.percentile_millis(95),
+                audio_underruns: renderer.underruns,
+                audio_midstream_underruns: telemetry.audio_midstream_underruns,
+                audio_terminal_playout_episodes: telemetry.audio_terminal_playout_episodes,
+                audio_underrun_frames_estimate: renderer.underrun_frames,
                 audio_mixed_frames: audio_mix.mixed_frames,
                 audio_silent_frames: audio_mix.silent_frames,
                 audio_corrupt_packets: audio_decode.corrupt_packets,
-                audio_endpoint_id: renderer_info.endpoint_id().to_owned(),
-                audio_device_format: renderer_info.device_format().to_owned(),
-                audio_device_sample_rate: renderer_info.device_sample_rate,
-                audio_device_channels: renderer_info.device_channels,
-                audio_device_bits_per_sample: renderer_info.device_bits_per_sample,
-                audio_device_valid_bits_per_sample: renderer_info.device_valid_bits_per_sample,
-                audio_device_channel_mask: renderer_info.device_channel_mask,
-                audio_device_buffer_duration_100ns: renderer_info.device_buffer_duration_100ns,
-                audio_conversion_active: renderer_info.conversion_active,
-                audio_initialization_path: initialization_path_label(
-                    renderer_info.initialization_path,
-                )
-                .to_owned(),
-                audio_engine_period_frames: renderer_info.engine_period_frames,
-                audio_clock_frequency: renderer_info.clock_frequency,
-                audio_recovery_count: renderer_info.recovery_count,
+                audio_endpoint_id: renderer.endpoint_id().to_owned(),
+                audio_device_format: renderer.device_format().to_owned(),
+                audio_device_sample_rate: renderer.device_sample_rate,
+                audio_device_channels: renderer.device_channels,
+                audio_device_bits_per_sample: renderer.device_bits_per_sample,
+                audio_device_valid_bits_per_sample: renderer.device_valid_bits_per_sample,
+                audio_device_channel_mask: renderer.device_channel_mask,
+                audio_device_buffer_duration_100ns: renderer.device_buffer_duration_100ns,
+                audio_conversion_active: renderer.conversion_active,
+                audio_initialization_path: initialization_path_label(renderer.initialization_path)
+                    .to_owned(),
+                audio_engine_period_frames: renderer.engine_period_frames,
+                audio_clock_frequency: renderer.clock_frequency,
+                audio_recovery_count: renderer.recovery_count,
                 video_encoded_buffer_capacity: video_buffers.encoded_capacity,
                 video_converted_buffer_capacity: video_buffers.converted_capacity,
                 video_encoded_high_water: video_buffers.encoded_high_water,
@@ -1163,14 +621,102 @@ mod windows_app {
                 audio_packet_capacity: audio_packets.packet_capacity,
                 audio_packet_high_water: audio_packets.packet_high_water,
                 audio_queue_high_water_frames: audio_mix.queue_high_water_frames,
-                endpoint_buffer_frames: renderer_info.buffer_frames,
-                endpoint_epoch: renderer_info.endpoint_epoch,
-                decoder_acceleration: self.decoder_acceleration,
-                decoder_presentable_frames: decoder_info.presentable_frames,
-                decoder_output_copies: decoder_info.output_copies,
-                decoder_samples_received: decoder_info.mft_samples_received,
-                decoder_samples_released: decoder_info.mft_samples_released,
+                endpoint_buffer_frames: renderer.buffer_frames,
+                endpoint_epoch: renderer.endpoint_epoch,
+                decoder_acceleration,
+                decoder_presentable_frames: ownership.presentable_frames,
+                decoder_output_copies: ownership.output_copies,
+                decoder_samples_received: ownership.mft_samples_received,
+                decoder_samples_released: ownership.mft_samples_released,
             })
+        }
+
+        fn wait_for_open(&mut self) -> AppResult<PlaybackTime> {
+            let deadline = Instant::now() + DEVICE_STALL_TIMEOUT;
+            loop {
+                while let Some(update) = self.client.try_recv_update() {
+                    match update.payload {
+                        SessionUpdatePayload::Event(PlaybackEvent::Opened { duration, .. }) => {
+                            return Ok(duration);
+                        }
+                        SessionUpdatePayload::Event(PlaybackEvent::Error { message, .. }) => {
+                            return Err(invalid(format!("open failed: {message}")));
+                        }
+                        _ => {}
+                    }
+                }
+                self.ensure_running("open")?;
+                if Instant::now() >= deadline {
+                    return Err(invalid("media did not open before the device timeout"));
+                }
+                thread::sleep(LOOP_SLEEP);
+            }
+        }
+
+        fn pause_and_wait(&mut self) -> AppResult<()> {
+            self.client.try_send(PlaybackCommand::Pause)?;
+            let deadline = Instant::now() + DEVICE_STALL_TIMEOUT;
+            loop {
+                while let Some(update) = self.client.try_recv_update() {
+                    match update.payload {
+                        SessionUpdatePayload::Snapshot(snapshot)
+                            if matches!(
+                                snapshot.phase,
+                                PlaybackPhase::Paused | PlaybackPhase::Ended
+                            ) =>
+                        {
+                            return Ok(());
+                        }
+                        SessionUpdatePayload::Event(PlaybackEvent::Ended { .. }) => {
+                            self.ended = true;
+                            return Ok(());
+                        }
+                        SessionUpdatePayload::Event(PlaybackEvent::Error { message, .. }) => {
+                            return Err(invalid(format!("pause failed: {message}")));
+                        }
+                        _ => {}
+                    }
+                }
+                self.ensure_running("pause")?;
+                if Instant::now() >= deadline {
+                    return Err(invalid("pause did not settle before the device timeout"));
+                }
+                thread::sleep(LOOP_SLEEP);
+            }
+        }
+
+        fn drain_before_command(&mut self) -> AppResult<()> {
+            while let Some(update) = self.client.try_recv_update() {
+                match update.payload {
+                    SessionUpdatePayload::Event(PlaybackEvent::Error { message, .. }) => {
+                        return Err(invalid(format!("playback session failed: {message}")));
+                    }
+                    SessionUpdatePayload::Event(PlaybackEvent::Ended { .. }) => {
+                        self.ended = true;
+                    }
+                    _ => {}
+                }
+            }
+            self.ensure_running("command")
+        }
+
+        fn ensure_running(&self, operation: &str) -> AppResult<()> {
+            if self.playback.as_ref().is_some_and(JoinHandle::is_finished) {
+                Err(invalid(format!(
+                    "headless playback thread exited during {operation}"
+                )))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl Drop for HeadlessSession {
+        fn drop(&mut self) {
+            if let Some(playback) = self.playback.take() {
+                let _ = self.client.try_send(PlaybackCommand::Close);
+                let _ = playback.join();
+            }
         }
     }
 
@@ -1288,6 +834,10 @@ mod windows_app {
         Ok(())
     }
 
+    fn playback_duration(duration: PlaybackTime) -> Duration {
+        Duration::from_secs_f64(duration.ticks as f64 / f64::from(duration.timescale))
+    }
+
     fn pace_cycle(start: Instant, duration: Duration, cycle: usize, total_cycles: usize) {
         let fraction = cycle as f64 / total_cycles as f64;
         sleep_until(start + duration.mul_f64(fraction));
@@ -1298,7 +848,7 @@ mod windows_app {
             if remaining.is_zero() {
                 break;
             }
-            std::thread::sleep(remaining.min(Duration::from_millis(50)));
+            thread::sleep(remaining.min(Duration::from_millis(50)));
         }
     }
 
@@ -1343,58 +893,6 @@ mod windows_app {
         result
     }
 
-    fn find_video_track(index: &clipline_mp4::MovieIndex) -> AppResult<usize> {
-        index
-            .tracks
-            .iter()
-            .position(|track| matches!(track.config, PlaybackTrackConfig::H264 { .. }))
-            .ok_or_else(|| invalid("fixture has no H.264 track"))
-    }
-
-    fn find_audio_tracks(index: &clipline_mp4::MovieIndex) -> Vec<usize> {
-        index
-            .tracks
-            .iter()
-            .enumerate()
-            .filter_map(|(track_index, track)| {
-                matches!(track.config, PlaybackTrackConfig::Opus { .. }).then_some(track_index)
-            })
-            .collect()
-    }
-
-    fn rescale_to_timeline(ticks: u64, timescale: u32) -> AppResult<u64> {
-        if timescale == 0 {
-            return Err(invalid("media timescale must be non-zero"));
-        }
-        let scaled = u128::from(ticks)
-            .checked_mul(u128::from(PLAYBACK_TIMELINE_HZ))
-            .and_then(|value| value.checked_div(u128::from(timescale)))
-            .and_then(|value| u64::try_from(value).ok())
-            .ok_or_else(|| invalid("media timestamp conversion overflow"))?;
-        Ok(scaled)
-    }
-
-    fn timeline_position(pts: i64, timescale: u32) -> AppResult<TimelinePosition> {
-        let pts = u64::try_from(pts).map_err(|_| invalid("negative video PTS is unsupported"))?;
-        Ok(TimelinePosition::new(rescale_to_timeline(pts, timescale)?))
-    }
-
-    fn timeline_duration(duration: u32, timescale: u32) -> AppResult<TimelineDuration> {
-        Ok(TimelineDuration::new(rescale_to_timeline(
-            u64::from(duration),
-            timescale,
-        )?)?)
-    }
-
-    fn percentile_u16(values: &mut [u16], percentile: usize) -> Option<u16> {
-        if values.is_empty() || !(1..=100).contains(&percentile) {
-            return None;
-        }
-        values.sort_unstable();
-        let rank = values.len().saturating_mul(percentile).saturating_add(99) / 100;
-        values.get(rank.saturating_sub(1)).copied()
-    }
-
     fn max_option<T: Copy + Ord>(left: Option<T>, right: Option<T>) -> Option<T> {
         match (left, right) {
             (Some(left), Some(right)) => Some(left.max(right)),
@@ -1418,15 +916,6 @@ mod windows_app {
         }
     }
 
-    fn is_terminal_playout(
-        clock: TimelinePosition,
-        video_end: TimelinePosition,
-        endpoint_buffer_frames: usize,
-    ) -> bool {
-        video_end.ticks().saturating_sub(clock.ticks())
-            <= u64::try_from(endpoint_buffer_frames).unwrap_or(u64::MAX)
-    }
-
     fn merge_fail_closed_percentile(
         current: Option<u16>,
         next: Option<u16>,
@@ -1445,12 +934,9 @@ mod windows_app {
         Box::new(io::Error::new(ErrorKind::InvalidData, message.into()))
     }
 
-    #[allow(dead_code)]
-    fn _assert_metrics_type(_: &PlaybackMetrics) {}
-
     #[cfg(test)]
     mod tests {
-        use super::{is_terminal_playout, merge_fail_closed_percentile, TimelinePosition};
+        use super::merge_fail_closed_percentile;
 
         #[test]
         fn percentile_aggregation_stays_failed_closed_after_any_overflow() {
@@ -1465,26 +951,6 @@ mod windows_app {
             let still_rejected =
                 merge_fail_closed_percentile(rejected, Some(3), &mut overflowed, false);
             assert_eq!(still_rejected, None);
-        }
-
-        #[test]
-        fn endpoint_empty_is_terminal_only_inside_the_final_buffer_window() {
-            let end = TimelinePosition::new(240_000);
-            assert!(!is_terminal_playout(
-                TimelinePosition::new(238_943),
-                end,
-                1_056,
-            ));
-            assert!(is_terminal_playout(
-                TimelinePosition::new(238_944),
-                end,
-                1_056,
-            ));
-            assert!(is_terminal_playout(
-                TimelinePosition::new(240_001),
-                end,
-                1_056,
-            ));
         }
     }
 }

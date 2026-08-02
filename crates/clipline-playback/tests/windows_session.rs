@@ -626,7 +626,8 @@ fn occluded_seek_settles_and_occluded_final_frame_still_ends() {
     let Some(metrics) = run_near_eof("occluded-eof", OccludedPublisher) else {
         return;
     };
-    assert!(metrics.occluded_settled_seeks >= 1);
+    assert_eq!(metrics.settled_seeks, 1);
+    assert_eq!(metrics.occluded_settled_seeks, 1);
     assert!(metrics.presentation_occluded_frames >= 1);
 }
 

@@ -29,6 +29,7 @@ use crate::{
 pub const SESSION_UPDATE_CAPACITY: usize = 64;
 pub const SESSION_MAX_WAIT: Duration = Duration::from_millis(10);
 const SESSION_IDLE_WAIT: Duration = Duration::from_millis(2);
+const SESSION_ACTIVE_WAIT: Duration = Duration::from_millis(1);
 const MAX_SESSION_PUMP_STEPS: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -452,7 +453,11 @@ impl SessionRuntime {
             }
 
             if !made_progress {
-                if let Some(accepted) = self.wait_for_command(SESSION_IDLE_WAIT) {
+                let active =
+                    worker.snapshot().phase == PlaybackPhase::Playing || pending_action.is_some();
+                if active {
+                    std::thread::sleep(SESSION_ACTIVE_WAIT);
+                } else if let Some(accepted) = self.wait_for_command(SESSION_IDLE_WAIT) {
                     worker
                         .enqueue(accepted.command, accepted.accepted_at)
                         .map_err(|error| {
@@ -1182,11 +1187,12 @@ impl SessionMedia {
             .map_err(|error| clock_backend_error("freeze settled seek clock", error))?;
         self.accumulated_metrics
             .accumulate_generation(self.scheduler.metrics());
-        self.scheduler.begin_seek(
-            token,
-            SeekTarget::new(target, worker_plan.target_sample_index),
-            accepted_at,
-        );
+        let seek_target = SeekTarget::new(target, worker_plan.target_sample_index);
+        if token.work().seek == 0 {
+            self.scheduler.replace_pipeline(token, seek_target);
+        } else {
+            self.scheduler.begin_seek(token, seek_target, accepted_at);
+        }
         self.eos = EndOfStreamTracker::new(self.video_end);
         self.settled_position = plan.target_time;
         self.next_video_sample = plan.video_preroll.samples.start;
@@ -1340,19 +1346,20 @@ impl SessionMedia {
         }
         let clock = self.sample_clock()?;
         self.receive_decoder(clock)?;
-        let settled_before = self.scheduler.metrics().settled_seeks;
+        let presented_before = self.scheduler.metrics().presented_frames;
         let occluded_before = self.scheduler.metrics().presentation_occluded_frames;
         let backpressured_before = self.scheduler.metrics().presentation_backpressured_frames;
         self.tick_scheduler(clock, publisher, now)?;
-        if self.scheduler.metrics().settled_seeks > settled_before {
+        if self.scheduler.metrics().presented_frames > presented_before {
             return Ok(ActionProgress::Complete(WorkerCompletion::Published {
                 position: self.settled_position,
             }));
         }
         if self.scheduler.metrics().presentation_occluded_frames > occluded_before {
-            if !self
-                .scheduler
-                .settle_seek_after_occlusion(token, sample_index, now)
+            if token.work().seek != 0
+                && !self
+                    .scheduler
+                    .settle_seek_after_occlusion(token, sample_index, now)
             {
                 return Err(retry_media(
                     BackendComponent::FramePublisher,
@@ -1704,5 +1711,30 @@ impl SessionMedia {
         self.clock
             .sample(raw)
             .map_err(|error| clock_backend_error("sample audio clock", error))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_terminal_playout, TimelinePosition};
+
+    #[test]
+    fn endpoint_empty_is_terminal_only_inside_the_final_buffer_window() {
+        let end = TimelinePosition::new(240_000);
+        assert!(!is_terminal_playout(
+            TimelinePosition::new(238_943),
+            end,
+            1_056,
+        ));
+        assert!(is_terminal_playout(
+            TimelinePosition::new(238_944),
+            end,
+            1_056,
+        ));
+        assert!(is_terminal_playout(
+            TimelinePosition::new(240_001),
+            end,
+            1_056,
+        ));
     }
 }
