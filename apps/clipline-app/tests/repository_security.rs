@@ -73,6 +73,16 @@ fn native_shell_services_are_shell_owned_and_tauri_plugins_are_absent() {
         "CreateNamedPipeW(",
         "CreateMutexW(",
         "ImpersonateNamedPipeClient(",
+        "OpenProcessToken(",
+        "TokenElevation",
+        "ShellExecuteW(",
+        "SHOpenFolderAndSelectItems(",
+        "OpenClipboard(",
+        "SetClipboardData(",
+        "CredWriteW(",
+        "CredReadW(",
+        "CredDeleteW(",
+        "CredFree(",
     ] {
         let owners: Vec<_> = app_sources
             .iter()
@@ -96,6 +106,60 @@ fn native_shell_services_are_shell_owned_and_tauri_plugins_are_absent() {
         assert!(
             service.contains(contract),
             "native hotkey service must retain {contract}"
+        );
+    }
+
+    let process = fs::read_to_string(root.join("crates/clipline-shell/src/windows/process.rs"))
+        .expect("read native process service");
+    for contract in [
+        "ELEVATED_AFTER_ARGUMENT",
+        "ShellLaunch::parse(",
+        "GetProcessTimes(",
+        "WaitForSingleObject(",
+    ] {
+        assert!(
+            process.contains(contract),
+            "native process service must retain {contract}"
+        );
+    }
+
+    let shell_execute =
+        fs::read_to_string(root.join("crates/clipline-shell/src/windows/shell_execute.rs"))
+            .expect("read native shell-execute service");
+    for contract in [
+        "ShellExecuteW(",
+        "SHOpenFolderAndSelectItems(",
+        "wide_nul_checked(",
+        "SHELL_SUCCESS_MINIMUM",
+    ] {
+        assert!(
+            shell_execute.contains(contract),
+            "native shell-execute service must retain {contract}"
+        );
+    }
+
+    let clipboard = fs::read_to_string(root.join("crates/clipline-shell/src/windows/clipboard.rs"))
+        .expect("read native clipboard service");
+    for contract in [
+        "OPEN_ATTEMPTS: usize = 8",
+        "OpenClipboard(",
+        "CloseClipboard(",
+        "SetClipboardData(",
+        "transfer.release()",
+    ] {
+        assert!(
+            clipboard.contains(contract),
+            "native clipboard service must retain {contract}"
+        );
+    }
+
+    let credential =
+        fs::read_to_string(root.join("crates/clipline-shell/src/windows/credential.rs"))
+            .expect("read native credential service");
+    for contract in ["CredWriteW(", "CredReadW(", "CredDeleteW(", "CredFree("] {
+        assert!(
+            credential.contains(contract),
+            "native credential service must retain {contract}"
         );
     }
 
@@ -196,16 +260,7 @@ fn unsafe_application_platform_helpers_live_under_the_windows_module() {
     let source_root = workspace_root().join("apps/clipline-app/src");
     let windows_root = source_root.join("windows");
     let sources = rust_sources_below(&source_root);
-    for symbol in [
-        "CredWriteW",
-        "CredReadW",
-        "CredDeleteW",
-        "CredFree",
-        "CREDENTIALW",
-        "ShellExecuteW",
-        "GetDiskFreeSpaceExW",
-        "MoveFileExW",
-    ] {
+    for symbol in ["GetDiskFreeSpaceExW", "MoveFileExW"] {
         let owners: Vec<_> = sources
             .iter()
             .filter(|path| fs::read_to_string(path).unwrap().contains(symbol))

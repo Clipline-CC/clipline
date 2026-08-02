@@ -20,6 +20,7 @@ use clipline_cloud_api::{
 };
 use clipline_desktop::{Generation, UiEvent, UiEventSink};
 use clipline_events::ClipMarkers;
+use clipline_shell::windows::credential::CredentialStore;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, Runtime};
@@ -29,7 +30,6 @@ use crate::app::RuntimeState;
 use crate::library::{validate_clip_path, StorageSettings};
 use crate::settings::{normalize_cloud_visibility, CloudSettings, CloudUploadRecord};
 use crate::util::unix_now;
-use crate::windows::CredentialStore;
 
 const DEFAULT_DEVICE_NAME: &str = "Clipline Desktop";
 const READY_POLL_ATTEMPTS: usize = 30;
@@ -457,7 +457,8 @@ pub fn open_cloud_clip(
 }
 
 fn open_cloud_url(url: &str, context: &str) -> Result<(), String> {
-    crate::windows::open_with_shell(std::ffi::OsStr::new(url), context)
+    clipline_shell::windows::shell_execute::open_browser_url(url, context)
+        .map_err(|error| error.to_string())
 }
 
 fn cloud_asset_context(
@@ -2492,15 +2493,21 @@ fn credential_target(host_url: &str, user_id: &str) -> String {
 }
 
 fn write_credential(target: &str, username: &str, token: &str) -> Result<(), String> {
-    CLOUD_CREDENTIALS.write(target, username, token)
+    CLOUD_CREDENTIALS
+        .write(target, username, token)
+        .map_err(|error| error.to_string())
 }
 
 fn read_credential(target: &str) -> Result<String, String> {
-    CLOUD_CREDENTIALS.read(target)
+    CLOUD_CREDENTIALS
+        .read(target)
+        .map_err(|error| error.to_string())
 }
 
 fn delete_credential_if_present(target: &str) -> Result<(), String> {
-    CLOUD_CREDENTIALS.delete_if_present(target)
+    CLOUD_CREDENTIALS
+        .delete_if_present(target)
+        .map_err(|error| error.to_string())
 }
 
 fn cloud_error(error: CloudApiError) -> String {

@@ -6,13 +6,13 @@ use std::sync::{Mutex, OnceLock};
 
 use chrono::DateTime;
 use clipline_desktop::{UiEvent, UiEventSink};
+use clipline_shell::windows::credential::CredentialStore;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, Runtime};
 
 use crate::app::RuntimeState;
 use crate::library::StorageSettings;
 use crate::settings::OsuApiSettings;
-use crate::windows::CredentialStore;
 
 const OSU_TOKEN_URL: &str = "https://osu.ppy.sh/oauth/token";
 const OSU_API_VERSION: &str = "20220705";
@@ -808,15 +808,21 @@ fn osu_user_lookup_segment(user: &str) -> String {
 }
 
 fn write_secret(target: &str, username: &str, secret: &str) -> Result<(), String> {
-    OSU_CREDENTIALS.write(target, username, secret)
+    OSU_CREDENTIALS
+        .write(target, username, secret)
+        .map_err(|error| error.to_string())
 }
 
 fn read_secret(target: &str) -> Result<String, String> {
-    OSU_CREDENTIALS.read(target)
+    OSU_CREDENTIALS
+        .read(target)
+        .map_err(|error| error.to_string())
 }
 
 fn delete_secret_if_present(target: &str) -> Result<(), String> {
-    OSU_CREDENTIALS.delete_if_present(target)
+    OSU_CREDENTIALS
+        .delete_if_present(target)
+        .map_err(|error| error.to_string())
 }
 
 fn reconcile_osu_credential_cleanup(state: &RuntimeState) -> Result<(), String> {
@@ -840,7 +846,8 @@ fn reconcile_osu_credential_cleanup(state: &RuntimeState) -> Result<(), String> 
 }
 
 fn open_path(path: &std::path::Path, context: &str) -> Result<(), String> {
-    crate::windows::open_with_shell(path.as_os_str(), context)
+    clipline_shell::windows::shell_execute::open_path(path, context)
+        .map_err(|error| error.to_string())
 }
 
 fn osu_setup_guide_html() -> &'static str {

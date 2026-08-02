@@ -358,7 +358,8 @@ pub(super) async fn save_prepared_bug_report(
 pub(super) fn open_diagnostics_folder() -> Result<(), String> {
     let directory = diagnostics::diagnostics_directory()
         .ok_or_else(|| "diagnostics are not initialized".to_string())?;
-    crate::windows::open_with_shell(directory.as_os_str(), "open diagnostics folder")
+    clipline_shell::windows::shell_execute::open_folder(&directory, "open diagnostics folder")
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]

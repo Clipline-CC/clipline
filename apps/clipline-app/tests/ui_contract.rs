@@ -548,6 +548,20 @@ fn administrator_restart_uses_an_exact_parent_handoff() {
     let main = fs::read_to_string(root.join("src/main.rs")).expect("read src/main.rs");
     let windows =
         fs::read_to_string(root.join("src/windows/mod.rs")).expect("read src/windows/mod.rs");
+    let shell_process = fs::read_to_string(
+        root.ancestors()
+            .nth(2)
+            .expect("workspace root")
+            .join("crates/clipline-shell/src/windows/process.rs"),
+    )
+    .expect("read native shell process service");
+    let shell_execute = fs::read_to_string(
+        root.ancestors()
+            .nth(2)
+            .expect("workspace root")
+            .join("crates/clipline-shell/src/windows/shell_execute.rs"),
+    )
+    .expect("read native shell-execute service");
     let ui = main_js();
 
     assert!(
@@ -560,18 +574,27 @@ fn administrator_restart_uses_an_exact_parent_handoff() {
         main.contains("wait_for_elevation_parent_from_args"),
         "the elevated child must finish the parent handoff before starting Tauri"
     );
+    assert!(
+        windows.contains("clipline_shell::windows::process::launch_elevated_after")
+            && windows.contains("clipline_shell::windows::process::wait_for_elevation_parent_from_args"),
+        "the rollback frontend must reach elevation only through the safe native shell service"
+    );
     for required in [
-        "launch_elevated_after",
         "--clipline-elevated-after",
         "wait_for_elevation_parent_from_args",
-        "query_process_identity",
-        "\"runas\"",
+        "process_identity",
+        "GetProcessTimes(",
+        "run_as(",
     ] {
         assert!(
-            windows.contains(required),
+            shell_process.contains(required),
             "the Windows boundary must retain exact-process handoff primitive {required}"
         );
     }
+    assert!(
+        shell_execute.contains("OsStr::new(\"runas\")"),
+        "the safe shell-execute boundary must retain the UAC runas verb"
+    );
     assert!(
         ui.contains("restart_as_administrator"),
         "the affirmative UI action must invoke the narrow restart command"
@@ -3842,6 +3865,14 @@ fn clipboard_copy_distinguishes_shareable_and_original_paths() {
     let html = index_html();
     let app = app_rs();
     let library = library_rs();
+    let clipboard = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("workspace root")
+            .join("crates/clipline-shell/src/windows/clipboard.rs"),
+    )
+    .expect("read native shell clipboard service");
 
     assert!(
         library.contains("pub struct CopyClipToClipboardRequest")
@@ -3849,9 +3880,18 @@ fn clipboard_copy_distinguishes_shareable_and_original_paths() {
             && library.contains("request: CopyClipToClipboardRequest")
             && library.contains("window: tauri::WebviewWindow")
             && library.contains(".hwnd()")
-            && library.contains("SetClipboardData(CF_HDROP as u32")
-            && !library.contains("EmptyClipboard()"),
+            && library.contains("clipline_shell::windows::clipboard::copy_file_to_clipboard")
+            && !library.contains("SetClipboardData("),
         "clipboard command should accept selected audio while native clipboard ownership comes from the invoking Clipline window",
+    );
+    assert!(
+        clipboard.contains("OPEN_ATTEMPTS: usize = 8")
+            && clipboard.contains("OpenClipboard(")
+            && clipboard.contains("EmptyClipboard()")
+            && clipboard.contains("SetClipboardData(")
+            && clipboard.contains("CloseClipboard()")
+            && clipboard.contains("transfer.release()"),
+        "the native shell clipboard service must retain bounded ownership transfer"
     );
     assert!(
         app.contains("crate::library::copy_clip_to_clipboard"),

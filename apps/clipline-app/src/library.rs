@@ -12,11 +12,8 @@ use naming::{
 use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::io::{self, Read};
-use std::mem::size_of;
-use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
-use std::ptr;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -28,17 +25,10 @@ use clipline_mp4::{
     MediaVideoCodec,
 };
 use clipline_storage::storage_status as read_storage_status;
-use windows_sys::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
-use windows_sys::Win32::System::DataExchange::{CloseClipboard, OpenClipboard, SetClipboardData};
-use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
-use windows_sys::Win32::System::Ole::CF_HDROP;
-use windows_sys::Win32::UI::Shell::DROPFILES;
-
 use tauri::{AppHandle, Manager, Runtime};
 
 use crate::service::{clips_dir, default_clips_dir};
 use crate::util;
-use crate::windows::last_os_error;
 
 pub struct StorageSettings {
     quota_bytes: Mutex<Option<u64>>,
@@ -2088,10 +2078,8 @@ pub(crate) fn validate_clip_path(
 #[tauri::command]
 pub fn reveal_clip(path: String, settings: tauri::State<StorageSettings>) -> Result<(), String> {
     let target = validate_clip_path(&settings, &path)?;
-    let dir = target
-        .parent()
-        .ok_or_else(|| "clip has no containing folder".to_string())?;
-    open_folder_path(dir)
+    clipline_shell::windows::shell_execute::reveal_in_explorer(&target, "reveal clip in Explorer")
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -2109,7 +2097,8 @@ pub async fn copy_clip_to_clipboard(
         .0 as isize;
     tauri::async_runtime::spawn_blocking(move || {
         let share_path = clipboard_copy_path(&target, audio_track_ids.as_deref(), original)?;
-        copy_file_to_clipboard(&share_path, owner as HWND)
+        clipline_shell::windows::clipboard::copy_file_to_clipboard(&share_path, owner)
+            .map_err(|error| error.to_string())
     })
     .await
     .map_err(|e| format!("copy clip task: {e}"))?
@@ -2118,15 +2107,8 @@ pub async fn copy_clip_to_clipboard(
 #[tauri::command]
 pub fn open_media_folder(settings: tauri::State<StorageSettings>) -> Result<(), String> {
     let dir = settings.clips_dir()?;
-    open_folder_path(&dir)
-}
-
-fn open_folder_path(dir: &Path) -> Result<(), String> {
-    std::process::Command::new("explorer.exe")
-        .arg(dir)
-        .spawn()
-        .map_err(|e| format!("open explorer: {e}"))?;
-    Ok(())
+    clipline_shell::windows::shell_execute::open_folder(&dir, "open media folder")
+        .map_err(|error| error.to_string())
 }
 
 fn clip_metadata_path(path: &Path) -> PathBuf {
@@ -2246,152 +2228,6 @@ fn update_cloud_record_paths(state: &crate::app::RuntimeState, old_path: &str, n
         }
     }) {
         tracing::warn!(event = "renamed_clip_cloud_record_update_failed", error = %error);
-    }
-}
-
-fn copy_file_to_clipboard(path: &Path, owner: HWND) -> Result<(), String> {
-    let payload = dropfiles_payload(path);
-    let handle = unsafe { GlobalAlloc(GMEM_MOVEABLE, payload.len()) };
-    if handle.is_null() {
-        return Err(last_os_error("allocate clipboard memory"));
-    }
-
-    let mem = unsafe { GlobalLock(handle) };
-    if mem.is_null() {
-        let err = last_os_error("lock clipboard memory");
-        unsafe {
-            GlobalFree(handle);
-        }
-        return Err(err);
-    }
-    unsafe {
-        ptr::copy_nonoverlapping(payload.as_ptr(), mem.cast::<u8>(), payload.len());
-        GlobalUnlock(handle);
-    }
-
-    let mut transfer = ClipboardTransfer::new(handle);
-    clipboard_transaction(
-        8,
-        || {
-            if unsafe { OpenClipboard(owner) } == 0 {
-                Err(last_os_error("open clipboard"))
-            } else {
-                Ok(())
-            }
-        },
-        || unsafe {
-            CloseClipboard();
-        },
-        || {
-            if unsafe { SetClipboardData(CF_HDROP as u32, transfer.handle()) }.is_null() {
-                Err(last_os_error("set clipboard data"))
-            } else {
-                transfer.release();
-                Ok(())
-            }
-        },
-        || std::thread::sleep(Duration::from_millis(15)),
-    )
-}
-
-fn clipboard_transaction<E>(
-    attempts: usize,
-    mut open: impl FnMut() -> Result<(), E>,
-    mut close: impl FnMut(),
-    mut set: impl FnMut() -> Result<(), E>,
-    mut wait: impl FnMut(),
-) -> Result<(), E> {
-    let mut last_error = None;
-    for attempt in 0..attempts.max(1) {
-        match open() {
-            Ok(()) => {
-                let result = set();
-                close();
-                return result;
-            }
-            Err(error) => {
-                last_error = Some(error);
-                if attempt + 1 < attempts.max(1) {
-                    wait();
-                }
-            }
-        }
-    }
-    Err(last_error.expect("at least one clipboard-open attempt runs"))
-}
-
-fn dropfiles_payload(path: &Path) -> Vec<u8> {
-    let mut wide = shell_clipboard_path_wide(path);
-    wide.extend([0, 0]);
-
-    let header_len = size_of::<DROPFILES>();
-    let byte_len = header_len + wide.len() * size_of::<u16>();
-    let mut payload = vec![0u8; byte_len];
-    let header = DROPFILES {
-        pFiles: header_len as u32,
-        pt: Default::default(),
-        fNC: 0,
-        fWide: 1,
-    };
-    unsafe {
-        ptr::write_unaligned(payload.as_mut_ptr().cast::<DROPFILES>(), header);
-        ptr::copy_nonoverlapping(
-            wide.as_ptr().cast::<u8>(),
-            payload.as_mut_ptr().add(header_len),
-            wide.len() * size_of::<u16>(),
-        );
-    }
-    payload
-}
-
-fn shell_clipboard_path_wide(path: &Path) -> Vec<u16> {
-    const BACKSLASH: u16 = b'\\' as u16;
-    const QUESTION: u16 = b'?' as u16;
-    const U: u16 = b'U' as u16;
-    const N: u16 = b'N' as u16;
-    const C: u16 = b'C' as u16;
-    const VERBATIM: [u16; 4] = [BACKSLASH, BACKSLASH, QUESTION, BACKSLASH];
-    const VERBATIM_UNC: [u16; 8] = [
-        BACKSLASH, BACKSLASH, QUESTION, BACKSLASH, U, N, C, BACKSLASH,
-    ];
-
-    let wide: Vec<u16> = path.as_os_str().encode_wide().collect();
-    if wide.starts_with(&VERBATIM_UNC) {
-        let mut plain = vec![BACKSLASH, BACKSLASH];
-        plain.extend_from_slice(&wide[VERBATIM_UNC.len()..]);
-        plain
-    } else if wide.starts_with(&VERBATIM) {
-        wide[VERBATIM.len()..].to_vec()
-    } else {
-        wide
-    }
-}
-
-struct ClipboardTransfer {
-    handle: HGLOBAL,
-}
-
-impl ClipboardTransfer {
-    fn new(handle: HGLOBAL) -> Self {
-        Self { handle }
-    }
-
-    fn handle(&self) -> HANDLE {
-        self.handle
-    }
-
-    fn release(&mut self) {
-        self.handle = ptr::null_mut();
-    }
-}
-
-impl Drop for ClipboardTransfer {
-    fn drop(&mut self) {
-        if !self.handle.is_null() {
-            unsafe {
-                GlobalFree(self.handle);
-            }
-        }
     }
 }
 
@@ -4884,96 +4720,6 @@ mod tests {
         assert!(
             c.with_extension("osu-enrichment.json").exists(),
             "c.mp4 pending osu! sidecar must be left untouched"
-        );
-    }
-
-    #[test]
-    fn dropfiles_payload_strips_verbatim_prefix_and_marks_unicode() {
-        let path = Path::new(r"\\?\C:\Users\dain\Videos\Clipline\clïp 雪.mp4");
-        let payload = dropfiles_payload(path);
-        let p_files = u32::from_le_bytes(payload[0..4].try_into().unwrap()) as usize;
-
-        assert_eq!(p_files, size_of::<DROPFILES>());
-        assert_eq!(i32::from_le_bytes(payload[12..16].try_into().unwrap()), 0);
-        assert_eq!(i32::from_le_bytes(payload[16..20].try_into().unwrap()), 1);
-
-        let path_units: Vec<u16> = payload[p_files..]
-            .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes(pair.try_into().unwrap()))
-            .collect();
-        assert_eq!(&path_units[path_units.len() - 2..], &[0, 0]);
-        let decoded = String::from_utf16(&path_units[..path_units.len() - 2]).unwrap();
-        assert_eq!(decoded, r"C:\Users\dain\Videos\Clipline\clïp 雪.mp4");
-    }
-
-    #[test]
-    fn shell_clipboard_path_wide_converts_verbatim_unc_paths() {
-        let path = Path::new(r"\\?\UNC\nas\clips\clïp 雪.mp4");
-        let decoded = String::from_utf16(&shell_clipboard_path_wide(path)).unwrap();
-
-        assert_eq!(decoded, r"\\nas\clips\clïp 雪.mp4");
-    }
-
-    #[test]
-    fn clipboard_transaction_retries_open_and_closes_every_opened_path() {
-        use std::cell::{Cell, RefCell};
-
-        let events = RefCell::new(Vec::new());
-        let opens = Cell::new(0_u32);
-        let result = clipboard_transaction(
-            3,
-            || {
-                events.borrow_mut().push("open");
-                opens.set(opens.get() + 1);
-                if opens.get() < 3 {
-                    Err("busy")
-                } else {
-                    Ok(())
-                }
-            },
-            || events.borrow_mut().push("close"),
-            || {
-                events.borrow_mut().push("set");
-                Ok(())
-            },
-            || events.borrow_mut().push("wait"),
-        );
-        assert_eq!(result, Ok(()));
-        assert_eq!(
-            events.into_inner(),
-            vec!["open", "wait", "open", "wait", "open", "set", "close"]
-        );
-
-        let events = RefCell::new(Vec::new());
-        let result = clipboard_transaction(
-            1,
-            || {
-                events.borrow_mut().push("open");
-                Ok::<(), &str>(())
-            },
-            || events.borrow_mut().push("close"),
-            || {
-                events.borrow_mut().push("set");
-                Err("set")
-            },
-            || unreachable!(),
-        );
-        assert_eq!(result, Err("set"));
-        assert_eq!(events.into_inner(), vec!["open", "set", "close"]);
-
-        let closes = Cell::new(0);
-        let result = clipboard_transaction(
-            2,
-            || Err::<(), _>("busy"),
-            || closes.set(closes.get() + 1),
-            || Ok(()),
-            || {},
-        );
-        assert_eq!(result, Err("busy"));
-        assert_eq!(
-            closes.get(),
-            0,
-            "never close a clipboard that was not opened"
         );
     }
 }

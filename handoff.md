@@ -4,11 +4,11 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
-## Checkpoint (2026-08-02): Slint replacement Milestone 6 native shell, Tasks 1--5
+## Checkpoint (2026-08-02): Slint replacement Milestone 6 native shell, Tasks 1--6
 
 Plan: `docs/superpowers/plans/2026-08-02-slint-native-shell.md`. The new
 `crates/clipline-shell` crate owns the framework-neutral launch/window/shutdown contract and the
-first two shared Windows shell services. Its command port is bounded at 32 entries with one
+shared Windows shell services. Its command port is bounded at 32 entries with one
 reserved Quit, barrier-safe Open/Save coalescing, checked delivery sequences, and a staged shutdown
 coordinator that does not permit process exit before durable state, media, recorder, and diagnostics
 acknowledgements arrive for the current generation.
@@ -43,22 +43,40 @@ acknowledged no-ops. The shell dispatcher exists independently of the hotkey ser
 window creation/reveal on Tauri's main thread, including activations queued before UI attachment.
 `tauri-plugin-single-instance` is absent.
 
+Task 6 removed the remaining duplicated process, shell-open, clipboard, credential, and diagnostic
+mechanics from the Tauri application. Elevation handoff now uses the same bounded `ShellLaunch`
+parser and verifies the parent by PID plus creation time before waiting. Browser/path opens validate
+embedded NULs and the documented `ShellExecuteW` result boundary; reveal uses a PIDL with
+`SHOpenFolderAndSelectItems` instead of an Explorer command line. The file clipboard owns one
+moveable allocation, retries only the eight bounded open attempts, closes every successful open,
+and transfers the allocation exactly once. Cloud and osu! secrets use one safe Credential Manager
+wrapper that retains their existing target/value labels and never includes secret bytes in errors.
+
+Structured diagnostics are now framework-neutral: a 2,048-record nonblocking lossy queue, 16 KiB
+records, five 4 MiB generations, allowlisted snapshot copies, bounded panic records, and explicit
+flush/snapshot/shutdown acknowledgements with 15-second barriers. The Tauri module is only a tracing
+and panic-hook adapter over that service, so the later Slint shell can use the same ownership and
+support-bundle semantics without importing either frontend framework.
+
 Validation is green: CI-mode `cargo test --workspace`, warning-denied workspace Clippy after fresh
-`clipline-shell` and `clipline-app` caches, 505 app unit tests (two intentional subprocess fixtures
-ignored), 92 UI contracts, 11 repository-security contracts, four disposable HKCU autostart device
-tests, both native hotkey device tests, three neutral activation protocol tests, and four live
-same-process named-pipe/mutex device tests. Generated Tauri schemas and `Cargo.lock` were refreshed.
+`clipline-shell` and `clipline-app` caches, 484 app unit tests, 92 UI contracts, 11
+repository-security contracts, 8 shared diagnostics tests, live disposable Credential Manager
+CRUD, four disposable HKCU autostart device tests, both native hotkey device tests, three neutral
+activation protocol tests, and four live same-process named-pipe/mutex device tests. A normal-mode
+workspace run reached the unrelated WGC device smoke, which timed out twice waiting five seconds
+for a live desktop frame; CI-mode correctly skipped hardware smokes and passed the complete gate.
+Generated Tauri schemas and `Cargo.lock` remain current.
 The user's installed Clipline process and profile remained untouched, so no shipping debug app was
 launched and no test used the production instance identity.
 
 Implementation commits are `026d0eb` (bounded shell/lifecycle), `23263e3` (neutral hotkey grammar),
-`d20e421` (native Windows hotkey service), `a6d74b9` (transactional HKCU autostart), and the Task 5
-commit immediately following this checkpoint. Plan commits are `13005af` and `9329e53`.
+`d20e421` (native Windows hotkey service), `a6d74b9` (transactional HKCU autostart), `ff57dc1`
+(authenticated single-instance activation), and the Task 6 commit containing this checkpoint. Plan
+commits are `13005af` and `9329e53`.
 
-Next: Task 6 consolidates shared safe Windows process/shell/clipboard/credential helpers and the
-bounded diagnostics service. Then continue Tasks 7--11 (signed updater, lazy Slint tray/window,
-shipping adapters, NSIS candidate, and final validation) without switching production before the
-later gates pass.
+Next: Task 7 builds the framework-neutral signed updater. Then continue Tasks 8--11 (lazy Slint
+tray/window, shipping adapters, NSIS candidate, and final validation) without switching production
+before the later gates pass.
 
 ## Checkpoint (2026-08-02): Slint replacement Milestone 5 desktop controller
 

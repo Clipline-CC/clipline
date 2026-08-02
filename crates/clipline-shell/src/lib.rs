@@ -3,6 +3,7 @@
 pub mod activation;
 mod channel;
 mod contract;
+pub mod diagnostics;
 pub mod hotkey;
 mod shutdown;
 
