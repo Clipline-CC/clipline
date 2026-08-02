@@ -35,7 +35,9 @@ pub use games::{
     GamePluginReviewSettings, GamePluginSettings, GameRecordingMode, GameSettings,
     MatchEventSettings, TimelineMarkerSettings,
 };
-pub use hotkey::{is_global_shortcut_hotkey, normalize_hotkey, parse_hotkey};
+pub use hotkey::normalize_hotkey;
+#[cfg(test)]
+pub use hotkey::parse_hotkey;
 pub use osu::OsuApiSettings;
 pub use persistence::{
     audio_preview_cache_dir, icon_cache_dir, normalize_media_dir, normalize_replay_cache_dir,

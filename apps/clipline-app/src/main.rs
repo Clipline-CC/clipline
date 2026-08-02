@@ -43,8 +43,6 @@ mod game_plugins;
 #[cfg(windows)]
 mod games;
 #[cfg(windows)]
-mod hotkeys;
-#[cfg(windows)]
 mod library;
 #[cfg(windows)]
 mod markers;

@@ -47,6 +47,49 @@ fn neutral_shell_contract_has_no_framework_or_platform_escape_hatches() {
     }
 }
 
+#[test]
+fn native_hotkey_service_is_shell_owned_and_the_tauri_plugin_is_absent() {
+    let root = workspace_root();
+    let manifest =
+        fs::read_to_string(root.join("apps/clipline-app/Cargo.toml")).expect("read app manifest");
+    assert!(!manifest.contains("tauri-plugin-global-shortcut"));
+    assert!(manifest.contains("clipline-shell"));
+    let lock = fs::read_to_string(root.join("Cargo.lock")).expect("read Cargo.lock");
+    assert!(!lock.contains("name = \"tauri-plugin-global-shortcut\""));
+
+    let app_sources = rust_sources_below(&root.join("apps/clipline-app/src"));
+    for symbol in [
+        "RegisterHotKey(",
+        "SetWindowsHookExW(",
+        "UnhookWindowsHookEx(",
+        "GetAsyncKeyState(",
+    ] {
+        let owners: Vec<_> = app_sources
+            .iter()
+            .filter(|path| fs::read_to_string(path).unwrap().contains(symbol))
+            .collect();
+        assert!(
+            owners.is_empty(),
+            "app code must reach {symbol} only through clipline-shell: {owners:?}"
+        );
+    }
+
+    let service = fs::read_to_string(root.join("crates/clipline-shell/src/windows/hotkey.rs"))
+        .expect("read native hotkey service");
+    for contract in [
+        "RegisterHotKey(",
+        "SetWindowsHookExW(",
+        "ShellCommand::SaveReplay",
+        "replace_hotkeys(",
+        "join.join()",
+    ] {
+        assert!(
+            service.contains(contract),
+            "native hotkey service must retain {contract}"
+        );
+    }
+}
+
 fn unix_day_for_iso_date(value: &str) -> i64 {
     let mut parts = value.split('-');
     let mut year: i64 = parts

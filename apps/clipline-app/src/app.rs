@@ -13,7 +13,6 @@ use tauri::path::BaseDirectory;
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, Runtime, WebviewWindow, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_autostart::ManagerExt;
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 use tauri_plugin_updater::UpdaterExt;
 
 use clipline_capture::diagnostics::install_diagnostic_handler;
@@ -21,6 +20,9 @@ use clipline_desktop::{
     Generation, Revision, UiAction, UiEffect, UiEvent, UiEventSink, WindowLifecycleMode,
     WindowLifecycleSnapshot,
 };
+use clipline_shell::hotkey::{HotkeyReplacementOutcome, HotkeySet};
+use clipline_shell::windows::hotkey::WindowsHotkeyService;
+use clipline_shell::{shell_command_channel, ShellCommand, ShellCommandReceiver};
 
 use crate::game_discovery::DetectedGameCandidate;
 use crate::game_plugins::GamePluginInfo;
@@ -28,8 +30,7 @@ use crate::games::{DetectedGame, GameWindowInfo};
 use crate::osu_enrichment::OsuTitleEvent;
 use crate::service::{self, Cmd, Event, ServiceOptions};
 use crate::settings::{
-    is_global_shortcut_hotkey, parse_hotkey, quota_bytes_from_gb, AppSettings, CaptureMode,
-    CustomGameSettings, GameRecordingMode,
+    quota_bytes_from_gb, AppSettings, CaptureMode, CustomGameSettings, GameRecordingMode,
 };
 use crate::updates::UpdateChannel;
 use crate::util::unix_now_i64;
@@ -1334,18 +1335,6 @@ impl RuntimeState {
             .map_err(|_| "cloud settings save lock poisoned".to_string())
     }
 
-    fn active_shortcut_matches(&self, shortcut: &Shortcut) -> bool {
-        let Ok(inner) = self.0.lock() else {
-            return false;
-        };
-        inner
-            .settings
-            .hotkeys()
-            .into_iter()
-            .filter_map(|raw| parse_global_hotkey(raw).ok().flatten())
-            .any(|active| &active == shortcut)
-    }
-
     fn set_recording<R: Runtime>(
         &self,
         app: AppHandle<R>,
@@ -1686,72 +1675,6 @@ fn native_window_reconcile_action(
         (WindowLifecycleMode::Taskbar, false) => NativeWindowReconcileAction::RestoreTaskbar,
         _ => NativeWindowReconcileAction::None,
     }
-}
-
-/// Brings the OS registrations in line with the configured global shortcuts:
-/// registers shortcuts new in `new`, unregisters ones dropped from `old`.
-/// A registration failure for a shortcut that was already configured (a
-/// retry of one that was unavailable earlier) is returned as a warning; a
-/// failure for a newly added or removed shortcut rolls back this call's
-/// registrations and aborts.
-fn sync_global_hotkeys<E>(
-    old: &[Shortcut],
-    new: &[Shortcut],
-    is_registered: impl Fn(Shortcut) -> bool,
-    mut register: impl FnMut(Shortcut) -> Result<(), E>,
-    mut unregister: impl FnMut(Shortcut) -> Result<(), E>,
-) -> Result<Vec<String>, String>
-where
-    E: std::fmt::Display,
-{
-    let mut warnings = Vec::new();
-    let mut added = Vec::new();
-    for shortcut in new {
-        if is_registered(*shortcut) {
-            continue;
-        }
-        match register(*shortcut) {
-            Ok(()) => added.push(*shortcut),
-            Err(e) if old.contains(shortcut) => {
-                warnings.push(format!("global save hotkey still unavailable: {e}"));
-            }
-            Err(e) => {
-                for shortcut in added {
-                    let _ = unregister(shortcut);
-                }
-                return Err(format!("register hotkey: {e}"));
-            }
-        }
-    }
-    let mut removed = Vec::new();
-    for shortcut in old {
-        if new.contains(shortcut) || !is_registered(*shortcut) {
-            continue;
-        }
-        if let Err(e) = unregister(*shortcut) {
-            let mut rollback_errors = Vec::new();
-            for shortcut in removed.into_iter().rev() {
-                if let Err(rollback) = register(shortcut) {
-                    rollback_errors.push(format!("re-register {shortcut}: {rollback}"));
-                }
-            }
-            for shortcut in added {
-                if let Err(rollback) = unregister(shortcut) {
-                    rollback_errors.push(format!("unregister {shortcut}: {rollback}"));
-                }
-            }
-            let mut message = format!("replace hotkey: {e}");
-            if !rollback_errors.is_empty() {
-                message.push_str(&format!(
-                    "; rollback incomplete: {}",
-                    rollback_errors.join(", ")
-                ));
-            }
-            return Err(message);
-        }
-        removed.push(*shortcut);
-    }
-    Ok(warnings)
 }
 
 fn send_main_window_to_tray<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
@@ -2375,24 +2298,85 @@ fn stop_microphone_test(state: tauri::State<MicTestState>) {
     state.stop();
 }
 
-fn parse_global_hotkey(raw: &str) -> Result<Option<Shortcut>, String> {
-    if is_global_shortcut_hotkey(raw)? {
-        parse_hotkey(raw).map(Some)
-    } else {
-        Ok(None)
+fn configured_hotkeys(settings: &AppSettings) -> Result<HotkeySet, String> {
+    HotkeySet::parse(&settings.hotkeys()).map_err(|error| error.to_string())
+}
+
+#[derive(Default)]
+struct HotkeyServiceState {
+    service: Mutex<Option<WindowsHotkeyService>>,
+    dispatcher: Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+impl HotkeyServiceState {
+    fn install(
+        &self,
+        service: WindowsHotkeyService,
+        dispatcher: std::thread::JoinHandle<()>,
+    ) -> Result<(), String> {
+        let mut service_slot = self
+            .service
+            .lock()
+            .map_err(|_| "hotkey service lock poisoned".to_string())?;
+        let mut dispatcher_slot = self
+            .dispatcher
+            .lock()
+            .map_err(|_| "hotkey dispatcher lock poisoned".to_string())?;
+        if service_slot.is_some() || dispatcher_slot.is_some() {
+            return Err("hotkey service is already installed".into());
+        }
+        *service_slot = Some(service);
+        *dispatcher_slot = Some(dispatcher);
+        Ok(())
+    }
+
+    fn replace(&self, candidate: &HotkeySet) -> Result<HotkeyReplacementOutcome, String> {
+        self.service
+            .lock()
+            .map_err(|_| "hotkey service lock poisoned".to_string())?
+            .as_ref()
+            .ok_or_else(|| "hotkey service is unavailable".to_string())?
+            .replace(candidate)
+            .map_err(|error| error.to_string())
     }
 }
 
-/// The configured Save Replay keybinds that go through the OS global-shortcut
-/// registry (mouse and modified keyboard binds use the low-level hook instead).
-fn global_hotkeys(settings: &AppSettings) -> Result<Vec<Shortcut>, String> {
-    let mut shortcuts = Vec::new();
-    for raw in settings.hotkeys() {
-        if let Some(shortcut) = parse_global_hotkey(raw)? {
-            shortcuts.push(shortcut);
+impl Drop for HotkeyServiceState {
+    fn drop(&mut self) {
+        if let Ok(service) = self.service.get_mut() {
+            drop(service.take());
+        }
+        if let Ok(dispatcher) = self.dispatcher.get_mut() {
+            if let Some(dispatcher) = dispatcher.take() {
+                let _ = dispatcher.join();
+            }
         }
     }
-    Ok(shortcuts)
+}
+
+fn spawn_hotkey_dispatch<R: Runtime>(
+    app: AppHandle<R>,
+    receiver: ShellCommandReceiver,
+) -> Result<std::thread::JoinHandle<()>, String> {
+    std::thread::Builder::new()
+        .name("clipline-hotkey-dispatch".into())
+        .spawn(move || loop {
+            match receiver.wait_recv(Duration::from_millis(250)) {
+                Ok(Some(update)) if update.command == ShellCommand::SaveReplay => {
+                    let state = app.state::<RuntimeState>();
+                    let _ = dispatch_ui_action(&app, &state, UiAction::SaveReplay);
+                }
+                Ok(Some(update)) => {
+                    log_diagnostic(format!(
+                        "hotkey dispatcher ignored shell command {:?}",
+                        update.command
+                    ));
+                }
+                Ok(None) => {}
+                Err(_) => break,
+            }
+        })
+        .map_err(|error| format!("spawn hotkey command dispatcher: {error}"))
 }
 
 fn save_hotkey_label(settings: &AppSettings) -> String {
@@ -2411,8 +2395,7 @@ fn run_before_releasing_settings_save_lock<T>(
 
 #[derive(Default)]
 struct AppliedSettingsSideEffects {
-    global_hotkeys: bool,
-    hook_hotkeys: bool,
+    hotkeys: bool,
     tray_label: bool,
     autostart: bool,
 }
@@ -2421,8 +2404,7 @@ fn rollback_settings_side_effects<R: Runtime>(
     app: &AppHandle<R>,
     tray_items: &TrayItems<R>,
     old: &AppSettings,
-    old_global_hotkeys: &[Shortcut],
-    new_global_hotkeys: &[Shortcut],
+    old_hotkeys: &HotkeySet,
     applied: &AppliedSettingsSideEffects,
 ) -> Vec<String> {
     let mut errors = Vec::new();
@@ -2436,21 +2418,9 @@ fn rollback_settings_side_effects<R: Runtime>(
             errors.push(format!("restore tray hotkey label: {error}"));
         }
     }
-    if applied.hook_hotkeys {
-        if let Err(error) = crate::hotkeys::set_save_hotkeys(&old.hotkeys()) {
-            errors.push(format!("restore low-level save hotkeys: {error}"));
-        }
-    }
-    if applied.global_hotkeys {
-        let shortcuts = app.global_shortcut();
-        if let Err(error) = sync_global_hotkeys(
-            new_global_hotkeys,
-            old_global_hotkeys,
-            |shortcut| shortcuts.is_registered(shortcut),
-            |shortcut| shortcuts.register(shortcut),
-            |shortcut| shortcuts.unregister(shortcut),
-        ) {
-            errors.push(format!("restore global save hotkeys: {error}"));
+    if applied.hotkeys {
+        if let Err(error) = app.state::<HotkeyServiceState>().replace(old_hotkeys) {
+            errors.push(format!("restore save hotkeys: {error}"));
         }
     }
     errors
@@ -2500,40 +2470,18 @@ fn save_settings<R: Runtime>(
         requested_open_on_startup,
         old.open_on_startup,
     );
-    let old_global_hotkeys = global_hotkeys(&old)?;
-    let new_global_hotkeys = global_hotkeys(&settings)?;
+    let old_hotkeys = configured_hotkeys(&old)?;
+    let new_hotkeys = configured_hotkeys(&settings)?;
     let quota_bytes = quota_bytes_from_gb(settings.disk_quota_gb)?;
-    let shortcuts = app.global_shortcut();
     let mut applied = AppliedSettingsSideEffects::default();
-    let warnings = sync_global_hotkeys(
-        &old_global_hotkeys,
-        &new_global_hotkeys,
-        |shortcut| shortcuts.is_registered(shortcut),
-        |shortcut| shortcuts.register(shortcut),
-        |shortcut| shortcuts.unregister(shortcut),
-    )?;
-    applied.global_hotkeys = true;
-    if let Err(primary) = crate::hotkeys::set_save_hotkeys(&settings.hotkeys()) {
-        let rollback = rollback_settings_side_effects(
-            &app,
-            &tray_items,
-            &old,
-            &old_global_hotkeys,
-            &new_global_hotkeys,
-            &applied,
-        );
-        return Err(settings_transaction_error(primary, rollback));
-    }
-    applied.hook_hotkeys = true;
+    let warnings = app
+        .state::<HotkeyServiceState>()
+        .replace(&new_hotkeys)?
+        .warnings;
+    applied.hotkeys = true;
     if let Err(primary) = tray_items.set_hotkey_label(&save_hotkey_label(&settings)) {
-        let rollback = rollback_settings_side_effects(
-            &app,
-            &tray_items,
-            &old,
-            &old_global_hotkeys,
-            &new_global_hotkeys,
-            &applied,
-        );
+        let rollback =
+            rollback_settings_side_effects(&app, &tray_items, &old, &old_hotkeys, &applied);
         return Err(settings_transaction_error(primary, rollback));
     }
     applied.tray_label = true;
@@ -2546,14 +2494,8 @@ fn save_settings<R: Runtime>(
                 applied.autostart = true;
             }
             Err(primary) => {
-                let rollback = rollback_settings_side_effects(
-                    &app,
-                    &tray_items,
-                    &old,
-                    &old_global_hotkeys,
-                    &new_global_hotkeys,
-                    &applied,
-                );
+                let rollback =
+                    rollback_settings_side_effects(&app, &tray_items, &old, &old_hotkeys, &applied);
                 return Err(settings_transaction_error(
                     format!("update Windows startup registration: {primary}"),
                     rollback,
@@ -2564,26 +2506,14 @@ fn save_settings<R: Runtime>(
     let prepared_restart = match state.prepare_settings_restart(settings.clone()) {
         Ok(prepared) => prepared,
         Err(primary) => {
-            let rollback = rollback_settings_side_effects(
-                &app,
-                &tray_items,
-                &old,
-                &old_global_hotkeys,
-                &new_global_hotkeys,
-                &applied,
-            );
+            let rollback =
+                rollback_settings_side_effects(&app, &tray_items, &old, &old_hotkeys, &applied);
             return Err(settings_transaction_error(primary, rollback));
         }
     };
     if let Err(error) = settings.save() {
-        let rollback = rollback_settings_side_effects(
-            &app,
-            &tray_items,
-            &old,
-            &old_global_hotkeys,
-            &new_global_hotkeys,
-            &applied,
-        );
+        let rollback =
+            rollback_settings_side_effects(&app, &tray_items, &old, &old_hotkeys, &applied);
         return Err(settings_transaction_error(error, rollback));
     }
     if let Err(primary) = state.finish_prepared_restart(app.clone(), prepared_restart) {
@@ -2595,8 +2525,7 @@ fn save_settings<R: Runtime>(
             &app,
             &tray_items,
             &old,
-            &old_global_hotkeys,
-            &new_global_hotkeys,
+            &old_hotkeys,
             &applied,
         ));
         return Err(settings_transaction_error(primary, rollback));
@@ -2679,8 +2608,8 @@ pub fn run() {
         .media_dir_path()
         .unwrap_or_else(|_| service::default_clips_dir());
     let media_dir_for_setup = media_dir.clone();
-    let startup_global_hotkeys =
-        global_hotkeys(&settings).unwrap_or_else(|_| vec![parse_hotkey("Alt+F10").unwrap()]);
+    let startup_hotkeys = configured_hotkeys(&settings)
+        .unwrap_or_else(|_| HotkeySet::parse(&["Alt+F10"]).expect("default hotkey is valid"));
     let desktop_state =
         crate::desktop::DesktopState::new(settings.clone(), startup_warnings.clone())
             .expect("initialize bounded desktop snapshot");
@@ -2694,6 +2623,7 @@ pub fn run() {
         .manage(ui_event_sink)
         .manage(StartupWarnings::new(startup_warnings))
         .manage(WindowLifecycleState::default())
+        .manage(HotkeyServiceState::default())
         .manage(MicTestState::default())
         .manage(support::SupportState::default())
         .manage(crate::memory::MemorySampler::default())
@@ -2716,18 +2646,6 @@ pub fn run() {
             Some(vec!["--autostart"]),
         ))
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(
-            tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(move |_app, shortcut, event| {
-                    if event.state() == ShortcutState::Pressed {
-                        let state = _app.state::<RuntimeState>();
-                        if state.active_shortcut_matches(shortcut) {
-                            let _ = dispatch_ui_action(_app, &state, UiAction::SaveReplay);
-                        }
-                    }
-                })
-                .build(),
-        )
         .invoke_handler(tauri::generate_handler![
             save_replay,
             restart_as_administrator,
@@ -2804,24 +2722,50 @@ pub fn run() {
                     tracing::warn!(event = "startup_osu_enrichment_retry_failed", error = %e);
                 }
             });
-            for hotkey in &startup_global_hotkeys {
-                if let Err(e) = app.global_shortcut().register(*hotkey) {
-                    let message =
-                        format!("global save hotkey unavailable; continuing without it: {e}");
-                    tracing::warn!(event = "global_hotkey_registration_failed", message = %message);
+            let (shell_sender, shell_receiver) = shell_command_channel();
+            match WindowsHotkeyService::start(shell_sender) {
+                Ok(service) => {
+                    for warning in service.startup_warnings() {
+                        let message = format!("low-level save hotkey unavailable: {warning}");
+                        tracing::warn!(event = "save_hook_install_failed", message = %message);
+                        publish_user_error(app.handle(), message);
+                    }
+                    match service.replace(&startup_hotkeys) {
+                        Ok(outcome) => {
+                            for message in outcome.warnings {
+                                tracing::warn!(event = "global_hotkey_registration_failed", message = %message);
+                                publish_user_error(app.handle(), message);
+                            }
+                        }
+                        Err(error) => {
+                            let message = format!(
+                                "global save hotkey unavailable; continuing without it: {error}"
+                            );
+                            tracing::warn!(event = "global_hotkey_registration_failed", message = %message);
+                            publish_user_error(app.handle(), message);
+                        }
+                    }
+                    match spawn_hotkey_dispatch(app.handle().clone(), shell_receiver) {
+                        Ok(dispatcher) => {
+                            if let Err(error) = app
+                                .state::<HotkeyServiceState>()
+                                .install(service, dispatcher)
+                            {
+                                tracing::error!(event = "hotkey_service_install_failed", error = %error);
+                                publish_user_error(app.handle(), error);
+                            }
+                        }
+                        Err(error) => {
+                            tracing::error!(event = "hotkey_dispatch_start_failed", error = %error);
+                            publish_user_error(app.handle(), error);
+                        }
+                    }
+                }
+                Err(error) => {
+                    let message = format!("save hotkey service unavailable: {error}");
+                    tracing::warn!(event = "save_hotkey_service_start_failed", message = %message);
                     publish_user_error(app.handle(), message);
                 }
-            }
-            if let Err(e) = crate::hotkeys::install_save_hook(&settings.hotkeys(), {
-                let app = app.handle().clone();
-                move || {
-                    let state = app.state::<RuntimeState>();
-                    let _ = dispatch_ui_action(&app, &state, UiAction::SaveReplay);
-                }
-            }) {
-                let message = format!("low-level save hotkey unavailable: {e}");
-                tracing::warn!(event = "save_hook_install_failed", message = %message);
-                publish_user_error(app.handle(), message);
             }
             if let Err(e) = crate::library::prune_audio_preview_cache_on_startup() {
                 tracing::warn!(event = "audio_preview_startup_prune_failed", error = %e);
@@ -3489,185 +3433,6 @@ mod tests {
         assert!(error.starts_with("save failed"), "{error}");
         assert!(error.contains("restore autostart failed"), "{error}");
         assert!(error.contains("restore hotkey failed"), "{error}");
-    }
-
-    #[test]
-    fn sync_global_hotkeys_skips_unregister_when_old_shortcut_is_stale() {
-        let old_shortcut = parse_hotkey("Alt+F10").unwrap();
-        let new_shortcut = parse_hotkey("Ctrl+F8").unwrap();
-        let mut registered = Vec::new();
-        let mut unregistered = Vec::new();
-
-        let result = sync_global_hotkeys(
-            &[old_shortcut],
-            &[new_shortcut],
-            |_| false,
-            |shortcut| {
-                registered.push(shortcut);
-                Ok::<_, &'static str>(())
-            },
-            |shortcut| {
-                unregistered.push(shortcut);
-                Err::<(), _>("old shortcut was never registered")
-            },
-        );
-
-        assert_eq!(result, Ok(Vec::new()));
-        assert_eq!(registered, vec![new_shortcut]);
-        assert!(unregistered.is_empty());
-    }
-
-    #[test]
-    fn missing_unchanged_global_hotkey_is_retried_without_blocking_save() {
-        let shortcut = parse_hotkey("Alt+F10").unwrap();
-        let mut registered = Vec::new();
-
-        let result = sync_global_hotkeys(
-            &[shortcut],
-            &[shortcut],
-            |_| false,
-            |shortcut| {
-                registered.push(shortcut);
-                Err::<(), _>("still owned by another app")
-            },
-            |_| Ok(()),
-        );
-
-        let warnings = result.expect("retry failure must not block save");
-        assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("still owned by another app"));
-        assert_eq!(registered, vec![shortcut]);
-    }
-
-    #[test]
-    fn sync_global_hotkeys_adds_secondary_and_keeps_registered_primary() {
-        let primary = parse_hotkey("Alt+F10").unwrap();
-        let secondary = parse_hotkey("Ctrl+F8").unwrap();
-        let mut registered = Vec::new();
-        let mut unregistered = Vec::new();
-
-        let result = sync_global_hotkeys(
-            &[primary],
-            &[primary, secondary],
-            |shortcut| shortcut == primary,
-            |shortcut| {
-                registered.push(shortcut);
-                Ok::<_, &'static str>(())
-            },
-            |shortcut| {
-                unregistered.push(shortcut);
-                Ok(())
-            },
-        );
-
-        assert_eq!(result, Ok(Vec::new()));
-        assert_eq!(registered, vec![secondary]);
-        assert!(unregistered.is_empty());
-    }
-
-    #[test]
-    fn sync_global_hotkeys_rolls_back_new_registrations_on_failure() {
-        let secondary = parse_hotkey("Ctrl+F8").unwrap();
-        let removed = parse_hotkey("Alt+F10").unwrap();
-        let mut unregistered = Vec::new();
-
-        let result = sync_global_hotkeys(
-            &[removed],
-            &[secondary],
-            |shortcut| shortcut == removed,
-            |_| Ok::<_, &'static str>(()),
-            |shortcut| {
-                unregistered.push(shortcut);
-                if shortcut == removed {
-                    Err("cannot unregister")
-                } else {
-                    Ok(())
-                }
-            },
-        );
-
-        assert!(result.is_err());
-        assert_eq!(unregistered, vec![removed, secondary]);
-    }
-
-    #[test]
-    fn sync_global_hotkeys_restores_earlier_removals_when_a_later_one_fails() {
-        let first = parse_hotkey("Alt+F10").unwrap();
-        let second = parse_hotkey("Ctrl+F8").unwrap();
-        let mut registered = Vec::new();
-        let mut unregistered = Vec::new();
-
-        let result = sync_global_hotkeys(
-            &[first, second],
-            &[],
-            |_| true,
-            |shortcut| {
-                registered.push(shortcut);
-                Ok::<_, &'static str>(())
-            },
-            |shortcut| {
-                unregistered.push(shortcut);
-                if shortcut == second {
-                    Err("second removal failed")
-                } else {
-                    Ok(())
-                }
-            },
-        );
-
-        assert!(result.is_err());
-        assert_eq!(unregistered, vec![first, second]);
-        assert_eq!(registered, vec![first]);
-    }
-
-    #[test]
-    fn sync_global_hotkeys_surfaces_rollback_failures() {
-        let first = parse_hotkey("Alt+F10").unwrap();
-        let second = parse_hotkey("Ctrl+F8").unwrap();
-
-        let error = sync_global_hotkeys(
-            &[first, second],
-            &[],
-            |_| true,
-            |_| Err::<(), _>("restore failed"),
-            |shortcut| {
-                if shortcut == second {
-                    Err("second removal failed")
-                } else {
-                    Ok(())
-                }
-            },
-        )
-        .unwrap_err();
-
-        assert!(error.contains("rollback incomplete"), "{error}");
-        assert!(error.contains("restore failed"), "{error}");
-    }
-
-    #[test]
-    fn sync_global_hotkeys_removes_dropped_secondary() {
-        let primary = parse_hotkey("Alt+F10").unwrap();
-        let secondary = parse_hotkey("Ctrl+F8").unwrap();
-        let mut registered = Vec::new();
-        let mut unregistered = Vec::new();
-
-        let result = sync_global_hotkeys(
-            &[primary, secondary],
-            &[primary],
-            |_| true,
-            |shortcut| {
-                registered.push(shortcut);
-                Ok::<_, &'static str>(())
-            },
-            |shortcut| {
-                unregistered.push(shortcut);
-                Ok(())
-            },
-        );
-
-        assert_eq!(result, Ok(Vec::new()));
-        assert!(registered.is_empty());
-        assert_eq!(unregistered, vec![secondary]);
     }
 
     #[test]

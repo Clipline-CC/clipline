@@ -5,6 +5,9 @@ mod contract;
 pub mod hotkey;
 mod shutdown;
 
+#[cfg(windows)]
+pub mod windows;
+
 pub use channel::{
     shell_command_channel, shell_command_channel_starting_at, SequencedShellCommand,
     ShellCommandPublishOutcome, ShellCommandReceiveError, ShellCommandReceiver,
