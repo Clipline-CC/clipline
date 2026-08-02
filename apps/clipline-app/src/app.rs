@@ -19,6 +19,9 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 use tauri_plugin_updater::UpdaterExt;
 
 use clipline_capture::diagnostics::install_diagnostic_handler;
+use clipline_desktop::{
+    Revision, UiEvent, UiEventSink, WindowLifecycleMode, WindowLifecycleSnapshot,
+};
 
 use crate::game_discovery::DetectedGameCandidate;
 use crate::game_plugins::GamePluginInfo;
@@ -41,35 +44,9 @@ use diagnostics::{diagnostic_log_path, log_diagnostic};
 const MAIN_WINDOW_LABEL: &str = "main";
 const WEBVIEW_READY_TIMEOUT: Duration = Duration::from_secs(5);
 const GAME_DETECTOR_INTERVAL: Duration = Duration::from_millis(500);
-const WINDOW_LIFECYCLE_EVENT: &str = "window-lifecycle";
 static FRONTEND_READY: AtomicBool = AtomicBool::new(false);
 static WEBVIEW_READY_WATCHDOG_ARMED: AtomicBool = AtomicBool::new(false);
 static WEBVIEW_REPAIR_NOTICE_SHOWN: AtomicBool = AtomicBool::new(false);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-enum WindowLifecycleMode {
-    Foreground,
-    Tray,
-    Taskbar,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-struct WindowLifecycleSnapshot {
-    revision: u64,
-    mode: WindowLifecycleMode,
-    backgrounded: bool,
-}
-
-impl WindowLifecycleSnapshot {
-    fn new(revision: u64, mode: WindowLifecycleMode) -> Self {
-        Self {
-            revision,
-            mode,
-            backgrounded: mode != WindowLifecycleMode::Foreground,
-        }
-    }
-}
 
 struct WindowLifecycleState(Mutex<WindowLifecycleSnapshot>);
 
@@ -78,7 +55,7 @@ impl Default for WindowLifecycleState {
         // The configured native window starts hidden. A normal launch moves to
         // Foreground after reveal; autostart deliberately remains in Tray.
         Self(Mutex::new(WindowLifecycleSnapshot::new(
-            0,
+            Revision::INITIAL,
             WindowLifecycleMode::Tray,
         )))
     }
@@ -98,7 +75,7 @@ impl WindowLifecycleState {
             Err(poisoned) => poisoned.into_inner(),
         };
         if snapshot.mode != mode {
-            let revision = snapshot.revision.saturating_add(1);
+            let revision = Revision::new(snapshot.revision.get().saturating_add(1));
             *snapshot = WindowLifecycleSnapshot::new(revision, mode);
         }
         *snapshot
@@ -117,6 +94,7 @@ fn ensure_foreground_microphone_test(state: &WindowLifecycleState) -> Result<(),
 struct FrontendReadyResponse {
     warnings: Vec<String>,
     window_lifecycle: WindowLifecycleSnapshot,
+    desktop_snapshot: clipline_desktop::DesktopSnapshot<AppSettings>,
 }
 
 #[derive(serde::Serialize)]
@@ -468,6 +446,7 @@ async fn memory_status(
 fn frontend_ready<R: Runtime>(
     app: AppHandle<R>,
     runtime: tauri::State<RuntimeState>,
+    desktop: tauri::State<crate::desktop::DesktopState>,
     startup_warnings: tauri::State<StartupWarnings>,
     window_lifecycle: tauri::State<WindowLifecycleState>,
 ) -> FrontendReadyResponse {
@@ -478,9 +457,13 @@ fn frontend_ready<R: Runtime>(
     if let Some(status) = runtime.current_waiting_status() {
         let _ = app.emit("status", status);
     }
+    if let Err(error) = desktop.replace_settings(runtime.settings()) {
+        log_diagnostic(format!("desktop settings reconciliation failed: {error}"));
+    }
     FrontendReadyResponse {
         warnings: startup_warnings.take(),
         window_lifecycle: window_lifecycle.snapshot(),
+        desktop_snapshot: desktop.snapshot(),
     }
 }
 
@@ -1643,9 +1626,12 @@ fn publish_window_lifecycle<R: Runtime>(
     mode: WindowLifecycleMode,
 ) -> WindowLifecycleSnapshot {
     let snapshot = app.state::<WindowLifecycleState>().transition(mode);
-    if let Err(error) = app.emit(WINDOW_LIFECYCLE_EVENT, snapshot) {
+    if let Err(error) = app
+        .state::<crate::desktop::tauri_sink::TauriUiEventSink>()
+        .try_publish(UiEvent::WindowLifecycle { snapshot })
+    {
         log_diagnostic(format!(
-            "window lifecycle emit failed revision={} mode={:?}: {error}",
+            "window lifecycle publish failed revision={} mode={:?}: {error}",
             snapshot.revision, snapshot.mode
         ));
     }
@@ -2489,9 +2475,16 @@ pub fn run() {
     let media_dir_for_setup = media_dir.clone();
     let startup_global_hotkeys =
         global_hotkeys(&settings).unwrap_or_else(|_| vec![parse_hotkey("Alt+F10").unwrap()]);
+    let desktop_state =
+        crate::desktop::DesktopState::new(settings.clone(), startup_warnings.clone())
+            .expect("initialize bounded desktop snapshot");
+    let (ui_event_sink, ui_event_receiver) =
+        crate::desktop::tauri_sink::TauriUiEventSink::channel();
 
     tauri::Builder::default()
         .manage(RuntimeState::new(settings.clone(), lol_url))
+        .manage(desktop_state)
+        .manage(ui_event_sink)
         .manage(StartupWarnings::new(startup_warnings))
         .manage(WindowLifecycleState::default())
         .manage(MicTestState::default())
@@ -2591,6 +2584,10 @@ pub fn run() {
             crate::library::storage_status
         ])
         .setup(move |app| {
+            crate::desktop::tauri_sink::spawn_event_pump(
+                app.handle().clone(),
+                ui_event_receiver,
+            )?;
             configure_bundled_ffmpeg(app);
             let osu_app = app.handle().clone();
             let osu_media_root = media_dir_for_setup.clone();
@@ -2718,6 +2715,11 @@ pub fn run() {
                 let message = format!("recorder startup failed: {e}");
                 tracing::error!(event = "recorder_startup_failed", message = %message);
                 let _ = app.handle().emit("error", message);
+            } else if let Err(error) = app
+                .state::<crate::desktop::DesktopState>()
+                .set_recorder_desired(true)
+            {
+                tracing::error!(event = "desktop_recorder_state_failed", error = %error);
             }
             spawn_game_detector(app.handle().clone());
 
@@ -4868,19 +4870,19 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
 
         assert_eq!(
             state.snapshot(),
-            WindowLifecycleSnapshot::new(0, WindowLifecycleMode::Tray)
+            WindowLifecycleSnapshot::new(Revision::new(0), WindowLifecycleMode::Tray)
         );
         assert_eq!(
             state.transition(WindowLifecycleMode::Tray),
-            WindowLifecycleSnapshot::new(0, WindowLifecycleMode::Tray)
+            WindowLifecycleSnapshot::new(Revision::new(0), WindowLifecycleMode::Tray)
         );
         assert_eq!(
             state.transition(WindowLifecycleMode::Foreground),
-            WindowLifecycleSnapshot::new(1, WindowLifecycleMode::Foreground)
+            WindowLifecycleSnapshot::new(Revision::new(1), WindowLifecycleMode::Foreground)
         );
         assert_eq!(
             state.transition(WindowLifecycleMode::Taskbar),
-            WindowLifecycleSnapshot::new(2, WindowLifecycleMode::Taskbar)
+            WindowLifecycleSnapshot::new(Revision::new(2), WindowLifecycleMode::Taskbar)
         );
     }
 

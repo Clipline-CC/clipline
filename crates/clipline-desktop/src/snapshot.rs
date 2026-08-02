@@ -47,6 +47,12 @@ macro_rules! checked_counter {
                 }
             }
         }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                self.0.fmt(formatter)
+            }
+        }
     };
 }
 

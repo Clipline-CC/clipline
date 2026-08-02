@@ -905,6 +905,7 @@ dependencies = [
  "chrono",
  "clipline-capture",
  "clipline-cloud-api",
+ "clipline-desktop",
  "clipline-events",
  "clipline-lol",
  "clipline-mp4",

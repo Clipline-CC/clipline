@@ -9,6 +9,7 @@ license.workspace = true
 # system webview libraries. Non-Windows targets get a stub main.
 [target.'cfg(windows)'.dependencies]
 clipline-capture = { path = "../../crates/clipline-capture" }
+clipline-desktop = { path = "../../crates/clipline-desktop" }
 clipline-events = { path = "../../crates/clipline-events" }
 clipline-lol = { path = "../../crates/clipline-lol" }
 clipline-mp4 = { path = "../../crates/clipline-mp4" }

@@ -31,6 +31,8 @@ mod cloud_upload;
 #[cfg(windows)]
 mod credential_transaction;
 #[cfg(windows)]
+mod desktop;
+#[cfg(windows)]
 mod game_discovery;
 #[cfg(windows)]
 mod game_icon;
