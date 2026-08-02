@@ -30,6 +30,10 @@ fn parent_and_bounds_validation_fail_closed() {
         validate_video_bounds(PhysicalVideoRect::new(0, 0, i32::MAX as u32 + 1, 360)),
         Err(VideoHostError::InvalidBounds)
     );
+    assert_eq!(
+        validate_video_bounds(PhysicalVideoRect::new(i32::MAX, 0, 1, 1)),
+        Err(VideoHostError::InvalidBounds)
+    );
     validate_video_bounds(PhysicalVideoRect::new(0, 0, 0, 0))
         .expect("zero bounds are valid hidden geometry");
 }

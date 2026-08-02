@@ -1,9 +1,10 @@
+use std::cell::Cell;
 use std::ffi::c_void;
 use std::marker::PhantomData;
 use std::num::NonZeroIsize;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use thiserror::Error;
 use windows::Win32::Foundation::{DXGI_STATUS_OCCLUDED, HWND, S_OK};
@@ -13,9 +14,9 @@ use windows::Win32::Graphics::Dxgi::{
 };
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DestroyWindow, IsWindow, SetWindowPos, ShowWindow, SWP_NOACTIVATE,
-    SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
-    WS_EX_NOACTIVATE,
+    CreateWindowExW, DestroyWindow, GetWindowThreadProcessId, IsWindow, SetWindowPos, ShowWindow,
+    SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, WS_CHILD, WS_CLIPCHILDREN,
+    WS_CLIPSIBLINGS, WS_EX_NOACTIVATE,
 };
 use windows_core::w;
 
@@ -58,6 +59,8 @@ pub enum VideoHostError {
     NullParent,
     #[error("parent HWND is not a live window")]
     InvalidParent,
+    #[error("parent HWND belongs to thread {expected}, not the current thread {actual}")]
+    ParentThreadMismatch { expected: u32, actual: u32 },
     #[error("video-stage bounds exceed the Win32 coordinate range")]
     InvalidBounds,
     #[error("video host may only be accessed from its creating thread")]
@@ -68,6 +71,8 @@ pub enum VideoHostError {
     TargetAlreadyAttached,
     #[error("video publisher target must be dropped before the host closes")]
     PublisherStillAttached,
+    #[error("video target state lock is poisoned")]
+    StatePoisoned,
     #[error("video presentation state failed: {0}")]
     Presentation(#[from] PresentationError),
     #[error("Win32 video host operation failed with HRESULT 0x{native_code:08X}: {message}")]
@@ -76,10 +81,15 @@ pub enum VideoHostError {
 
 #[derive(Debug)]
 struct VideoTargetState {
-    revision: AtomicU64,
-    presentable: AtomicBool,
-    alive: AtomicBool,
+    snapshot: Mutex<VideoTargetSnapshot>,
     publisher_attached: AtomicBool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct VideoTargetSnapshot {
+    revision: u64,
+    presentable: bool,
+    alive: bool,
 }
 
 /// Move-only playback-thread lease for the child window. Dropping it permits
@@ -88,6 +98,7 @@ struct VideoTargetState {
 pub struct WindowsVideoTarget {
     raw_hwnd: NonZeroIsize,
     state: Arc<VideoTargetState>,
+    _not_sync: PhantomData<Cell<()>>,
 }
 
 impl Drop for WindowsVideoTarget {
@@ -104,15 +115,28 @@ impl WindowsVideoTarget {
     }
 
     pub fn latest_revision(&self) -> u64 {
-        self.state.revision.load(Ordering::Acquire)
+        self.snapshot().revision
     }
 
     pub fn is_presentable(&self) -> bool {
-        self.state.alive.load(Ordering::Acquire) && self.state.presentable.load(Ordering::Acquire)
+        let snapshot = self.snapshot();
+        snapshot.alive && snapshot.presentable
     }
 
     pub fn is_alive(&self) -> bool {
-        self.state.alive.load(Ordering::Acquire)
+        self.snapshot().alive
+    }
+
+    fn snapshot(&self) -> VideoTargetSnapshot {
+        self.state
+            .snapshot
+            .lock()
+            .map(|snapshot| *snapshot)
+            .unwrap_or(VideoTargetSnapshot {
+                revision: u64::MAX,
+                presentable: false,
+                alive: false,
+            })
     }
 }
 
@@ -148,6 +172,14 @@ impl WindowsVideoHost {
         if !unsafe { IsWindow(Some(parent)) }.as_bool() {
             return Err(VideoHostError::InvalidParent);
         }
+        // SAFETY: the live parent was validated above and the process-id
+        // output is deliberately omitted.
+        let expected = unsafe { GetWindowThreadProcessId(parent, None) };
+        // SAFETY: this pure query has no preconditions.
+        let actual = unsafe { GetCurrentThreadId() };
+        if expected != actual {
+            return Err(VideoHostError::ParentThreadMismatch { expected, actual });
+        }
 
         // SAFETY: the built-in STATIC class is process-independent, the live
         // parent was validated above, and all optional pointer parameters are
@@ -174,9 +206,11 @@ impl WindowsVideoHost {
             message: "CreateWindowExW returned a null video child".into(),
         })?;
         let target_state = Arc::new(VideoTargetState {
-            revision: AtomicU64::new(0),
-            presentable: AtomicBool::new(false),
-            alive: AtomicBool::new(true),
+            snapshot: Mutex::new(VideoTargetSnapshot {
+                revision: 0,
+                presentable: false,
+                alive: true,
+            }),
             publisher_attached: AtomicBool::new(false),
         });
         Ok(Self {
@@ -199,6 +233,7 @@ impl WindowsVideoHost {
         Ok(WindowsVideoTarget {
             raw_hwnd,
             state: Arc::clone(&self.target_state),
+            _not_sync: PhantomData,
         })
     }
 
@@ -215,6 +250,20 @@ impl WindowsVideoHost {
         let update = candidate.update(bounds, state)?;
         if matches!(update, PresentationUpdate::Unchanged { .. }) {
             return Ok(update);
+        }
+
+        let revision = match update {
+            PresentationUpdate::Changed { revision, .. } => revision,
+            PresentationUpdate::Unchanged { .. } => unreachable!(),
+        };
+        {
+            let mut snapshot = self
+                .target_state
+                .snapshot
+                .lock()
+                .map_err(|_| VideoHostError::StatePoisoned)?;
+            snapshot.revision = revision;
+            snapshot.presentable = false;
         }
 
         if state == PresentationState::Visible && bounds.has_area() {
@@ -238,12 +287,12 @@ impl WindowsVideoHost {
         }
 
         self.lifecycle = candidate;
-        self.target_state
-            .revision
-            .store(self.lifecycle.latest_revision(), Ordering::Release);
-        self.target_state
-            .presentable
-            .store(self.lifecycle.is_presentable(), Ordering::Release);
+        let mut snapshot = self
+            .target_state
+            .snapshot
+            .lock()
+            .map_err(|_| VideoHostError::StatePoisoned)?;
+        snapshot.presentable = self.lifecycle.is_presentable();
         Ok(update)
     }
 
@@ -269,10 +318,14 @@ impl WindowsVideoHost {
             self.hwnd = Some(hwnd);
             return Err(VideoHostError::PublisherStillAttached);
         }
-        self.target_state
-            .presentable
-            .store(false, Ordering::Release);
-        self.target_state.alive.store(false, Ordering::Release);
+        let mut snapshot = self
+            .target_state
+            .snapshot
+            .lock()
+            .map_err(|_| VideoHostError::StatePoisoned)?;
+        snapshot.presentable = false;
+        snapshot.alive = false;
+        drop(snapshot);
         // SAFETY: `hwnd` is the live child uniquely owned by this host.
         unsafe { DestroyWindow(hwnd) }
             .map_err(|error| native_error(error, "destroy video child window"))
@@ -290,10 +343,10 @@ impl WindowsVideoHost {
 impl Drop for WindowsVideoHost {
     fn drop(&mut self) {
         if self.target_state.publisher_attached.load(Ordering::Acquire) {
-            self.target_state
-                .presentable
-                .store(false, Ordering::Release);
-            self.target_state.alive.store(false, Ordering::Release);
+            if let Ok(mut snapshot) = self.target_state.snapshot.lock() {
+                snapshot.presentable = false;
+                snapshot.alive = false;
+            }
             if let Some(hwnd) = self.hwnd.take() {
                 // SAFETY: hiding the still-parent-owned child prevents further
                 // display while the move-only publisher target drains. The OS
@@ -312,6 +365,8 @@ pub fn validate_video_bounds(bounds: PhysicalVideoRect) -> Result<(), VideoHostE
         || bounds.y < 0
         || bounds.width > i32::MAX as u32
         || bounds.height > i32::MAX as u32
+        || bounds.x.checked_add(bounds.width as i32).is_none()
+        || bounds.y.checked_add(bounds.height as i32).is_none()
     {
         return Err(VideoHostError::InvalidBounds);
     }
@@ -428,5 +483,23 @@ mod tests {
         host.close().expect("close child twice");
         // SAFETY: checking a stale opaque HWND is permitted.
         assert!(!unsafe { IsWindow(Some(hwnd(child_raw))) }.as_bool());
+    }
+
+    #[test]
+    fn parent_from_another_thread_is_rejected_before_child_creation() {
+        let (handle_tx, handle_rx) = std::sync::mpsc::sync_channel(1);
+        let (close_tx, close_rx) = std::sync::mpsc::sync_channel(1);
+        let owner = std::thread::spawn(move || {
+            let parent = TestParent::new();
+            handle_tx.send(parent.raw()).expect("publish test HWND");
+            close_rx.recv().expect("wait before destroying parent");
+        });
+        let parent_raw = handle_rx.recv().expect("receive test HWND");
+        assert!(matches!(
+            WindowsVideoHost::attach(parent_raw),
+            Err(VideoHostError::ParentThreadMismatch { .. })
+        ));
+        close_tx.send(()).expect("release parent thread");
+        owner.join().expect("join parent thread");
     }
 }
