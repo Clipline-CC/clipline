@@ -1,13 +1,13 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use clipline_playback::windows::{SessionUpdate, SessionUpdatePayload};
 use clipline_playback::{
     PipelineToken, PlaybackCommand, PlaybackEvent, PlaybackPhase, PlaybackSnapshot, PlaybackTime,
     WorkGeneration, PLAYBACK_TIMELINE_HZ,
 };
 use clipline_slint_spike::controller::{
-    ApplyUpdateOutcome, PlaybackCommandPort, PlaybackController, ShutdownOrder, ShutdownStage,
+    ApplyUpdateOutcome, ControllerUpdate, ControllerUpdatePayload, PlaybackCommandPort,
+    PlaybackController, ShutdownOrder, ShutdownStage,
 };
 
 #[derive(Clone, Default)]
@@ -51,10 +51,10 @@ fn callbacks_map_to_owned_playback_commands() {
     let port = FakePort::default();
     let commands = Arc::clone(&port.commands);
     let mut controller = PlaybackController::new(port);
-    controller.apply_update(SessionUpdate {
+    controller.apply_update(ControllerUpdate {
         sequence: 1,
         token: token(1, 0, 1),
-        payload: SessionUpdatePayload::Snapshot(snapshot(WorkGeneration::new(1, 0), false)),
+        payload: ControllerUpdatePayload::Snapshot(snapshot(WorkGeneration::new(1, 0), false)),
     });
 
     controller.open(PathBuf::from("next.mp4")).unwrap();
@@ -92,20 +92,20 @@ fn newer_revisions_apply_and_late_ui_work_is_rejected() {
     let mut controller = PlaybackController::new(FakePort::default());
     let current = token(2, 4, 9);
     assert_eq!(
-        controller.apply_update(SessionUpdate {
+        controller.apply_update(ControllerUpdate {
             sequence: 10,
             token: current,
-            payload: SessionUpdatePayload::Snapshot(snapshot(current.work(), true)),
+            payload: ControllerUpdatePayload::Snapshot(snapshot(current.work(), true)),
         }),
         ApplyUpdateOutcome::Applied
     );
     assert!(controller.ui_state().playing);
 
     assert_eq!(
-        controller.apply_update(SessionUpdate {
+        controller.apply_update(ControllerUpdate {
             sequence: 11,
             token: token(2, 3, 99),
-            payload: SessionUpdatePayload::Event(PlaybackEvent::Error {
+            payload: ControllerUpdatePayload::Event(PlaybackEvent::Error {
                 generation: WorkGeneration::new(2, 3),
                 message: "stale".into(),
             }),
@@ -116,10 +116,10 @@ fn newer_revisions_apply_and_late_ui_work_is_rejected() {
     assert!(controller.ui_state().playing);
 
     assert_eq!(
-        controller.apply_update(SessionUpdate {
+        controller.apply_update(ControllerUpdate {
             sequence: 10,
             token: token(2, 4, 10),
-            payload: SessionUpdatePayload::Event(PlaybackEvent::Error {
+            payload: ControllerUpdatePayload::Event(PlaybackEvent::Error {
                 generation: WorkGeneration::new(2, 4),
                 message: "out of order".into(),
             }),
@@ -131,10 +131,10 @@ fn newer_revisions_apply_and_late_ui_work_is_rejected() {
 #[test]
 fn errors_are_owned_for_display_and_shutdown_order_is_enforced() {
     let mut controller = PlaybackController::new(FakePort::default());
-    controller.apply_update(SessionUpdate {
+    controller.apply_update(ControllerUpdate {
         sequence: 1,
         token: token(1, 0, 1),
-        payload: SessionUpdatePayload::Event(PlaybackEvent::Error {
+        payload: ControllerUpdatePayload::Event(PlaybackEvent::Error {
             generation: WorkGeneration::new(1, 0),
             message: "device removed".to_owned(),
         }),

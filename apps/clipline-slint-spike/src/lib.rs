@@ -3,6 +3,12 @@
 pub mod controller;
 pub mod cpu_frame;
 pub mod model;
+pub mod options;
+
+#[cfg(windows)]
+pub mod live;
+#[cfg(windows)]
+pub mod windows;
 
 slint::include_modules!();
 

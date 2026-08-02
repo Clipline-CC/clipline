@@ -1,11 +1,24 @@
 use std::fmt;
 use std::path::PathBuf;
 
-use clipline_playback::windows::{SessionUpdate, SessionUpdatePayload};
 use clipline_playback::{
     PipelineToken, PlaybackCommand, PlaybackEvent, PlaybackPhase, PlaybackSnapshot, PlaybackTime,
     PLAYBACK_TIMELINE_HZ,
 };
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ControllerUpdate {
+    pub sequence: u64,
+    pub token: PipelineToken,
+    pub payload: ControllerUpdatePayload,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ControllerUpdatePayload {
+    Snapshot(PlaybackSnapshot),
+    Event(PlaybackEvent),
+    Metrics,
+}
 
 pub trait PlaybackCommandPort {
     fn send(&self, command: PlaybackCommand) -> Result<(), String>;
@@ -105,6 +118,14 @@ impl<P: PlaybackCommandPort> PlaybackController<P> {
         })
     }
 
+    pub fn play(&self) -> Result<(), ControllerError> {
+        self.send(PlaybackCommand::Play)
+    }
+
+    pub fn pause(&self) -> Result<(), ControllerError> {
+        self.send(PlaybackCommand::Pause)
+    }
+
     pub fn seek_relative(&self, seconds: f64) -> Result<(), ControllerError> {
         if !seconds.is_finite() {
             return Err(ControllerError::InvalidSeek);
@@ -154,7 +175,7 @@ impl<P: PlaybackCommandPort> PlaybackController<P> {
         self.send(PlaybackCommand::Close)
     }
 
-    pub fn apply_update(&mut self, update: SessionUpdate) -> ApplyUpdateOutcome {
+    pub fn apply_update(&mut self, update: ControllerUpdate) -> ApplyUpdateOutcome {
         if self
             .latest_sequence
             .is_some_and(|sequence| update.sequence <= sequence)
@@ -167,9 +188,9 @@ impl<P: PlaybackCommandPort> PlaybackController<P> {
         self.latest_sequence = Some(update.sequence);
         self.latest_token = Some(update.token);
         match update.payload {
-            SessionUpdatePayload::Snapshot(snapshot) => self.apply_snapshot(snapshot),
-            SessionUpdatePayload::Event(event) => self.apply_event(event),
-            SessionUpdatePayload::Metrics(_) => {}
+            ControllerUpdatePayload::Snapshot(snapshot) => self.apply_snapshot(snapshot),
+            ControllerUpdatePayload::Event(event) => self.apply_event(event),
+            ControllerUpdatePayload::Metrics => {}
         }
         ApplyUpdateOutcome::Applied
     }

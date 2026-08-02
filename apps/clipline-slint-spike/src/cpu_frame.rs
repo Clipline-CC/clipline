@@ -7,9 +7,7 @@ use clipline_playback::{
 };
 
 #[cfg(windows)]
-use clipline_playback::windows::{
-    D3D11VideoSurface, Nv12ReadbackTelemetry, WindowsNv12Readback,
-};
+use clipline_playback::windows::{D3D11VideoSurface, Nv12ReadbackTelemetry, WindowsNv12Readback};
 #[cfg(windows)]
 use slint::{Rgb8Pixel, SharedPixelBuffer};
 
@@ -352,7 +350,9 @@ impl CpuDiagnosticPublisher {
         }
         enqueue_cpu_delivery(self.window.clone(), self.consumer.clone(), token).map_err(|error| {
             self.consumer.cancel_delivery();
-            publication_failure(format!("queue CPU diagnostic frame on Slint event loop: {error}"))
+            publication_failure(format!(
+                "queue CPU diagnostic frame on Slint event loop: {error}"
+            ))
         })
     }
 }

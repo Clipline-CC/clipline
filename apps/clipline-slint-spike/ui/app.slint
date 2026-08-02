@@ -24,6 +24,19 @@ component SectionLabel inherits Text {
     vertical-alignment: center;
 }
 
+export component SpikeTray inherits SystemTrayIcon {
+    in property <image> tray-icon;
+    icon: tray-icon;
+    tooltip: "Clipline Slint Presentation Spike";
+    callback show-window();
+    callback quit-app();
+    Menu {
+        MenuItem { title: "Show Clipline spike"; activated => { root.show-window(); } }
+        MenuSeparator { }
+        MenuItem { title: "Quit spike"; activated => { root.quit-app(); } }
+    }
+}
+
 export component CliplineSpike inherits Window {
     title: "Clipline Slint Presentation Spike";
     preferred-width: 1200px;
