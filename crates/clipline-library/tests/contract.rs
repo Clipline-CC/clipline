@@ -6,8 +6,9 @@ use clipline_library::{
     CloudWorkToken, DurableUploadToken, ForegroundGeneration, GenerationError, LocalClipId,
     LocalClipItem, MutationFailure, MutationReport, PayloadBoundsError, PresentationRow,
     RequestGeneration, UploadGeneration, UploadSummary, WindowAttachmentGeneration,
-    WindowWorkToken, MAX_CATALOG_PAGE_ROWS, MAX_CLOUD_INDEX_ROWS, MAX_DECODED_PAGE_IMAGES,
-    MAX_LOCAL_INDEX_ROWS, MAX_MUTATION_PATH_BYTES, MAX_POSTER_RESULT_ENTRIES, MAX_UPLOAD_SUMMARIES,
+    WindowWorkToken, MAX_CATALOG_IDENTITY_BYTES, MAX_CATALOG_PAGE_ROWS, MAX_CLOUD_INDEX_ROWS,
+    MAX_DECODED_PAGE_IMAGES, MAX_LOCAL_INDEX_ROWS, MAX_MUTATION_PATH_BYTES,
+    MAX_POSTER_RESULT_ENTRIES, MAX_UPLOAD_SUMMARIES,
 };
 
 #[test]
@@ -126,6 +127,28 @@ fn deserialization_preserves_identity_invariants() {
         serde_json::from_value::<LocalClipId>(serde_json::json!("x".repeat(16 * 1024 + 1)))
             .is_err()
     );
+}
+
+#[test]
+fn identity_final_encoded_key_is_bounded_and_round_trips_at_the_limit() {
+    let exact_raw = "x".repeat(MAX_CATALOG_IDENTITY_BYTES - "exact:".len());
+    let exact = ClipPathIdentity::from_text(&exact_raw).unwrap();
+    assert_eq!(exact.as_str().len(), MAX_CATALOG_IDENTITY_BYTES);
+    let exact_round_trip: ClipPathIdentity =
+        serde_json::from_value(serde_json::to_value(&exact).unwrap()).unwrap();
+    assert_eq!(exact_round_trip, exact);
+    assert!(ClipPathIdentity::from_text(&format!("{exact_raw}x")).is_none());
+
+    let windows_raw = format!(
+        r"C:\{}",
+        "x".repeat(MAX_CATALOG_IDENTITY_BYTES - "windows:".len() - r"C:\".len())
+    );
+    let windows = ClipPathIdentity::from_text(&windows_raw).unwrap();
+    assert_eq!(windows.as_str().len(), MAX_CATALOG_IDENTITY_BYTES);
+    let windows_round_trip: ClipPathIdentity =
+        serde_json::from_value(serde_json::to_value(&windows).unwrap()).unwrap();
+    assert_eq!(windows_round_trip, windows);
+    assert!(ClipPathIdentity::from_text(&format!("{windows_raw}x")).is_none());
 }
 
 #[test]

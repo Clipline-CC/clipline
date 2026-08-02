@@ -42,11 +42,20 @@ impl ClipPathIdentity {
                 .as_bytes()
                 .first()
                 .is_some_and(u8::is_ascii_alphabetic);
-        if is_drive_absolute || normalized.starts_with(r"\\") {
-            Some(Self(format!("windows:{}", normalized.to_lowercase())))
+        let key = if is_drive_absolute || normalized.starts_with(r"\\") {
+            let maximum_path_bytes = MAX_CATALOG_IDENTITY_BYTES.checked_sub("windows:".len())?;
+            if normalized.len() > maximum_path_bytes {
+                return None;
+            }
+            format!("windows:{}", normalized.to_lowercase())
         } else {
-            Some(Self(format!("exact:{text}")))
-        }
+            let maximum_path_bytes = MAX_CATALOG_IDENTITY_BYTES.checked_sub("exact:".len())?;
+            if text.len() > maximum_path_bytes {
+                return None;
+            }
+            format!("exact:{text}")
+        };
+        Some(Self(key))
     }
 
     #[must_use]
