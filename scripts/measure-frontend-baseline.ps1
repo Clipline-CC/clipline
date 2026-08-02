@@ -5,9 +5,9 @@
 .DESCRIPTION
     Launches Clipline in a disposable Windows profile, delegates UI driving to
     a marker-producing adapter, and writes frontend-neutral raw samples plus a
-    metadata/summary JSON sidecar. The built-in Tauri adapter uses CDP. A Slint
-    adapter can later use UI Automation or a benchmark control endpoint while
-    emitting the same ready/error marker protocol.
+    metadata/summary JSON sidecar. The built-in Tauri adapter uses CDP. The
+    external Slint adapter consumes app-authored semantic markers and the same
+    ready/error protocol without adding a benchmark control endpoint.
 
     Tauri runs intentionally accept only target/benchmark/clipline-app.exe.
     That optimized Cargo profile keeps debug assertions enabled, which makes
@@ -47,6 +47,7 @@ param(
     [ValidateRange(5, 3600)][int]$ReadinessTimeoutSeconds = 600,
     [ValidateRange(1, 65535)][int]$DebugPort = 9222,
     [string]$OutputDirectory,
+    [switch]$RequireBenchmarkBuild,
     [switch]$DriverWorker,
     [string]$DriverContextPath
 )
@@ -54,7 +55,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:HarnessVersion = '1.0.0'
+$script:HarnessVersion = '1.1.0'
 $script:ScenarioNames = @(
     'autostart-tray', 'library-50', 'library-500', 'library-2000', 'settings',
     'review-idle', 'review-playing', 'scrub-storm', 'close-to-tray',
@@ -469,18 +470,24 @@ function Assert-CliplineDriverHealthy {
 function Assert-CliplineBenchmarkExecutable {
     param(
         [Parameter(Mandatory = $true)][string]$Executable,
-        [Parameter(Mandatory = $true)][string]$FrontendName
+        [Parameter(Mandatory = $true)][string]$FrontendName,
+        [Parameter(Mandatory = $true)][bool]$Required
     )
     if (-not (Test-Path -LiteralPath $Executable -PathType Leaf)) {
         throw "executable does not exist: $Executable"
     }
-    if ($FrontendName -ne 'tauri') { return $null }
+    if (-not $Required) { return $null }
 
     $profileDirectory = Split-Path -Leaf (Split-Path -Parent $Executable)
     if ($profileDirectory -ne 'benchmark') {
-        throw 'Tauri baselines require target/benchmark/clipline-app.exe; release builds can mutate the global autostart registry'
+        throw "$FrontendName gate runs require an executable from the benchmark profile"
     }
-    $cargo = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'Cargo.toml') -Raw
+    $cargoPath = if ($FrontendName -eq 'tauri') {
+        Join-Path $script:RepoRoot 'Cargo.toml'
+    } else {
+        Join-Path $script:RepoRoot 'apps/clipline-slint-spike/Cargo.toml'
+    }
+    $cargo = Get-Content -LiteralPath $cargoPath -Raw
     if ($cargo -notmatch '(?ms)^\[profile\.benchmark\].*?^inherits\s*=\s*"release".*?^debug-assertions\s*=\s*true\s*$') {
         throw 'Cargo.toml benchmark profile must inherit release and enable debug assertions'
     }
@@ -538,7 +545,8 @@ function Resolve-CliplineFixture {
         $manifestValue.suite -ne 'clipline-native-playback-v1') {
         throw 'fixture manifest has an unsupported schema or suite'
     }
-    $entry = @($manifestValue.fixtures | Where-Object { $_.file -eq [System.IO.Path]::GetFileName($resolvedCandidate) }) |
+    $hashCoveredEntries = @($manifestValue.fixtures) + @($manifestValue.production_mux_oracles)
+    $entry = @($hashCoveredEntries | Where-Object { $_.file -eq [System.IO.Path]::GetFileName($resolvedCandidate) }) |
         Select-Object -First 1
     if (-not $entry -or -not $entry.artifact -or
         [string]::IsNullOrWhiteSpace([string]$entry.artifact.sha256)) {
@@ -811,11 +819,17 @@ if ($Frontend -eq 'slint' -and
     throw 'Slint baselines require an existing -AdapterScript that implements the marker protocol'
 }
 if ([string]::IsNullOrWhiteSpace($Renderer)) {
-    $Renderer = if ($Frontend -eq 'tauri') { 'webview2' } else { 'native' }
+    $Renderer = if ($Frontend -eq 'tauri') { 'webview2' } else { 'winit-software-d3d' }
+}
+if ($Frontend -eq 'slint' -and
+    $Renderer -notin @('winit-software', 'winit-software-d3d', 'winit-software-cpu-diagnostic')) {
+    throw 'Slint renderer must be winit-software, winit-software-d3d, or winit-software-cpu-diagnostic'
 }
 
 $resolvedExe = (Resolve-Path -LiteralPath $Exe).Path
-$benchmarkSafetyProbe = Assert-CliplineBenchmarkExecutable -Executable $resolvedExe -FrontendName $Frontend
+$benchmarkRequired = $Frontend -eq 'tauri' -or [bool]$RequireBenchmarkBuild
+$benchmarkSafetyProbe = Assert-CliplineBenchmarkExecutable -Executable $resolvedExe `
+    -FrontendName $Frontend -Required $benchmarkRequired
 $resolvedFixtures = $null
 if (-not [string]::IsNullOrWhiteSpace($FixturesDir)) {
     if (-not (Test-Path -LiteralPath $FixturesDir -PathType Container)) {
@@ -823,8 +837,20 @@ if (-not [string]::IsNullOrWhiteSpace($FixturesDir)) {
     }
     $resolvedFixtures = (Resolve-Path -LiteralPath $FixturesDir).Path
 }
+$requestedFixture = $FixturePath
+if ($Frontend -eq 'slint' -and [string]::IsNullOrWhiteSpace($requestedFixture) -and
+    $Scenario -in @('review-idle', 'review-playing', 'scrub-storm', 'reveal-close-100')) {
+    # The native index intentionally rejects FFmpeg's mid-sample edit lists.
+    # This first-party remux is hash-covered by production_mux_oracles and uses
+    # the same encoded streams without those foreign edit boxes.
+    $requestedFixture = 'hybrid-writer-h264-two-opus-5s.mp4'
+}
 $resolvedFixture = Resolve-CliplineFixture -ScenarioName $Scenario `
-    -FixtureDirectory $resolvedFixtures -RequestedPath $FixturePath
+    -FixtureDirectory $resolvedFixtures -RequestedPath $requestedFixture
+if ($Frontend -eq 'slint' -and $Scenario -eq 'reveal-close-100' -and -not $resolvedFixture) {
+    $resolvedFixture = Resolve-CliplineFixture -ScenarioName 'review-idle' `
+        -FixtureDirectory $resolvedFixtures -RequestedPath $requestedFixture
+}
 
 $processName = [System.IO.Path]::GetFileNameWithoutExtension($resolvedExe)
 $existing = @(Get-Process -Name $processName -ErrorAction SilentlyContinue)
@@ -869,6 +895,7 @@ Initialize-CliplineFixtureProfile -ScenarioName $Scenario -MediaPath $mediaPath 
 
 $markerPath = Join-Path $profileRoot 'driver-markers.jsonl'
 $stopPath = Join-Path $profileRoot 'driver.stop'
+$frontendTelemetryPath = Join-Path $profileRoot 'frontend-telemetry.json'
 $contextPath = Join-Path $profileRoot 'driver-context.json'
 $diagnosticLogPath = Join-Path $appData 'Clipline/logs/clipline.log'
 $fixtureHashes = Get-CliplineFixtureHashes -FixtureDirectory $resolvedFixtures
@@ -914,6 +941,22 @@ try {
     }
     $arguments = @()
     if ($Scenario -eq 'autostart-tray') { $arguments += '--autostart' }
+    if ($Frontend -eq 'slint') {
+        if ($Scenario -notin @('review-idle', 'review-playing', 'scrub-storm', 'reveal-close-100')) {
+            throw "Slint presentation spike does not implement baseline scenario $Scenario"
+        }
+        $arguments += @(
+            '--fixture', "`"$resolvedFixture`"",
+            '--renderer', 'winit-software',
+            '--scenario', $Scenario,
+            '--marker-path', "`"$markerPath`"",
+            '--stop-path', "`"$stopPath`"",
+            '--telemetry-path', "`"$frontendTelemetryPath`""
+        )
+        if ($Renderer -eq 'winit-software-cpu-diagnostic') {
+            $arguments += '--cpu-frame-diagnostic'
+        }
+    }
     if ($arguments.Count -gt 0) {
         $rootProcess = Start-Process -FilePath $resolvedExe -ArgumentList $arguments `
             -WorkingDirectory (Split-Path -Parent $resolvedExe) -PassThru
@@ -965,6 +1008,7 @@ try {
         fixturePath = $resolvedFixture
         markerPath = $markerPath
         stopPath = $stopPath
+        frontendTelemetryPath = $frontendTelemetryPath
         diagnosticLogPath = $diagnosticLogPath
     }
     $context | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $contextPath -Encoding UTF8
@@ -1043,6 +1087,18 @@ try {
     $endUtc = [datetime]::UtcNow
     New-Item -ItemType File -Path $stopPath -Force | Out-Null
     Assert-CliplineDriverHealthy -MarkerPath $markerPath -DriverProcess $driverProcess
+    if ($Frontend -eq 'slint') {
+        if (-not $driverProcess.WaitForExit(15000)) {
+            throw 'Slint adapter did not observe a graceful spike shutdown within 15 seconds'
+        }
+        Assert-CliplineDriverHealthy -MarkerPath $markerPath -DriverProcess $driverProcess
+        if (-not $rootProcess.WaitForExit(1000) -or $rootProcess.ExitCode -ne 0) {
+            throw "Slint spike exited unsuccessfully after the harness stop signal"
+        }
+        if (-not (Test-Path -LiteralPath $frontendTelemetryPath -PathType Leaf)) {
+            throw 'Slint spike did not publish final frontend telemetry after graceful shutdown'
+        }
+    }
 
     if ($Frontend -eq 'tauri' -and
         @(Get-ChildItem -LiteralPath $webViewUserData -Force -ErrorAction SilentlyContinue).Count -eq 0) {
@@ -1067,6 +1123,9 @@ try {
 
     $columns = Get-CliplineSampleColumns
     $rawRows.ToArray() | Select-Object -Property $columns | Export-Csv -LiteralPath $rawCsvPath -NoTypeInformation
+    $frontendTelemetry = if ($Frontend -eq 'slint') {
+        Get-Content -LiteralPath $frontendTelemetryPath -Raw | ConvertFrom-Json
+    } else { $null }
     $metadata = [pscustomobject][ordered]@{
         schemaVersion = 1
         harnessVersion = $script:HarnessVersion
@@ -1079,6 +1138,7 @@ try {
             path = $resolvedExe
             sha256 = $exeHash
             bytes = [long](Get-Item -LiteralPath $resolvedExe).Length
+            benchmarkRequired = $benchmarkRequired
             benchmarkSafetyProbe = $benchmarkSafetyProbe
         }
         fixtures = [pscustomobject][ordered]@{
@@ -1111,6 +1171,7 @@ try {
             protocol = 'clipline-baseline-marker-v1'
             detail = $readyMarker.detail
         }
+        frontendTelemetry = $frontendTelemetry
         profile = [pscustomobject][ordered]@{
             disposable = $true
             root = $profileRoot

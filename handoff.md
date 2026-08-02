@@ -4,6 +4,70 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-02): Slint replacement Milestone 4 presentation spike
+
+Plan: `docs/superpowers/plans/2026-08-01-slint-presentation-spike.md`. Protocol and evidence status:
+`docs/slint/slint-presentation-protocol.md`.
+
+The non-distributed `apps/clipline-slint-spike` pins Slint 1.17.1 with winit, the software chrome
+renderer, accessibility, raw-window-handle 0.6, and system-tray support. No Qt or Skia renderer is
+active; Slint's selected software path does include its expected `tiny-skia` raster dependency. It
+hosts the Milestone 3 native session behind a bounded controller/update port. Commands are
+generation-fenced, updates are revisioned and stale-rejected, and shutdown orders the update pump,
+playback session, presentation publisher, child HWND, and Slint event loop so media and window
+ownership cannot outlive their host.
+
+The production-candidate video path uses one same-adapter D3D11 child-window presenter: two
+flip-model swap-chain buffers, one retained pending playback surface, revision checks around
+geometry/presentation, exact resize/minimize/occlusion handling, and explicit device-loss errors.
+There is no automatic CPU fallback. The opt-in diagnostic path instead uses one bounded staging
+readback, one reusable 640x360 RGB buffer (691,200 bytes for the checked-in fixture), and at most
+one outstanding Slint UI delivery. Repository security checks keep all new unsafe Windows calls
+under Windows safe-wrapper modules.
+
+The matched presentation fixture is the hash-covered production mux oracle
+`fixtures/playback/hybrid-writer-h264-two-opus-5s.mp4`, SHA-256
+`8a32e046402aa5a6e7a1fce05a747d3705dc1a7dc868d08a8cc18573c0dd2a71`. The sampler now accepts
+both procedural fixtures and `production_mux_oracles` without weakening SHA-256 validation and
+chooses the writer-authored file by default for Slint review scenarios. Its external Slint adapter
+requires app-produced semantic readiness, creation-time-verified root identity, clean stop-file
+shutdown, and final fail-closed frontend telemetry.
+
+Complete sampler smokes on Windows 11 build 26200 accepted CPU-diagnostic `review-playing`,
+`scrub-storm`, and `reveal-close-100`. They closed cleanly with balanced MFT ownership (71/71,
+272/272, and 1/1), fixed one-allocation/one-pending mailbox bounds, zero stale or late/drop results,
+and all 100 reveal/close cycles. The one-second debug p95 PWS readings were 17.3, 18.1, and 16.4
+MiB; they are lifecycle diagnostics, not publishable performance evidence.
+Final harness-1.1.0 schema smoke `20260802T092518Z-slint-scrub-storm` used executable SHA-256
+`e58cb33852c68ac1c9a40b4948a78764e4485229d77349a8c3f80fb0e65f1563` and reported 273/273 MFT
+ownership, 0 ms p95 A/V error, 29 ms p95 seek settlement across 32 samples, no histogram overflow,
+zero late/drop, and the exported two-surface/64-update bounds. It remains a short debug diagnostic.
+The dedicated optimized benchmark profile/probe is also live. Harness-1.1.0 smoke
+`20260802T093832Z-slint-scrub-storm` accepted executable SHA-256
+`cdf56707a59e8bba34ace7f8388839b8105b292f027c8dc7825e86e02db7186e`, opt-level 3, debug
+assertions, no registry mutation, clean shutdown, 273/273 MFT ownership, 0 ms p95 A/V error,
+34 ms p95 seek settlement across 32 samples, and 18.2 MiB one-second p95 PWS; it is not a
+five-minute accepted sample.
+
+This machine exposes Microsoft Basic Display Adapter. The D3D smoke failed closed at the video
+processor query with `E_NOINTERFACE`, proving it did not silently use CPU presentation, but leaving
+the D3D fast path unvalidated. Formal three-plus-three five-minute runs, real-GPU decode/present,
+DPI/device-recovery coverage, 1080p60 gates, and matched Tauri PWS/CPU all remain pending. The
+installed Clipline was not stopped; matched Tauri evidence still requires the user to close it.
+
+Standalone spike tests/Clippy, fresh-cache spike and playback Clippy, playback/MP4/device suites,
+PowerShell metric helpers, repository security, migration contract, CI-mode workspace tests, and
+warning-denied workspace Clippy are green. The active dependency tree contains only the seven
+reviewed Slint features and no Qt/Skia renderer, Tauri/WebView, GStreamer, or linked FFmpeg; all new
+unsafe remains under playback's Windows module. One unrelated live WGC primary-monitor test timed
+out twice waiting five seconds for a desktop frame in this Basic Display session. That test is
+explicitly CI-skipped, the CI-mode workspace suite passed, and no capture source changed.
+
+Next: Milestone 5 should extract the desktop controller/bootstrap/event-sink boundary while keeping
+the shipping Tauri frontend intact. Reuse the spike's bounded `PlaybackController`, `LiveSession`,
+and revisioned UI-update pattern; do not treat its representative Review controls or tray menu as
+full parity for `surface:review`, `tray:*`, or lifecycle ledger rows.
+
 ## Checkpoint (2026-08-01): Slint replacement Milestone 3 native playback
 
 Plan: `docs/superpowers/plans/2026-08-01-slint-native-playback.md`.

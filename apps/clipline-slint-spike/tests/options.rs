@@ -21,6 +21,10 @@ fn command_line_selects_only_explicit_bounded_paths() {
         "review-playing",
         "--marker-path",
         "ready.jsonl",
+        "--stop-path",
+        "driver.stop",
+        "--telemetry-path",
+        "telemetry.json",
     ]))
     .unwrap();
     assert_eq!(
@@ -34,6 +38,14 @@ fn command_line_selects_only_explicit_bounded_paths() {
     assert_eq!(
         options.marker_path.unwrap(),
         std::path::PathBuf::from("ready.jsonl")
+    );
+    assert_eq!(
+        options.stop_path.unwrap(),
+        std::path::PathBuf::from("driver.stop")
+    );
+    assert_eq!(
+        options.telemetry_path.unwrap(),
+        std::path::PathBuf::from("telemetry.json")
     );
 
     assert!(matches!(

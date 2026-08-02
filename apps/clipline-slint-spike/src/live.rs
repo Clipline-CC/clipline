@@ -101,6 +101,7 @@ impl LiveSession {
         fixture: PathBuf,
         scenario: SpikeScenario,
         marker_path: Option<PathBuf>,
+        stop_path: Option<PathBuf>,
         exit_after_ready: bool,
     ) -> Result<Self, String> {
         let (client, runtime) = session_channel();
@@ -120,11 +121,14 @@ impl LiveSession {
         let updates = spawn_update_pump(
             Arc::clone(&client),
             Arc::clone(&controller),
-            Arc::clone(&stop_updates),
-            window,
-            scenario,
-            marker_path,
-            exit_after_ready,
+            UpdatePumpConfig {
+                stop: Arc::clone(&stop_updates),
+                window,
+                scenario,
+                marker_path,
+                stop_path,
+                exit_after_ready,
+            },
         )?;
         Ok(Self {
             controller,
@@ -139,6 +143,8 @@ impl LiveSession {
     }
 
     pub fn shutdown(mut self) -> Result<LiveSessionReport, String> {
+        self.stop_updates.store(true, Ordering::Release);
+        let updates_result = self.updates.take().map(JoinHandle::join);
         if let Ok(controller) = self.controller.lock() {
             let _ = controller.close();
         }
@@ -147,11 +153,8 @@ impl LiveSession {
             .take()
             .ok_or_else(|| "native playback thread was already joined".to_owned())?;
         let playback_result = playback.join();
-        self.stop_updates.store(true, Ordering::Release);
-        if let Some(updates) = self.updates.take() {
-            updates
-                .join()
-                .map_err(|_| "Slint update pump panicked".to_owned())?;
+        if let Some(updates_result) = updates_result {
+            updates_result.map_err(|_| "Slint update pump panicked".to_owned())?;
         }
         let mut report = playback_result
             .map_err(|_| "native playback thread panicked".to_owned())?
@@ -179,15 +182,28 @@ impl LiveSession {
     }
 }
 
-fn spawn_update_pump(
-    client: Arc<SessionClient>,
-    controller: Arc<Mutex<PlaybackController<SessionCommandPort>>>,
+struct UpdatePumpConfig {
     stop: Arc<AtomicBool>,
     window: slint::Weak<CliplineSpike>,
     scenario: SpikeScenario,
     marker_path: Option<PathBuf>,
+    stop_path: Option<PathBuf>,
     exit_after_ready: bool,
+}
+
+fn spawn_update_pump(
+    client: Arc<SessionClient>,
+    controller: Arc<Mutex<PlaybackController<SessionCommandPort>>>,
+    config: UpdatePumpConfig,
 ) -> Result<JoinHandle<()>, String> {
+    let UpdatePumpConfig {
+        stop,
+        window,
+        scenario,
+        marker_path,
+        stop_path,
+        exit_after_ready,
+    } = config;
     thread::Builder::new()
         .name("clipline-slint-updates".to_owned())
         .spawn(move || {
@@ -199,6 +215,9 @@ fn spawn_update_pump(
             let mut scrub_near_end = false;
             let mut marker_written = false;
             while !stop.load(Ordering::Acquire) {
+                if stop_path.as_ref().is_some_and(|path| path.exists()) {
+                    let _ = slint::quit_event_loop();
+                }
                 let mut progressed = false;
                 while let Some(update) = client.try_recv_update() {
                     progressed = true;

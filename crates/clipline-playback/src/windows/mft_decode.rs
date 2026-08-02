@@ -43,7 +43,7 @@ use super::d3d11::PlaybackD3D11Device;
 
 const MAX_PENDING_ACCESS_UNITS: usize = 32;
 const MAX_PENDING_ENCODED_BYTES: usize = crate::MAX_ANNEX_B_ACCESS_UNIT_BYTES;
-const MAX_PLAYBACK_SURFACES: usize = 2;
+pub const MAX_PLAYBACK_SURFACES: usize = 2;
 const MAX_STREAM_CHANGE_RETRIES: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

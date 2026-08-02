@@ -47,6 +47,8 @@ pub struct SpikeOptions {
     pub exit_after_ready: bool,
     pub scenario: SpikeScenario,
     pub marker_path: Option<PathBuf>,
+    pub stop_path: Option<PathBuf>,
+    pub telemetry_path: Option<PathBuf>,
 }
 
 impl Default for SpikeOptions {
@@ -58,6 +60,8 @@ impl Default for SpikeOptions {
             exit_after_ready: false,
             scenario: SpikeScenario::Interactive,
             marker_path: None,
+            stop_path: None,
+            telemetry_path: None,
         }
     }
 }
@@ -93,6 +97,13 @@ impl SpikeOptions {
                     options.marker_path =
                         Some(PathBuf::from(next_value(&mut args, "--marker-path")?));
                 }
+                "--stop-path" => {
+                    options.stop_path = Some(PathBuf::from(next_value(&mut args, "--stop-path")?));
+                }
+                "--telemetry-path" => {
+                    options.telemetry_path =
+                        Some(PathBuf::from(next_value(&mut args, "--telemetry-path")?));
+                }
                 "--help" | "-h" => return Err(OptionsError::HelpRequested),
                 _ => return Err(OptionsError::UnknownArgument(argument.into_owned())),
             }
@@ -106,7 +117,7 @@ impl SpikeOptions {
     pub const fn usage() -> &'static str {
         "clipline-slint-spike [--fixture <mp4>] [--renderer winit-software] \
          [--cpu-frame-diagnostic] [--exit-after-ready] [--scenario interactive|review-idle|review-playing|scrub-storm|reveal-close-100] \
-         [--marker-path <jsonl>]"
+         [--marker-path <jsonl>] [--stop-path <file>] [--telemetry-path <json>]"
     }
 }
 

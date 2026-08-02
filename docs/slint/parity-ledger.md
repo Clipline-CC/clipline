@@ -192,3 +192,16 @@ The shell replacement must also preserve `--autostart`, `--window <title>`, `--l
 not frontend callbacks. Every surface is checked at 100%, 125%, 150%, and 200% display scaling,
 with keyboard-only operation and Narrator/UI Automation checks for custom controls. The existing
 225 frontend tests remain the behavioral oracle until equivalent Rust/Slint tests pass.
+
+## Milestone 4 spike evidence boundary
+
+The non-distributed Slint presentation spike verifies infrastructure only: a revisioned playback
+controller, native H.264/two-Opus playback session, bounded D3D child-window presenter, explicit
+bounded CPU diagnostic, semantic measurement markers, clean stop/teardown, and 100 programmatic
+hide/reveal cycles. The CPU path passed local lifecycle smokes; the D3D path remains pending on a
+real GPU because the current console exposes Microsoft Basic Display Adapter. Exact evidence and
+pending gates are recorded in `docs/slint/slint-presentation-protocol.md`.
+
+No ledger status advances from that spike. Its representative Review buttons are not the complete
+`surface:review`, its small tray is not `tray:*` parity, and programmatic hide/reveal is not the full
+single-instance, close-to-tray, focus, DPI, keyboard, accessibility, or installed lifecycle matrix.

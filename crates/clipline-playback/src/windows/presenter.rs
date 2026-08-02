@@ -28,8 +28,9 @@ use windows::Win32::Graphics::Dxgi::Common::{
 use windows::Win32::Graphics::Dxgi::{
     IDXGIDevice, IDXGIFactory2, IDXGISwapChain1, DXGI_ERROR_DEVICE_HUNG, DXGI_ERROR_DEVICE_REMOVED,
     DXGI_ERROR_DEVICE_RESET, DXGI_ERROR_DRIVER_INTERNAL_ERROR, DXGI_ERROR_WAS_STILL_DRAWING,
-    DXGI_MWA_NO_ALT_ENTER, DXGI_PRESENT_DO_NOT_WAIT, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1,
-    DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
+    DXGI_MWA_NO_ALT_ENTER, DXGI_MWA_NO_WINDOW_CHANGES, DXGI_PRESENT_DO_NOT_WAIT,
+    DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
+    DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
 };
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -743,10 +744,12 @@ impl D3DPresentationPipeline {
                 .map_err(|error| {
                     publisher_windows_error(error, "create two-buffer video swap chain")
                 })?;
-        // SAFETY: associates this child with the factory and disables DXGI's
-        // implicit Alt+Enter behavior.
-        unsafe { factory.MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER) }
-            .map_err(|error| publisher_windows_error(error, "configure video swap chain"))?;
+        // SAFETY: associates this child with the factory while leaving all
+        // window ownership and transitions to Slint's UI thread.
+        unsafe {
+            factory.MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER | DXGI_MWA_NO_WINDOW_CHANGES)
+        }
+        .map_err(|error| publisher_windows_error(error, "configure video swap chain"))?;
         let (enumerator, processor) = create_video_processor(
             &video_device,
             source_width,

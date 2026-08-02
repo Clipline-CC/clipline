@@ -14,7 +14,7 @@ mod wasapi_render;
 
 pub use mft_decode::{
     classify_device_failure, probe_h264_decoders, D3D11VideoSurface, DecoderCapabilities,
-    DecoderOwnershipTelemetry, DecoderPreference, WindowsH264Decoder,
+    DecoderOwnershipTelemetry, DecoderPreference, WindowsH264Decoder, MAX_PLAYBACK_SURFACES,
 };
 pub use presenter::{
     classify_present_result, validate_video_bounds, D3D11PublisherTelemetry, PresentOutcome,

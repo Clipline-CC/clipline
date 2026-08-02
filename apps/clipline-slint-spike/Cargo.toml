@@ -33,3 +33,7 @@ slint = { version = "=1.17.1", default-features = false, features = [
 
 [build-dependencies]
 slint-build = "=1.17.1"
+
+[profile.benchmark]
+inherits = "release"
+debug-assertions = true

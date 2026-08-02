@@ -44,6 +44,20 @@ const REQUIRED_UI_CONTRACT: &[&str] = &[
     "accessible-label: \"Review player\"",
 ];
 
+const REQUIRED_TELEMETRY_CONTRACT: &[&str] = &[
+    "lateDropRatio",
+    "avErrorP95Ms",
+    "avErrorHistogramOverflowed",
+    "seekSettleP95Ms",
+    "seekLatencyHistogramOverflowed",
+    "settledSeeks",
+    "mftSamplesReceived",
+    "mftSamplesReleased",
+    "pendingHighWater",
+    "swapChainBuffers",
+    "decoderSurfacePool",
+];
+
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -87,6 +101,12 @@ fn spike_is_exactly_pinned_small_and_non_distributed() {
         manifest.contains("[workspace]\nresolver = \"2\""),
         "the excluded spike must be an explicit standalone workspace"
     );
+    assert!(
+        manifest.contains("[profile.benchmark]")
+            && manifest.contains("inherits = \"release\"")
+            && manifest.contains("debug-assertions = true"),
+        "formal Slint measurements need the optimized registry-safe benchmark profile"
+    );
 
     assert!(
         manifest.contains("version = \"=1.17.1\""),
@@ -112,6 +132,7 @@ fn spike_is_exactly_pinned_small_and_non_distributed() {
 
     let build = read(root.join("apps/clipline-slint-spike/build.rs"));
     assert!(build.contains("slint_build::compile(\"ui/app.slint\")"));
+    assert!(build.contains("CLIPLINE_BUILD_OPT_LEVEL"));
     let ui = read(root.join("apps/clipline-slint-spike/ui/app.slint"));
     assert!(ui.contains("export component CliplineSpike inherits Window"));
     assert!(ui.contains("preferred-width: 1200px"));
@@ -120,6 +141,15 @@ fn spike_is_exactly_pinned_small_and_non_distributed() {
         assert!(
             ui.contains(contract),
             "missing Slint UI contract: {contract}"
+        );
+    }
+
+    let main = read(root.join("apps/clipline-slint-spike/src/main.rs"));
+    assert!(main.contains("--clipline-benchmark-probe"));
+    for contract in REQUIRED_TELEMETRY_CONTRACT {
+        assert!(
+            main.contains(contract),
+            "missing final telemetry contract: {contract}"
         );
     }
 
