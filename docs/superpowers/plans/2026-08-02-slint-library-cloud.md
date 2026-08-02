@@ -38,10 +38,11 @@ shipping Tauri commands become JSON-compatible adapters over those services. The
 uses the same services directly. Do not make the Slint package depend on `clipline-app` and do not
 duplicate filesystem, cloud, or upload algorithms in a spike-only module.
 
-Full application settings remain owned by the shipping settings subsystem until Milestone 8.
-Inject narrow `LibraryConfig`, `CloudAccountStore`, and upload-record transaction ports. These
-ports snapshot the exact current media root/account and delegate whole-settings persistence to the
-existing transactional owner; the Library crate must never partially deserialize or rewrite
+The full `AppSettings` document type, normalization, load/repair/backup, and atomic persistence must
+move intact into a framework-neutral `clipline-settings` crate before live Slint services are
+wired. This is a storage-boundary prerequisite, not the Milestone 8 Settings UI port. Inject narrow
+`LibraryConfig`, `CloudAccountStore`, and upload-record transaction ports backed by that shared
+whole-document store. Neither Library nor Slint may partially deserialize or rewrite
 `settings.json`. Cloud credential access stays behind the reviewed `clipline-shell` safe wrapper.
 
 The catalog controller owns a compact bounded metadata index, current source, query/filter/
@@ -83,7 +84,7 @@ Pinned bounds and behavior:
 
 Stop the milestone and record a no-go before advancing if the Slint package depends on Tauri or
 `clipline-app`, if filesystem/network/poster work runs on the UI thread, if more than 60 catalog
-rows or page images enter the Slint model, if stale/account-crossed work mutates or persists state,
+rows or more than 32 decoded/retained page images enter the Slint model, if stale/account-crossed work mutates or persists state,
 if an active upload source can be renamed/deleted, if abandoned media-open work retains a playback
 lease, or if the 2,000-clip absolute memory/process bound fails.
 
@@ -157,6 +158,10 @@ lease, or if the 2,000-clip absolute memory/process bound fails.
 - Port the bounded card-presentation subset currently called through `PlayerCore`: clip kind,
   session grouping, marker digest/category colors, gallery card preview, custom title policy, and
   first-party/plugin game summary/icon identity. Keep the rest of PlayerCore for Milestone 9.
+- Define a bounded `ClipDetail` request/result for one stable item: marker ticks/digest, audio-track
+  IDs/labels, and upload-dialog summary strings. Enforce sidecar byte/entry/string/audio-track bounds
+  and exact item + foreground + request ownership so a late detail cannot populate a replacement
+  row/dialog.
 - Port `CloudCore`: account key, request gate, backend-owned settings merge, exact plain-HTTP
   consent, uploaded/shareability rules, and progress reconciliation that does not rebuild cards for
   byte-only bursts.
@@ -174,7 +179,53 @@ lease, or if the 2,000-clip absolute memory/process bound fails.
 - Preserve the current page-reset semantics when source/filter/group/page-size/data identity changes;
   otherwise clamp the current page.
 
-## Task 3: Extract the local Library service without changing Tauri JSON
+## Task 3: Extract the shared whole-document settings store
+
+**Files**
+
+- Modify: `Cargo.toml`
+- Create: `crates/clipline-settings/Cargo.toml`
+- Create: `crates/clipline-settings/src/lib.rs`
+- Create: `crates/clipline-settings/src/types.rs`
+- Create: `crates/clipline-settings/src/cloud.rs`
+- Create: `crates/clipline-settings/src/games.rs`
+- Create: `crates/clipline-settings/src/osu.rs`
+- Create: `crates/clipline-settings/src/validation.rs`
+- Create: `crates/clipline-settings/src/persistence.rs`
+- Create: `crates/clipline-settings/tests/persistence.rs`
+- Modify: `apps/clipline-app/src/settings/mod.rs`
+- Modify: `apps/clipline-app/src/settings/*.rs`
+- Modify: `apps/clipline-app/src/app.rs`
+- Modify: `apps/clipline-slint-spike/Cargo.toml`
+- Create: `apps/clipline-slint-spike/src/settings.rs`
+- Create: `apps/clipline-slint-spike/tests/settings_store.rs`
+
+**Test first**
+
+- Move the full current settings load/save/repair/normalization/default/backup/atomic-temp corpus
+  unchanged into the shared crate. Preserve every JSON field/default, unknown-field policy, path,
+  last-known-good backup, corrupt-file quarantine, normalization, and error string used by callers.
+- Prove whole-document compare-and-swap transactions validate the expected settings revision and
+  account generation before applying a narrow media-root/cloud-record/profile change. A failed or
+  stale transaction preserves primary, backup, in-memory value, and revision byte-for-byte.
+- Keep secrets absent from settings JSON and use the exact existing Credential Manager target.
+- The Tauri settings module becomes a compatibility re-export/adapter over the shared type/store;
+  all existing settings and transaction tests remain green without changing command JSON.
+- Add a Slint candidate bootstrap that opens only an explicitly supplied isolated profile for tests
+  or the normal shared Clipline profile for the eventual production candidate, obtains a complete
+  typed document, and persists only through the same transaction API. Tests may never resolve to
+  or mutate the installed user's profile.
+
+**Implement to green**
+
+- Move the storage/type implementation rather than copying it. UI draft/dirty/save compensation,
+  device probes, and settings controls remain Milestone 8 work.
+- Keep framework/Win32 imports out of `clipline-settings`; inject config-directory/path resolution
+  where platform ownership requires it.
+- Use this concrete store for `LibraryConfig` and `CloudAccountStore` in both adapters. Milestone 7
+  cannot claim live Slint Cloud/upload parity until this task is complete.
+
+## Task 4: Extract the local Library service without changing Tauri JSON
 
 **Files**
 
@@ -183,6 +234,7 @@ lease, or if the 2,000-clip absolute memory/process bound fails.
 - Create: `crates/clipline-library/src/repository.rs`
 - Create: `crates/clipline-library/tests/local_scan.rs`
 - Create: `crates/clipline-library/tests/local_mutation.rs`
+- Create: `crates/clipline-library/tests/clip_detail.rs`
 - Modify: `apps/clipline-app/src/library.rs`
 - Modify: `apps/clipline-app/src/library/naming.rs`
 - Modify: existing Library unit/command/JSON tests
@@ -196,7 +248,9 @@ lease, or if the 2,000-clip absolute memory/process bound fails.
   corrupt JSON, hostile duration values, and aspect/search summaries. The compact scan result keeps
   only card/search summaries; active-page detail loading is separately bounded and token-fenced.
 - Preserve canonical media-root validation: only root or one direct session child, `.mp4`, no
-  traversal/symlink escape, and the original correctly cased path is retained for filesystem use.
+  traversal/symlink/reparse escape. Retain original spelling only for display and path-identity
+  reconciliation; every read/open/mutation uses the separately stored canonical, containment-
+  validated path and revalidates identity immediately before rename/delete to close TOCTOU swaps.
 - Preserve title rename, file rename, delete, and bulk partial-success semantics. File rename moves
   MP4/markers/metadata/pending-osu/poster transactionally, rejects collisions and active-upload
   leases, and rolls every completed step back on failure. Delete owns exactly the existing sidecars
@@ -206,6 +260,9 @@ lease, or if the 2,000-clip absolute memory/process bound fails.
 - Pin old Tauri command names, argument casing, result JSON, error strings used by contracts, and
   asset-protocol scoping. The compatibility adapter adds scope after a successful scan; the shared
   service itself has no Tauri concept.
+- Accept a 10,000-item safety ceiling for the shipping scan: retain the exact `LocalClipScan` JSON
+  shape, return the deterministic newest 10,000 items, and add one explicit warning string when
+  truncated. Tests pin selection order and warning text; no silent omission is allowed.
 
 **Implement to green**
 
@@ -216,18 +273,20 @@ lease, or if the 2,000-clip absolute memory/process bound fails.
 - Defer storage settings/status to Milestone 8 and export/audio sidecars/clipboard sharing to
   Milestone 9, while retaining their existing shipping implementations over shared path validation.
 
-## Task 4: Extract the bounded poster service and native image ownership model
+## Task 5: Extract the bounded poster service and native image ownership model
 
 **Files**
 
 - Create: `crates/clipline-library/src/poster.rs`
 - Create: `crates/clipline-library/tests/poster.rs`
 - Create: `crates/clipline-library/tests/poster_controller.rs`
+- Modify: `crates/clipline-library/Cargo.toml`
 - Modify: `apps/clipline-app/src/library.rs`
 - Modify: `apps/clipline-app/src/poster.rs`
 - Modify: `apps/clipline-slint-spike/Cargo.toml`
 - Create: `apps/clipline-slint-spike/src/poster.rs`
 - Create: `apps/clipline-slint-spike/tests/poster_adapter.rs`
+- Modify: `apps/clipline-app/tests/repository_security.rs`
 
 **Test first**
 
@@ -246,6 +305,9 @@ lease, or if the 2,000-clip absolute memory/process bound fails.
   then constructs `slint::Image::from_rgb8` on the UI thread after the final token check. Structural
   tests reject base64, data URLs, unbounded file/pixel buffers, UI-thread file decode, and more than
   32 retained `slint::Image`s. Delete/rename-after-decode proves no file handle survives.
+- Use `image` 0.25 with `default-features = false` and only `jpeg`, after repository license/security
+  review. Read dimensions first, reject width/height/pixel-count/RGB-byte overflow against the
+  public cap before allocation, then decode exactly RGB8 into a prevalidated bounded buffer.
 
 **Implement to green**
 
@@ -256,7 +318,7 @@ lease, or if the 2,000-clip absolute memory/process bound fails.
   decode in callbacks: decode to the sendable pixel buffer on a worker, then construct/publish the
   image through the event loop with a weak component and current token.
 
-## Task 5: Extract cloud account, list, thumbnail, profile, and cache services
+## Task 6: Extract cloud account, list, thumbnail, profile, and cache services
 
 **Files**
 
@@ -266,6 +328,7 @@ lease, or if the 2,000-clip absolute memory/process bound fails.
 - Create: `crates/clipline-library/src/cloud/ports.rs`
 - Create: `crates/clipline-library/tests/cloud_service.rs`
 - Create: `crates/clipline-library/tests/cloud_cache.rs`
+- Modify: `crates/clipline-library/Cargo.toml`
 - Modify: `apps/clipline-app/src/cloud.rs`
 - Modify: `apps/clipline-app/src/cloud/cache_identity.rs`
 - Modify: `apps/clipline-app/Cargo.toml`
@@ -298,17 +361,21 @@ lease, or if the 2,000-clip absolute memory/process bound fails.
 
 - Move cloud transport/cache logic into the shared crate and pin the existing cloud API revision;
   do not duplicate requests in the Slint package.
+- Add only the already reviewed `clipline-cloud-api`, `reqwest` rustls, `tokio`, hashing/time, and
+  `clipline-settings` dependencies/features required by this service; record license/security
+  review and reject native-TLS or framework dependency creep.
 - Keep connect/disconnect/settings controls in Milestone 8, but accept account-snapshot changes now
   and invalidate every window-scoped request atomically.
 - Browser/profile/clip opening remains a typed platform effect executed by reviewed helpers.
 
-## Task 6: Make upload, status sync, persistence, and foreground feedback account-safe
+## Task 7: Make upload, status sync, persistence, and foreground feedback account-safe
 
 **Files**
 
 - Create: `crates/clipline-library/src/upload.rs`
 - Create: `crates/clipline-library/tests/upload.rs`
 - Create: `crates/clipline-library/tests/upload_account_fence.rs`
+- Modify: `crates/clipline-library/Cargo.toml`
 - Modify: `apps/clipline-app/src/cloud_upload.rs`
 - Modify: `apps/clipline-app/src/cloud.rs`
 - Modify: `crates/clipline-desktop/src/event.rs`
@@ -354,7 +421,7 @@ lease, or if the 2,000-clip absolute memory/process bound fails.
 - Route progress through the existing bounded desktop event port after extending its account fence;
   do not add an unbounded upload channel.
 
-## Task 7: Build the bounded catalog controller and rebuildable projection
+## Task 8: Build the bounded catalog controller and rebuildable projection
 
 **Files**
 
@@ -395,7 +462,7 @@ lease, or if the 2,000-clip absolute memory/process bound fails.
 - Add only revision/source/active summaries to `DesktopSnapshot`; keep the catalog controller as a
   long-lived shell-owned service so the snapshot never balloons with item arrays.
 
-## Task 8: Implement the Slint Local/Cloud surface and keyboard/accessibility contract
+## Task 9: Implement the Slint Local/Cloud surface and keyboard/accessibility contract
 
 **Files**
 
@@ -405,9 +472,13 @@ lease, or if the 2,000-clip absolute memory/process bound fails.
 - Modify: `apps/clipline-slint-spike/src/lib.rs`
 - Modify: `apps/clipline-slint-spike/src/model.rs`
 - Modify: `apps/clipline-slint-spike/src/shell.rs`
+- Modify: `apps/clipline-slint-spike/src/live.rs`
+- Modify: `apps/clipline-slint-spike/src/controller.rs`
 - Create: `apps/clipline-slint-spike/src/catalog.rs`
 - Create: `apps/clipline-slint-spike/tests/library_surface.rs`
 - Create: `apps/clipline-slint-spike/tests/library_keyboard.rs`
+- Modify: `apps/clipline-slint-spike/tests/controller.rs`
+- Modify: `apps/clipline-slint-spike/tests/windows_live.rs`
 - Modify: `apps/clipline-slint-spike/tests/spike_contract.rs`
 
 **Test first**
@@ -419,8 +490,9 @@ lease, or if the 2,000-clip absolute memory/process bound fails.
   select mode/bulk bar, context menus, title/file rename, delete confirmation/partial report, upload
   dialog/progress, copy/open public link, reveal, and cloud-media open.
 - Match current surface scope exactly: Cloud has search/paging/context actions but hides local
-  filter/sort/group controls and exits local multi-select. The upload dialog owns title (140-byte/
-  character contract as currently tested), description (5,000), visibility, and audio selection;
+  filter/sort/group controls and exits local multi-select. The upload dialog owns title (140 UTF-16
+  code units, matching the browser `maxlength`), description (5,000 UTF-16 code units), visibility,
+  and audio selection loaded from the current token-fenced `ClipDetail`;
   delete-local-after-upload remains an existing saved Cloud setting, not a new per-upload control.
 - Route callbacks to typed controller actions. Post effects to bounded workers; post completions
   through `invoke_from_event_loop` with weak handles and exact tokens. No callback performs I/O.
@@ -433,6 +505,10 @@ lease, or if the 2,000-clip absolute memory/process bound fails.
   supported; keep Narrator and high-DPI verification explicitly manual.
 - Window drop synchronously detaches catalog projection, releases all Slint images and scoped cloud
   media lease, cancels window-scoped work, and leaves durable uploads/controller state alive.
+- Extend the current fixture-bound `LiveSession` with bounded dynamic Open/Replace/Close commands for
+  validated local or cached-cloud sources. Transfer an opaque source lease into the accepted Open;
+  release the prior file/decoder/audio/source lease before publishing replacement readiness. Stale
+  open results release their incoming lease, and fixture startup remains a harness-only path.
 
 **Implement to green**
 
@@ -443,7 +519,7 @@ lease, or if the 2,000-clip absolute memory/process bound fails.
 - Preserve the reserved native Review video child; opening a row hands a validated local/cached path
   and scoped lease to the existing native playback session.
 
-## Task 9: Rebase the shipping Tauri Library/Cloud adapters on the shared services
+## Task 10: Rebase the shipping Tauri Library/Cloud adapters on the shared services
 
 **Files**
 
@@ -476,7 +552,7 @@ lease, or if the 2,000-clip absolute memory/process bound fails.
 - Keep the Tauri production package and user profile untouched; this task is an internal dependency
   inversion, not a shell cutover.
 
-## Task 10: Prove large-library, poster-process, lifecycle, and cloud gates
+## Task 11: Prove large-library, poster-process, lifecycle, and cloud gates
 
 **Files**
 
@@ -501,10 +577,11 @@ lease, or if the 2,000-clip absolute memory/process bound fails.
 - Absolute gates: rows <= 60, decoded images <= 32, poster path/status LRU <= 120, FFmpeg peak <= 2, no duplicate same-key
   extraction, no off-page image retention after settle, no unbounded queue/cache/handle growth,
   first usable 2,000-clip page <= 1.5 s on the gate machine, and 2,000-clip open-Library private
-  working-set p95 <= 120 MiB. Record machine/noise rejection rules; do not reinterpret a rejected
-  run as passing evidence.
-- Matched gates: Slint open-Library PWS p95 <= 80% of matched optimized Tauri, page/filter p95 no
-  worse than Tauri by more than 50 ms, and CPU within one percentage point over equal windows.
+  working-set five-minute p50 <= 140 MiB. Record p95/max as diagnostics. Record machine/noise
+  rejection rules; do not reinterpret a rejected run as passing evidence.
+- Matched gates: Slint open-Library five-minute PWS p50 <= 65% of matched optimized Tauri and private
+  commit at least 25% lower; page/filter p95 no worse than Tauri by more than 50 ms, and CPU within
+  one percentage point over equal windows.
   If installed Clipline or environment noise blocks Tauri matching, keep the matched gate pending
   rather than inventing a result.
 - Run 100 Local/Cloud page switches, poster cancellations, window reveal/close cycles, cloud-media
@@ -520,7 +597,7 @@ lease, or if the 2,000-clip absolute memory/process bound fails.
 - Run at least three accepted samples for each absolute scenario before marking it passed. Manual
   Narrator, UI Automation, high-DPI, and real-account smoke remain named pending gates if unavailable.
 
-## Task 11: Close Milestone 7 without overstating parity
+## Task 12: Close Milestone 7 without overstating parity
 
 **Files**
 
@@ -550,7 +627,7 @@ lease, or if the 2,000-clip absolute memory/process bound fails.
 Milestone 7 is complete only when:
 
 1. the neutral Rust cross-implementation corpus matches the retained JavaScript contracts;
-2. Slint presents no more than 60 local/cloud rows and 60 page images, with selection/active identity
+2. Slint presents no more than 60 local/cloud rows and 32 decoded page images, with selection/active identity
    surviving window recreation in the controller;
 3. local scan/rename/delete/reveal, poster extraction, cloud page/thumbnail/media/profile/open/share,
    upload progress/completion/status sync, account fencing, foreground feedback, and scoped media
