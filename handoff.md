@@ -4,6 +4,55 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-01): Slint replacement Milestone 3 native playback
+
+Plan: `docs/superpowers/plans/2026-08-01-slint-native-playback.md`.
+
+`crates/clipline-playback` now provides the framework-neutral playback contract and Windows native
+backends. The neutral worker owns bounded/coalesced commands, generation-and-revision cancellation,
+seek/step/track-selection state, audio-clock rebasing, scheduling, metrics, and recovery policy.
+Windows-only safe wrappers provide Media Foundation H.264 decode to playback-owned D3D11 NV12
+surfaces and WASAPI stereo rendering/clocking. Hardware decode is preferred; the inbox decoder can
+fall back to bounded system-memory NV12 followed by an explicit D3D upload. No FFmpeg library,
+GStreamer, or GPL runtime is linked.
+
+The principal bounds are a 64-command inbox with reserved Close handling, 32 MiB encoded and 64 MiB
+Annex-B access units, 64 KiB Opus packets, eight selected audio tracks, 24,000 stereo frames (500 ms)
+of mixed audio, 5,760-frame renderer writes, 32 pending decoder access units, one scheduler-retained
+frame, and two playback surfaces. Backend results carry their submit-time token and are rejected at
+every I/O, decode, mix, scheduling, and publication boundary when stale.
+
+The deterministic fixture suite covers seek storms, close during seek, fatal-error reopen, live
+track switching, stale completions, audio gaps/tails, corruption, device loss, and lifecycle
+teardown. The headless executable is a measurement harness; `PlaybackWorker` plus its fake-backend
+tests remain the orchestration contract of record until the production event-loop adapter lands.
+Local live checks on the writer-authored fixture completed 150/150 frames, 240,000 audio frames,
+roughly 3 ms p95 A/V error, and balanced decoder ownership. The seek storm settled 10/10 final
+targets at 47--51 ms p95, and the exact 100-cycle test settled 100/100 at 64 ms debug / 122 ms
+optimized, without late/drop or buffer-capacity growth.
+
+The 1080p60/two-Opus gate file at
+`target/slint-playback/clipline-1080p60-two-opus-5s.mp4` is finalized through public
+`HybridMp4Writer` and has SHA-256
+`4dfe6db5faa55b39728bb59219dcbb4c669234bd084c5565e43a70b906f60978`. Diagnostic run
+`20260802T041006Z-headless-playback-c4ce05bd` completed 19,500/19,500 eligible/presented frames,
+2 ms p95 A/V error, zero late/drop, balanced MFT ownership, and 35.54 MiB p95 private working set.
+The run is deliberately **not accepted**: background noise exceeded the protocol limit (12.037% of
+intervals versus 5%), and this console session exposed Microsoft Basic Display Adapter, so only the
+software decoder path ran. Task 8 remains pending at zero of the required three playback plus three
+seek-storm samples. The hardware path, 1080p60 seek/cycle gates, and matched Tauri memory/CPU gates
+must be rerun on a quiet real-GPU console session; the matched Tauri baseline also requires closing
+the user's installed Clipline process.
+
+Non-1x playback remains explicit pending parity work: the native contract currently accepts only
+1x. Final Review parity requires a bounded pitch-preserving tempo stage for
+0.5/0.75/1/1.25/1.5/2x or an approved product decision changing that behavior.
+
+Next: Milestone 4 adds the non-distributed `apps/clipline-slint-spike` pinned to Slint 1.17.1,
+connects the worker to a bounded D3D11 presentation surface inside a representative 1200x760 Review
+screen, and keeps a CPU `SharedPixelBuffer` path diagnostic-only. Validate window/DPI/device-loss/
+teardown behavior before any broad Library, Cloud, or Settings port.
+
 ## Checkpoint (2026-08-01): Slint replacement Milestone 2 playback index
 
 Plan: `docs/superpowers/plans/2026-08-01-slint-playback-index.md`.

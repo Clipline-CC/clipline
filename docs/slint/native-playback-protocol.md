@@ -106,3 +106,28 @@ The worker compares the complete pipeline token immediately before and after eac
 A newer command may therefore cancel work without waiting for a whole GOP or audio queue to finish.
 Rapid alternating seeks are allowed to perform bounded discarded work, but only the final token may
 publish or settle.
+
+## Milestone 3 diagnostic evidence
+
+The local gate input is
+`target/slint-playback/clipline-1080p60-two-opus-5s.mp4` (SHA-256
+`4dfe6db5faa55b39728bb59219dcbb4c669234bd084c5565e43a70b906f60978`). It contains 300
+1920x1080 H.264 High frames at 60 fps, ten keyframes, and two 48 kHz Opus tracks. Procedural media
+was encoded by the reviewed separately spawned LGPL FFmpeg runtime, then the final file was muxed
+through the public `HybridMp4Writer` path. A complete independent decode verified the final stream
+layout and frame count.
+
+Diagnostic run `20260802T041006Z-headless-playback-c4ce05bd` used the release headless harness for
+a 30-second warm-up and 300-second sample. It completed 65 play-to-EOF sessions and reported
+19,500 decoded-eligible and presented frames, 2 ms p95 A/V error, no late or scheduler-dropped
+frames, balanced 19,500 MFT sample receives/releases/copies, verified input-file release, and
+35.54 MiB p95 private working set. Queue and buffer capacities did not grow. Decode was the explicit
+software path because this console session exposed Microsoft Basic Display Adapter rather than a
+hardware decode adapter.
+
+These numbers are diagnostic evidence, not a passed Task 8 gate. The process sampler rejected the
+run because 26 of 216 steady-state intervals exceeded the background-noise threshold (12.037%, with
+a 5% maximum). Therefore zero of the required three playback and three matched seek-storm samples
+are accepted. Hardware-path evidence, the 1080p60 seek-storm and 100-cycle runs, and the matched
+Tauri comparison remain pending. They must be rerun in a quiet console session with a real GPU;
+the matched Tauri run additionally requires that no unrelated Clipline process be running.

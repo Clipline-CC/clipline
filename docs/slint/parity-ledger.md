@@ -100,6 +100,7 @@ stable; the baseline commit preserves exact historical locations.
 | `surface:local-library` | Search/filter/group/sort/page, poster states, selection, context actions. | M7 library | Model fixtures; 50/500/2,000-item manual matrix. | `not_started` |
 | `surface:cloud-library` | Remote paging/cache/progress/account-aware actions. | M7 cloud | Cloud generation fixtures and manual flow. | `not_started` |
 | `surface:review` | Playback, tracks, trim, markers, timeline, export/share/rename/delete. | M9 review | Cross-implementation vectors and media gates. | `not_started` |
+| `review:playback-rate` | 0.5x, 0.75x, 1x, 1.25x, 1.5x, and 2x playback with pitch-preserving audio. Milestone 3 intentionally supports only 1x. | M9 review / final parity | Bounded tempo-stage vectors plus live multi-track A/V gates at every rate, or an explicit approved product waiver. | `not_started` |
 | `surface:settings-general` | Startup, lifecycle, timeline, theme, update channel/check. | M8 settings | Draft/validation/accessibility tests. | `not_started` |
 | `surface:settings-capture` | Displays/region, backend, audio devices/volumes, microphone test. | M8 settings | Device fixtures and multi-DPI manual flow. | `not_started` |
 | `surface:settings-recording` | Basic/advanced encoder, duration, resolution, bitrate/quality, FPS. | M8 settings | Validation/normalization parity vectors. | `not_started` |
