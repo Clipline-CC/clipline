@@ -2,6 +2,7 @@
 
 pub mod controller;
 pub mod cpu_frame;
+pub mod desktop;
 pub mod model;
 pub mod options;
 

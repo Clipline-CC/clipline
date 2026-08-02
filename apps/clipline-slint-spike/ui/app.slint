@@ -16,6 +16,12 @@ export struct TimelineMarker {
     marker-color: color,
 }
 
+export struct DesktopUploadItem {
+    local-clip-id: string,
+    status: string,
+    progress: string,
+}
+
 component SectionLabel inherits Text {
     color: #a89784;
     font-size: 11px;
@@ -48,6 +54,9 @@ export component CliplineSpike inherits Window {
 
     in property <[LibraryItem]> library-items: [];
     in property <[TimelineMarker]> timeline-markers: [];
+    in property <[DesktopUploadItem]> desktop-uploads: [];
+    in-out property <string> recorder-state: "BUFFERING";
+    in-out property <string> desktop-notice: "";
     in-out property <bool> review-visible: false;
     in-out property <bool> playing: false;
     in-out property <bool> track-one-selected: true;
@@ -173,7 +182,7 @@ export component CliplineSpike inherits Window {
             border-width: 1px;
             border-color: #392c21;
             Rectangle { x: 12px; y: 14px; width: 8px; height: 8px; border-radius: 4px; background: #d9962a; }
-            Text { x: 28px; y: 8px; width: 146px; height: 20px; text: "BUFFERING"; color: #e5c183; font-size: 11px; font-weight: 700; vertical-alignment: center; }
+            Text { x: 28px; y: 8px; width: 146px; height: 20px; text: root.recorder-state; color: #e5c183; font-size: 11px; font-weight: 700; vertical-alignment: center; overflow: elide; }
             Text { x: 12px; y: 36px; width: 166px; height: 17px; text: "Alt+F10  Save Replay"; color: #d8ccbd; font-size: 11px; }
             Text { x: 12px; y: 58px; width: 166px; height: 16px; text: "Memory  35.5 MiB p95"; color: #8d7d6d; font-size: 10px; }
         }
@@ -183,7 +192,7 @@ export component CliplineSpike inherits Window {
             y: parent.height - 54px;
             width: 180px;
             height: 38px;
-            text: root.status-text;
+            text: root.desktop-notice == "" ? root.status-text : root.desktop-notice + "\n" + root.status-text;
             color: #8d7d6d;
             font-size: 10px;
             wrap: word-wrap;

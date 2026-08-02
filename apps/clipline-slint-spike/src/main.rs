@@ -63,7 +63,10 @@ fn run(options: SpikeOptions) -> Result<(), Box<dyn std::error::Error>> {
     if options.fixture.is_some() {
         return Err("native playback is currently implemented for Windows".into());
     }
-    clipline_slint_spike::create_window()?.run()?;
+    let window = clipline_slint_spike::create_window()?;
+    let desktop_adapter = start_desktop_adapter(&window)?;
+    window.run()?;
+    drop(desktop_adapter);
     Ok(())
 }
 
@@ -74,6 +77,7 @@ fn run(options: SpikeOptions) -> Result<(), Box<dyn std::error::Error>> {
     use clipline_slint_spike::SpikeTray;
 
     let window = clipline_slint_spike::create_window()?;
+    let desktop_adapter = start_desktop_adapter(&window)?;
     let telemetry_path = options.telemetry_path.clone();
     window.set_cpu_frame_diagnostic(options.cpu_frame_diagnostic);
     let tray = SpikeTray::new()?;
@@ -214,9 +218,33 @@ fn run(options: SpikeOptions) -> Result<(), Box<dyn std::error::Error>> {
     drop(host);
     shutdown_order.host_destroyed()?;
     drop(tray);
+    drop(desktop_adapter);
     drop(window);
     shutdown_order.ui_dropped()?;
     Ok(())
+}
+
+fn start_desktop_adapter(
+    window: &clipline_slint_spike::CliplineSpike,
+) -> Result<clipline_slint_spike::desktop::SlintDesktopAdapter, std::io::Error> {
+    let adapter = clipline_slint_spike::desktop::SlintDesktopAdapter::start(window.as_weak())
+        .map_err(std::io::Error::other)?;
+    adapter
+        .try_publish(clipline_desktop::UiEvent::Recorder {
+            generation: clipline_desktop::Generation::new(1),
+            event: clipline_desktop::RecorderEvent::Status {
+                recording: true,
+                waiting_for_game: false,
+                segments: 2,
+                buffered_s: 30.0,
+                buffered_mb: 24.0,
+                full_session: false,
+                encoder: "H.264".into(),
+                capture_backend: "windows_graphics_capture".into(),
+            },
+        })
+        .map_err(std::io::Error::other)?;
+    Ok(adapter)
 }
 
 #[cfg(windows)]

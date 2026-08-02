@@ -16,6 +16,7 @@ name = "clipline-slint-spike"
 path = "src/main.rs"
 
 [dependencies]
+clipline-desktop = { path = "../../crates/clipline-desktop" }
 clipline-mp4 = { path = "../../crates/clipline-mp4" }
 clipline-playback = { path = "../../crates/clipline-playback" }
 raw-window-handle = "0.6"

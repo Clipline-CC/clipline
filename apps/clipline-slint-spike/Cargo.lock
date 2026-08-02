@@ -798,6 +798,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "clipline-desktop"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "clipline-mp4"
 version = "0.1.0"
 dependencies = [
@@ -820,6 +828,7 @@ dependencies = [
 name = "clipline-slint-spike"
 version = "0.1.0"
 dependencies = [
+ "clipline-desktop",
  "clipline-mp4",
  "clipline-playback",
  "raw-window-handle",
