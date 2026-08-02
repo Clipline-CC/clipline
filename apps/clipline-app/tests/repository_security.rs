@@ -10,6 +10,43 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
+#[test]
+fn neutral_shell_contract_has_no_framework_or_platform_escape_hatches() {
+    let root = workspace_root();
+    let source_root = root.join("crates/clipline-shell/src");
+    let windows_root = source_root.join("windows");
+    assert!(source_root.is_dir(), "missing neutral shell crate");
+
+    let neutral_sources: Vec<_> = rust_sources_below(&source_root)
+        .into_iter()
+        .filter(|path| !path.starts_with(&windows_root))
+        .collect();
+    for path in neutral_sources {
+        let source = fs::read_to_string(&path).expect("read neutral shell source");
+        for forbidden in [
+            "tauri::",
+            "slint::",
+            "windows::Win32",
+            "windows_sys::Win32",
+            "webview2",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "neutral shell source {} imports forbidden {forbidden}",
+                path.display()
+            );
+        }
+        assert!(
+            !source
+                .split_whitespace()
+                .any(|token| token == "unsafe" || token.starts_with("unsafe{")),
+            "first-party unsafe must stay under {} but appears in {}",
+            windows_root.display(),
+            path.display()
+        );
+    }
+}
+
 fn unix_day_for_iso_date(value: &str) -> i64 {
     let mut parts = value.split('-');
     let mut year: i64 = parts

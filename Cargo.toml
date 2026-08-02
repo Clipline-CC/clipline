@@ -7,6 +7,7 @@ members = [
     "crates/clipline-storage",
     "crates/clipline-capture",
     "crates/clipline-desktop",
+    "crates/clipline-shell",
     "crates/clipline-mp4",
     "crates/clipline-playback",
     "crates/clipline-test-utils",
