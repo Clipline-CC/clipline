@@ -15,6 +15,7 @@ clipline-events = { path = "../../crates/clipline-events" }
 clipline-lol = { path = "../../crates/clipline-lol" }
 clipline-mp4 = { path = "../../crates/clipline-mp4" }
 clipline-storage = { path = "../../crates/clipline-storage" }
+clipline-updater = { path = "../../crates/clipline-updater" }
 # Pinned to an immutable rev (not a branch): a branch ref isn't reproducible —
 # a force-push or rename silently breaks every build. Bump the rev deliberately.
 clipline-cloud-api = { git = "https://github.com/dain98/clipline-cloud", rev = "304f7f6490bd1f6078f4d703fdc33dcd1ecdafcf" }
@@ -31,7 +32,6 @@ tokio-util = { version = "0.7", features = ["io", "rt"] }
 # the webview2-com pin below. A routine minor bump could silently change them.
 tauri = { version = "~2.11", features = ["tray-icon", "protocol-asset"] }
 tauri-runtime = "~2.11"
-tauri-plugin-updater = "2"
 # Pinned to the version Tauri 2.11 already resolves, so `PlatformWebview::controller`
 # hands back the same `ICoreWebView2Controller` type and no second COM binding
 # enters the dependency tree.
@@ -43,6 +43,8 @@ chrono = "0.4.45"
 rfd = "0.15"
 png = "0.17"
 base64 = "0.22"
+semver = { workspace = true }
+thiserror = { workspace = true }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json"] }
 uuid = { version = "1", features = ["v4", "serde"] }

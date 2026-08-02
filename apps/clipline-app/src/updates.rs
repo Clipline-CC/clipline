@@ -1,60 +1,14 @@
-use serde::{Deserialize, Serialize};
-
-pub const NIGHTLY_UPDATE_ENDPOINT: &str =
-    "https://github.com/dain98/clipline/releases/download/nightly/latest.json";
-pub const STABLE_UPDATE_ENDPOINT: &str =
-    "https://github.com/dain98/clipline/releases/latest/download/latest.json";
-
-// Standalone builds bundle a fixed WebView2 runtime instead of installing the
-// Evergreen runtime system-wide. They must update into the standalone
-// installer: the regular one would run the WebView2 bootstrapper on a machine
-// whose owner chose not to have WebView2 installed.
-pub const NIGHTLY_STANDALONE_UPDATE_ENDPOINT: &str =
-    "https://github.com/dain98/clipline/releases/download/nightly/latest-standalone.json";
-pub const STABLE_STANDALONE_UPDATE_ENDPOINT: &str =
-    "https://github.com/dain98/clipline/releases/latest/download/latest-standalone.json";
+pub use clipline_updater::manifest::UpdateChannel;
 
 // Flip this once Clipline has stable, non-prerelease GitHub releases.
 pub const STABLE_CHANNEL_ENABLED: bool = false;
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum UpdateChannel {
-    Stable,
-    #[default]
-    Nightly,
-}
-
-impl UpdateChannel {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Stable => "Stable",
-            Self::Nightly => "Nightly",
-        }
-    }
-
-    /// `standalone` is whether this build bundles a fixed WebView2 runtime
-    /// (derived from the Tauri config baked into the binary, so an installed
-    /// app keeps its variant across updates).
-    pub fn endpoint(self, standalone: bool) -> &'static str {
-        match (self, standalone) {
-            (Self::Stable, false) => STABLE_UPDATE_ENDPOINT,
-            (Self::Stable, true) => STABLE_STANDALONE_UPDATE_ENDPOINT,
-            (Self::Nightly, false) => NIGHTLY_UPDATE_ENDPOINT,
-            (Self::Nightly, true) => NIGHTLY_STANDALONE_UPDATE_ENDPOINT,
-        }
-    }
-
-    pub fn enabled(self) -> bool {
-        match self {
-            Self::Stable => STABLE_CHANNEL_ENABLED,
-            Self::Nightly => true,
-        }
-    }
+pub const fn channel_enabled(channel: UpdateChannel) -> bool {
+    channel.enabled() && (STABLE_CHANNEL_ENABLED || !matches!(channel, UpdateChannel::Stable))
 }
 
 pub fn normalize_channel(channel: UpdateChannel) -> UpdateChannel {
-    if channel.enabled() {
+    if channel_enabled(channel) {
         channel
     } else {
         UpdateChannel::Nightly
@@ -67,7 +21,7 @@ mod tests {
 
     #[test]
     fn stable_channel_is_modeled_but_disabled_for_now() {
-        assert!(!UpdateChannel::Stable.enabled());
+        assert!(!channel_enabled(UpdateChannel::Stable));
         assert_eq!(
             normalize_channel(UpdateChannel::Stable),
             UpdateChannel::Nightly

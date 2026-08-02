@@ -4,7 +4,7 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
-## Checkpoint (2026-08-02): Slint replacement Milestone 6 native shell, Tasks 1--6
+## Checkpoint (2026-08-02): Slint replacement Milestone 6 native shell, Tasks 1--7
 
 Plan: `docs/superpowers/plans/2026-08-02-slint-native-shell.md`. The new
 `crates/clipline-shell` crate owns the framework-neutral launch/window/shutdown contract and the
@@ -58,8 +58,28 @@ flush/snapshot/shutdown acknowledgements with 15-second barriers. The Tauri modu
 and panic-hook adapter over that service, so the later Slint shell can use the same ownership and
 support-bundle semantics without importing either frontend framework.
 
+Task 7 adds `crates/clipline-updater` as the framework-neutral signed-update owner. Manifests are
+limited to 256 KiB and reject duplicate/unknown fields, non-HTTPS or crossed release paths, wrong
+channel/variant, invalid versions/dates, and non-newer versions. Installer downloads are streamed
+with a 512 MiB cap, manual five-hop GitHub-only redirect policy, 20-second connection/read-idle
+deadlines (not a whole-file deadline), cancellation checks, `create_new` ownership, exact
+length/SHA-256 telemetry, durable flush, and failure cleanup. Minisign 0.2.5 verifies the exact
+bytes with Clipline's existing key and binds the trusted-comment filename before a private
+`VerifiedInstaller` can reach Windows.
+
+The Windows updater creates the passive NSIS process suspended with the same `/P /R /UPDATE /ARGS`
+contract as the former plugin. Durable settings and window media complete first; recorder stop then
+waits up to 10 seconds for the matching finalization acknowledgement before diagnostics flush, the
+child resumes, and the app requests exit. A preparation, finalization timeout, or service-stop
+failure drops the handoff, terminates the suspended child, removes the owned file, and leaves the
+app running. The shipping `check_for_updates`/`install_update` JSON commands are unchanged, regular
+and standalone manifests remain distinct, and `tauri-plugin-updater` plus its config/ACL surface
+are removed. The published 0.1.43 regular manifest and 54,315,070-byte installer were downloaded as
+untracked oracles; SHA-256 matched `b4e4cb2aa8a8b3ff98be5de511299b04045c42b9d4a11c8ccfde00354b8bbd4d`,
+and the exact installer passed the new streaming verifier with the embedded production key.
+
 Validation is green: CI-mode `cargo test --workspace`, warning-denied workspace Clippy after fresh
-`clipline-shell` and `clipline-app` caches, 484 app unit tests, 92 UI contracts, 11
+`clipline-shell` and `clipline-app` caches, 487 app unit tests, 92 UI contracts, 12
 repository-security contracts, 8 shared diagnostics tests, live disposable Credential Manager
 CRUD, four disposable HKCU autostart device tests, both native hotkey device tests, three neutral
 activation protocol tests, and four live same-process named-pipe/mutex device tests. A normal-mode
@@ -74,9 +94,8 @@ Implementation commits are `026d0eb` (bounded shell/lifecycle), `23263e3` (neutr
 (authenticated single-instance activation), and the Task 6 commit containing this checkpoint. Plan
 commits are `13005af` and `9329e53`.
 
-Next: Task 7 builds the framework-neutral signed updater. Then continue Tasks 8--11 (lazy Slint
-tray/window, shipping adapters, NSIS candidate, and final validation) without switching production
-before the later gates pass.
+Next: continue Tasks 8--11 (lazy Slint tray/window, shipping adapters, NSIS candidate, and final
+validation) without switching production before the later gates pass.
 
 ## Checkpoint (2026-08-02): Slint replacement Milestone 5 desktop controller
 

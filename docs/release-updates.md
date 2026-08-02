@@ -118,13 +118,15 @@ Two environment traps cost time on 0.1.42 and are worth expecting:
 After publishing, verify what is actually downloadable rather than what was
 staged: fetch each asset from its public URL, confirm the bytes match the staged
 installers, and check that the signature **in each manifest** validates the
-downloaded bytes under the `pubkey` in `tauri.conf.json`. That is precisely what
+downloaded bytes under `CLIPLINE_MINISIGN_PUBLIC_KEY` in
+`crates/clipline-updater/src/lib.rs`. That is precisely what
 the updater does, and it catches a mismatched, stale, or crossed-over signature
 that per-file checks miss.
 
 ## Signing
 
-The updater public key is committed in `apps/clipline-app/tauri.conf.json`.
+The updater public key is committed as `CLIPLINE_MINISIGN_PUBLIC_KEY` in
+`crates/clipline-updater/src/lib.rs`.
 The matching private key was generated locally at:
 
 ```text

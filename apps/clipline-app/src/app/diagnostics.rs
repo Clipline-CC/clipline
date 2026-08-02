@@ -151,6 +151,21 @@ pub(super) fn snapshot_to(destination: &Path) -> Result<Vec<PathBuf>, String> {
         .map_err(|error| error.to_string())
 }
 
+pub(super) fn flush() -> Result<(), String> {
+    let handle = DIAGNOSTICS
+        .get()
+        .ok_or_else(|| "diagnostics are not initialized".to_string())?;
+    let service = handle
+        .service
+        .lock()
+        .map_err(|error| format!("lock diagnostic service: {error}"))?;
+    service
+        .as_ref()
+        .ok_or_else(|| "diagnostics are already shut down".to_string())?
+        .flush()
+        .map_err(|error| error.to_string())
+}
+
 pub(super) fn log_diagnostic(message: impl AsRef<str>) {
     tracing::debug!(
         event = "legacy_diagnostic",

@@ -62,7 +62,7 @@ Secrets:
 | Secret | What |
 | --- | --- |
 | `SIGNPATH_API_TOKEN` | SignPath CI user API token |
-| `TAURI_SIGNING_PRIVATE_KEY` | Existing minisign **updater** key (base64) — the one whose pubkey is in `tauri.conf.json` |
+| `TAURI_SIGNING_PRIVATE_KEY` | Existing minisign **updater** key (base64) — the one whose pubkey is `CLIPLINE_MINISIGN_PUBLIC_KEY` in `crates/clipline-updater/src/lib.rs` |
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Password for that updater key |
 
 Variables:

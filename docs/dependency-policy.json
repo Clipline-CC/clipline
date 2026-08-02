@@ -5,9 +5,9 @@
       "package": "reqwest",
       "allowed_versions": ["0.12", "0.13"],
       "owner": "Dain",
-      "rationale": "Clipline and the pinned clipline-cloud-api use reqwest 0.12, while tauri-plugin-updater uses reqwest 0.13. Moving either first-party caller alone would retain both stacks and split Clipline from its cloud API; downgrading the updater would give up current security fixes.",
-      "review_by": "2026-10-18",
-      "remove_when": "Align as soon as clipline-cloud-api and tauri-plugin-updater support the same reqwest release line; verify cargo tree contains one reqwest package before removing this exception."
+      "rationale": "Clipline, clipline-updater, and the pinned clipline-cloud-api share reqwest 0.12. Tauri core 2.11.2 independently resolves reqwest 0.13 for its framework services even after the updater plugin is removed.",
+      "review_by": "2026-11-02",
+      "remove_when": "Remove when the rollback Tauri shell is retired at Milestone 10, or when Tauri core and first-party Clipline crates resolve the same reqwest release line."
     }
   ],
   "controlled_forks": [

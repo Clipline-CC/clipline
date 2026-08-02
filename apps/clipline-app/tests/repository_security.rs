@@ -55,11 +55,14 @@ fn native_shell_services_are_shell_owned_and_tauri_plugins_are_absent() {
     assert!(!manifest.contains("tauri-plugin-global-shortcut"));
     assert!(!manifest.contains("tauri-plugin-autostart"));
     assert!(!manifest.contains("tauri-plugin-single-instance"));
+    assert!(!manifest.contains("tauri-plugin-updater"));
     assert!(manifest.contains("clipline-shell"));
+    assert!(manifest.contains("clipline-updater"));
     let lock = fs::read_to_string(root.join("Cargo.lock")).expect("read Cargo.lock");
     assert!(!lock.contains("name = \"tauri-plugin-global-shortcut\""));
     assert!(!lock.contains("name = \"tauri-plugin-autostart\""));
     assert!(!lock.contains("name = \"tauri-plugin-single-instance\""));
+    assert!(!lock.contains("name = \"tauri-plugin-updater\""));
 
     let app_sources = rust_sources_below(&root.join("apps/clipline-app/src"));
     for symbol in [
@@ -193,6 +196,54 @@ fn native_shell_services_are_shell_owned_and_tauri_plugins_are_absent() {
         assert!(
             activation.contains(contract),
             "native activation service must retain {contract}"
+        );
+    }
+}
+
+#[test]
+fn neutral_updater_has_no_framework_or_platform_escape_hatches() {
+    let root = workspace_root();
+    let source_root = root.join("crates/clipline-updater/src");
+    let windows_path = source_root.join("windows.rs");
+    assert!(source_root.is_dir(), "missing neutral updater crate");
+
+    for path in rust_sources_below(&source_root) {
+        let source = fs::read_to_string(&path).expect("read updater source");
+        for forbidden in ["tauri::", "slint::", "webview2"] {
+            assert!(
+                !source.contains(forbidden),
+                "updater source {} imports forbidden {forbidden}",
+                path.display()
+            );
+        }
+        if path != windows_path {
+            assert!(
+                !source.contains("windows::Win32"),
+                "neutral updater source {} imports Win32",
+                path.display()
+            );
+            assert!(
+                !source
+                    .split_whitespace()
+                    .any(|token| token == "unsafe" || token.starts_with("unsafe{")),
+                "updater unsafe must stay in {} but appears in {}",
+                windows_path.display(),
+                path.display()
+            );
+        }
+    }
+
+    let windows = fs::read_to_string(windows_path).expect("read Windows updater handoff");
+    for contract in [
+        "CreateProcessW(",
+        "CREATE_SUSPENDED",
+        "ResumeThread(",
+        "TerminateProcess(",
+        "/P /R /UPDATE /ARGS",
+    ] {
+        assert!(
+            windows.contains(contract),
+            "Windows updater handoff must retain {contract}"
         );
     }
 }
@@ -541,7 +592,7 @@ fn dependency_exceptions_and_fixed_runtime_are_owned_and_current() {
     assert_eq!(
         reqwest_lines,
         ["0.12", "0.13"],
-        "only the two reviewed reqwest release lines may be selected"
+        "only the first-party 0.12 line and Tauri core's reviewed 0.13 line may be selected"
     );
 
     let policy: serde_json::Value = serde_json::from_str(
@@ -558,6 +609,12 @@ fn dependency_exceptions_and_fixed_runtime_are_owned_and_current() {
     assert_eq!(
         exception["allowed_versions"],
         serde_json::json!(["0.12", "0.13"])
+    );
+    assert!(
+        exception["rationale"]
+            .as_str()
+            .is_some_and(|value| value.contains("Tauri core") && value.contains("updater")),
+        "the exception must name Tauri core while confirming the first-party updater shares 0.12"
     );
     for field in ["owner", "rationale", "review_by", "remove_when"] {
         assert!(

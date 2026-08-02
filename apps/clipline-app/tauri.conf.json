@@ -69,16 +69,5 @@
         "installerIcon": "icons/icon.ico"
       }
     }
-  },
-  "plugins": {
-    "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDg5RTA1MDk3MjY0QkU2RTYKUldUbTVrc21sMURnaVhoZVI0OGswbUM1dWU5bVFzbmFLMFBhM1M4Rzh2aXJQN2FyNkhJT0x1bloK",
-      "endpoints": [
-        "https://github.com/dain98/clipline/releases/download/nightly/latest.json"
-      ],
-      "windows": {
-        "installMode": "passive"
-      }
-    }
   }
 }

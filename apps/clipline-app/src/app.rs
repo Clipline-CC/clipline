@@ -4,15 +4,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
-
-use tauri::image::Image;
-use tauri::menu::{Menu, MenuItem};
-use tauri::path::BaseDirectory;
-use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager, Runtime, WebviewWindow, WebviewWindowBuilder, WindowEvent};
-use tauri_plugin_updater::UpdaterExt;
 
 use clipline_capture::diagnostics::install_diagnostic_handler;
 use clipline_desktop::{
@@ -24,6 +17,17 @@ use clipline_shell::windows::activation::WindowsInstanceGuard;
 use clipline_shell::windows::autostart::{AutostartChange, WindowsAutostartRegistration};
 use clipline_shell::windows::hotkey::WindowsHotkeyService;
 use clipline_shell::{ShellCommand, ShellCommandReceiver, ShellCommandSender};
+use clipline_updater::download::download_installer;
+use clipline_updater::manifest::{
+    check_update, installer_filename, UpdateCheck, UpdateManifest, UpdatePolicy, UpdateVariant,
+};
+use clipline_updater::windows::WindowsInstallerLauncher;
+use clipline_updater::{install_verified, verify_download, UpdateShutdown};
+use tauri::image::Image;
+use tauri::menu::{Menu, MenuItem};
+use tauri::path::BaseDirectory;
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Manager, Runtime, WebviewWindow, WebviewWindowBuilder, WindowEvent};
 
 use crate::game_discovery::DetectedGameCandidate;
 use crate::game_plugins::GamePluginInfo;
@@ -33,7 +37,7 @@ use crate::service::{self, Cmd, Event, ServiceOptions};
 use crate::settings::{
     quota_bytes_from_gb, AppSettings, CaptureMode, CustomGameSettings, GameRecordingMode,
 };
-use crate::updates::UpdateChannel;
+use crate::updates::{channel_enabled, UpdateChannel};
 use crate::util::unix_now_i64;
 
 #[path = "app/diagnostics.rs"]
@@ -716,7 +720,22 @@ fn checked_generation_next(current: u64, domain: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("{domain} generation exhausted"))
 }
 
-pub(crate) struct RuntimeState(Mutex<RuntimeInner>);
+pub(crate) struct RuntimeState(Mutex<RuntimeInner>, RecorderStopAcknowledgement);
+
+#[derive(Default)]
+struct RecorderStopAcknowledgement {
+    generation: Mutex<Option<(u64, bool)>>,
+    changed: Condvar,
+}
+
+impl RecorderStopAcknowledgement {
+    fn publish(&self, generation: u64, finalized_cleanly: bool) {
+        if let Ok(mut acknowledged) = self.generation.lock() {
+            *acknowledged = Some((generation, finalized_cleanly));
+            self.changed.notify_all();
+        }
+    }
+}
 
 static CLOUD_SETTINGS_SAVE_LOCK: Mutex<()> = Mutex::new(());
 
@@ -844,7 +863,7 @@ impl RuntimeState {
             Self::install_recording_sender(&mut inner, tx)
                 .expect("initial recording generation is available");
         }
-        Self(Mutex::new(inner))
+        Self(Mutex::new(inner), RecorderStopAcknowledgement::default())
     }
 
     fn install_recording_sender(inner: &mut RuntimeInner, tx: Sender<Cmd>) -> Result<u64, String> {
@@ -863,6 +882,7 @@ impl RuntimeState {
         if inner.recording_generation != generation || inner.tx.is_none() {
             return false;
         }
+        let finalized_cleanly = !inner.recent_recorder_error;
         if !recording {
             let Ok(next_generation) =
                 checked_generation_next(inner.recording_generation, "recording")
@@ -874,7 +894,68 @@ impl RuntimeState {
             inner.recording_generation = next_generation;
             inner.last_save_request = None;
         }
+        drop(inner);
+        if !recording {
+            self.1.publish(generation, finalized_cleanly);
+        }
         true
+    }
+
+    fn stop_recorder_and_wait(&self, timeout: Duration) -> Result<(), String> {
+        let (sender, generation) = {
+            let inner = self
+                .0
+                .lock()
+                .map_err(|_| "runtime state lock poisoned".to_string())?;
+            let Some(sender) = inner.tx.as_ref().cloned() else {
+                return Ok(());
+            };
+            (sender, inner.recording_generation)
+        };
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| "recorder finalization deadline overflowed".to_string())?;
+        let mut acknowledged = self
+            .1
+            .generation
+            .lock()
+            .map_err(|_| "recorder finalization acknowledgement lock poisoned".to_string())?;
+        sender
+            .send(Cmd::Stop { announce: true })
+            .map_err(|_| "recorder stop channel closed before finalization".to_string())?;
+
+        loop {
+            if let Some((acknowledged_generation, finalized_cleanly)) = *acknowledged {
+                if acknowledged_generation == generation {
+                    return if finalized_cleanly {
+                        Ok(())
+                    } else {
+                        Err("recorder reported a finalization failure".to_string())
+                    };
+                }
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(format!(
+                    "recorder finalization timed out after {} ms",
+                    timeout.as_millis()
+                ));
+            }
+            let (next, wait) = self
+                .1
+                .changed
+                .wait_timeout(acknowledged, remaining)
+                .map_err(|_| "recorder finalization acknowledgement lock poisoned".to_string())?;
+            acknowledged = next;
+            if wait.timed_out()
+                && !matches!(*acknowledged, Some((acknowledged_generation, _)) if acknowledged_generation == generation)
+            {
+                return Err(format!(
+                    "recorder finalization timed out after {} ms",
+                    timeout.as_millis()
+                ));
+            }
+        }
     }
 
     fn service_generation_is_current(&self, generation: u64) -> bool {
@@ -1979,29 +2060,25 @@ fn is_standalone_install<R: Runtime>(app: &AppHandle<R>) -> bool {
 async fn check_update_for_channel<R: Runtime>(
     app: &AppHandle<R>,
     channel: UpdateChannel,
-) -> Result<(Option<tauri_plugin_updater::Update>, Option<String>), String> {
-    if !channel.enabled() {
+) -> Result<(Option<UpdateManifest>, Option<String>), String> {
+    if !channel_enabled(channel) {
         return Err(format!("{} updates are not available yet", channel.label()));
     }
 
-    let endpoint = channel
-        .endpoint(is_standalone_install(app))
-        .parse()
-        .map_err(|e| format!("parse update endpoint: {e}"))?;
-    let updater = app
-        .updater_builder()
-        .timeout(Duration::from_secs(20))
-        .endpoints(vec![endpoint])
-        .map_err(|e| e.to_string())?
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    match updater.check().await {
-        Ok(update) => Ok((update, None)),
-        Err(tauri_plugin_updater::Error::ReleaseNotFound) => {
-            Ok((None, Some(missing_release_metadata_message(channel))))
-        }
-        Err(e) => Err(e.to_string()),
+    let current_version = semver::Version::parse(&app.package_info().version.to_string())
+        .map_err(|error| format!("parse current application version: {error}"))?;
+    let policy = UpdatePolicy::new(
+        current_version,
+        channel,
+        UpdateVariant::from_standalone(is_standalone_install(app)),
+    );
+    match check_update(&policy)
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        UpdateCheck::Available(update) => Ok((Some(update), None)),
+        UpdateCheck::Current => Ok((None, None)),
+        UpdateCheck::MissingRelease => Ok((None, Some(missing_release_metadata_message(channel)))),
     }
 }
 
@@ -2028,14 +2105,83 @@ async fn check_for_updates<R: Runtime>(
         channel_label: channel.label(),
         current_version,
         available: update.is_some(),
-        version: update.as_ref().map(|update| update.version.clone()),
-        date: update
-            .as_ref()
-            .and_then(|update| update.date.map(|date| date.to_string())),
-        notes: update.as_ref().and_then(|update| update.body.clone()),
+        version: update.as_ref().map(|update| update.version.to_string()),
+        date: update.as_ref().map(|update| update.pub_date.clone()),
+        notes: update.as_ref().map(|update| update.notes.clone()),
         endpoint: channel.endpoint(is_standalone_install(&app)),
         status,
     })
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct AppUpdateShutdownError(String);
+
+struct TauriUpdateShutdown<'a, R: Runtime> {
+    app: &'a AppHandle<R>,
+    state: &'a RuntimeState,
+}
+
+impl<R: Runtime> UpdateShutdown for TauriUpdateShutdown<'_, R> {
+    type Error = AppUpdateShutdownError;
+
+    fn publish_durable_state(&mut self) -> Result<(), Self::Error> {
+        self.state.settings().save().map_err(AppUpdateShutdownError)
+    }
+
+    fn stop_window_media(&mut self) -> Result<(), Self::Error> {
+        self.app.state::<MicTestState>().stop();
+        publish_window_lifecycle(self.app, WindowLifecycleMode::Tray);
+        Ok(())
+    }
+
+    fn stop_recorder(&mut self) -> Result<(), Self::Error> {
+        self.state
+            .stop_recorder_and_wait(Duration::from_secs(10))
+            .map_err(AppUpdateShutdownError)
+    }
+
+    fn flush_diagnostics(&mut self) -> Result<(), Self::Error> {
+        diagnostics::flush().map_err(AppUpdateShutdownError)
+    }
+
+    fn request_exit(&mut self) -> Result<(), Self::Error> {
+        self.app.exit(0);
+        Ok(())
+    }
+}
+
+fn update_download_destination(release_filename: &str) -> Result<PathBuf, String> {
+    let directory = std::env::temp_dir()
+        .join("Clipline")
+        .join("update-downloads");
+    std::fs::create_dir_all(&directory)
+        .map_err(|error| format!("create update download directory: {error}"))?;
+    Ok(directory.join(format!(
+        "clipline-update-{}-{}-{release_filename}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    )))
+}
+
+fn cleanup_stale_update_downloads() {
+    let directory = std::env::temp_dir()
+        .join("Clipline")
+        .join("update-downloads");
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten().take(64) {
+        let path = entry.path();
+        if path.is_file()
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("clipline-update-"))
+        {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 #[tauri::command]
@@ -2049,12 +2195,29 @@ async fn install_update<R: Runtime>(
         return Err(status.unwrap_or_else(|| "no update is available".into()));
     };
 
-    app.state::<MicTestState>().stop();
-    state.send(Cmd::Stop { announce: false });
-    update
-        .download_and_install(|_, _| {}, || {})
+    let variant = UpdateVariant::from_standalone(is_standalone_install(&app));
+    let release_filename = installer_filename(&update.version, variant);
+    let destination = update_download_destination(&release_filename)?;
+    let cancelled = AtomicBool::new(false);
+    let telemetry = download_installer(update.target.url.clone(), &destination, &cancelled)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|error| error.to_string())?;
+    let verified = verify_download(telemetry, &update.target.signature, &release_filename)
+        .map_err(|error| error.to_string())?;
+    let mut launcher = WindowsInstallerLauncher;
+    let mut shutdown = TauriUpdateShutdown {
+        app: &app,
+        state: &state,
+    };
+    let receipt = install_verified(&mut launcher, &mut shutdown, verified)
+        .map_err(|error| error.to_string())?;
+    log_diagnostic(format!(
+        "verified update handoff process_id={} bytes={} sha256={}",
+        receipt.process_id(),
+        receipt.telemetry().bytes_written,
+        receipt.telemetry().sha256_hex()
+    ));
+    Ok(())
 }
 
 #[tauri::command]
@@ -2600,6 +2763,7 @@ pub fn run(
     shell_receiver: ShellCommandReceiver,
 ) {
     let _diagnostics_guard = diagnostics::init().ok();
+    cleanup_stale_update_downloads();
     if let Err(error) = install_diagnostic_handler(|event| log_diagnostic(event.to_string())) {
         log_diagnostic(format!("capture diagnostic setup: {error}"));
     }
@@ -2678,7 +2842,6 @@ pub fn run(
         .manage(crate::memory::MemorySampler::default())
         .manage(NativeMediaFolderAuthorization::default())
         .manage(crate::library::StorageSettings::new(quota_bytes, media_dir))
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             save_replay,
             restart_as_administrator,
@@ -3304,6 +3467,7 @@ mod tests {
     use crate::settings::{
         CloudUploadRecord, GameRecordingMode, ReplayStorageMode, ReplayStorageSettings,
     };
+    use std::sync::Arc;
 
     #[test]
     fn quota_parser_converts_gib_to_bytes() {
@@ -3516,6 +3680,70 @@ mod tests {
         assert!(inner.tx.is_none());
         assert!(inner.last_save_request.is_none());
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn updater_stop_waits_for_matching_recorder_finalization_acknowledgement() {
+        let (tx, rx) = mpsc::channel();
+        let state = Arc::new(RuntimeState::with_sender(tx, AppSettings::default(), None));
+        let service_state = Arc::clone(&state);
+        let service = std::thread::spawn(move || {
+            assert!(matches!(
+                rx.recv_timeout(Duration::from_secs(1)),
+                Ok(Cmd::Stop { announce: true })
+            ));
+            let generation = service_state.0.lock().unwrap().recording_generation;
+            assert!(service_state.accept_service_status(generation, false));
+        });
+
+        state
+            .stop_recorder_and_wait(Duration::from_secs(1))
+            .expect("matching stopped status acknowledges finalization");
+        service.join().unwrap();
+        assert!(state.0.lock().unwrap().tx.is_none());
+    }
+
+    #[test]
+    fn updater_stop_timeout_fails_closed_without_exiting_or_losing_sender() {
+        let (tx, rx) = mpsc::channel();
+        let state = RuntimeState::with_sender(tx, AppSettings::default(), None);
+
+        let error = state
+            .stop_recorder_and_wait(Duration::from_millis(1))
+            .expect_err("missing finalization acknowledgement must time out");
+
+        assert!(error.contains("timed out"), "{error}");
+        assert!(matches!(rx.try_recv(), Ok(Cmd::Stop { announce: true })));
+        assert!(state.0.lock().unwrap().tx.is_some());
+    }
+
+    #[test]
+    fn updater_stop_rejects_a_recorder_finalization_error_acknowledgement() {
+        let (tx, rx) = mpsc::channel();
+        let state = Arc::new(RuntimeState::with_sender(tx, AppSettings::default(), None));
+        let service_state = Arc::clone(&state);
+        let service = std::thread::spawn(move || {
+            assert!(matches!(
+                rx.recv_timeout(Duration::from_secs(1)),
+                Ok(Cmd::Stop { announce: true })
+            ));
+            let generation = service_state.0.lock().unwrap().recording_generation;
+            service_state.observe_runtime_event(
+                generation,
+                &Event::Error {
+                    message: "finish failed".to_string(),
+                },
+            );
+            assert!(service_state.accept_service_status(generation, false));
+        });
+
+        let error = state
+            .stop_recorder_and_wait(Duration::from_secs(1))
+            .expect_err("failed finalization must abort the update handoff");
+
+        service.join().unwrap();
+        assert!(error.contains("finalization failure"), "{error}");
+        assert!(state.0.lock().unwrap().tx.is_none());
     }
 
     #[test]

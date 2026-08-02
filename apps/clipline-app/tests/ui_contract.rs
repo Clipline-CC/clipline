@@ -576,7 +576,8 @@ fn administrator_restart_uses_an_exact_parent_handoff() {
     );
     assert!(
         windows.contains("clipline_shell::windows::process::launch_elevated_after")
-            && windows.contains("clipline_shell::windows::process::wait_for_elevation_parent_from_args"),
+            && windows
+                .contains("clipline_shell::windows::process::wait_for_elevation_parent_from_args"),
         "the rollback frontend must reach elevation only through the safe native shell service"
     );
     for required in [
@@ -982,7 +983,8 @@ fn review_player_owns_all_controls() {
             && main_js().contains("update.current_version")
             && main_js().contains("update.status || updateUpToDateStatus(update)")
             && main_js().contains("checkForUpdates({ manual: false })")
-            && app_rs().contains("tauri_plugin_updater::Builder::new().build()")
+            && app_rs().contains("clipline_updater::manifest")
+            && app_rs().contains("verify_download")
             && main_js().contains("minimize_main_window"),
         "general settings must expose and persist tray close/minimize/preview/update behavior"
     );
