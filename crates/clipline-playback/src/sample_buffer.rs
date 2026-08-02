@@ -1,6 +1,8 @@
 use std::io::{Read, Seek};
 
-use clipline_mp4::{IndexedMovie, MovieIndex, PlaybackTime, SeekPlan, TrackIndex};
+use clipline_mp4::{
+    IndexedMovie, MovieIndex, PlaybackIndexError, PlaybackTime, SeekPlan, TrackIndex,
+};
 
 use crate::annexb::{
     AnnexBError, AnnexBLimits, H264AnnexBConverter, H264DecoderConfig, ParameterSetSubmission,
@@ -86,6 +88,12 @@ pub struct ConvertedVideoSample {
     is_sync: bool,
     generation: WorkGeneration,
     parameter_set_submission: Option<ParameterSetSubmission>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VideoStepTarget {
+    pub time: PlaybackTime,
+    pub sample_index: usize,
 }
 
 impl ConvertedVideoSample {
@@ -359,6 +367,45 @@ impl<R: Read + Seek> VideoSampleTransport<R> {
         self.movie
             .seek_plan(self.track_index, audio_track_indices, requested_time)
             .map_err(Into::into)
+    }
+
+    pub fn resolve_step_target(
+        &self,
+        current: PlaybackTime,
+        frames: i32,
+    ) -> Result<VideoStepTarget, AnnexBError> {
+        if current.timescale == 0 {
+            return Err(PlaybackIndexError::InvalidTime(
+                "step position timescale must be non-zero".into(),
+            )
+            .into());
+        }
+        if frames == 0 {
+            return Err(
+                PlaybackIndexError::InvalidTime("step count must be non-zero".into()).into(),
+            );
+        }
+        let track = &self.movie.index().tracks[self.track_index];
+        let last_sample_index = track.samples.len().checked_sub(1).ok_or_else(|| {
+            PlaybackIndexError::InvalidSample("video track has no samples to step".into())
+        })?;
+        let current_end = track.samples.partition_point(|sample| {
+            sample.pts < 0
+                || u128::from(sample.pts as u64) * u128::from(current.timescale)
+                    <= u128::from(current.ticks) * u128::from(track.timescale)
+        });
+        let current_sample_index = current_end.saturating_sub(1).min(last_sample_index);
+        let stepped = (current_sample_index as i128 + i128::from(frames))
+            .clamp(0, last_sample_index as i128) as usize;
+        let target_ticks = u64::try_from(track.samples[stepped].pts).map_err(|_| {
+            PlaybackIndexError::InvalidTime(format!(
+                "video sample {stepped} has a negative presentation timestamp"
+            ))
+        })?;
+        Ok(VideoStepTarget {
+            time: PlaybackTime::new(target_ticks, track.timescale)?,
+            sample_index: stepped,
+        })
     }
 
     pub fn commit_parameter_sets(&mut self, submission: ParameterSetSubmission) -> bool {

@@ -492,3 +492,57 @@ fn indexed_read_and_annex_b_conversion_are_separate_generation_safe_checkpoints(
         .unwrap();
     assert_eq!(seek.video_sync_sample.track_index, video_track_index);
 }
+
+#[test]
+fn signed_frame_steps_resolve_to_exact_clamped_source_samples() {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/playback/hybrid-writer-h264-two-opus-5s.mp4");
+    let movie = IndexedMovie::open(fixture).unwrap();
+    let video_track_index = movie
+        .index()
+        .tracks
+        .iter()
+        .position(|track| matches!(track.config, PlaybackTrackConfig::H264 { .. }))
+        .unwrap();
+    let track = &movie.index().tracks[video_track_index];
+    let timescale = track.timescale;
+    let middle = 50;
+    let current = PlaybackTime::new(
+        u64::try_from(track.samples[middle].pts).unwrap()
+            + u64::from(track.samples[middle].duration / 2),
+        timescale,
+    )
+    .unwrap();
+    let last = track.samples.len() - 1;
+    let expected_previous_pts = u64::try_from(track.samples[middle - 1].pts).unwrap();
+    let expected_next_pts = u64::try_from(track.samples[middle + 1].pts).unwrap();
+    let expected_last_pts = u64::try_from(track.samples[last].pts).unwrap();
+    let transport = VideoSampleTransport::new(movie, video_track_index, OPEN_GENERATION).unwrap();
+
+    let previous = transport.resolve_step_target(current, -1).unwrap();
+    assert_eq!(previous.sample_index, middle - 1);
+    assert_eq!(
+        previous.time,
+        PlaybackTime::new(expected_previous_pts, timescale).unwrap()
+    );
+    let next = transport.resolve_step_target(current, 1).unwrap();
+    assert_eq!(next.sample_index, middle + 1);
+    assert_eq!(
+        next.time,
+        PlaybackTime::new(expected_next_pts, timescale).unwrap()
+    );
+
+    let first = transport.resolve_step_target(current, i32::MIN).unwrap();
+    assert_eq!(first.sample_index, 0);
+    assert_eq!(first.time.ticks, 0);
+    let final_target = transport.resolve_step_target(current, i32::MAX).unwrap();
+    assert_eq!(final_target.sample_index, last);
+    assert_eq!(final_target.time.ticks, expected_last_pts);
+
+    let plan = transport.seek_plan(&[], final_target.time).unwrap();
+    assert_eq!(
+        plan.video_preroll.samples.end - 1,
+        final_target.sample_index
+    );
+    assert!(transport.resolve_step_target(current, 0).is_err());
+}
