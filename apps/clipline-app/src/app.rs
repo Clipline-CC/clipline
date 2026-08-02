@@ -579,7 +579,7 @@ impl MicTestState {
             .0
             .lock()
             .map_err(|_| "mic test state lock poisoned".to_string())?;
-        inner.last_generation = inner.last_generation.wrapping_add(1).max(1);
+        inner.last_generation = checked_generation_next(inner.last_generation, "microphone test")?;
         let generation = inner.last_generation;
         let previous = inner.active.replace(MicTestSession { generation, stop });
         if let Some(previous) = previous {
@@ -660,6 +660,12 @@ fn mic_test_should_stop(receiver: &Receiver<()>) -> bool {
         Ok(()) | Err(TryRecvError::Disconnected) => true,
         Err(TryRecvError::Empty) => false,
     }
+}
+
+fn checked_generation_next(current: u64, domain: &str) -> Result<u64, String> {
+    current
+        .checked_add(1)
+        .ok_or_else(|| format!("{domain} generation exhausted"))
 }
 
 pub(crate) struct RuntimeState(Mutex<RuntimeInner>);
@@ -786,17 +792,19 @@ impl RuntimeState {
             recent_recorder_error: false,
         };
         if let Some(tx) = tx {
-            Self::install_recording_sender(&mut inner, tx);
+            Self::install_recording_sender(&mut inner, tx)
+                .expect("initial recording generation is available");
         }
         Self(Mutex::new(inner))
     }
 
-    fn install_recording_sender(inner: &mut RuntimeInner, tx: Sender<Cmd>) -> u64 {
-        inner.recording_generation = inner.recording_generation.wrapping_add(1);
+    fn install_recording_sender(inner: &mut RuntimeInner, tx: Sender<Cmd>) -> Result<u64, String> {
+        inner.recording_generation =
+            checked_generation_next(inner.recording_generation, "recording")?;
         inner.recording_desired = true;
         inner.tx = Some(tx);
         inner.last_save_request = None;
-        inner.recording_generation
+        Ok(inner.recording_generation)
     }
 
     fn accept_service_status(&self, generation: u64, recording: bool) -> bool {
@@ -807,9 +815,14 @@ impl RuntimeState {
             return false;
         }
         if !recording {
+            let Ok(next_generation) =
+                checked_generation_next(inner.recording_generation, "recording")
+            else {
+                return false;
+            };
             inner.tx = None;
             inner.recording_desired = false;
-            inner.recording_generation = inner.recording_generation.wrapping_add(1);
+            inner.recording_generation = next_generation;
             inner.last_save_request = None;
         }
         true
@@ -946,7 +959,8 @@ impl RuntimeState {
                     // so preserve it on an option error. With no sender, a prior
                     // restart is already spawning; invalidate that stale plan.
                     if inner.tx.is_none() {
-                        inner.recording_generation = inner.recording_generation.wrapping_add(1);
+                        inner.recording_generation =
+                            checked_generation_next(inner.recording_generation, "recording")?;
                     }
                     return Err(error);
                 }
@@ -957,7 +971,8 @@ impl RuntimeState {
             None
         };
         let old_tx = inner.tx.take();
-        inner.recording_generation = inner.recording_generation.wrapping_add(1);
+        inner.recording_generation =
+            checked_generation_next(inner.recording_generation, "recording")?;
         let generation = inner.recording_generation;
         inner.last_save_request = None;
         Ok(PreparedServiceRestart {
@@ -979,7 +994,15 @@ impl RuntimeState {
         {
             return Err(tx);
         }
-        Ok(Self::install_recording_sender(inner, tx))
+        let Ok(generation) = checked_generation_next(inner.recording_generation, "recording")
+        else {
+            return Err(tx);
+        };
+        inner.recording_generation = generation;
+        inner.recording_desired = true;
+        inner.tx = Some(tx);
+        inner.last_save_request = None;
+        Ok(generation)
     }
 
     fn prepare_settings_restart(
@@ -1042,14 +1065,15 @@ impl RuntimeState {
         let old_tx = inner.tx.take();
         let replacement = if let Some(options) = next_options {
             let (tx, spawned) = spawn(options);
-            let generation = Self::install_recording_sender(inner, tx);
+            let generation = Self::install_recording_sender(inner, tx)?;
             Some((spawned, generation))
         } else {
             None
         };
         let waiting_for_game = inner.recording_desired && !should_run;
         if waiting_for_game {
-            inner.recording_generation = inner.recording_generation.wrapping_add(1);
+            inner.recording_generation =
+                checked_generation_next(inner.recording_generation, "recording")?;
             inner.last_save_request = None;
         }
         let waiting_generation = waiting_for_game.then_some(inner.recording_generation);
@@ -1255,7 +1279,7 @@ impl RuntimeState {
             inner.last_save_request = None;
             if recorder_should_run(&inner.settings, inner.active_game.as_ref()) {
                 let (tx, rx) = service::spawn(Self::options(&inner)?);
-                let generation = Self::install_recording_sender(&mut inner, tx);
+                let generation = Self::install_recording_sender(&mut inner, tx)?;
                 Some((rx, generation))
             } else {
                 None
@@ -1278,7 +1302,8 @@ impl RuntimeState {
         let tx = {
             let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
             inner.recording_desired = false;
-            inner.recording_generation = inner.recording_generation.wrapping_add(1);
+            inner.recording_generation =
+                checked_generation_next(inner.recording_generation, "recording")?;
             let tx = inner.tx.take();
             inner.last_save_request = None;
             tx
@@ -3256,6 +3281,35 @@ mod tests {
     }
 
     #[test]
+    fn producer_generations_fail_closed_instead_of_wrapping() {
+        assert_eq!(
+            checked_generation_next(u64::MAX, "test").unwrap_err(),
+            "test generation exhausted"
+        );
+
+        let mic = MicTestState::default();
+        mic.0.lock().unwrap().last_generation = u64::MAX;
+        assert_eq!(
+            mic.begin().unwrap_err(),
+            "microphone test generation exhausted"
+        );
+        assert!(mic.0.lock().unwrap().active.is_none());
+
+        let state = RuntimeState::new(AppSettings::default(), None);
+        state.0.lock().unwrap().recording_generation = u64::MAX;
+        let (tx, rx) = mpsc::channel();
+        let error = {
+            let mut inner = state.0.lock().unwrap();
+            RuntimeState::install_recording_sender(&mut inner, tx).unwrap_err()
+        };
+        assert_eq!(error, "recording generation exhausted");
+        let inner = state.0.lock().unwrap();
+        assert!(inner.tx.is_none());
+        assert!(!inner.recording_desired);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
     fn failed_cloud_settings_save_leaves_live_state_unchanged() {
         let state = RuntimeState::new(AppSettings::default(), None);
 
@@ -3534,7 +3588,7 @@ mod tests {
         let (new_tx, new_rx) = mpsc::channel();
         {
             let mut inner = state.0.lock().unwrap();
-            RuntimeState::install_recording_sender(&mut inner, new_tx);
+            RuntimeState::install_recording_sender(&mut inner, new_tx).unwrap();
         }
 
         assert!(!state.accept_service_status(stale_generation, false));
@@ -3915,7 +3969,7 @@ mod tests {
                 "osu!",
                 84,
             ));
-            RuntimeState::install_recording_sender(&mut inner, newer_tx);
+            RuntimeState::install_recording_sender(&mut inner, newer_tx).unwrap();
             RuntimeState::commit_prepared_restart_with(&mut inner, prepared, |options| {
                 committed_options = Some(options);
                 (replacement_tx, ())
@@ -3957,7 +4011,7 @@ mod tests {
         let mut committed_options = None;
         let committed = {
             let mut inner = state.0.lock().unwrap();
-            RuntimeState::install_recording_sender(&mut inner, started_tx);
+            RuntimeState::install_recording_sender(&mut inner, started_tx).unwrap();
             RuntimeState::commit_prepared_restart_with(&mut inner, prepared, |options| {
                 committed_options = Some(options);
                 (replacement_tx, ())
@@ -4137,7 +4191,7 @@ mod tests {
         let (stale_tx, stale_rx) = mpsc::channel();
         let rejected = {
             let mut inner = state.0.lock().unwrap();
-            RuntimeState::install_recording_sender(&mut inner, newer_tx);
+            RuntimeState::install_recording_sender(&mut inner, newer_tx).unwrap();
             RuntimeState::install_prepared_service_restart(&mut inner, restart_generation, stale_tx)
                 .unwrap_err()
         };
