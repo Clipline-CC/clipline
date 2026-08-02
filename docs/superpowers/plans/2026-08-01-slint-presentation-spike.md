@@ -21,7 +21,10 @@ an explicit Milestone 9/final-parity requirement.
 
 ## Fixed architecture
 
-- Pin `slint` and `slint-build` to exactly `1.17.1`. Disable default features and enable only
+- Pin `slint` and `slint-build` to exactly `1.17.1`. Keep the spike as a workspace-excluded,
+  standalone Cargo package with its own committed lockfile: Slint's Parley stack requires ICU
+  2.1+ while the shipping app's Boa 0.21.1 tests require ICU 2.0.x, and Cargo cannot unify those
+  same-major requirements in one resolve. Disable default features and enable only
   `std`, `compat-1-2`, `accessibility`, `backend-winit`, `renderer-software`, `system-tray`, and
   `raw-window-handle-06`. Qt, Skia, live preview, MCP, and system-testing are excluded. A later
   opt-in comparison may enable `renderer-femtovg-wgpu`; it is not part of the default binary.
@@ -56,10 +59,11 @@ an explicit Milestone 9/final-parity requirement.
 
 - [ ] Add a failing repository-contract test first. It requires the exact Slint pins and allowlisted
       features, rejects Tauri/WebView/Qt/Skia/GStreamer/linked-FFmpeg dependencies, verifies that the
-      spike is a workspace member but absent from both shipping bundle manifests, and scans for
-      first-party `unsafe` outside the playback crate's Windows module.
+      spike is explicitly excluded into its own workspace and absent from both shipping bundle
+      manifests, and scans for first-party `unsafe` outside the playback crate's Windows module.
 - [ ] Add the non-distributed package with `clipline-playback`, `clipline-mp4`, `serde`, and
-      `serde_json`. Keep `raw-window-handle = "0.6"` direct and version-aligned with Slint.
+      `serde_json`. Keep `raw-window-handle = "0.6"` direct and version-aligned with Slint. Commit
+      the standalone lockfile and run it explicitly; root workspace gates deliberately exclude it.
 - [ ] Make `slint-build` compile the single root UI file. The neutral library and compile-contract
       test must build on Ubuntu without instantiating a window; all Windows integration stays under
       `#[cfg(windows)]`.
@@ -242,7 +246,8 @@ an explicit Milestone 9/final-parity requirement.
 - Modify: `handoff.md`
 - Modify: `docs/slint/parity-ledger.md` only for behavior actually verified
 
-- [ ] Run package, playback, MP4, security, and migration-contract tests; then
+- [ ] Run the spike package through `--manifest-path apps/clipline-slint-spike/Cargo.toml`, then
+      playback, MP4, security, and migration-contract tests; then
       `cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings`.
 - [ ] Run fresh-cache Clippy for both changed packages. Audit `cargo tree` and source for the exact
       Slint pin/features, no Qt/Skia/Tauri/WebView/linked FFmpeg/GStreamer/GPL runtime, and no new
@@ -269,4 +274,3 @@ an explicit Milestone 9/final-parity requirement.
 - DXGI flip-model swap chains and D3D11 video processor APIs:
   <https://learn.microsoft.com/windows/win32/direct3ddxgi/dxgi-flip-model>
   and <https://learn.microsoft.com/windows/win32/api/d3d11/nf-d3d11-id3d11videocontext-videoprocessorblt>
-
