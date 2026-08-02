@@ -909,6 +909,7 @@ dependencies = [
  "clipline-events",
  "clipline-lol",
  "clipline-mp4",
+ "clipline-shell",
  "clipline-storage",
  "clipline-test-utils",
  "httpmock",

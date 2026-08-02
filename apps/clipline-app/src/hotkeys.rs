@@ -262,9 +262,7 @@ fn parse_hook_hotkey(raw: &str) -> Result<HookHotkey, String> {
     let spec = parse_hotkey_spec(raw)?;
     let key_vk = match &spec.key {
         HotkeyKey::Function(number) => VK_F1_CODE + u32::from(*number) - 1,
-        HotkeyKey::Keyboard(key) => {
-            keyboard_key_vk_code(key).ok_or_else(|| format!("unsupported hotkey key: {key}"))?
-        }
+        HotkeyKey::Keyboard(key) => key.virtual_key_code(),
         HotkeyKey::Middle => VK_MBUTTON_CODE,
         HotkeyKey::Mouse4 => VK_XBUTTON1_CODE,
         HotkeyKey::Mouse5 => VK_XBUTTON2_CODE,
@@ -444,44 +442,6 @@ fn is_supported_keyboard_hook_vk(vk_code: u32) -> bool {
                 | 0xDD
                 | 0xDE
         )
-}
-
-fn keyboard_key_vk_code(key: &str) -> Option<u32> {
-    if key.len() == 1 {
-        let c = key.as_bytes()[0];
-        if c.is_ascii_uppercase() || c.is_ascii_digit() {
-            return Some(c as u32);
-        }
-    }
-
-    match key {
-        "Backspace" => Some(0x08),
-        "Tab" => Some(0x09),
-        "Enter" => Some(0x0D),
-        "Space" => Some(0x20),
-        "PageUp" => Some(0x21),
-        "PageDown" => Some(0x22),
-        "End" => Some(0x23),
-        "Home" => Some(0x24),
-        "ArrowLeft" => Some(0x25),
-        "ArrowUp" => Some(0x26),
-        "ArrowRight" => Some(0x27),
-        "ArrowDown" => Some(0x28),
-        "Insert" => Some(0x2D),
-        "Delete" => Some(0x2E),
-        "Semicolon" => Some(0xBA),
-        "Equal" => Some(0xBB),
-        "Comma" => Some(0xBC),
-        "Minus" => Some(0xBD),
-        "Period" => Some(0xBE),
-        "Slash" => Some(0xBF),
-        "Backquote" => Some(0xC0),
-        "BracketLeft" => Some(0xDB),
-        "Backslash" => Some(0xDC),
-        "BracketRight" => Some(0xDD),
-        "Quote" => Some(0xDE),
-        _ => None,
-    }
 }
 
 fn xbutton_vk_code(mouse_data: u32) -> Option<u32> {

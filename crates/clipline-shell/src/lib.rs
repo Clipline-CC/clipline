@@ -2,6 +2,7 @@
 
 mod channel;
 mod contract;
+pub mod hotkey;
 mod shutdown;
 
 pub use channel::{
