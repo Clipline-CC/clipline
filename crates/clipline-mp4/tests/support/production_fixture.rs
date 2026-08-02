@@ -9,9 +9,13 @@ pub const SOURCE: &[u8] = include_bytes!(concat!(
 ));
 
 pub fn generate() -> Result<Vec<u8>, Box<dyn Error>> {
-    let top = walk(SOURCE);
+    generate_from_source(SOURCE)
+}
+
+pub fn generate_from_source(source: &[u8]) -> Result<Vec<u8>, Box<dyn Error>> {
+    let top = walk(source);
     let moov = find(&top, b"moov").ok_or("source oracle has no moov")?;
-    let tracks: Vec<_> = children(SOURCE, moov)
+    let tracks: Vec<_> = children(source, moov)
         .into_iter()
         .filter(|box_info| &box_info.fourcc == b"trak")
         .collect();
@@ -21,7 +25,7 @@ pub fn generate() -> Result<Vec<u8>, Box<dyn Error>> {
 
     let mut edit_type_offsets = Vec::with_capacity(tracks.len());
     for track in &tracks {
-        let edits: Vec<_> = children(SOURCE, track)
+        let edits: Vec<_> = children(source, track)
             .into_iter()
             .filter(|box_info| &box_info.fourcc == b"edts")
             .collect();
@@ -38,7 +42,7 @@ pub fn generate() -> Result<Vec<u8>, Box<dyn Error>> {
         edit_type_offsets.push(type_offset);
     }
 
-    let mut source_without_edits = SOURCE.to_vec();
+    let mut source_without_edits = source.to_vec();
     for offset in edit_type_offsets {
         source_without_edits[offset..offset + 4].copy_from_slice(b"free");
     }

@@ -18,6 +18,9 @@ fn fixture_path() -> PathBuf {
 fn checked_in_production_fixture_is_reproducible_and_playback_shaped() {
     let expected =
         production_fixture::generate().expect("remux decoder oracle through HybridMp4Writer");
+    let from_runtime_source = production_fixture::generate_from_source(production_fixture::SOURCE)
+        .expect("remux runtime source through HybridMp4Writer");
+    assert_eq!(from_runtime_source, expected);
     let committed = std::fs::read(fixture_path()).expect(
         "missing production fixture; run `cargo run -p clipline-mp4 --example generate_production_playback_fixture`",
     );
