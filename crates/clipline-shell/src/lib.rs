@@ -21,6 +21,6 @@ pub use contract::{
     MAX_LAUNCH_ARGUMENTS, MAX_LAUNCH_ARGUMENT_BYTES, MAX_LAUNCH_TOTAL_BYTES,
 };
 pub use shutdown::{
-    ShutdownAcknowledgement, ShutdownCoordinator, ShutdownEffect, ShutdownError, ShutdownReason,
-    ShutdownStage, MAX_SHUTDOWN_TIMEOUT_MS,
+    ShutdownAcknowledgement, ShutdownCoordinator, ShutdownEffect, ShutdownError, ShutdownGate,
+    ShutdownLease, ShutdownOwnershipError, ShutdownReason, ShutdownStage, MAX_SHUTDOWN_TIMEOUT_MS,
 };

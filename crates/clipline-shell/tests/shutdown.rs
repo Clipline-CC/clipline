@@ -1,7 +1,31 @@
 use clipline_shell::{
     ShellGeneration, ShutdownAcknowledgement, ShutdownCoordinator, ShutdownEffect, ShutdownError,
-    ShutdownReason, ShutdownStage, MAX_SHUTDOWN_TIMEOUT_MS,
+    ShutdownGate, ShutdownOwnershipError, ShutdownReason, ShutdownStage, MAX_SHUTDOWN_TIMEOUT_MS,
 };
+
+#[test]
+fn only_one_process_shutdown_reason_can_own_exit_at_a_time() {
+    let gate = ShutdownGate::new();
+    let quit = gate
+        .begin(ShutdownReason::Quit)
+        .expect("quit owns shutdown");
+    assert_eq!(gate.owner(), Some(ShutdownReason::Quit));
+    assert!(matches!(
+        gate.begin(ShutdownReason::InstallUpdate),
+        Err(ShutdownOwnershipError::Busy {
+            active: ShutdownReason::Quit,
+            requested: ShutdownReason::InstallUpdate,
+        })
+    ));
+
+    drop(quit);
+    assert_eq!(gate.owner(), None);
+    let install = gate
+        .begin(ShutdownReason::InstallUpdate)
+        .expect("lease drop releases shutdown ownership");
+    install.commit_exit();
+    assert_eq!(gate.owner(), Some(ShutdownReason::InstallUpdate));
+}
 
 #[test]
 fn shutdown_requires_every_acknowledgement_in_order_before_exit() {

@@ -567,22 +567,34 @@ fn administrator_restart_uses_an_exact_parent_handoff() {
     assert!(
         app.contains("fn restart_as_administrator")
             && app.contains("crate::windows::launch_elevated_after(std::process::id())")
+            && app.contains("shutdown_app(&app, ||")
             && app.contains("restart_as_administrator,"),
         "the shell must expose only the current-executable administrator restart"
     );
+    let shutdown_start = app
+        .find("fn shutdown_app")
+        .expect("shared shutdown adapter");
+    let shutdown_end = app[shutdown_start..]
+        .find("fn elapsed_millis")
+        .map(|offset| shutdown_start + offset)
+        .expect("shutdown adapter terminator");
+    let shutdown = &app[shutdown_start..shutdown_end];
     assert!(
-        main.contains("wait_for_elevation_parent_from_args"),
+        shutdown.find("before_exit()").unwrap() < shutdown.find("app.exit(0)").unwrap(),
+        "the elevated child may launch only after durable shutdown and immediately before exit"
+    );
+    assert!(
+        main.contains("wait_for_elevation_parent(launch.elevation_parent())"),
         "the elevated child must finish the parent handoff before starting Tauri"
     );
     assert!(
         windows.contains("clipline_shell::windows::process::launch_elevated_after")
-            && windows
-                .contains("clipline_shell::windows::process::wait_for_elevation_parent_from_args"),
-        "the rollback frontend must reach elevation only through the safe native shell service"
+            && main.contains("clipline_shell::windows::process::wait_for_elevation_parent"),
+        "the rollback frontend must reach elevation only through the parsed safe native shell service"
     );
     for required in [
         "--clipline-elevated-after",
-        "wait_for_elevation_parent_from_args",
+        "wait_for_elevation_parent",
         "process_identity",
         "GetProcessTimes(",
         "run_as(",

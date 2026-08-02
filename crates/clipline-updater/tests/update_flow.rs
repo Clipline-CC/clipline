@@ -11,7 +11,8 @@ use clipline_updater::manifest::{
 };
 use clipline_updater::{
     install_verified, verify_download, verify_download_with_key, InstallerLauncher,
-    PreparedInstallerHandoff, UpdateShutdown, VerificationError, CLIPLINE_MINISIGN_PUBLIC_KEY,
+    PreparedInstallerHandoff, UpdateOperationError, UpdateOperationGate, UpdateOperationKind,
+    UpdateOperationSnapshot, UpdateShutdown, VerificationError, CLIPLINE_MINISIGN_PUBLIC_KEY,
 };
 use reqwest::Url;
 use sha2::{Digest, Sha256};
@@ -20,6 +21,85 @@ const FIXTURE_BYTES: &[u8] = b"test";
 const FIXTURE_KEY: &str = include_str!("fixtures/known-good-public-key.pub");
 const FIXTURE_SIGNATURE: &str = include_str!("fixtures/known-good-signature.b64");
 const BAD_SIGNATURE: &str = include_str!("fixtures/known-bad-signature.b64");
+
+#[test]
+fn update_operations_are_single_owner_cancellable_and_release_on_drop() {
+    let gate = UpdateOperationGate::new();
+    let check = gate
+        .begin(UpdateOperationKind::Check)
+        .expect("first operation owns the gate");
+    let first = gate.snapshot().expect("active operation snapshot");
+    assert_eq!(first.kind, UpdateOperationKind::Check);
+    assert!(!first.cancelled);
+
+    assert!(matches!(
+        gate.begin(UpdateOperationKind::Install),
+        Err(UpdateOperationError::Busy {
+            active: UpdateOperationKind::Check,
+            requested: UpdateOperationKind::Install,
+        })
+    ));
+    assert!(gate.cancel_active());
+    assert!(check
+        .cancellation()
+        .load(std::sync::atomic::Ordering::Acquire));
+    assert!(gate.snapshot().expect("cancelled snapshot").cancelled);
+
+    drop(check);
+    assert!(gate.snapshot().is_none());
+    let install = gate
+        .begin(UpdateOperationKind::Install)
+        .expect("drop releases the operation gate");
+    assert!(install.id() > first.id);
+    install.commit_exit();
+    assert_eq!(
+        gate.snapshot()
+            .expect("committed exit keeps gate owned")
+            .kind,
+        UpdateOperationKind::Install
+    );
+}
+
+#[test]
+fn shutdown_can_cancel_and_boundedly_wait_for_the_active_update() {
+    let gate = UpdateOperationGate::new();
+    let operation = gate
+        .begin(UpdateOperationKind::Install)
+        .expect("install operation");
+    let id = operation.id();
+
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            while !operation
+                .cancellation()
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                std::thread::yield_now();
+            }
+            drop(operation);
+        });
+        let quiesced = gate
+            .quiesce_and_wait(std::time::Duration::from_secs(1))
+            .expect("active update releases after cancellation");
+        assert_eq!(
+            quiesced.completed(),
+            Some(UpdateOperationSnapshot {
+                id,
+                kind: UpdateOperationKind::Install,
+                cancelled: true,
+            })
+        );
+        assert!(matches!(
+            gate.begin(UpdateOperationKind::Check),
+            Err(UpdateOperationError::Quiescing {
+                requested: UpdateOperationKind::Check,
+            })
+        ));
+        drop(quiesced);
+    });
+    assert!(gate.snapshot().is_none());
+    assert!(gate.begin(UpdateOperationKind::Check).is_ok());
+}
 
 fn telemetry(path: &Path, bytes: &[u8]) -> DownloadTelemetry {
     DownloadTelemetry {

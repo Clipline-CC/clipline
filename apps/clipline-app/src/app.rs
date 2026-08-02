@@ -16,13 +16,19 @@ use clipline_shell::hotkey::{HotkeyReplacementOutcome, HotkeySet};
 use clipline_shell::windows::activation::WindowsInstanceGuard;
 use clipline_shell::windows::autostart::{AutostartChange, WindowsAutostartRegistration};
 use clipline_shell::windows::hotkey::WindowsHotkeyService;
-use clipline_shell::{ShellCommand, ShellCommandReceiver, ShellCommandSender};
+use clipline_shell::{
+    LaunchMode, SequencedShellCommand, ShellCommand, ShellCommandReceiver, ShellCommandSender,
+    ShellLaunch, ShutdownAcknowledgement, ShutdownCoordinator, ShutdownEffect, ShutdownGate,
+    ShutdownReason, WindowEffect, WindowEvent as ShellWindowEvent, WindowPolicy,
+};
 use clipline_updater::download::download_installer;
 use clipline_updater::manifest::{
     check_update, installer_filename, UpdateCheck, UpdateManifest, UpdatePolicy, UpdateVariant,
 };
 use clipline_updater::windows::WindowsInstallerLauncher;
-use clipline_updater::{install_verified, verify_download, UpdateShutdown};
+use clipline_updater::{
+    install_verified, verify_download, UpdateOperationGate, UpdateOperationKind, UpdateShutdown,
+};
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem};
 use tauri::path::BaseDirectory;
@@ -48,6 +54,9 @@ use diagnostics::{diagnostic_log_path, log_diagnostic};
 
 const MAIN_WINDOW_LABEL: &str = "main";
 const AUTOSTART_VALUE_NAME: &str = "Clipline";
+const SHELL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
+const RECORDER_FINALIZATION_TIMEOUT: Duration = Duration::from_secs(10);
+const UPDATE_QUIESCE_TIMEOUT: Duration = Duration::from_secs(21);
 const WEBVIEW_READY_TIMEOUT: Duration = Duration::from_secs(5);
 const GAME_DETECTOR_INTERVAL: Duration = Duration::from_millis(500);
 static FRONTEND_READY: AtomicBool = AtomicBool::new(false);
@@ -1667,8 +1676,10 @@ fn restart_as_administrator<R: Runtime>(app: AppHandle<R>) -> Result<bool, Strin
     if crate::windows::current_process_is_elevated()? {
         return Ok(false);
     }
-    crate::windows::launch_elevated_after(std::process::id())?;
-    quit_app(&app);
+    shutdown_app(&app, || {
+        crate::windows::launch_elevated_after(std::process::id())
+    })
+    .map_err(|error| error.to_string())?;
     Ok(true)
 }
 
@@ -1741,38 +1752,31 @@ fn saved_autostart_preference_for_build(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CloseRequestAction {
-    Tray,
-    Quit,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MinimizeRequestAction {
-    Taskbar,
-    Tray,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NativeWindowReconcileAction {
     None,
     BackgroundTaskbar,
     RestoreTaskbar,
 }
 
-fn close_request_action(settings: &AppSettings) -> CloseRequestAction {
+fn close_request_effect(settings: &AppSettings) -> WindowEffect {
     if settings.close_to_tray {
-        CloseRequestAction::Tray
+        shared_window_effect(ShellWindowEvent::CloseRequested)
     } else {
-        CloseRequestAction::Quit
+        shared_window_effect(ShellWindowEvent::QuitRequested)
     }
 }
 
-fn minimize_request_action(settings: &AppSettings) -> MinimizeRequestAction {
+fn minimize_request_effect(settings: &AppSettings) -> WindowEffect {
     if settings.minimize_to_tray {
-        MinimizeRequestAction::Tray
+        shared_window_effect(ShellWindowEvent::CloseRequested)
     } else {
-        MinimizeRequestAction::Taskbar
+        shared_window_effect(ShellWindowEvent::MinimizeRequested)
     }
+}
+
+fn shared_window_effect(event: ShellWindowEvent) -> WindowEffect {
+    let (mut policy, _) = WindowPolicy::for_launch(LaunchMode::Normal);
+    policy.apply(event)
 }
 
 fn native_window_reconcile_action(
@@ -1893,12 +1897,160 @@ fn hide_autostart_webviews<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
-fn quit_app<R: Runtime>(app: &AppHandle<R>) {
+#[derive(Debug, thiserror::Error)]
+enum TauriShellError {
+    #[error("enqueue {command:?} from {source}: {error}")]
+    Enqueue {
+        source: &'static str,
+        command: ShellCommand,
+        #[source]
+        error: clipline_shell::ShellCommandSendError,
+    },
+    #[error("apply {command:?}: {message}")]
+    Action {
+        command: ShellCommand,
+        message: String,
+    },
+    #[error("schedule {command:?} on the Tauri thread: {message}")]
+    Schedule {
+        command: ShellCommand,
+        message: String,
+    },
+    #[error("advance shared shutdown contract: {0}")]
+    ShutdownContract(#[from] clipline_shell::ShutdownError),
+    #[error("acquire process shutdown ownership: {0}")]
+    ShutdownOwnership(#[from] clipline_shell::ShutdownOwnershipError),
+    #[error("quiesce update work for shutdown: {0}")]
+    UpdateOperation(#[from] clipline_updater::UpdateOperationError),
+}
+
+fn enqueue_shell_command(
+    sender: &ShellCommandSender,
+    command: ShellCommand,
+    source: &'static str,
+) -> Result<(), TauriShellError> {
+    sender
+        .try_send(command)
+        .map(|_| ())
+        .map_err(|error| TauriShellError::Enqueue {
+            source,
+            command,
+            error,
+        })
+}
+
+fn report_shell_error<R: Runtime>(app: &AppHandle<R>, error: TauriShellError) {
+    let message = format!("native shell: {error}");
+    log_diagnostic(&message);
+    tracing::error!(event = "native_shell_command_failed", error = %error);
+    publish_user_error(app, message);
+}
+
+fn quit_app<R: Runtime>(app: &AppHandle<R>) -> Result<(), TauriShellError> {
+    shutdown_app(app, || Ok(()))
+}
+
+fn shutdown_app<R: Runtime>(
+    app: &AppHandle<R>,
+    before_exit: impl FnOnce() -> Result<(), String>,
+) -> Result<(), TauriShellError> {
     log_diagnostic("quit app requested");
-    app.state::<MicTestState>().stop();
-    app.state::<RuntimeState>()
-        .send(Cmd::Stop { announce: false });
-    app.exit(0);
+    let shutdown_gate = app.state::<ShutdownGate>();
+    let shutdown_owner = shutdown_gate.begin(ShutdownReason::Quit)?;
+    let update_gate = app.state::<UpdateOperationGate>();
+    let updates_quiesced = update_gate.quiesce_and_wait(UPDATE_QUIESCE_TIMEOUT)?;
+    let started = Instant::now();
+    let mut shutdown = ShutdownCoordinator::new();
+    let mut effect = shutdown.begin(
+        ShutdownReason::Quit,
+        0,
+        u64::try_from(SHELL_SHUTDOWN_TIMEOUT.as_millis()).expect("shutdown timeout fits u64"),
+    )?;
+
+    loop {
+        effect = match effect {
+            ShutdownEffect::PublishDurableState { generation } => {
+                let save_guard = RuntimeState::lock_cloud_settings_save().map_err(|message| {
+                    TauriShellError::Action {
+                        command: ShellCommand::Quit,
+                        message,
+                    }
+                })?;
+                app.state::<RuntimeState>()
+                    .settings()
+                    .save()
+                    .map_err(|message| TauriShellError::Action {
+                        command: ShellCommand::Quit,
+                        message,
+                    })?;
+                drop(save_guard);
+                shutdown.acknowledge(
+                    generation,
+                    ShutdownAcknowledgement::DurableStatePublished,
+                    elapsed_millis(started),
+                )?
+            }
+            ShutdownEffect::StopWindowMedia { generation } => {
+                app.state::<MicTestState>().stop();
+                publish_window_lifecycle(app, WindowLifecycleMode::Tray);
+                shutdown.acknowledge(
+                    generation,
+                    ShutdownAcknowledgement::WindowMediaStopped,
+                    elapsed_millis(started),
+                )?
+            }
+            ShutdownEffect::FinalizeRecorder { generation } => {
+                app.state::<RuntimeState>()
+                    .stop_recorder_and_wait(RECORDER_FINALIZATION_TIMEOUT)
+                    .map_err(|message| TauriShellError::Action {
+                        command: ShellCommand::Quit,
+                        message,
+                    })?;
+                shutdown.acknowledge(
+                    generation,
+                    ShutdownAcknowledgement::RecorderFinalized,
+                    elapsed_millis(started),
+                )?
+            }
+            ShutdownEffect::FlushDiagnostics { generation } => {
+                diagnostics::flush().map_err(|message| TauriShellError::Action {
+                    command: ShellCommand::Quit,
+                    message,
+                })?;
+                shutdown.acknowledge(
+                    generation,
+                    ShutdownAcknowledgement::DiagnosticsFlushed,
+                    elapsed_millis(started),
+                )?
+            }
+            ShutdownEffect::ReadyToExit {
+                reason: ShutdownReason::Quit,
+                ..
+            } => {
+                before_exit().map_err(|message| TauriShellError::Action {
+                    command: ShellCommand::Quit,
+                    message,
+                })?;
+                shutdown_owner.commit_exit();
+                updates_quiesced.commit_exit();
+                app.exit(0);
+                return Ok(());
+            }
+            ShutdownEffect::ReadyToExit {
+                reason: ShutdownReason::InstallUpdate,
+                ..
+            } => {
+                return Err(TauriShellError::Action {
+                    command: ShellCommand::Quit,
+                    message: "quit reached an update-install shutdown effect".into(),
+                });
+            }
+        };
+    }
+}
+
+fn elapsed_millis(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 fn should_open_on_tray_event(event: &TrayIconEvent) -> bool {
@@ -1922,8 +2074,8 @@ fn minimize_main_window<R: Runtime>(
     window: WebviewWindow<R>,
     state: tauri::State<RuntimeState>,
 ) -> Result<(), String> {
-    match minimize_request_action(&state.settings()) {
-        MinimizeRequestAction::Taskbar => {
+    match minimize_request_effect(&state.settings()) {
+        WindowEffect::ShowInTaskbar => {
             let label = window.label().to_string();
             hide_main_window(
                 || window.minimize(),
@@ -1938,7 +2090,10 @@ fn minimize_main_window<R: Runtime>(
                 },
             )
         }
-        MinimizeRequestAction::Tray => send_main_window_to_tray(&app),
+        WindowEffect::DropToTray => send_main_window_to_tray(&app),
+        effect => Err(format!(
+            "shared shell returned invalid minimize effect {effect:?}"
+        )),
     }
 }
 
@@ -2095,10 +2250,21 @@ async fn check_for_updates<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<'_, RuntimeState>,
 ) -> Result<UpdateCheckResult, String> {
+    check_for_updates_inner(&app, &state).await
+}
+
+async fn check_for_updates_inner<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &RuntimeState,
+) -> Result<UpdateCheckResult, String> {
+    let operations = app.state::<UpdateOperationGate>();
+    let _operation = operations
+        .begin(UpdateOperationKind::Check)
+        .map_err(|error| error.to_string())?;
     let settings = state.settings();
     let channel = settings.update_channel;
     let current_version = app.package_info().version.to_string();
-    let (update, status) = check_update_for_channel(&app, channel).await?;
+    let (update, status) = check_update_for_channel(app, channel).await?;
 
     Ok(UpdateCheckResult {
         channel,
@@ -2108,7 +2274,7 @@ async fn check_for_updates<R: Runtime>(
         version: update.as_ref().map(|update| update.version.to_string()),
         date: update.as_ref().map(|update| update.pub_date.clone()),
         notes: update.as_ref().map(|update| update.notes.clone()),
-        endpoint: channel.endpoint(is_standalone_install(&app)),
+        endpoint: channel.endpoint(is_standalone_install(app)),
         status,
     })
 }
@@ -2126,7 +2292,11 @@ impl<R: Runtime> UpdateShutdown for TauriUpdateShutdown<'_, R> {
     type Error = AppUpdateShutdownError;
 
     fn publish_durable_state(&mut self) -> Result<(), Self::Error> {
-        self.state.settings().save().map_err(AppUpdateShutdownError)
+        let save_guard =
+            RuntimeState::lock_cloud_settings_save().map_err(AppUpdateShutdownError)?;
+        let result = self.state.settings().save().map_err(AppUpdateShutdownError);
+        drop(save_guard);
+        result
     }
 
     fn stop_window_media(&mut self) -> Result<(), Self::Error> {
@@ -2189,28 +2359,45 @@ async fn install_update<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<'_, RuntimeState>,
 ) -> Result<(), String> {
+    install_update_inner(&app, &state).await
+}
+
+async fn install_update_inner<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &RuntimeState,
+) -> Result<(), String> {
+    let operations = app.state::<UpdateOperationGate>();
+    let operation = operations
+        .begin(UpdateOperationKind::Install)
+        .map_err(|error| error.to_string())?;
     let channel = state.settings().update_channel;
-    let (update, status) = check_update_for_channel(&app, channel).await?;
+    let (update, status) = check_update_for_channel(app, channel).await?;
     let Some(update) = update else {
         return Err(status.unwrap_or_else(|| "no update is available".into()));
     };
 
-    let variant = UpdateVariant::from_standalone(is_standalone_install(&app));
+    let variant = UpdateVariant::from_standalone(is_standalone_install(app));
     let release_filename = installer_filename(&update.version, variant);
     let destination = update_download_destination(&release_filename)?;
-    let cancelled = AtomicBool::new(false);
-    let telemetry = download_installer(update.target.url.clone(), &destination, &cancelled)
-        .await
-        .map_err(|error| error.to_string())?;
+    let telemetry = download_installer(
+        update.target.url.clone(),
+        &destination,
+        operation.cancellation(),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
     let verified = verify_download(telemetry, &update.target.signature, &release_filename)
         .map_err(|error| error.to_string())?;
+    let shutdown_gate = app.state::<ShutdownGate>();
+    let shutdown_owner = shutdown_gate
+        .begin(ShutdownReason::InstallUpdate)
+        .map_err(|error| error.to_string())?;
     let mut launcher = WindowsInstallerLauncher;
-    let mut shutdown = TauriUpdateShutdown {
-        app: &app,
-        state: &state,
-    };
+    let mut shutdown = TauriUpdateShutdown { app, state };
     let receipt = install_verified(&mut launcher, &mut shutdown, verified)
         .map_err(|error| error.to_string())?;
+    shutdown_owner.commit_exit();
+    operation.commit_exit();
     log_diagnostic(format!(
         "verified update handoff process_id={} bytes={} sha256={}",
         receipt.process_id(),
@@ -2557,34 +2744,90 @@ fn spawn_shell_dispatch<R: Runtime>(
 ) -> Result<std::thread::JoinHandle<()>, String> {
     std::thread::Builder::new()
         .name("clipline-shell-dispatch".into())
-        .spawn(move || while !stop.load(Ordering::Acquire) {
-            match receiver.wait_recv(Duration::from_millis(250)) {
-                Ok(Some(update)) if update.command == ShellCommand::SaveReplay => {
-                    let state = app.state::<RuntimeState>();
-                    let _ = dispatch_ui_action(&app, &state, UiAction::SaveReplay);
-                }
-                Ok(Some(update)) if update.command == ShellCommand::Open => {
-                    let open_app = app.clone();
-                    if let Err(error) = app.run_on_main_thread(move || {
-                        if let Err(error) = open_main_window(&open_app) {
-                            log_diagnostic(format!("single-instance open existing failed: {error}"));
-                            tracing::error!(event = "single_instance_window_open_failed", error = %error);
+        .spawn(move || {
+            while !stop.load(Ordering::Acquire) {
+                match receiver.wait_recv(Duration::from_millis(250)) {
+                    Ok(Some(update)) => {
+                        if let Err(error) = dispatch_shell_command(&app, update) {
+                            report_shell_error(&app, error);
                         }
-                    }) {
-                        log_diagnostic(format!("schedule single-instance activation: {error}"));
                     }
+                    Ok(None) => {}
+                    Err(_) => break,
                 }
-                Ok(Some(update)) => {
-                    log_diagnostic(format!(
-                        "shell dispatcher ignored command {:?}",
-                        update.command
-                    ));
-                }
-                Ok(None) => {}
-                Err(_) => break,
             }
         })
         .map_err(|error| format!("spawn hotkey command dispatcher: {error}"))
+}
+
+fn dispatch_shell_command<R: Runtime>(
+    app: &AppHandle<R>,
+    update: SequencedShellCommand,
+) -> Result<(), TauriShellError> {
+    match update.command {
+        ShellCommand::Open => {
+            let open_app = app.clone();
+            app.run_on_main_thread(move || {
+                if let Err(message) = open_main_window(&open_app) {
+                    report_shell_error(
+                        &open_app,
+                        TauriShellError::Action {
+                            command: ShellCommand::Open,
+                            message,
+                        },
+                    );
+                }
+            })
+            .map_err(|error| TauriShellError::Schedule {
+                command: ShellCommand::Open,
+                message: error.to_string(),
+            })
+        }
+        ShellCommand::SaveReplay => {
+            let state = app.state::<RuntimeState>();
+            dispatch_ui_action(app, &state, UiAction::SaveReplay)
+                .map(|_| ())
+                .map_err(|message| TauriShellError::Action {
+                    command: ShellCommand::SaveReplay,
+                    message,
+                })
+        }
+        ShellCommand::OpenDiagnostics => {
+            support::open_diagnostics_folder().map_err(|message| TauriShellError::Action {
+                command: ShellCommand::OpenDiagnostics,
+                message,
+            })
+        }
+        ShellCommand::Quit => quit_app(app),
+        ShellCommand::CheckUpdates | ShellCommand::InstallUpdate => {
+            let update_app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let state = update_app.state::<RuntimeState>();
+                let result = match update.command {
+                    ShellCommand::CheckUpdates => check_for_updates_inner(&update_app, &state)
+                        .await
+                        .map(|result| {
+                            log_diagnostic(format!(
+                                "native update check completed available={} version={:?}",
+                                result.available, result.version
+                            ));
+                        }),
+                    ShellCommand::InstallUpdate => install_update_inner(&update_app, &state).await,
+                    _ => unreachable!("match arm restricts native update commands"),
+                };
+                if let Err(message) = result {
+                    report_shell_error(
+                        &update_app,
+                        TauriShellError::Action {
+                            command: update.command,
+                            message,
+                        },
+                    );
+                }
+            });
+            Ok(())
+        }
+    }
 }
 
 fn save_hotkey_label(settings: &AppSettings) -> String {
@@ -2761,6 +3004,7 @@ pub fn run(
     instance_guard: WindowsInstanceGuard,
     shell_sender: ShellCommandSender,
     shell_receiver: ShellCommandReceiver,
+    launch: ShellLaunch,
 ) {
     let _diagnostics_guard = diagnostics::init().ok();
     cleanup_stale_update_downloads();
@@ -2774,7 +3018,7 @@ pub fn run(
         log_diagnostic(format!("settings recovery: {warning}"));
         tracing::warn!(event = "settings_recovery_warning", message = %warning);
     }
-    let args: Vec<String> = std::env::args().collect();
+    let args = launch.application_arguments();
     log_diagnostic(format!(
         "run start version={} args={args:?} log_path={:?}",
         env!("CARGO_PKG_VERSION"),
@@ -2828,6 +3072,7 @@ pub fn run(
             .expect("initialize bounded desktop snapshot");
     let (ui_event_sink, ui_event_receiver) =
         crate::desktop::tauri_sink::TauriUiEventSink::channel();
+    let launched_by_autostart = launch.mode() == LaunchMode::Autostart;
 
     tauri::Builder::default()
         .manage(RuntimeState::new(settings.clone(), lol_url))
@@ -2836,6 +3081,9 @@ pub fn run(
         .manage(ui_event_sink)
         .manage(StartupWarnings::new(startup_warnings))
         .manage(WindowLifecycleState::default())
+        .manage(shell_sender.clone())
+        .manage(ShutdownGate::new())
+        .manage(UpdateOperationGate::new())
         .manage(HotkeyServiceState::default())
         .manage(MicTestState::default())
         .manage(support::SupportState::default())
@@ -2937,7 +3185,7 @@ pub fn run(
                     publish_user_error(app.handle(), error);
                 }
             }
-            match WindowsHotkeyService::start(shell_sender) {
+            match WindowsHotkeyService::start(shell_sender.clone()) {
                 Ok(service) => {
                     for warning in service.startup_warnings() {
                         let message = format!("low-level save hotkey unavailable: {warning}");
@@ -2990,7 +3238,6 @@ pub fn run(
 
             // When launched by the autostart registry entry, start in the tray
             // instead of flashing the main window.
-            let launched_by_autostart = std::env::args().any(|arg| arg == "--autostart");
             log_diagnostic(format!(
                 "setup start launched_by_autostart={launched_by_autostart} webviews={}",
                 webview_labels(app.handle())
@@ -3021,34 +3268,28 @@ pub fn run(
                 .icon(tray_icon())
                 .tooltip("Clipline — replay buffer")
                 .menu(&menu)
-                .on_menu_event(move |app, event| match event.id().as_ref() {
-                    "open" => {
-                        log_diagnostic("tray menu event: open");
-                        if let Err(e) = open_main_window(app) {
-                            log_diagnostic(format!("tray menu open failed: {e}"));
-                            tracing::error!(event = "tray_window_open_failed", error = %e);
+                .on_menu_event(move |app, event| {
+                    let mapping = match event.id().as_ref() {
+                        "open" => Some(("tray open", ShellCommand::Open)),
+                        "save" => Some(("tray save", ShellCommand::SaveReplay)),
+                        "diagnostics" => {
+                            Some(("tray diagnostics", ShellCommand::OpenDiagnostics))
                         }
-                    }
-                    "save" => {
-                        log_diagnostic("tray menu event: save");
-                        let state = app.state::<RuntimeState>();
-                        let _ = dispatch_ui_action(app, &state, UiAction::SaveReplay);
-                    }
-                    "diagnostics" => {
-                        log_diagnostic("tray menu event: diagnostics");
-                        if let Err(error) = support::open_diagnostics_folder() {
-                            tracing::error!(
-                                event = "open_diagnostics_folder_failed",
-                                error = %error
-                            );
+                        "quit" => Some(("tray quit", ShellCommand::Quit)),
+                        other => {
+                            log_diagnostic(format!("tray menu event: unknown id={other}"));
+                            None
                         }
-                    }
-                    "quit" => {
-                        log_diagnostic("tray menu event: quit");
-                        quit_app(app);
-                    }
-                    other => {
-                        log_diagnostic(format!("tray menu event: unknown id={other}"));
+                    };
+                    if let Some((source, command)) = mapping {
+                        log_diagnostic(format!("{source} requested"));
+                        if let Err(error) = enqueue_shell_command(
+                            &app.state::<ShellCommandSender>(),
+                            command,
+                            source,
+                        ) {
+                            report_shell_error(app, error);
+                        }
                     }
                 })
                 .on_tray_icon_event(|tray, event| {
@@ -3057,9 +3298,13 @@ pub fn run(
                     }
                     if should_open_on_tray_event(&event) {
                         log_diagnostic("tray icon event requests open");
-                        if let Err(e) = open_main_window(tray.app_handle()) {
-                            log_diagnostic(format!("tray icon open failed: {e}"));
-                            tracing::error!(event = "tray_icon_window_open_failed", error = %e);
+                        let app = tray.app_handle();
+                        if let Err(error) = enqueue_shell_command(
+                            &app.state::<ShellCommandSender>(),
+                            ShellCommand::Open,
+                            "tray left click",
+                        ) {
+                            report_shell_error(app, error);
                         }
                     }
                 })
@@ -3106,17 +3351,34 @@ pub fn run(
             } if is_app_window_label(&label) => {
                 log_diagnostic(format!("window event: app close requested label={label}"));
                 api.prevent_close();
-                match close_request_action(&app.state::<RuntimeState>().settings()) {
-                    CloseRequestAction::Tray => {
+                match close_request_effect(&app.state::<RuntimeState>().settings()) {
+                    WindowEffect::DropToTray => {
                         log_diagnostic("close request action: tray");
                         if let Err(e) = send_main_window_to_tray(app) {
                             log_diagnostic(format!("close to tray failed: {e}"));
                             tracing::error!(event = "close_to_tray_failed", error = %e);
                         }
                     }
-                    CloseRequestAction::Quit => {
+                    WindowEffect::Quit => {
                         log_diagnostic("close request action: quit");
-                        quit_app(app);
+                        if let Err(error) = enqueue_shell_command(
+                            &app.state::<ShellCommandSender>(),
+                            ShellCommand::Quit,
+                            "window close",
+                        ) {
+                            report_shell_error(app, error);
+                        }
+                    }
+                    effect => {
+                        report_shell_error(
+                            app,
+                            TauriShellError::Action {
+                                command: ShellCommand::Quit,
+                                message: format!(
+                                    "shared shell returned invalid close effect {effect:?}"
+                                ),
+                            },
+                        );
                     }
                 }
             }
@@ -3157,7 +3419,10 @@ pub fn run(
         });
     // Keep instance ownership and the activation listener alive for the entire application run.
     // Tauri state (including the shell dispatcher) is already gone before this bounded join.
-    drop(instance_guard);
+    if let Err(error) = instance_guard.shutdown() {
+        log_diagnostic(format!("single-instance listener shutdown failed: {error}"));
+        tracing::error!(event = "single_instance_shutdown_failed", error = %error);
+    }
 }
 
 fn spawn_game_detector<R: Runtime>(app: AppHandle<R>) {
@@ -4806,10 +5071,10 @@ mod tests {
     #[test]
     fn window_request_actions_follow_general_settings() {
         let defaults = AppSettings::default();
-        assert_eq!(close_request_action(&defaults), CloseRequestAction::Tray);
+        assert_eq!(close_request_effect(&defaults), WindowEffect::DropToTray);
         assert_eq!(
-            minimize_request_action(&defaults),
-            MinimizeRequestAction::Taskbar
+            minimize_request_effect(&defaults),
+            WindowEffect::ShowInTaskbar
         );
 
         let settings = AppSettings {
@@ -4817,11 +5082,8 @@ mod tests {
             minimize_to_tray: true,
             ..AppSettings::default()
         };
-        assert_eq!(close_request_action(&settings), CloseRequestAction::Quit);
-        assert_eq!(
-            minimize_request_action(&settings),
-            MinimizeRequestAction::Tray
-        );
+        assert_eq!(close_request_effect(&settings), WindowEffect::Quit);
+        assert_eq!(minimize_request_effect(&settings), WindowEffect::DropToTray);
     }
 
     #[test]
@@ -4864,7 +5126,7 @@ mod tests {
             .find("acquire_or_activate(")
             .expect("native instance ownership should be acquired");
         let app_run = main
-            .find("app::run(instance, shell_sender, shell_receiver)")
+            .find("app::run(instance, shell_sender, shell_receiver, launch)")
             .expect("primary instance should construct the app");
         assert!(
             acquire < app_run,
@@ -4893,6 +5155,23 @@ mod tests {
             !main[..acquire].contains("app::run(") && !main[..acquire].contains("service::spawn("),
             "startup must not construct the app or recorder before duplicate rejection"
         );
+    }
+
+    #[test]
+    fn native_shell_enqueue_failure_is_typed_before_application_work() {
+        let (sender, receiver) = clipline_shell::shell_command_channel();
+        drop(receiver);
+
+        let error = enqueue_shell_command(&sender, ShellCommand::Quit, "test")
+            .expect_err("a disconnected command port must fail closed");
+        assert!(matches!(
+            error,
+            TauriShellError::Enqueue {
+                source: "test",
+                command: ShellCommand::Quit,
+                error: clipline_shell::ShellCommandSendError::Disconnected,
+            }
+        ));
     }
 
     #[test]

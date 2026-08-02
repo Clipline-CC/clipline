@@ -65,6 +65,21 @@ fn native_shell_services_are_shell_owned_and_tauri_plugins_are_absent() {
     assert!(!lock.contains("name = \"tauri-plugin-updater\""));
 
     let app_sources = rust_sources_below(&root.join("apps/clipline-app/src"));
+    for forbidden in [
+        "tauri_plugin_global_shortcut",
+        "tauri_plugin_autostart",
+        "tauri_plugin_single_instance",
+        "tauri_plugin_updater",
+    ] {
+        let owners: Vec<_> = app_sources
+            .iter()
+            .filter(|path| fs::read_to_string(path).unwrap().contains(forbidden))
+            .collect();
+        assert!(
+            owners.is_empty(),
+            "shipping app source must not retain removed plugin namespace {forbidden}: {owners:?}"
+        );
+    }
     for symbol in [
         "RegisterHotKey(",
         "SetWindowsHookExW(",

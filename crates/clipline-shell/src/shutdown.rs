@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::sync::Mutex;
 use thiserror::Error;
 
 use crate::ShellGeneration;
@@ -10,6 +11,87 @@ pub const MAX_SHUTDOWN_TIMEOUT_MS: u64 = 30_000;
 pub enum ShutdownReason {
     Quit,
     InstallUpdate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum ShutdownOwnershipError {
+    #[error("{active:?} already owns process shutdown; cannot start {requested:?}")]
+    Busy {
+        active: ShutdownReason,
+        requested: ShutdownReason,
+    },
+    #[error("process shutdown ownership is unavailable")]
+    Unavailable,
+}
+
+/// Process-wide ownership for the one path allowed to authorize application exit.
+#[derive(Default)]
+pub struct ShutdownGate {
+    owner: Mutex<Option<ShutdownReason>>,
+}
+
+impl ShutdownGate {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            owner: Mutex::new(None),
+        }
+    }
+
+    pub fn begin(
+        &self,
+        requested: ShutdownReason,
+    ) -> Result<ShutdownLease<'_>, ShutdownOwnershipError> {
+        let mut owner = self
+            .owner
+            .lock()
+            .map_err(|_| ShutdownOwnershipError::Unavailable)?;
+        if let Some(active) = *owner {
+            return Err(ShutdownOwnershipError::Busy { active, requested });
+        }
+        *owner = Some(requested);
+        Ok(ShutdownLease {
+            gate: self,
+            reason: requested,
+            release_on_drop: true,
+        })
+    }
+
+    #[must_use]
+    pub fn owner(&self) -> Option<ShutdownReason> {
+        match self.owner.lock() {
+            Ok(owner) => *owner,
+            Err(poisoned) => *poisoned.into_inner(),
+        }
+    }
+}
+
+pub struct ShutdownLease<'a> {
+    gate: &'a ShutdownGate,
+    reason: ShutdownReason,
+    release_on_drop: bool,
+}
+
+impl ShutdownLease<'_> {
+    /// Keep shutdown ownership latched because application exit is committed.
+    pub fn commit_exit(mut self) {
+        self.release_on_drop = false;
+    }
+}
+
+impl Drop for ShutdownLease<'_> {
+    fn drop(&mut self) {
+        if !self.release_on_drop {
+            return;
+        }
+        let mut owner = match self.gate.owner.lock() {
+            Ok(owner) => owner,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if *owner == Some(self.reason) {
+            *owner = None;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -21,13 +21,23 @@ fn windows_main() -> Result<(), String> {
     if print_benchmark_probe_if_requested() {
         return Ok(());
     }
-    if let Err(error) = windows::wait_for_elevation_parent_from_args() {
+    let launch = clipline_shell::ShellLaunch::parse(std::env::args())
+        .map_err(|error| format!("parse shell launch: {error}"))?;
+    if let Err(error) =
+        clipline_shell::windows::process::wait_for_elevation_parent(launch.elevation_parent())
+    {
         return Err(format!("administrator restart handoff: {error}"));
     }
-    let command = if std::env::args().any(|argument| argument == "--autostart") {
-        clipline_shell::activation::ActivationCommand::AutostartNoop
-    } else {
-        clipline_shell::activation::ActivationCommand::Reveal
+    if let Some(parent) = launch.updater_parent() {
+        if let Err(error) = clipline_shell::windows::process::wait_for_process_exit(parent) {
+            return Err(format!("update restart handoff: {error}"));
+        }
+    }
+    let command = match launch.mode() {
+        clipline_shell::LaunchMode::Autostart => {
+            clipline_shell::activation::ActivationCommand::AutostartNoop
+        }
+        clipline_shell::LaunchMode::Normal => clipline_shell::activation::ActivationCommand::Reveal,
     };
     let (shell_sender, shell_receiver) = clipline_shell::shell_command_channel();
     match clipline_shell::windows::activation::acquire_or_activate(
@@ -38,7 +48,7 @@ fn windows_main() -> Result<(), String> {
     .map_err(|error| format!("single-instance activation: {error}"))?
     {
         clipline_shell::windows::activation::WindowsInstanceRole::Primary(instance) => {
-            app::run(instance, shell_sender, shell_receiver);
+            app::run(instance, shell_sender, shell_receiver, launch);
         }
         clipline_shell::windows::activation::WindowsInstanceRole::Secondary(_) => {}
     }

@@ -9,6 +9,9 @@ pub mod windows;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
@@ -25,6 +28,290 @@ use download::DownloadTelemetry;
 pub const CLIPLINE_MINISIGN_PUBLIC_KEY: &str = "untrusted comment: minisign public key: 89E05097264BE6E6\nRWTm5ksml1DgiXheR48k0mC5ue9mQsnaK0Pa3S8G8virP7ar6HIOLunZ\n";
 
 const VERIFY_BUFFER_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateOperationKind {
+    Check,
+    Install,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UpdateOperationSnapshot {
+    pub id: u64,
+    pub kind: UpdateOperationKind,
+    pub cancelled: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum UpdateOperationError {
+    #[error("an update {active:?} operation is already active; cannot start {requested:?}")]
+    Busy {
+        active: UpdateOperationKind,
+        requested: UpdateOperationKind,
+    },
+    #[error("updates are quiescing for process shutdown; cannot start {requested:?}")]
+    Quiescing { requested: UpdateOperationKind },
+    #[error("the update operation identity is exhausted")]
+    IdentityExhausted,
+    #[error("the update operation gate is unavailable")]
+    Unavailable,
+    #[error("timed out waiting for update {active:?} operation {id} to stop")]
+    WaitTimedOut {
+        id: u64,
+        active: UpdateOperationKind,
+    },
+}
+
+struct ActiveUpdateOperation {
+    id: u64,
+    kind: UpdateOperationKind,
+    cancelled: Arc<AtomicBool>,
+}
+
+#[derive(Default)]
+struct UpdateOperationState {
+    last_id: u64,
+    active: Option<ActiveUpdateOperation>,
+    quiescing: bool,
+}
+
+/// Process-local ownership for update checks and installs.
+///
+/// The lease is RAII so every early return releases the gate. Cancellation is
+/// an explicit shared flag that a bounded downloader can observe without a UI
+/// or framework dependency.
+#[derive(Default)]
+pub struct UpdateOperationGate {
+    state: Mutex<UpdateOperationState>,
+    idle: Condvar,
+}
+
+impl UpdateOperationGate {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            state: Mutex::new(UpdateOperationState {
+                last_id: 0,
+                active: None,
+                quiescing: false,
+            }),
+            idle: Condvar::new(),
+        }
+    }
+
+    pub fn begin(
+        &self,
+        requested: UpdateOperationKind,
+    ) -> Result<UpdateOperationLease<'_>, UpdateOperationError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| UpdateOperationError::Unavailable)?;
+        if state.quiescing {
+            return Err(UpdateOperationError::Quiescing { requested });
+        }
+        if let Some(active) = &state.active {
+            return Err(UpdateOperationError::Busy {
+                active: active.kind,
+                requested,
+            });
+        }
+        let id = state
+            .last_id
+            .checked_add(1)
+            .ok_or(UpdateOperationError::IdentityExhausted)?;
+        let cancelled = Arc::new(AtomicBool::new(false));
+        state.last_id = id;
+        state.active = Some(ActiveUpdateOperation {
+            id,
+            kind: requested,
+            cancelled: Arc::clone(&cancelled),
+        });
+        Ok(UpdateOperationLease {
+            gate: self,
+            id,
+            cancelled,
+            release_on_drop: true,
+        })
+    }
+
+    #[must_use]
+    pub fn cancel_active(&self) -> bool {
+        let state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let Some(active) = &state.active else {
+            return false;
+        };
+        active.cancelled.store(true, Ordering::Release);
+        true
+    }
+
+    /// Prevent new update work, cancel the current operation, and wait for its
+    /// RAII lease to release. The returned lease keeps the gate quiescent for
+    /// the caller's shutdown transaction.
+    pub fn quiesce_and_wait(
+        &self,
+        timeout: Duration,
+    ) -> Result<UpdateQuiescenceLease<'_>, UpdateOperationError> {
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or(UpdateOperationError::Unavailable)?;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| UpdateOperationError::Unavailable)?;
+        if state.quiescing {
+            return Err(UpdateOperationError::Unavailable);
+        }
+        state.quiescing = true;
+        let tracked = state.active.as_ref().map(|active| {
+            active.cancelled.store(true, Ordering::Release);
+            UpdateOperationSnapshot {
+                id: active.id,
+                kind: active.kind,
+                cancelled: true,
+            }
+        });
+
+        while let Some(tracked) = tracked {
+            if state
+                .active
+                .as_ref()
+                .is_none_or(|active| active.id != tracked.id)
+            {
+                return Ok(UpdateQuiescenceLease {
+                    gate: self,
+                    completed: Some(tracked),
+                    release_on_drop: true,
+                });
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                state.quiescing = false;
+                self.idle.notify_all();
+                return Err(UpdateOperationError::WaitTimedOut {
+                    id: tracked.id,
+                    active: tracked.kind,
+                });
+            }
+            let (next, wait) = self
+                .idle
+                .wait_timeout(state, remaining)
+                .map_err(|_| UpdateOperationError::Unavailable)?;
+            state = next;
+            if wait.timed_out()
+                && state
+                    .active
+                    .as_ref()
+                    .is_some_and(|active| active.id == tracked.id)
+            {
+                state.quiescing = false;
+                self.idle.notify_all();
+                return Err(UpdateOperationError::WaitTimedOut {
+                    id: tracked.id,
+                    active: tracked.kind,
+                });
+            }
+        }
+
+        Ok(UpdateQuiescenceLease {
+            gate: self,
+            completed: None,
+            release_on_drop: true,
+        })
+    }
+
+    #[must_use]
+    pub fn snapshot(&self) -> Option<UpdateOperationSnapshot> {
+        let state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        state.active.as_ref().map(|active| UpdateOperationSnapshot {
+            id: active.id,
+            kind: active.kind,
+            cancelled: active.cancelled.load(Ordering::Acquire),
+        })
+    }
+}
+
+pub struct UpdateOperationLease<'a> {
+    gate: &'a UpdateOperationGate,
+    id: u64,
+    cancelled: Arc<AtomicBool>,
+    release_on_drop: bool,
+}
+
+impl UpdateOperationLease<'_> {
+    #[must_use]
+    pub const fn id(&self) -> u64 {
+        self.id
+    }
+
+    #[must_use]
+    pub fn cancellation(&self) -> &AtomicBool {
+        &self.cancelled
+    }
+
+    /// Keep the operation latched because application exit is committed.
+    pub fn commit_exit(mut self) {
+        self.release_on_drop = false;
+    }
+}
+
+impl Drop for UpdateOperationLease<'_> {
+    fn drop(&mut self) {
+        if !self.release_on_drop {
+            return;
+        }
+        let mut state = match self.gate.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if state
+            .active
+            .as_ref()
+            .is_some_and(|active| active.id == self.id)
+        {
+            state.active = None;
+            self.gate.idle.notify_all();
+        }
+    }
+}
+
+pub struct UpdateQuiescenceLease<'a> {
+    gate: &'a UpdateOperationGate,
+    completed: Option<UpdateOperationSnapshot>,
+    release_on_drop: bool,
+}
+
+impl UpdateQuiescenceLease<'_> {
+    #[must_use]
+    pub const fn completed(&self) -> Option<UpdateOperationSnapshot> {
+        self.completed
+    }
+
+    /// Keep the gate permanently quiescent because application exit is now committed.
+    pub fn commit_exit(mut self) {
+        self.release_on_drop = false;
+    }
+}
+
+impl Drop for UpdateQuiescenceLease<'_> {
+    fn drop(&mut self) {
+        if !self.release_on_drop {
+            return;
+        }
+        let mut state = match self.gate.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        state.quiescing = false;
+        self.gate.idle.notify_all();
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum VerificationError {

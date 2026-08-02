@@ -1,10 +1,7 @@
 pub use clipline_updater::manifest::UpdateChannel;
 
-// Flip this once Clipline has stable, non-prerelease GitHub releases.
-pub const STABLE_CHANNEL_ENABLED: bool = false;
-
 pub const fn channel_enabled(channel: UpdateChannel) -> bool {
-    channel.enabled() && (STABLE_CHANNEL_ENABLED || !matches!(channel, UpdateChannel::Stable))
+    channel.enabled()
 }
 
 pub fn normalize_channel(channel: UpdateChannel) -> UpdateChannel {

@@ -4,7 +4,7 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
-## Checkpoint (2026-08-02): Slint replacement Milestone 6 native shell, Tasks 1--8
+## Checkpoint (2026-08-02): Slint replacement Milestone 6 native shell, Tasks 1--9
 
 Plan: `docs/superpowers/plans/2026-08-02-slint-native-shell.md`. The new
 `crates/clipline-shell` crate owns the framework-neutral launch/window/shutdown contract and the
@@ -105,8 +105,25 @@ window and one drop. Debug diagnostic harness runs reported 3.4 MiB tree PWS p95
 7.2 MiB after close-to-tray, and 11.2 MiB after the 100-cycle soak; these are functional diagnostics,
 not formal memory claims, because the quiet matched benchmark gates remain pending.
 
+Task 9 puts the shipping Tauri shell on the same framework-neutral contracts without removing the
+WebView rollback path. `ShellLaunch` is parsed exactly once before application startup and carries
+normal, autostart, elevation-parent, and updater-parent handoffs into the app. Tauri tray clicks,
+Open, Save Replay, Diagnostics, Quit, Check Updates, and Install Update all enter through the one
+bounded `ShellCommand` port; adapter failures are typed, logged, and surfaced through the existing
+native error path. Window close/minimize decisions use the shared `WindowPolicy`, and repository
+contracts reject the four removed Tauri shell plugins and direct reintroduction of their Win32
+mechanics.
+
+Process exit is now single-owner. A neutral `ShutdownGate` serializes ordinary Quit, administrator
+restart, and updater install, while an `UpdateOperationGate` permits only one check/install and lets
+Quit cancel and boundedly wait for active updater work. The owner then saves durable settings under
+the existing transaction lock, publishes tray state, waits for recorder finalization, flushes
+diagnostics, and only then exits. Administrator restart launches the exact elevated child only at
+that final ready-to-exit edge. Successful passive installs latch both gates so another shutdown
+path cannot race the already-authorized exit; failures release their leases and remain visible.
+
 Validation is green: CI-mode `cargo test --workspace`, warning-denied workspace Clippy after fresh
-`clipline-shell` and `clipline-app` caches, 487 app unit tests, 92 UI contracts, 12
+`clipline-shell` and `clipline-app` caches, 488 app unit tests, 92 UI contracts, 12
 repository-security contracts, 8 shared diagnostics tests, live disposable Credential Manager
 CRUD, four disposable HKCU autostart device tests, both native hotkey device tests, three neutral
 activation protocol tests, and four live same-process named-pipe/mutex device tests. A normal-mode
@@ -116,13 +133,14 @@ Generated Tauri schemas and `Cargo.lock` remain current.
 The user's installed Clipline process and profile remained untouched, so no shipping debug app was
 launched and no test used the production instance identity.
 
-Implementation commits are `026d0eb` (bounded shell/lifecycle), `23263e3` (neutral hotkey grammar),
-`d20e421` (native Windows hotkey service), `a6d74b9` (transactional HKCU autostart), `ff57dc1`
-(authenticated single-instance activation), and the Task 6 commit containing this checkpoint. Plan
-commits are `13005af` and `9329e53`.
+Implementation commits through Task 8 are `026d0eb` (bounded shell/lifecycle), `23263e3` (neutral
+hotkey grammar), `d20e421` (native Windows hotkey service), `a6d74b9` (transactional HKCU
+autostart), `ff57dc1` (authenticated single-instance activation), `b20ba8b` (shared Windows shell
+services), `71448aa` (signed updater), and `bc74ca0` (lazy Slint tray shell). Plan commits are
+`13005af` and `9329e53`.
 
-Next: continue Tasks 9--11 (shipping Tauri adapters, the isolated native NSIS candidate, and final
-validation) without switching production before the later gates pass.
+Next: continue Tasks 10--11 (the isolated native NSIS candidate and final validation) without
+switching production before the later gates pass.
 
 ## Checkpoint (2026-08-02): Slint replacement Milestone 5 desktop controller
 

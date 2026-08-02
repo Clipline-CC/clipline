@@ -31,11 +31,6 @@ pub fn launch_elevated_after(parent_process_id: u32) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
-pub fn wait_for_elevation_parent_from_args() -> Result<(), String> {
-    clipline_shell::windows::process::wait_for_elevation_parent_from_args()
-        .map_err(|error| error.to_string())
-}
-
 pub(crate) fn wide_null(value: &OsStr) -> Vec<u16> {
     value.encode_wide().chain(std::iter::once(0)).collect()
 }
