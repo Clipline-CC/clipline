@@ -48,16 +48,18 @@ fn neutral_shell_contract_has_no_framework_or_platform_escape_hatches() {
 }
 
 #[test]
-fn native_hotkey_and_autostart_services_are_shell_owned_and_tauri_plugins_are_absent() {
+fn native_shell_services_are_shell_owned_and_tauri_plugins_are_absent() {
     let root = workspace_root();
     let manifest =
         fs::read_to_string(root.join("apps/clipline-app/Cargo.toml")).expect("read app manifest");
     assert!(!manifest.contains("tauri-plugin-global-shortcut"));
     assert!(!manifest.contains("tauri-plugin-autostart"));
+    assert!(!manifest.contains("tauri-plugin-single-instance"));
     assert!(manifest.contains("clipline-shell"));
     let lock = fs::read_to_string(root.join("Cargo.lock")).expect("read Cargo.lock");
     assert!(!lock.contains("name = \"tauri-plugin-global-shortcut\""));
     assert!(!lock.contains("name = \"tauri-plugin-autostart\""));
+    assert!(!lock.contains("name = \"tauri-plugin-single-instance\""));
 
     let app_sources = rust_sources_below(&root.join("apps/clipline-app/src"));
     for symbol in [
@@ -68,6 +70,9 @@ fn native_hotkey_and_autostart_services_are_shell_owned_and_tauri_plugins_are_ab
         "RegGetValueW(",
         "RegSetValueExW(",
         "RegDeleteValueW(",
+        "CreateNamedPipeW(",
+        "CreateMutexW(",
+        "ImpersonateNamedPipeClient(",
     ] {
         let owners: Vec<_> = app_sources
             .iter()
@@ -106,6 +111,24 @@ fn native_hotkey_and_autostart_services_are_shell_owned_and_tauri_plugins_are_ab
         assert!(
             autostart.contains(contract),
             "native autostart service must retain {contract}"
+        );
+    }
+
+    let activation =
+        fs::read_to_string(root.join("crates/clipline-shell/src/windows/activation.rs"))
+            .expect("read native activation service");
+    for contract in [
+        "PIPE_REJECT_REMOTE_CLIENTS",
+        "ImpersonateNamedPipeClient(",
+        "OpenThreadToken(",
+        "GetNamedPipeClientProcessId(",
+        "GetProcessTimes(",
+        "MAX_ACTIVATION_PAYLOAD_BYTES",
+        "listener_loop(",
+    ] {
+        assert!(
+            activation.contains(contract),
+            "native activation service must retain {contract}"
         );
     }
 }

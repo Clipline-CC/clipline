@@ -285,14 +285,14 @@ fn cloud_pages_and_marker_art_cross_narrow_renderer_boundaries() {
 fn native_shell_prevents_duplicate_clipline_instances() {
     let manifest = cargo_toml();
     let app = app_rs();
-    let single_instance_plugin = "tauri_plugin_single_instance::init";
-    let single_instance = app
-        .find(single_instance_plugin)
-        .expect("native shell should register the Tauri single-instance plugin");
+    let main = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"))
+        .expect("read native entry point");
 
     assert!(
-        manifest.contains("tauri-plugin-single-instance"),
-        "Cargo.toml should depend on the single-instance plugin"
+        !manifest.contains("tauri-plugin-single-instance")
+            && !app.contains("tauri_plugin_single_instance")
+            && main.contains("acquire_or_activate("),
+        "single-instance ownership must use the shared authenticated native adapter"
     );
     assert!(
         !manifest.contains("tauri-plugin-autostart")
@@ -300,10 +300,9 @@ fn native_shell_prevents_duplicate_clipline_instances() {
             && app.contains("WindowsAutostartRegistration"),
         "autostart must be owned by the shared native shell adapter"
     );
-    let updater = app.find("tauri_plugin_updater::Builder::new").unwrap();
     assert!(
-        single_instance < updater,
-        "single-instance ownership must be established before other shell plugins"
+        main.find("acquire_or_activate(").unwrap() < main.find("app::run(").unwrap(),
+        "instance ownership must be established before constructing the application shell"
     );
 }
 

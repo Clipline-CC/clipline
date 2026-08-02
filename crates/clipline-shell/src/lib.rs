@@ -1,5 +1,6 @@
 //! Framework-neutral desktop shell contract for Clipline.
 
+pub mod activation;
 mod channel;
 mod contract;
 pub mod hotkey;

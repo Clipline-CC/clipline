@@ -4,7 +4,7 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
-## Checkpoint (2026-08-02): Slint replacement Milestone 6 native shell, Tasks 1--4
+## Checkpoint (2026-08-02): Slint replacement Milestone 6 native shell, Tasks 1--5
 
 Plan: `docs/superpowers/plans/2026-08-02-slint-native-shell.md`. The new
 `crates/clipline-shell` crate owns the framework-neutral launch/window/shutdown contract and the
@@ -31,21 +31,34 @@ permissions are absent. Device tests use randomized disposable value names whose
 pre-existing state and deletes only its own value on drop; the installed `Clipline` entry was never
 touched.
 
+Single-instance ownership is established before the Tauri builder or recorder exists. A global
+product-and-SID-scoped mutex elects the primary; a local-only named pipe uses
+`PIPE_REJECT_REMOTE_CLIENTS`, then impersonates each peer and compares its binary `TokenUser` SID.
+The bounded, versioned JSON envelope is limited to 4 KiB, rejects duplicate/unknown fields, and
+includes the client's PID plus creation time so a recycled process ID cannot authenticate. Reads
+and accepts are deadline-bound, malformed/incomplete/stalled clients fail closed, and the listener
+checks its stop flag every 2 ms without relying on a wake connection. Normal secondaries enqueue one
+coalescable Open command in the existing 32-entry shell port; secondary autostart launches are
+acknowledged no-ops. The shell dispatcher exists independently of the hotkey service and schedules
+window creation/reveal on Tauri's main thread, including activations queued before UI attachment.
+`tauri-plugin-single-instance` is absent.
+
 Validation is green: CI-mode `cargo test --workspace`, warning-denied workspace Clippy after fresh
 `clipline-shell` and `clipline-app` caches, 505 app unit tests (two intentional subprocess fixtures
 ignored), 92 UI contracts, 11 repository-security contracts, four disposable HKCU autostart device
-tests, and both native hotkey device tests. Generated Tauri schemas and `Cargo.lock` were refreshed.
+tests, both native hotkey device tests, three neutral activation protocol tests, and four live
+same-process named-pipe/mutex device tests. Generated Tauri schemas and `Cargo.lock` were refreshed.
 The user's installed Clipline process and profile remained untouched, so no shipping debug app was
-launched.
+launched and no test used the production instance identity.
 
 Implementation commits are `026d0eb` (bounded shell/lifecycle), `23263e3` (neutral hotkey grammar),
-`d20e421` (native Windows hotkey service), and the Task 4 commit immediately following this
-checkpoint. Plan commits are `13005af` and `9329e53`.
+`d20e421` (native Windows hotkey service), `a6d74b9` (transactional HKCU autostart), and the Task 5
+commit immediately following this checkpoint. Plan commits are `13005af` and `9329e53`.
 
-Next: Task 5 implements the bounded, versioned, same-user-authenticated single-instance activation
-channel and removes `tauri-plugin-single-instance` only after the shipping app uses it. Then continue
-Tasks 6--11 (shared services/diagnostics, signed updater, lazy Slint tray/window, shipping adapters,
-NSIS candidate, and final validation) without switching production before the later gates pass.
+Next: Task 6 consolidates shared safe Windows process/shell/clipboard/credential helpers and the
+bounded diagnostics service. Then continue Tasks 7--11 (signed updater, lazy Slint tray/window,
+shipping adapters, NSIS candidate, and final validation) without switching production before the
+later gates pass.
 
 ## Checkpoint (2026-08-02): Slint replacement Milestone 5 desktop controller
 

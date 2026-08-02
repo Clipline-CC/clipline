@@ -10,14 +10,39 @@ fn main() {
 
 #[cfg(windows)]
 fn main() {
+    if let Err(error) = windows_main() {
+        eprintln!("Clipline startup failed: {error}");
+        std::process::exit(1);
+    }
+}
+
+#[cfg(windows)]
+fn windows_main() -> Result<(), String> {
     if print_benchmark_probe_if_requested() {
-        return;
+        return Ok(());
     }
     if let Err(error) = windows::wait_for_elevation_parent_from_args() {
-        eprintln!("administrator restart handoff: {error}");
-        return;
+        return Err(format!("administrator restart handoff: {error}"));
     }
-    app::run();
+    let command = if std::env::args().any(|argument| argument == "--autostart") {
+        clipline_shell::activation::ActivationCommand::AutostartNoop
+    } else {
+        clipline_shell::activation::ActivationCommand::Reveal
+    };
+    let (shell_sender, shell_receiver) = clipline_shell::shell_command_channel();
+    match clipline_shell::windows::activation::acquire_or_activate(
+        "io.clipline.app",
+        command,
+        shell_sender.clone(),
+    )
+    .map_err(|error| format!("single-instance activation: {error}"))?
+    {
+        clipline_shell::windows::activation::WindowsInstanceRole::Primary(instance) => {
+            app::run(instance, shell_sender, shell_receiver);
+        }
+        clipline_shell::windows::activation::WindowsInstanceRole::Secondary(_) => {}
+    }
+    Ok(())
 }
 
 #[cfg(windows)]

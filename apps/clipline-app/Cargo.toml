@@ -31,7 +31,6 @@ tokio-util = { version = "0.7", features = ["io", "rt"] }
 # the webview2-com pin below. A routine minor bump could silently change them.
 tauri = { version = "~2.11", features = ["tray-icon", "protocol-asset"] }
 tauri-runtime = "~2.11"
-tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"
 # Pinned to the version Tauri 2.11 already resolves, so `PlatformWebview::controller`
 # hands back the same `ICoreWebView2Controller` type and no second COM binding

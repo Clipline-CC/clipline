@@ -20,9 +20,10 @@ use clipline_desktop::{
     WindowLifecycleSnapshot,
 };
 use clipline_shell::hotkey::{HotkeyReplacementOutcome, HotkeySet};
+use clipline_shell::windows::activation::WindowsInstanceGuard;
 use clipline_shell::windows::autostart::{AutostartChange, WindowsAutostartRegistration};
 use clipline_shell::windows::hotkey::WindowsHotkeyService;
-use clipline_shell::{shell_command_channel, ShellCommand, ShellCommandReceiver};
+use clipline_shell::{ShellCommand, ShellCommandReceiver, ShellCommandSender};
 
 use crate::game_discovery::DetectedGameCandidate;
 use crate::game_plugins::GamePluginInfo;
@@ -2333,26 +2334,30 @@ fn configured_hotkeys(settings: &AppSettings) -> Result<HotkeySet, String> {
 struct HotkeyServiceState {
     service: Mutex<Option<WindowsHotkeyService>>,
     dispatcher: Mutex<Option<std::thread::JoinHandle<()>>>,
+    dispatcher_stop: std::sync::Arc<AtomicBool>,
 }
 
 impl HotkeyServiceState {
-    fn install(
-        &self,
-        service: WindowsHotkeyService,
-        dispatcher: std::thread::JoinHandle<()>,
-    ) -> Result<(), String> {
+    fn install_service(&self, service: WindowsHotkeyService) -> Result<(), String> {
         let mut service_slot = self
             .service
             .lock()
             .map_err(|_| "hotkey service lock poisoned".to_string())?;
-        let mut dispatcher_slot = self
-            .dispatcher
-            .lock()
-            .map_err(|_| "hotkey dispatcher lock poisoned".to_string())?;
-        if service_slot.is_some() || dispatcher_slot.is_some() {
+        if service_slot.is_some() {
             return Err("hotkey service is already installed".into());
         }
         *service_slot = Some(service);
+        Ok(())
+    }
+
+    fn install_dispatcher(&self, dispatcher: std::thread::JoinHandle<()>) -> Result<(), String> {
+        let mut dispatcher_slot = self
+            .dispatcher
+            .lock()
+            .map_err(|_| "shell dispatcher lock poisoned".to_string())?;
+        if dispatcher_slot.is_some() {
+            return Err("shell dispatcher is already installed".into());
+        }
         *dispatcher_slot = Some(dispatcher);
         Ok(())
     }
@@ -2373,6 +2378,7 @@ impl Drop for HotkeyServiceState {
         if let Ok(service) = self.service.get_mut() {
             drop(service.take());
         }
+        self.dispatcher_stop.store(true, Ordering::Release);
         if let Ok(dispatcher) = self.dispatcher.get_mut() {
             if let Some(dispatcher) = dispatcher.take() {
                 let _ = dispatcher.join();
@@ -2381,21 +2387,33 @@ impl Drop for HotkeyServiceState {
     }
 }
 
-fn spawn_hotkey_dispatch<R: Runtime>(
+fn spawn_shell_dispatch<R: Runtime>(
     app: AppHandle<R>,
     receiver: ShellCommandReceiver,
+    stop: std::sync::Arc<AtomicBool>,
 ) -> Result<std::thread::JoinHandle<()>, String> {
     std::thread::Builder::new()
-        .name("clipline-hotkey-dispatch".into())
-        .spawn(move || loop {
+        .name("clipline-shell-dispatch".into())
+        .spawn(move || while !stop.load(Ordering::Acquire) {
             match receiver.wait_recv(Duration::from_millis(250)) {
                 Ok(Some(update)) if update.command == ShellCommand::SaveReplay => {
                     let state = app.state::<RuntimeState>();
                     let _ = dispatch_ui_action(&app, &state, UiAction::SaveReplay);
                 }
+                Ok(Some(update)) if update.command == ShellCommand::Open => {
+                    let open_app = app.clone();
+                    if let Err(error) = app.run_on_main_thread(move || {
+                        if let Err(error) = open_main_window(&open_app) {
+                            log_diagnostic(format!("single-instance open existing failed: {error}"));
+                            tracing::error!(event = "single_instance_window_open_failed", error = %error);
+                        }
+                    }) {
+                        log_diagnostic(format!("schedule single-instance activation: {error}"));
+                    }
+                }
                 Ok(Some(update)) => {
                     log_diagnostic(format!(
-                        "hotkey dispatcher ignored shell command {:?}",
+                        "shell dispatcher ignored command {:?}",
                         update.command
                     ));
                 }
@@ -2576,7 +2594,11 @@ fn save_settings<R: Runtime>(
     Ok(settings)
 }
 
-pub fn run() {
+pub fn run(
+    instance_guard: WindowsInstanceGuard,
+    shell_sender: ShellCommandSender,
+    shell_receiver: ShellCommandReceiver,
+) {
     let _diagnostics_guard = diagnostics::init().ok();
     if let Err(error) = install_diagnostic_handler(|event| log_diagnostic(event.to_string())) {
         log_diagnostic(format!("capture diagnostic setup: {error}"));
@@ -2656,18 +2678,6 @@ pub fn run() {
         .manage(crate::memory::MemorySampler::default())
         .manage(NativeMediaFolderAuthorization::default())
         .manage(crate::library::StorageSettings::new(quota_bytes, media_dir))
-        .plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
-            let launched_by_autostart = args.iter().any(|arg| arg == "--autostart");
-            log_diagnostic(format!(
-                "single-instance secondary launch launched_by_autostart={launched_by_autostart} cwd={cwd:?} args={args:?}"
-            ));
-            if !launched_by_autostart {
-                if let Err(e) = open_main_window(app) {
-                    log_diagnostic(format!("single-instance open existing failed: {e}"));
-                    tracing::error!(event = "single_instance_window_open_failed", error = %e);
-                }
-            }
-        }))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             save_replay,
@@ -2745,7 +2755,25 @@ pub fn run() {
                     tracing::warn!(event = "startup_osu_enrichment_retry_failed", error = %e);
                 }
             });
-            let (shell_sender, shell_receiver) = shell_command_channel();
+            let dispatcher_stop = app
+                .state::<HotkeyServiceState>()
+                .dispatcher_stop
+                .clone();
+            match spawn_shell_dispatch(app.handle().clone(), shell_receiver, dispatcher_stop) {
+                Ok(dispatcher) => {
+                    if let Err(error) = app
+                        .state::<HotkeyServiceState>()
+                        .install_dispatcher(dispatcher)
+                    {
+                        tracing::error!(event = "shell_dispatch_install_failed", error = %error);
+                        publish_user_error(app.handle(), error);
+                    }
+                }
+                Err(error) => {
+                    tracing::error!(event = "shell_dispatch_start_failed", error = %error);
+                    publish_user_error(app.handle(), error);
+                }
+            }
             match WindowsHotkeyService::start(shell_sender) {
                 Ok(service) => {
                     for warning in service.startup_warnings() {
@@ -2768,20 +2796,12 @@ pub fn run() {
                             publish_user_error(app.handle(), message);
                         }
                     }
-                    match spawn_hotkey_dispatch(app.handle().clone(), shell_receiver) {
-                        Ok(dispatcher) => {
-                            if let Err(error) = app
-                                .state::<HotkeyServiceState>()
-                                .install(service, dispatcher)
-                            {
-                                tracing::error!(event = "hotkey_service_install_failed", error = %error);
-                                publish_user_error(app.handle(), error);
-                            }
-                        }
-                        Err(error) => {
-                            tracing::error!(event = "hotkey_dispatch_start_failed", error = %error);
-                            publish_user_error(app.handle(), error);
-                        }
+                    if let Err(error) = app
+                        .state::<HotkeyServiceState>()
+                        .install_service(service)
+                    {
+                        tracing::error!(event = "hotkey_service_install_failed", error = %error);
+                        publish_user_error(app.handle(), error);
                     }
                 }
                 Err(error) => {
@@ -2972,6 +2992,9 @@ pub fn run() {
             }
             _ => {}
         });
+    // Keep instance ownership and the activation listener alive for the entire application run.
+    // Tauri state (including the shell dispatcher) is already gone before this bounded join.
+    drop(instance_guard);
 }
 
 fn spawn_game_detector<R: Runtime>(app: AppHandle<R>) {
@@ -4608,16 +4631,25 @@ mod tests {
 
     #[test]
     fn native_shell_starts_recorder_after_single_instance_accepts_process() {
+        let main = include_str!("main.rs");
+        let acquire = main
+            .find("acquire_or_activate(")
+            .expect("native instance ownership should be acquired");
+        let app_run = main
+            .find("app::run(instance, shell_sender, shell_receiver)")
+            .expect("primary instance should construct the app");
+        assert!(
+            acquire < app_run,
+            "instance ownership must be established before app construction"
+        );
+
         let app = include_str!("app.rs");
-        let run_start = app.find("pub fn run()").expect("run function should exist");
+        let run_start = app.find("pub fn run(").expect("run function should exist");
         let run_body = &app[run_start..];
         let run_end = run_body
             .find("\nfn spawn_game_detector")
             .expect("run function should be followed by spawn_game_detector");
         let run_body = &run_body[..run_end];
-        let single_instance = run_body
-            .find("tauri_plugin_single_instance::init")
-            .expect("single-instance plugin should be installed");
         let setup = run_body
             .find(".setup(move |app|")
             .expect("app setup should be registered");
@@ -4626,16 +4658,12 @@ mod tests {
             .expect("setup should start the recorder after plugins are installed");
 
         assert!(
-            single_instance < setup,
-            "single-instance plugin must be installed before setup runs"
-        );
-        assert!(
             setup < recorder_start,
-            "initial recorder startup must happen from setup after single-instance registration"
+            "initial recorder startup must happen only from setup"
         );
         assert!(
-            !run_body[..single_instance].contains("service::spawn("),
-            "run() must not spawn the recorder before single-instance can reject a duplicate launch"
+            !main[..acquire].contains("app::run(") && !main[..acquire].contains("service::spawn("),
+            "startup must not construct the app or recorder before duplicate rejection"
         );
     }
 
