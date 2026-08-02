@@ -171,7 +171,8 @@ impl UiEventSender {
         state.next_sequence = sequence;
         let update = SequencedUiEvent { sequence, event };
         let outcome = if let Some(index) = replacement {
-            state.queue[index] = update;
+            state.queue.remove(index);
+            state.queue.push_back(update);
             UiEventPublishOutcome::Replaced
         } else {
             state.queue.push_back(update);

@@ -9,6 +9,13 @@ use super::DesktopState;
 
 const WINDOW_LIFECYCLE_EVENT: &str = "window-lifecycle";
 const CLOUD_UPLOAD_PROGRESS_EVENT: &str = "cloud-upload-progress";
+pub const DESKTOP_EVENT_SEQUENCE_EVENT: &str = "desktop-event-sequence";
+
+#[derive(Clone, serde::Serialize)]
+struct DesktopEventSequence {
+    event_sequence: u64,
+    snapshot_revision: clipline_desktop::Revision,
+}
 
 #[derive(Clone)]
 pub struct TauriUiEventSink(UiEventSender);
@@ -39,8 +46,9 @@ pub fn spawn_event_pump<R: Runtime>(
             match receiver.wait_recv(std::time::Duration::from_millis(250)) {
                 Ok(Some(update)) => {
                     let state = app.state::<DesktopState>();
-                    match state.apply_event(update.event.clone()) {
+                    match state.apply_sequenced(update.sequence, update.event.clone()) {
                         Ok(ApplyEventOutcome::Applied { .. }) => {
+                            emit_sequence(&app, update.sequence, state.snapshot().revision);
                             for emission in tauri_emissions(&update.event) {
                                 if let Err(error) = app.emit(emission.name, emission.payload) {
                                     tracing::error!(
@@ -51,7 +59,9 @@ pub fn spawn_event_pump<R: Runtime>(
                                 }
                             }
                         }
-                        Ok(ApplyEventOutcome::Unchanged | ApplyEventOutcome::Stale) => {}
+                        Ok(ApplyEventOutcome::Unchanged | ApplyEventOutcome::Stale) => {
+                            emit_sequence(&app, update.sequence, state.snapshot().revision);
+                        }
                         Err(error) => tracing::error!(
                             event = "desktop_event_apply_failed",
                             error = %error
@@ -64,6 +74,26 @@ pub fn spawn_event_pump<R: Runtime>(
         })
         .map(|_| ())
         .map_err(|error| format!("spawn Tauri UI event pump: {error}"))
+}
+
+fn emit_sequence<R: Runtime>(
+    app: &AppHandle<R>,
+    sequence: u64,
+    snapshot_revision: clipline_desktop::Revision,
+) {
+    if let Err(error) = app.emit(
+        DESKTOP_EVENT_SEQUENCE_EVENT,
+        DesktopEventSequence {
+            event_sequence: sequence,
+            snapshot_revision,
+        },
+    ) {
+        tracing::error!(
+            event = "tauri_ui_sequence_emit_failed",
+            sequence,
+            error = %error
+        );
+    }
 }
 
 struct TauriEmission {

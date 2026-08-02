@@ -53,3 +53,14 @@ fn migrated_producers_cannot_emit_directly_to_tauri() {
         );
     }
 }
+
+#[test]
+fn frontend_bootstrap_is_versioned_sequenced_and_authoritative() {
+    let app = fs::read_to_string(app_root().join("src/app.rs")).unwrap();
+    let desktop = fs::read_to_string(app_root().join("src/desktop.rs")).unwrap();
+    assert!(app.contains("desktop_snapshot: bootstrap.snapshot"));
+    assert!(app.contains("desktop_event_sequence: bootstrap.event_sequence"));
+    assert!(app.contains("desktop.snapshot().settings"));
+    assert!(desktop.contains("pub fn apply_sequenced("));
+    assert!(desktop.contains("pub fn bootstrap(&self) -> DesktopBootstrap"));
+}

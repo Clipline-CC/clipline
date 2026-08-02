@@ -88,6 +88,7 @@ stable; the baseline commit preserves exact historical locations.
 | `event:mic-test-error` | Ends microphone test with visible failure. | M8 microphone adapter | Device-loss state transition. | `not_started` |
 | `event:mic-test-stopped` | Reconciles microphone UI after native stop. | M8 microphone adapter | Explicit/background stop test. | `not_started` |
 | `event:window-lifecycle` | Revisioned foreground/tray/taskbar/background snapshot. | M5 lifecycle snapshot | Stale-revision and bootstrap-race tests. | `not_started` |
+| `event:desktop-event-sequence` | Monotonic adapter sequence and reduced snapshot revision for gap-triggered rebuilds. | M5 bootstrap adapter | Coalescing-gap and destroyed-window bootstrap tests. | `not_started` |
 | `event:game-detection` | Active game/window/process, mode, elevated-hotkey blockage. | M8 games | Detector stream and elevation warning test. | `not_started` |
 | `event:cloud-upload-progress` | Path identity, byte progress, status, remote identity, error. | M7 cloud controller | Coalescing/account-generation test. | `not_started` |
 | `event:osu-enrichment-updated` | Invalidates/refetches local Library after enrichment. | M7 library controller | Deferred foreground refresh test. | `not_started` |

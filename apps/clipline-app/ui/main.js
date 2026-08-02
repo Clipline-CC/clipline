@@ -12,8 +12,8 @@ $('win-max').addEventListener('click', () => appWindow.toggleMaximize());
 $('win-close').addEventListener('click', requestWindowClose);
 /* ---- backend events ---- */
 
-listen("status", (e) => {
-  const s = e.payload;
+function applyRecorderStatus(s) {
+  if (!s) return;
   recordingActive = s.recording;
   recorderWaitingForGame = !!s.waiting_for_game;
   recordingRequested = recordingActive || recorderWaitingForGame;
@@ -22,6 +22,10 @@ listen("status", (e) => {
   $("rail-dot").className = "dot"
     + (s.recording ? " on" : recorderWaitingForGame ? " waiting" : "");
   updateCaptureStatus();
+}
+
+listen("status", (e) => {
+  applyRecorderStatus(e.payload);
 });
 
 function requestRefresh() {
@@ -101,6 +105,71 @@ listen("cloud-upload-progress", (e) => {
     setDeckStatus("cloud upload processing");
   }
   if (update.renderRequired) renderClips();
+});
+
+let desktopEventSequence = 0;
+let desktopSnapshotReady = false;
+let desktopSnapshotRefreshPromise = null;
+let desktopSnapshotRefreshAgain = false;
+
+function applyDesktopSnapshot(response) {
+  const sequence = Number(response?.desktop_event_sequence);
+  const snapshot = response?.desktop_snapshot;
+  if (!Number.isSafeInteger(sequence) || sequence < 0 || !snapshot) return false;
+  if (sequence < desktopEventSequence) return false;
+
+  applyWindowLifecycleSnapshot(snapshot.lifecycle || response.window_lifecycle);
+  applyRecorderStatus(snapshot.recorder?.status);
+  activeDetectedGame = snapshot.game?.detection || null;
+  updateCaptureStatus();
+  updateGameDetectionStatus();
+  for (const upload of snapshot.uploads || []) {
+    if (upload?.progress) upsertCloudProgress(upload.progress);
+  }
+  const notices = (snapshot.notices || [])
+    .map((notice) => String(notice?.message || "").trim())
+    .filter(Boolean);
+  const legacyWarnings = Array.isArray(response.warnings) ? response.warnings : [];
+  const messages = notices.length ? notices : legacyWarnings;
+  if (messages.length) $("error").textContent = messages.join(" ");
+
+  desktopEventSequence = sequence;
+  desktopSnapshotReady = true;
+  return true;
+}
+
+async function requestDesktopSnapshotRefresh() {
+  if (desktopSnapshotRefreshPromise) {
+    desktopSnapshotRefreshAgain = true;
+    return desktopSnapshotRefreshPromise;
+  }
+  desktopSnapshotRefreshPromise = (async () => {
+    const response = await invoke("frontend_ready");
+    if (!applyDesktopSnapshot(response)) desktopSnapshotRefreshAgain = true;
+  })();
+  try {
+    await desktopSnapshotRefreshPromise;
+  } finally {
+    desktopSnapshotRefreshPromise = null;
+    if (desktopSnapshotRefreshAgain) {
+      desktopSnapshotRefreshAgain = false;
+      window.setTimeout(() => requestDesktopSnapshotRefresh().catch((error) => {
+        console.warn("desktop snapshot reconciliation failed:", error);
+      }), 0);
+    }
+  }
+}
+
+var desktopSequenceListenerReady = listen("desktop-event-sequence", (event) => {
+  const sequence = Number(event?.payload?.event_sequence);
+  if (!Number.isSafeInteger(sequence) || sequence <= desktopEventSequence) return;
+  const missedUpdate = desktopSnapshotReady && sequence !== desktopEventSequence + 1;
+  desktopEventSequence = sequence;
+  if (missedUpdate) {
+    requestDesktopSnapshotRefresh().catch((error) => {
+      console.warn("desktop sequence-gap reconciliation failed:", error);
+    });
+  }
 });
 
 /* ---- wiring ---- */
@@ -763,13 +832,8 @@ function applyWindowLifecycleSnapshot(snapshot) {
 
 async function reportFrontendReady() {
   try {
-    await windowLifecycleListenerReady;
-    const response = await invoke("frontend_ready");
-    const warnings = response && response.warnings;
-    if (Array.isArray(warnings) && warnings.length) {
-      $("error").textContent = warnings.join(" ");
-    }
-    applyWindowLifecycleSnapshot(response && response.window_lifecycle);
+    await Promise.all([windowLifecycleListenerReady, desktopSequenceListenerReady]);
+    await requestDesktopSnapshotRefresh();
   } catch (e) {
     console.warn("frontend_ready failed:", e);
   }

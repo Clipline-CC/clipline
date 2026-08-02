@@ -92,6 +92,40 @@ fn coalescing_is_last_writer_wins_without_crossing_a_durable_barrier() {
 }
 
 #[test]
+fn coalescing_preserves_monotonic_delivery_order() {
+    let (sender, receiver) = ui_event_channel();
+    sender.try_publish(status(1, 1)).unwrap();
+    sender
+        .try_publish(UiEvent::GameDetection {
+            generation: Generation::new(1),
+            detection: clipline_desktop::GameDetection {
+                active: false,
+                name: None,
+                window_title: None,
+                process_id: None,
+                process_instance_id: None,
+                exe_name: None,
+                recording_mode: None,
+                elevated_hotkeys_blocked: false,
+            },
+        })
+        .unwrap();
+    sender.try_publish(status(1, 2)).unwrap();
+
+    let first = receiver.try_recv().unwrap();
+    let second = receiver.try_recv().unwrap();
+    assert_eq!((first.sequence, second.sequence), (2, 3));
+    assert!(matches!(first.event, UiEvent::GameDetection { .. }));
+    assert!(matches!(
+        second.event,
+        UiEvent::Recorder {
+            event: RecorderEvent::Status { segments: 2, .. },
+            ..
+        }
+    ));
+}
+
+#[test]
 fn capacity_reserves_one_terminal_slot_and_full_is_atomic() {
     let (sender, receiver) = ui_event_channel();
     for index in 0..(UI_EVENT_CAPACITY - 1) {

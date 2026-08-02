@@ -276,6 +276,9 @@ fn rust_event_names(root: &Path) -> BTreeSet<String> {
                         path.display()
                     )
                 });
+                if argument == "emission.name" && path.ends_with("src/desktop/tauri_sink.rs") {
+                    continue;
+                }
                 output.insert(resolve_event_argument(argument, &constants, path));
             }
         }

@@ -416,14 +416,15 @@ fn frontend_reports_webview_readiness_to_native_shell() {
         app.contains("fn frontend_ready<R: Runtime>(")
             && app.contains("runtime: tauri::State<RuntimeState>")
             && app.contains("startup_warnings: tauri::State<StartupWarnings>")
-            && app.contains("runtime.current_waiting_status()")
+            && app.contains("runtime.current_recorder_status()")
+            && app.contains("desktop_event_sequence: bootstrap.event_sequence")
             && app.contains("frontend_ready,"),
         "Rust shell must expose frontend_ready with durable startup diagnostics and recorder status replay"
     );
     assert!(
         js.contains("invoke(\"frontend_ready\")")
-            && js.contains("Array.isArray(warnings)")
-            && js.contains("warnings.join(\" \")"),
+            && js.contains("Array.isArray(response.warnings)")
+            && js.contains("messages.join(\" \")"),
         "main.js must report readiness and render queued startup diagnostics"
     );
 }
@@ -439,8 +440,10 @@ fn manual_recorder_start_rechecks_waiting_state_before_emit() {
         .expect("find RuntimeState::start_recording body");
 
     assert!(
-        start_recording.contains("else if let Some(status) = self.current_waiting_status()")
-            && start_recording.contains("app.emit(\"status\", status)"),
+        start_recording
+            .contains("else if let Some((generation, status)) = self.current_waiting_status()")
+            && start_recording.contains("try_publish(UiEvent::Recorder")
+            && start_recording.contains("generation: Generation::new(generation)"),
         "manual start must re-check durable Waiting state after releasing the runtime lock"
     );
 }
@@ -2554,7 +2557,7 @@ fn native_background_lifecycle_releases_heavy_frontend_state() {
 
     assert!(
         tray_helper.contains("publish_background_window(app, WindowLifecycleMode::Tray)")
-            && tray_helper.contains("WINDOW_LIFECYCLE_EVENT"),
+            && app.contains("try_publish(UiEvent::WindowLifecycle { snapshot })"),
         "native close-to-tray must publish durable lifecycle state after hiding"
     );
     assert!(
@@ -2563,15 +2566,31 @@ fn native_background_lifecycle_releases_heavy_frontend_state() {
         "frontend must consume revisioned native lifecycle snapshots"
     );
     let ready = js_function_body(&js, "reportFrontendReady");
-    let listener_ready = ready
-        .find("await windowLifecycleListenerReady")
-        .expect("frontend_ready waits for lifecycle listener registration");
-    let ready_invoke = ready
-        .find("invoke(\"frontend_ready\")")
-        .expect("frontend_ready invoke");
     assert!(
-        listener_ready < ready_invoke,
-        "the durable snapshot must be requested only after lifecycle events can be received"
+        ready.contains("windowLifecycleListenerReady")
+            && ready.contains("desktopSequenceListenerReady")
+            && ready.contains("await requestDesktopSnapshotRefresh()"),
+        "the durable snapshot must be requested only after lifecycle and sequence events can be received"
+    );
+    let refresh = js_function_body(&js, "requestDesktopSnapshotRefresh");
+    assert!(
+        refresh.contains("invoke(\"frontend_ready\")")
+            && refresh.contains("applyDesktopSnapshot(response)"),
+        "snapshot refresh must use the authoritative frontend_ready response"
+    );
+    let apply_snapshot = js_function_body(&js, "applyDesktopSnapshot");
+    assert!(
+        apply_snapshot.contains("desktop_event_sequence")
+            && apply_snapshot.contains("desktop_snapshot")
+            && apply_snapshot.contains("applyWindowLifecycleSnapshot")
+            && apply_snapshot.contains("applyRecorderStatus"),
+        "the JS adapter must apply sequence-gated lifecycle and recorder snapshot state"
+    );
+    assert!(
+        js.contains("listen(\"desktop-event-sequence\"")
+            && js.contains("sequence !== desktopEventSequence + 1")
+            && js.contains("requestDesktopSnapshotRefresh()"),
+        "a desktop event sequence gap must request a fresh authoritative snapshot"
     );
     assert!(
         suspend_helper.contains("cancelDesiredAudioPreview();")

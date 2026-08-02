@@ -94,6 +94,7 @@ struct FrontendReadyResponse {
     warnings: Vec<String>,
     window_lifecycle: WindowLifecycleSnapshot,
     desktop_snapshot: clipline_desktop::DesktopSnapshot<AppSettings>,
+    desktop_event_sequence: u64,
 }
 
 #[derive(serde::Serialize)]
@@ -494,7 +495,14 @@ fn frontend_ready<R: Runtime>(
     if !was_ready {
         log_diagnostic("frontend_ready received");
     }
-    if let Some((generation, status)) = runtime.current_waiting_status() {
+    let recorder_status = runtime.current_recorder_status();
+    if let Some((generation, status)) = recorder_status.clone() {
+        if let Err(error) = desktop.apply_event(UiEvent::Recorder {
+            generation: Generation::new(generation),
+            event: status.clone(),
+        }) {
+            log_diagnostic(format!("desktop recorder reconciliation failed: {error}"));
+        }
         let _ = app
             .state::<crate::desktop::tauri_sink::TauriUiEventSink>()
             .try_publish(UiEvent::Recorder {
@@ -505,10 +513,18 @@ fn frontend_ready<R: Runtime>(
     if let Err(error) = desktop.replace_settings(runtime.settings()) {
         log_diagnostic(format!("desktop settings reconciliation failed: {error}"));
     }
+    let lifecycle = window_lifecycle.snapshot();
+    if let Err(error) = desktop.apply_event(UiEvent::WindowLifecycle {
+        snapshot: lifecycle,
+    }) {
+        log_diagnostic(format!("desktop lifecycle reconciliation failed: {error}"));
+    }
+    let bootstrap = desktop.bootstrap();
     FrontendReadyResponse {
         warnings: startup_warnings.take(),
-        window_lifecycle: window_lifecycle.snapshot(),
-        desktop_snapshot: desktop.snapshot(),
+        window_lifecycle: lifecycle,
+        desktop_snapshot: bootstrap.snapshot,
+        desktop_event_sequence: bootstrap.event_sequence,
     }
 }
 
@@ -732,6 +748,7 @@ struct RuntimeInner {
 
 #[derive(Clone)]
 struct RecorderDiagnosticStatus {
+    generation: u64,
     recording: bool,
     waiting_for_game: bool,
     segments: usize,
@@ -863,7 +880,7 @@ impl RuntimeState {
             .is_ok_and(|inner| inner.recording_generation == generation && inner.tx.is_some())
     }
 
-    fn observe_runtime_event(&self, event: &Event) {
+    fn observe_runtime_event(&self, generation: u64, event: &Event) {
         let Ok(mut inner) = self.0.lock() else {
             return;
         };
@@ -879,6 +896,7 @@ impl RuntimeState {
                 capture_backend,
             } => {
                 inner.last_recorder_status = Some(RecorderDiagnosticStatus {
+                    generation,
                     recording: *recording,
                     waiting_for_game: *waiting_for_game,
                     segments: *segments,
@@ -915,6 +933,48 @@ impl RuntimeState {
             && inner.tx.is_none()
             && !recorder_should_run(&inner.settings, inner.active_game.as_ref()))
         .then(|| (inner.recording_generation, waiting_for_game_status()))
+    }
+
+    fn current_recorder_status(&self) -> Option<(u64, Event)> {
+        let inner = self.0.lock().ok()?;
+        if inner.recording_desired
+            && inner.tx.is_none()
+            && !recorder_should_run(&inner.settings, inner.active_game.as_ref())
+        {
+            return Some((inner.recording_generation, waiting_for_game_status()));
+        }
+        if !inner.recording_desired {
+            return Some((
+                inner.recording_generation,
+                Event::Status {
+                    recording: false,
+                    waiting_for_game: false,
+                    segments: 0,
+                    buffered_s: 0.0,
+                    buffered_mb: 0.0,
+                    full_session: false,
+                    encoder: String::new(),
+                    capture_backend: String::new(),
+                },
+            ));
+        }
+        let status = inner
+            .last_recorder_status
+            .as_ref()
+            .filter(|status| status.generation == inner.recording_generation)?;
+        Some((
+            status.generation,
+            Event::Status {
+                recording: status.recording,
+                waiting_for_game: status.waiting_for_game,
+                segments: status.segments,
+                buffered_s: status.buffered_s,
+                buffered_mb: status.buffered_mb,
+                full_session: status.full_session,
+                encoder: status.encoder.clone(),
+                capture_backend: status.capture_backend.clone(),
+            },
+        ))
     }
 
     fn waiting_generation_is_current(&self, generation: u64) -> bool {
@@ -2047,8 +2107,18 @@ async fn install_update<R: Runtime>(
 }
 
 #[tauri::command]
-fn get_settings(state: tauri::State<RuntimeState>) -> AppSettings {
-    state.settings()
+fn get_settings(
+    state: tauri::State<RuntimeState>,
+    desktop: tauri::State<crate::desktop::DesktopState>,
+) -> AppSettings {
+    let settings = state.settings();
+    if let Err(error) = desktop.replace_settings(settings.clone()) {
+        log_diagnostic(format!(
+            "desktop settings query reconciliation failed: {error}"
+        ));
+        return settings;
+    }
+    desktop.snapshot().settings
 }
 
 async fn choose_folder_dialog(
@@ -2539,6 +2609,14 @@ fn save_settings<R: Runtime>(
     storage_settings.set_quota_bytes(quota_bytes);
     storage_settings.set_media_dir(media_dir.clone());
     media_folder_authorization.commit(&media_dir);
+    if let Err(error) = app
+        .state::<crate::desktop::DesktopState>()
+        .replace_settings(settings.clone())
+    {
+        log_diagnostic(format!(
+            "desktop saved settings reconciliation failed: {error}"
+        ));
+    }
     Ok(settings)
 }
 
@@ -3123,7 +3201,9 @@ fn pump_events<R: Runtime>(handle: AppHandle<R>, event_rx: Receiver<Event>, gene
             if !accepted {
                 continue;
             }
-            handle.state::<RuntimeState>().observe_runtime_event(&event);
+            handle
+                .state::<RuntimeState>()
+                .observe_runtime_event(generation, &event);
             if let Event::MediaRootResolved { path, .. } = &event {
                 let media_root = PathBuf::from(path);
                 handle
@@ -3684,6 +3764,38 @@ mod tests {
                     ..
                 }
             ))
+        ));
+    }
+
+    #[test]
+    fn active_recorder_status_is_available_for_authoritative_bootstrap() {
+        let (tx, _rx) = mpsc::channel();
+        let state = RuntimeState::with_sender(tx, AppSettings::default(), None);
+        let generation = state.0.lock().unwrap().recording_generation;
+        state.observe_runtime_event(
+            generation,
+            &Event::Status {
+                recording: true,
+                waiting_for_game: false,
+                segments: 4,
+                buffered_s: 5.0,
+                buffered_mb: 6.0,
+                full_session: false,
+                encoder: "H.264".into(),
+                capture_backend: "wgc".into(),
+            },
+        );
+
+        assert!(matches!(
+            state.current_recorder_status(),
+            Some((
+                observed_generation,
+                Event::Status {
+                    recording: true,
+                    segments: 4,
+                    ..
+                }
+            )) if observed_generation == generation
         ));
     }
 
