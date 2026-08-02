@@ -16,10 +16,10 @@ stable; the baseline commit preserves exact historical locations.
 
 | Stable token | Current source and behavior | Target owner | Acceptance | Status |
 |---|---|---|---|---|
-| `command:save_replay` | `app.rs::save_replay`; enqueue a replay save without blocking UI. | M5 recorder controller | Automated save request/event test; manual tray and window save. | `not_started` |
+| `command:save_replay` | `UiAction::SaveReplay` dispatches through the neutral controller; Tauri remains a signature/result adapter. | M5 recorder controller | Automated save request/event test; manual tray and window save. | `implemented` |
 | `command:restart_as_administrator` | `app.rs`; elevated relaunch, parent handoff, orderly quit. | M6 Windows shell | Automated argument/handoff tests; manual elevated-game flow. | `not_started` |
-| `command:set_recording` | `app.rs`; start, stop, or arm games-only recording. | M5 recorder controller | Existing recorder tests plus Slint action-state test. | `not_started` |
-| `command:get_settings` | `app.rs`; return the persisted settings snapshot. | M5 desktop controller | Snapshot parity fixture. | `not_started` |
+| `command:set_recording` | `UiAction::SetRecording` dispatches through the neutral controller and preserves start/stop/games-only service behavior. | M5 recorder controller | Existing recorder tests plus Slint action-state test. | `implemented` |
+| `command:get_settings` | Reconciles and returns the settings value owned by the versioned desktop snapshot. | M5 desktop controller | Snapshot parity fixture. | `implemented` |
 | `command:minimize_main_window` | `app.rs`; settings-dependent tray/taskbar transition. | M6 lifecycle | Lifecycle state-machine test and manual Windows check. | `not_started` |
 | `command:choose_media_folder` | `app.rs`; native picker and one-shot media authorization. | M8 settings | Picker cancel/select integration test. | `not_started` |
 | `command:choose_replay_cache_folder` | `app.rs`; native replay-cache folder picker. | M8 settings | Picker cancel/select integration test. | `not_started` |
@@ -32,7 +32,7 @@ stable; the baseline commit preserves exact historical locations.
 | `command:detect_installed_games` | `app.rs`; merge detected and custom games. | M8 games | Existing detector fixtures and stale-result test. | `not_started` |
 | `command:extract_window_icon` | `app.rs`; return bounded icon data for a selected window. | M8 games | Size/error test and manual icon check. | `not_started` |
 | `command:memory_status` | `app.rs`; cached in-app process-tree PWS diagnostic, not benchmark truth. | M5 diagnostics | Cross-check against external sampler; label scope. | `not_started` |
-| `command:frontend_ready` | `app.rs`; startup warnings and authoritative lifecycle snapshot. | M5 bootstrap snapshot | Startup race and stale-revision tests. | `not_started` |
+| `command:frontend_ready` | Returns the versioned authoritative desktop snapshot plus its last reduced event sequence; legacy fields remain additive. | M5 bootstrap snapshot | Startup race and stale-revision tests. | `implemented` |
 | `command:start_microphone_test` | `app.rs`; start native microphone monitor stream. | M8 capture settings | Start/idempotence/device-error tests. | `not_started` |
 | `command:stop_microphone_test` | `app.rs`; synchronously stop microphone monitor. | M8 capture settings | Stop/background-entry tests. | `not_started` |
 | `command:get_autostart_status` | `app.rs`; report configured per-user launch state. | M6 Windows shell | Registry adapter test and installed smoke test. | `not_started` |
@@ -81,17 +81,17 @@ stable; the baseline commit preserves exact historical locations.
 
 | Stable token | Current source and behavior | Target owner | Acceptance | Status |
 |---|---|---|---|---|
-| `event:status` | Recorder snapshot: active/waiting, buffer, encoder, backend, full-session. | M5 event sink | Snapshot/coalescing test. | `not_started` |
-| `event:saved` | Save completion, path, duration, markers, GC/quota effects; triggers refresh and sound/enrichment side effects. | M5 event sink | Replay/session payload and side-effect tests. | `not_started` |
-| `event:error` | User-visible runtime error string. | M5 event sink | Ordering and foreground-deferred error test. | `not_started` |
-| `event:mic-test` | RMS, peak, count, and bounded PCM preview samples. | M8 microphone adapter | Stream bounds/level/playback test. | `not_started` |
-| `event:mic-test-error` | Ends microphone test with visible failure. | M8 microphone adapter | Device-loss state transition. | `not_started` |
-| `event:mic-test-stopped` | Reconciles microphone UI after native stop. | M8 microphone adapter | Explicit/background stop test. | `not_started` |
-| `event:window-lifecycle` | Revisioned foreground/tray/taskbar/background snapshot. | M5 lifecycle snapshot | Stale-revision and bootstrap-race tests. | `not_started` |
-| `event:desktop-event-sequence` | Monotonic adapter sequence and reduced snapshot revision for gap-triggered rebuilds. | M5 bootstrap adapter | Coalescing-gap and destroyed-window bootstrap tests. | `not_started` |
-| `event:game-detection` | Active game/window/process, mode, elevated-hotkey blockage. | M8 games | Detector stream and elevation warning test. | `not_started` |
-| `event:cloud-upload-progress` | Path identity, byte progress, status, remote identity, error. | M7 cloud controller | Coalescing/account-generation test. | `not_started` |
-| `event:osu-enrichment-updated` | Invalidates/refetches local Library after enrichment. | M7 library controller | Deferred foreground refresh test. | `not_started` |
+| `event:status` | Neutral recorder event and durable snapshot: active/waiting, buffer, encoder, backend, full-session; projected by the Slint adapter. | M5 event sink | Snapshot/coalescing test. | `implemented` |
+| `event:saved` | Neutral durable save completion with path, duration, markers, GC/quota effects; shipping sound/enrichment side effects remain application-owned. | M5 event sink | Replay/session payload and side-effect tests. | `implemented` |
+| `event:error` | User-visible runtime errors enter the bounded neutral notice state and retain exact legacy string payloads. | M5 event sink | Ordering and foreground-deferred error test. | `implemented` |
+| `event:mic-test` | M5 routes bounded RMS/peak/count/PCM values through the neutral sink; the full Slint microphone surface remains M8. | M8 microphone adapter | Stream bounds/level/playback test. | `in_progress` |
+| `event:mic-test-error` | M5 preserves neutral generation fencing and legacy error-then-stopped ordering; the Slint device-loss surface remains M8. | M8 microphone adapter | Device-loss state transition. | `in_progress` |
+| `event:mic-test-stopped` | M5 stores terminal microphone state in the durable snapshot; full Slint reconciliation remains M8. | M8 microphone adapter | Explicit/background stop test. | `in_progress` |
+| `event:window-lifecycle` | Revisioned neutral foreground/tray/taskbar/background snapshot with stale-revision rejection and bootstrap reconciliation. | M5 lifecycle snapshot | Stale-revision and bootstrap-race tests. | `implemented` |
+| `event:desktop-event-sequence` | Monotonic reduced-event sequence and snapshot revision drive WebView gap recovery; Slint consumes the neutral channel directly. | M5 bootstrap adapter | Coalescing-gap and destroyed-window bootstrap tests. | `implemented` |
+| `event:game-detection` | M5 routes generation-fenced game/process/mode/elevation state through the neutral sink; the full Slint games surface remains M8. | M8 games | Detector stream and elevation warning test. | `in_progress` |
+| `event:cloud-upload-progress` | M5 adds bounded per-upload coalescing and deterministic completed-entry eviction; the full Slint cloud surface remains M7. | M7 cloud controller | Coalescing/account-generation test. | `in_progress` |
+| `event:osu-enrichment-updated` | M5 routes generation-fenced durable library invalidation through the neutral sink; the full Library refresh surface remains M7. | M7 library controller | Deferred foreground refresh test. | `in_progress` |
 
 ## Surfaces and dialogs
 
@@ -175,7 +175,7 @@ stable; the baseline commit preserves exact historical locations.
 | `lifecycle:single-instance-reveal` | Secondary non-autostart launch reveals primary. | M6 shell | Same-user activation tests. | `not_started` |
 | `lifecycle:close-to-tray-or-quit` | Close obeys setting; background stops mic and releases review work. | M6 shell | Setting matrix and 100-cycle soak. | `not_started` |
 | `lifecycle:minimize-to-tray-or-taskbar` | Minimize obeys setting and publishes revisioned mode. | M6 shell | Setting matrix and focus restore test. | `not_started` |
-| `lifecycle:foreground-bootstrap-snapshot` | Ready call returns authoritative revision so stale async work cannot win. | M5 controller | Startup race/generation suite. | `not_started` |
+| `lifecycle:foreground-bootstrap-snapshot` | Ready returns one authoritative versioned snapshot plus reduced-event sequence; JS refreshes on sequence gaps without replaying effects. | M5 controller | Startup race/generation suite. | `implemented` |
 | `updater:silent-check` | Delayed startup check on selected channel without interrupting on no update. | M6 updater | Timer/channel/offline test. | `not_started` |
 | `updater:manual-check` | User check shows current/update/error result. | M6 updater | State and keyboard test. | `not_started` |
 | `updater:install` | Recheck, stop services, verify/download, passive install, exit. | M6 updater | Signed/tampered/cancel/install matrix. | `not_started` |

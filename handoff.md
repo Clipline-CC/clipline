@@ -4,6 +4,56 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-02): Slint replacement Milestone 5 desktop controller
+
+Plan: `docs/superpowers/plans/2026-08-02-slint-desktop-controller.md`. The new workspace crate
+`crates/clipline-desktop` is the framework-neutral UI boundary: owned typed actions/effects/events,
+checked generation/revision counters, a 128-entry event channel with one reserved terminal slot,
+and a versioned durable `DesktopSnapshot<S>`. Coalescing is last-writer-wins without crossing a
+durable saved/error/terminal barrier and now moves replacements to the queue tail, preserving
+strictly increasing delivery sequences. Recorder, lifecycle, microphone, game detection, cloud
+upload, enrichment, and notice state are stale-fenced and bounded. Notices cap at 64, microphone
+preview payloads at 4,096 samples, and upload snapshots at 16 active entries; completed uploads are
+evicted deterministically oldest-first under pressure, while 16 genuinely active uploads fail
+atomically instead of growing.
+
+The shipping Tauri frontend remains intact and rollback-capable. Save Replay and recording
+start/stop enter through `UiAction`; every recorder/lifecycle/microphone/game/cloud/enrichment/user
+error producer now publishes through one cloneable bounded sink. Only
+`apps/clipline-app/src/desktop/tauri_sink.rs` knows legacy Tauri event names, and exact recorder,
+game-mode, cloud, lifecycle, microphone error-then-stopped, and string-error payloads are pinned by
+tests. A repository contract rejects direct `.emit(` calls in the migrated producers.
+
+`frontend_ready` now returns an additive authoritative desktop snapshot and the last reduced event
+sequence after synchronously reconciling current settings, lifecycle, and active/waiting/stopped
+recorder state. Repeated calls preserve startup notices and last-save metadata without replaying
+saved/error effects. The JavaScript bridge installs lifecycle and sequence listeners first, applies
+the snapshot, ignores older responses, and requests a fresh snapshot after any delivery gap. The
+legacy warning/lifecycle fields remain for one migration release. `get_settings` reads through the
+same snapshot, so the WebView and future Slint frontend share one settings revision.
+
+The standalone Slint spike depends only on `clipline-desktop`, not the Tauri application. Its event
+consumer reduces the same bounded channel on a worker, posts projections only through
+`slint::invoke_from_event_loop`, captures only `slint::Weak`, drops delayed closures behind a
+revision gate, and replaces a maximum-16 upload `ModelRc` on the UI thread. Component loss is a
+harmless weak-upgrade failure that disconnects the consumer; adapter drop joins the bounded-wait
+worker before the component is destroyed. This is intentionally representative state only: full
+Library/Cloud surfaces remain M7, Settings/microphone/games/support remain M8, and Review remains
+M9.
+
+Validation is green: CI-mode `cargo test --workspace`, warning-denied workspace Clippy, all 524 app
+unit tests (two intentional subprocess fixtures ignored), all 92 UI contracts, the migration
+ledger contract, `clipline-desktop` tests, standalone Slint tests, fresh-cache strict Clippy for the
+changed neutral/app/spike packages, JavaScript syntax, and the PowerShell baseline helper self-test.
+The installed Clipline process was never stopped. Consequently the shipping Tauri manual launch
+check and the Milestone 1/3/4 matched performance and real-GPU gates remain pending; none is claimed
+as passed here.
+
+Implementation commits run from `f8c1776` through `9b2154b`, following plan commit `c2ec13b`.
+Next: plan and implement Milestone 6's native Slint shell/lifecycle boundary (single-instance,
+tray, global hotkeys, autostart, updater, diagnostics, and packaging) while keeping the Tauri shell
+available until the later measured cutover gates pass.
+
 ## Checkpoint (2026-08-02): Slint replacement Milestone 4 presentation spike
 
 Plan: `docs/superpowers/plans/2026-08-01-slint-presentation-spike.md`. Protocol and evidence status:
