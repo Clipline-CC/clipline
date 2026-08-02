@@ -262,9 +262,6 @@ fn renderer_capabilities_match_observed_window_operations() {
             "core:window:allow-toggle-maximize",
             "core:window:allow-close",
             "core:window:allow-start-dragging",
-            "autostart:allow-enable",
-            "autostart:allow-disable",
-            "autostart:allow-is-enabled",
         ]
     );
 }
@@ -292,17 +289,21 @@ fn native_shell_prevents_duplicate_clipline_instances() {
     let single_instance = app
         .find(single_instance_plugin)
         .expect("native shell should register the Tauri single-instance plugin");
-    let autostart = app
-        .find("tauri_plugin_autostart::init")
-        .expect("native shell should register autostart");
 
     assert!(
         manifest.contains("tauri-plugin-single-instance"),
         "Cargo.toml should depend on the single-instance plugin"
     );
     assert!(
-        single_instance < autostart,
-        "single-instance plugin must be registered before autostart or other shell plugins"
+        !manifest.contains("tauri-plugin-autostart")
+            && !app.contains("tauri_plugin_autostart")
+            && app.contains("WindowsAutostartRegistration"),
+        "autostart must be owned by the shared native shell adapter"
+    );
+    let updater = app.find("tauri_plugin_updater::Builder::new").unwrap();
+    assert!(
+        single_instance < updater,
+        "single-instance ownership must be established before other shell plugins"
     );
 }
 

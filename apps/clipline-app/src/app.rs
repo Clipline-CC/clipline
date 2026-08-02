@@ -12,7 +12,6 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::path::BaseDirectory;
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, Runtime, WebviewWindow, WebviewWindowBuilder, WindowEvent};
-use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_updater::UpdaterExt;
 
 use clipline_capture::diagnostics::install_diagnostic_handler;
@@ -21,6 +20,7 @@ use clipline_desktop::{
     WindowLifecycleSnapshot,
 };
 use clipline_shell::hotkey::{HotkeyReplacementOutcome, HotkeySet};
+use clipline_shell::windows::autostart::{AutostartChange, WindowsAutostartRegistration};
 use clipline_shell::windows::hotkey::WindowsHotkeyService;
 use clipline_shell::{shell_command_channel, ShellCommand, ShellCommandReceiver};
 
@@ -42,6 +42,7 @@ mod support;
 use diagnostics::{diagnostic_log_path, log_diagnostic};
 
 const MAIN_WINDOW_LABEL: &str = "main";
+const AUTOSTART_VALUE_NAME: &str = "Clipline";
 const WEBVIEW_READY_TIMEOUT: Duration = Duration::from_secs(5);
 const GAME_DETECTOR_INTERVAL: Duration = Duration::from_millis(500);
 static FRONTEND_READY: AtomicBool = AtomicBool::new(false);
@@ -1590,21 +1591,47 @@ fn restart_as_administrator<R: Runtime>(app: AppHandle<R>) -> Result<bool, Strin
 }
 
 #[tauri::command]
-fn get_autostart_status<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
-    app.autolaunch().is_enabled().map_err(|e| e.to_string())
+fn get_autostart_status(state: tauri::State<RuntimeState>) -> Result<bool, String> {
+    autostart_status_for_build(
+        state.settings().open_on_startup,
+        cfg!(debug_assertions),
+        || {
+            autostart_registration()?
+                .is_enabled()
+                .map_err(|error| error.to_string())
+        },
+    )
 }
 
-fn set_autostart<R: Runtime>(app: &AppHandle<R>, enabled: bool) -> Result<bool, String> {
-    if !autostart_should_mutate_for_current_build() {
-        return Ok(enabled);
-    }
-    let autostart = app.autolaunch();
-    if enabled {
-        autostart.enable().map_err(|e| e.to_string())?;
+fn autostart_registration() -> Result<WindowsAutostartRegistration, String> {
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("resolve current executable for autostart: {error}"))?;
+    WindowsAutostartRegistration::new(AUTOSTART_VALUE_NAME, &executable)
+        .map_err(|error| error.to_string())
+}
+
+fn set_autostart(enabled: bool) -> Result<AutostartChange, String> {
+    autostart_registration()?
+        .set_enabled(enabled)
+        .map_err(|error| error.to_string())
+}
+
+fn rollback_autostart(change: &AutostartChange) -> Result<(), String> {
+    autostart_registration()?
+        .rollback(change)
+        .map_err(|error| error.to_string())
+}
+
+fn autostart_status_for_build(
+    persisted_preference: bool,
+    debug_build: bool,
+    read_registry: impl FnOnce() -> Result<bool, String>,
+) -> Result<bool, String> {
+    if debug_build {
+        Ok(persisted_preference)
     } else {
-        autostart.disable().map_err(|e| e.to_string())?;
+        read_registry()
     }
-    autostart.is_enabled().map_err(|e| e.to_string())
 }
 
 fn autostart_should_mutate_for_current_build() -> bool {
@@ -2397,7 +2424,7 @@ fn run_before_releasing_settings_save_lock<T>(
 struct AppliedSettingsSideEffects {
     hotkeys: bool,
     tray_label: bool,
-    autostart: bool,
+    autostart: Option<AutostartChange>,
 }
 
 fn rollback_settings_side_effects<R: Runtime>(
@@ -2408,8 +2435,8 @@ fn rollback_settings_side_effects<R: Runtime>(
     applied: &AppliedSettingsSideEffects,
 ) -> Vec<String> {
     let mut errors = Vec::new();
-    if applied.autostart {
-        if let Err(error) = set_autostart(app, old.open_on_startup) {
+    if let Some(change) = &applied.autostart {
+        if let Err(error) = rollback_autostart(change) {
             errors.push(format!("restore Windows startup registration: {error}"));
         }
     }
@@ -2488,10 +2515,10 @@ fn save_settings<R: Runtime>(
     if settings.open_on_startup != old.open_on_startup
         && autostart_should_mutate_for_current_build()
     {
-        match set_autostart(&app, settings.open_on_startup) {
-            Ok(actual) => {
-                settings.open_on_startup = actual;
-                applied.autostart = true;
+        match set_autostart(settings.open_on_startup) {
+            Ok(change) => {
+                settings.open_on_startup = change.enabled();
+                applied.autostart = Some(change);
             }
             Err(primary) => {
                 let rollback =
@@ -2641,10 +2668,6 @@ pub fn run() {
                 }
             }
         }))
-        .plugin(tauri_plugin_autostart::init(
-            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            Some(vec!["--autostart"]),
-        ))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             save_replay,
@@ -2775,12 +2798,11 @@ pub fn run() {
             // share settings and registry state with installed builds, so cargo
             // runs must not disable or replace the installed autostart entry.
             if autostart_should_mutate_for_current_build() {
-                let autostart = app.autolaunch();
-                let _ = if settings.open_on_startup {
-                    autostart.enable()
-                } else {
-                    autostart.disable()
-                };
+                if let Err(error) = set_autostart(settings.open_on_startup) {
+                    let message = format!("synchronize Windows startup registration: {error}");
+                    tracing::warn!(event = "autostart_sync_failed", message = %message);
+                    publish_user_error(app.handle(), message);
+                }
             }
 
             // When launched by the autostart registry entry, start in the tray
@@ -4555,6 +4577,19 @@ mod tests {
     fn debug_build_autostart_policy_skips_registry_mutation() {
         assert!(!autostart_should_mutate_for_build(true));
         assert!(autostart_should_mutate_for_build(false));
+    }
+
+    #[test]
+    fn debug_autostart_status_returns_persisted_preference_without_registry_access() {
+        assert!(autostart_status_for_build(true, true, || {
+            panic!("debug status must not read the shared installed Run value")
+        })
+        .unwrap());
+        assert!(!autostart_status_for_build(false, true, || {
+            panic!("benchmark status must not read the shared installed Run value")
+        })
+        .unwrap());
+        assert!(autostart_status_for_build(false, false, || Ok(true)).unwrap());
     }
 
     #[test]

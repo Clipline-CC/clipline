@@ -48,14 +48,16 @@ fn neutral_shell_contract_has_no_framework_or_platform_escape_hatches() {
 }
 
 #[test]
-fn native_hotkey_service_is_shell_owned_and_the_tauri_plugin_is_absent() {
+fn native_hotkey_and_autostart_services_are_shell_owned_and_tauri_plugins_are_absent() {
     let root = workspace_root();
     let manifest =
         fs::read_to_string(root.join("apps/clipline-app/Cargo.toml")).expect("read app manifest");
     assert!(!manifest.contains("tauri-plugin-global-shortcut"));
+    assert!(!manifest.contains("tauri-plugin-autostart"));
     assert!(manifest.contains("clipline-shell"));
     let lock = fs::read_to_string(root.join("Cargo.lock")).expect("read Cargo.lock");
     assert!(!lock.contains("name = \"tauri-plugin-global-shortcut\""));
+    assert!(!lock.contains("name = \"tauri-plugin-autostart\""));
 
     let app_sources = rust_sources_below(&root.join("apps/clipline-app/src"));
     for symbol in [
@@ -63,6 +65,9 @@ fn native_hotkey_service_is_shell_owned_and_the_tauri_plugin_is_absent() {
         "SetWindowsHookExW(",
         "UnhookWindowsHookEx(",
         "GetAsyncKeyState(",
+        "RegGetValueW(",
+        "RegSetValueExW(",
+        "RegDeleteValueW(",
     ] {
         let owners: Vec<_> = app_sources
             .iter()
@@ -86,6 +91,21 @@ fn native_hotkey_service_is_shell_owned_and_the_tauri_plugin_is_absent() {
         assert!(
             service.contains(contract),
             "native hotkey service must retain {contract}"
+        );
+    }
+
+    let autostart = fs::read_to_string(root.join("crates/clipline-shell/src/windows/autostart.rs"))
+        .expect("read native autostart service");
+    for contract in [
+        "RegGetValueW(",
+        "RegSetValueExW(",
+        "RegDeleteValueW(",
+        "ConcurrentChange",
+        "cleanup_on_drop",
+    ] {
+        assert!(
+            autostart.contains(contract),
+            "native autostart service must retain {contract}"
         );
     }
 }
