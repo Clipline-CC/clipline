@@ -445,3 +445,94 @@ fn parity_ledger_covers_the_shipping_frontend_boundary() {
         "ledger must define explicit migration states and waiver handling"
     );
 }
+
+#[test]
+fn native_slint_candidate_packaging_is_explicit_internal_and_webview_free() {
+    let root = workspace_root();
+    let installer = read(root.join("packaging/slint/installer.nsi"));
+    let shared = read(root.join("packaging/slint/installer-shared.nsh"));
+    let build = read(root.join("scripts/build-slint-installer.ps1"));
+    let tools = read(root.join("scripts/test-slint-installer-tools.ps1"));
+    let protocol = read(root.join("docs/slint/native-shell-package-protocol.md"));
+    let ci = read(root.join(".github/workflows/ci.yml"));
+
+    for required in [
+        "RequestExecutionLevel user",
+        "SetShellVarContext current",
+        "io.clipline.app",
+        "Clipline",
+        "Clipline-Slint-Internal-Candidate",
+        "THIRD-PARTY-NOTICES.md",
+        "ffmpeg\\LICENSE.txt",
+        "CreateShortcut",
+        "UninstallString",
+        "QuietUninstallString",
+        "/P",
+        "/R",
+        "/UPDATE",
+        "/ARGS",
+    ] {
+        assert!(
+            installer.contains(required) || shared.contains(required),
+            "native NSIS contract is missing {required}"
+        );
+    }
+    for required in [
+        "regular",
+        "standalone",
+        "Get-FileHash",
+        "verify-ffmpeg-resource.ps1",
+        "PROVENANCE.json",
+        "makensis",
+        "7z",
+        "create_new",
+        "webview2",
+    ] {
+        assert!(
+            build.contains(required),
+            "package builder is missing {required}"
+        );
+    }
+    assert!(
+        !installer.to_ascii_lowercase().contains("webview2"),
+        "the native installer must not carry a WebView2 payload"
+    );
+    assert!(
+        !installer.contains("MUI_PAGE_DIRECTORY")
+            && !installer.contains("InstallDirRegKey")
+            && installer.contains("StrCmp $INSTDIR \"${CLIPLINE_INSTALL_DIRECTORY}\"")
+            && installer
+                .matches("StrCmp $INSTDIR \"${CLIPLINE_INSTALL_DIRECTORY}\"")
+                .count()
+                == 2
+            && installer.contains("WaitForSingleObject")
+            && installer.contains("un.CliplineDeleteRequired"),
+        "the internal candidate must force its isolated directory and fence live payloads"
+    );
+    assert!(
+        build.contains("BoundedCapture")
+            && build.contains("contract_source_sha256")
+            && build.contains("Final staged package payload"),
+        "the builder must bound reads and anchor all staged sources"
+    );
+    assert!(
+        protocol.contains("internal-only")
+            && protocol.contains("operator approval")
+            && protocol.contains("pending"),
+        "the package protocol must not present the candidate as distributed or installed evidence"
+    );
+    assert!(
+        ci.contains("test-slint-installer-tools.ps1")
+            && ci.contains("native-slint-installer-contract:")
+            && ci.contains("runs-on: windows-latest")
+            && !ci.contains("upload-slint-installer"),
+        "CI may test the first-party tools but must not publish a Slint installer"
+    );
+    assert!(
+        tools.contains("tampered")
+            && tools.contains("oversized")
+            && tools.contains("webview")
+            && tools.contains("cross-install"),
+        "the PowerShell self-test must exercise the fail-closed package boundaries"
+    );
+}

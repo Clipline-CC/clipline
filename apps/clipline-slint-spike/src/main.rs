@@ -3,6 +3,9 @@ use clipline_slint_spike::options::{OptionsError, SpikeOptions};
 use slint::ComponentHandle;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if print_package_probe_if_requested()? {
+        return Ok(());
+    }
     if print_benchmark_probe_if_requested() {
         return Ok(());
     }
@@ -44,6 +47,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 const BENCHMARK_PROBE_ARGUMENT: &str = "--clipline-benchmark-probe";
+const PACKAGE_PROBE_ARGUMENT: &str = "--clipline-package-probe";
+
+fn print_package_probe_if_requested() -> Result<bool, Box<dyn std::error::Error>> {
+    let arguments = std::env::args_os().collect::<Vec<_>>();
+    let requested = arguments
+        .iter()
+        .skip(1)
+        .any(|argument| argument == PACKAGE_PROBE_ARGUMENT);
+    if !requested {
+        return Ok(false);
+    }
+    if arguments.len() != 2 || arguments[1] != PACKAGE_PROBE_ARGUMENT {
+        return Err("--clipline-package-probe must be the only application argument".into());
+    }
+    println!(
+        "{}",
+        serde_json::json!({
+            "schemaVersion": 1,
+            "kind": "clipline-slint-internal-candidate",
+            "productName": "Clipline",
+            "publisher": "Clipline",
+            "identifier": "io.clipline.app",
+            "version": env!("CLIPLINE_PACKAGE_VERSION"),
+            "variant": env!("CLIPLINE_PACKAGE_VARIANT"),
+            "applicationStateStarted": false,
+            "autostartRegistryMutation": false,
+        })
+    );
+    Ok(true)
+}
 
 fn benchmark_shell_is_safe(debug_assertions: bool, opt_level: &str) -> bool {
     debug_assertions && !matches!(opt_level.trim(), "" | "0" | "unknown")

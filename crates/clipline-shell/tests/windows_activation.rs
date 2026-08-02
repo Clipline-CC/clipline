@@ -4,7 +4,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clipline_shell::activation::{ActivationCommand, MAX_ACTIVATION_PAYLOAD_BYTES};
 use clipline_shell::windows::activation::{
-    acquire_or_activate, instance_names, ActivationAcknowledgement, WindowsInstanceRole,
+    acquire_or_activate, instance_names, ActivationAcknowledgement, WindowsActivationError,
+    WindowsInstanceRole, WindowsProcessFence,
 };
 use clipline_shell::{shell_command_channel, ShellCommand};
 
@@ -25,6 +26,19 @@ fn names_are_product_and_sid_scoped_without_username_text() {
     assert_ne!(first, second);
     assert!(!first.mutex.to_ascii_lowercase().contains("username"));
     assert!(instance_names("io clipline", &[1]).is_err());
+}
+
+#[test]
+fn process_fence_is_exclusive_and_reacquirable_after_release() {
+    let name = format!(r"Local\{}", product_identity("process-fence"));
+    let first = WindowsProcessFence::acquire(&name).expect("acquire process fence");
+    let second = match WindowsProcessFence::acquire(&name) {
+        Ok(_) => panic!("a second process fence owner must be rejected"),
+        Err(error) => error,
+    };
+    assert_eq!(second, WindowsActivationError::ProcessFenceOwned);
+    drop(first);
+    let _reacquired = WindowsProcessFence::acquire(&name).expect("reacquire released fence");
 }
 
 #[test]

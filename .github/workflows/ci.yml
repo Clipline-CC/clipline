@@ -40,3 +40,34 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+  native-slint-installer-contract:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master (stable toolchain)
+        with:
+          toolchain: stable
+
+      - name: Test internal Slint installer tools
+        shell: pwsh
+        run: ./scripts/test-slint-installer-tools.ps1
+
+      - name: Verify regular package identity probe
+        run: >-
+          cargo test --locked --manifest-path apps/clipline-slint-spike/Cargo.toml
+          --features package-regular --test spike_contract
+          package_probe_is_exact_side_effect_free_and_variant_intrinsic -- --exact
+
+      - name: Verify standalone package identity probe
+        run: >-
+          cargo test --locked --manifest-path apps/clipline-slint-spike/Cargo.toml
+          --features package-standalone --test spike_contract
+          package_probe_is_exact_side_effect_free_and_variant_intrinsic -- --exact
+
+      # Deliberately no upload/release/sign/install step. A real candidate build
+      # requires pre-staged reviewed FFmpeg plus explicit NSIS/7-Zip paths and is
+      # retained only as local internal evidence.

@@ -27,7 +27,8 @@ use windows::Win32::System::Pipes::{
 };
 use windows::Win32::System::Threading::{
     CreateMutexW, GetCurrentProcess, GetCurrentProcessId, GetCurrentThread, GetProcessTimes,
-    OpenProcess, OpenProcessToken, OpenThreadToken, PROCESS_QUERY_LIMITED_INFORMATION,
+    OpenProcess, OpenProcessToken, OpenThreadToken, ReleaseMutex,
+    PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
 use crate::activation::{
@@ -72,6 +73,8 @@ pub enum WindowsActivationError {
     Queue(String),
     #[error("activation protocol failed: {0}")]
     Protocol(String),
+    #[error("the bounded process fence is already owned")]
+    ProcessFenceOwned,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +92,37 @@ pub enum ActivationAcknowledgement {
 pub enum WindowsInstanceRole {
     Primary(WindowsInstanceGuard),
     Secondary(ActivationAcknowledgement),
+}
+
+/// An owned named mutex exposed through a safe wrapper for package/update fencing.
+pub struct WindowsProcessFence {
+    mutex: OwnedHandle,
+}
+
+impl WindowsProcessFence {
+    pub fn acquire(name: &str) -> Result<Self, WindowsActivationError> {
+        if name.is_empty() || name.encode_utf16().any(|unit| unit == 0) {
+            return Err(WindowsActivationError::Protocol(
+                "process fence name is empty or contains an embedded NUL".to_owned(),
+            ));
+        }
+        let wide_name = wide_nul(name);
+        unsafe { SetLastError(ERROR_SUCCESS) };
+        let mutex = unsafe { CreateMutexW(None, true, PCWSTR(wide_name.as_ptr())) }
+            .map(OwnedHandle::new)
+            .map_err(|error| native("create bounded process fence", error))?;
+        if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+            drop(mutex);
+            return Err(WindowsActivationError::ProcessFenceOwned);
+        }
+        Ok(Self { mutex })
+    }
+}
+
+impl Drop for WindowsProcessFence {
+    fn drop(&mut self) {
+        let _ = unsafe { ReleaseMutex(self.mutex.raw) };
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

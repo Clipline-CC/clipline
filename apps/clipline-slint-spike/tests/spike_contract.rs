@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 const REQUIRED_SLINT_FEATURES: &[&str] = &[
     "accessibility",
@@ -218,4 +219,51 @@ fn spike_is_exactly_pinned_small_and_non_distributed() {
             path.display()
         );
     }
+}
+
+#[test]
+fn package_probe_is_exact_side_effect_free_and_variant_intrinsic() {
+    let output = Command::new(env!("CARGO_BIN_EXE_clipline-slint-spike"))
+        .arg("--clipline-package-probe")
+        .output()
+        .expect("run side-effect-free package probe");
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    assert!(output.stdout.len() <= 4 * 1024);
+
+    let probe: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("package probe should emit one JSON value");
+    let object = probe.as_object().expect("package probe object");
+    assert_eq!(object.len(), 9, "package probe field set must stay exact");
+    assert_eq!(probe["schemaVersion"], 1);
+    assert_eq!(probe["kind"], "clipline-slint-internal-candidate");
+    assert_eq!(probe["productName"], "Clipline");
+    assert_eq!(probe["publisher"], "Clipline");
+    assert_eq!(probe["identifier"], "io.clipline.app");
+    assert_eq!(probe["version"], "0.1.43");
+    let expected_variant = if cfg!(feature = "package-regular") {
+        "regular"
+    } else if cfg!(feature = "package-standalone") {
+        "standalone"
+    } else {
+        "unpackaged"
+    };
+    assert_eq!(probe["variant"], expected_variant);
+    assert_eq!(probe["applicationStateStarted"], false);
+    assert_eq!(probe["autostartRegistryMutation"], false);
+
+    let rejected = Command::new(env!("CARGO_BIN_EXE_clipline-slint-spike"))
+        .args(["--clipline-package-probe", "--autostart"])
+        .output()
+        .expect("run malformed package probe");
+    assert!(!rejected.status.success());
+    assert!(rejected.stdout.is_empty());
+}
+
+#[cfg(windows)]
+#[test]
+fn package_install_fence_matches_the_internal_nsis_candidate() {
+    let shell = include_str!("../src/shell.rs");
+    assert!(shell.contains(r"Local\io.clipline.app.slint-candidate.package-fence"));
+    assert!(shell.contains("WindowsProcessFence::acquire"));
 }

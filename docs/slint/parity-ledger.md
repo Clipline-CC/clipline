@@ -180,11 +180,11 @@ stable; the baseline commit preserves exact historical locations.
 | `updater:manual-check` | User check shows current/update/error result. | M6 updater | State and keyboard test. | `not_started` |
 | `updater:install` | Recheck, stop services, verify/download, passive install, exit. | M6 updater | Signed/tampered/cancel/install matrix. | `not_started` |
 | `updater:signature-verification` | Existing committed minisign public key gates artifacts. | M6 updater | Known-good/bad signature tests. | `not_started` |
-| `package:regular-nsis` | Per-user NSIS with Evergreen WebView bootstrap during coexistence. | M6/M10 packaging | Clean install/upgrade/uninstall VM smoke. | `not_started` |
-| `package:standalone-nsis` | Separate standalone manifest/runtime/update channel. | M6/M10 packaging | Cross-update refusal and upgrade smoke. | `not_started` |
+| `package:regular-nsis` | First-party current-user, WebView-free regular Slint candidate with isolated internal artifact/install identity; shipping Tauri remains unchanged. | M6/M10 packaging | Extracted hash parity plus approved clean install/upgrade/uninstall VM smoke. | `in_progress` |
+| `package:standalone-nsis` | First-party current-user, WebView-free standalone Slint candidate with an intrinsic variant probe and cross-variant refusal. | M6/M10 packaging | Extracted hash parity, manifest crossing, and approved upgrade VM smoke. | `in_progress` |
 | `package:webview2-runtime` | Required/bundled WebView runtime remains until cutover, then is removed with Tauri. | M10 cutover | Bundle inspection and repair-path decision. | `not_started` |
-| `package:ffmpeg-resource` | Reviewed LGPL FFmpeg remains a separately spawned resource. | M6/M10 packaging | Existing integrity/license verifier. | `not_started` |
-| `package:product-identity` | Preserve Clipline, `io.clipline.app`, per-user settings/credentials/media/shortcuts. | M10 cutover | Installed migration and rollback test. | `not_started` |
+| `package:ffmpeg-resource` | Native candidate staging requires the reviewed LGPL FFmpeg allowlist, provenance, license, notices, and exact extracted hashes while keeping it separately spawned. | M6/M10 packaging | Existing integrity verifier plus both candidate extraction receipts; installed replacement smoke remains separate. | `implemented` |
+| `package:product-identity` | Installer metadata preserves Clipline / `io.clipline.app`, while M6 runtime/install paths remain isolated candidate identities to protect the installed app. | M10 cutover | Approved installed migration, production activation identity, and rollback test. | `in_progress` |
 
 ## CLI and cross-cutting manual matrix
 

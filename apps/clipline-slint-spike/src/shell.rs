@@ -315,6 +315,7 @@ mod windows_runtime {
     use super::{AttachmentToken, LifecycleAction, LifecycleSnapshot, ShellLifecycle};
 
     const PRODUCT_IDENTITY: &str = "io.clipline.app.slint-spike";
+    const PACKAGE_INSTALL_FENCE_NAME: &str = r"Local\io.clipline.app.slint-candidate.package-fence";
     const COMMAND_POLL: Duration = Duration::from_millis(5);
     const HANDLE_RETRY: Duration = Duration::from_millis(10);
     const MAX_HANDLE_ATTEMPTS: u16 = 200;
@@ -396,6 +397,11 @@ mod windows_runtime {
                     })
                 }
             };
+        let _package_install_fence =
+            clipline_shell::windows::activation::WindowsProcessFence::acquire(
+                PACKAGE_INSTALL_FENCE_NAME,
+            )
+            .map_err(|error| format!("acquire package install fence: {error}"))?;
         let hotkeys = WindowsHotkeyService::start(shell_commands.clone())
             .map_err(|error| format!("start Slint spike hotkey service: {error}"))?;
 
