@@ -11,7 +11,7 @@ members = [
     "crates/clipline-test-utils",
     "apps/clipline-app",
 ]
-exclude = ["third-party/shiguredo_opus"]
+exclude = ["third-party/shiguredo_opus", "apps/clipline-slint-spike"]
 
 [workspace.package]
 edition = "2021"

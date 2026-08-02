@@ -1,4 +1,5 @@
 /target
+apps/clipline-slint-spike/target/
 .worktrees/
 **/*.rs.bk
 *.mp4
