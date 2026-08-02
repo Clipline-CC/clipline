@@ -43,8 +43,8 @@ pub use presentation::{
 };
 pub use ring::{RingTelemetry, StereoRingBuffer, MAX_AUDIO_QUEUE_FRAMES};
 pub use sample_buffer::{
-    plan_video_sample_buffers, LoadedVideoSample, SampleBufferTelemetry, VideoAccessUnit,
-    VideoSampleBufferPlan, VideoSampleTransport,
+    plan_video_sample_buffers, ConvertedVideoSample, LoadedVideoSample, SampleBufferTelemetry,
+    VideoAccessUnit, VideoSampleBufferPlan, VideoSampleTransport,
 };
 pub use scheduler::{
     plan_audio_fill, AdmitOutcome, AudioAvailability, AudioFillPlan, EndOfStreamTracker,

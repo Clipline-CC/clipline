@@ -75,6 +75,29 @@ pub struct LoadedVideoSample {
     generation: WorkGeneration,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConvertedVideoSample {
+    id: u64,
+    sample_index: usize,
+    encoded_size: usize,
+    dts: u64,
+    pts: i64,
+    duration: u32,
+    is_sync: bool,
+    generation: WorkGeneration,
+    parameter_set_submission: Option<ParameterSetSubmission>,
+}
+
+impl ConvertedVideoSample {
+    pub const fn sample_index(self) -> usize {
+        self.sample_index
+    }
+
+    pub const fn generation(self) -> WorkGeneration {
+        self.generation
+    }
+}
+
 impl LoadedVideoSample {
     pub const fn sample_index(self) -> usize {
         self.sample_index
@@ -98,6 +121,8 @@ pub struct VideoSampleTransport<R: Read + Seek> {
     encoded_reserve_count: usize,
     next_loaded_id: u64,
     loaded_sample_id: Option<u64>,
+    next_converted_id: u64,
+    converted_sample_id: Option<u64>,
     converter: H264AnnexBConverter,
 }
 
@@ -149,6 +174,8 @@ impl<R: Read + Seek> VideoSampleTransport<R> {
             encoded_reserve_count,
             next_loaded_id: 0,
             loaded_sample_id: None,
+            next_converted_id: 0,
+            converted_sample_id: None,
             converter,
         })
     }
@@ -245,6 +272,15 @@ impl<R: Read + Seek> VideoSampleTransport<R> {
         loaded: LoadedVideoSample,
         generation: WorkGeneration,
     ) -> Result<VideoAccessUnit<'_>, AnnexBError> {
+        let converted = self.prepare_loaded_sample(loaded, generation)?;
+        self.converted_sample(converted, generation)
+    }
+
+    pub fn prepare_loaded_sample(
+        &mut self,
+        loaded: LoadedVideoSample,
+        generation: WorkGeneration,
+    ) -> Result<ConvertedVideoSample, AnnexBError> {
         let active_generation = self.converter.active_generation();
         if generation != active_generation || loaded.generation != generation {
             return Err(AnnexBError::StaleGeneration {
@@ -258,20 +294,58 @@ impl<R: Read + Seek> VideoSampleTransport<R> {
                 current_id: self.loaded_sample_id,
             });
         }
+        let id = self
+            .next_converted_id
+            .checked_add(1)
+            .ok_or(AnnexBError::ConvertedSampleCounterExhausted)?;
         self.loaded_sample_id = None;
+        self.converted_sample_id = None;
         let converted = self.converter.convert(
             &self.encoded[..loaded.encoded_size],
             loaded.is_sync,
             generation,
         )?;
-        Ok(VideoAccessUnit {
-            bytes: converted.bytes,
+        self.next_converted_id = id;
+        self.converted_sample_id = Some(id);
+        Ok(ConvertedVideoSample {
+            id,
             sample_index: loaded.sample_index,
             encoded_size: loaded.encoded_size,
             dts: loaded.dts,
             pts: loaded.pts,
             duration: loaded.duration,
             is_sync: loaded.is_sync,
+            generation,
+            parameter_set_submission: converted.parameter_set_submission,
+        })
+    }
+
+    pub fn converted_sample(
+        &self,
+        converted: ConvertedVideoSample,
+        generation: WorkGeneration,
+    ) -> Result<VideoAccessUnit<'_>, AnnexBError> {
+        let active_generation = self.converter.active_generation();
+        if generation != active_generation || converted.generation != generation {
+            return Err(AnnexBError::StaleGeneration {
+                active: active_generation,
+                actual: generation,
+            });
+        }
+        if self.converted_sample_id != Some(converted.id) {
+            return Err(AnnexBError::ConvertedSampleSuperseded {
+                converted_id: converted.id,
+                current_id: self.converted_sample_id,
+            });
+        }
+        Ok(VideoAccessUnit {
+            bytes: self.converter.output_bytes(),
+            sample_index: converted.sample_index,
+            encoded_size: converted.encoded_size,
+            dts: converted.dts,
+            pts: converted.pts,
+            duration: converted.duration,
+            is_sync: converted.is_sync,
             generation,
             parameter_set_submission: converted.parameter_set_submission,
         })
@@ -293,6 +367,7 @@ impl<R: Read + Seek> VideoSampleTransport<R> {
 
     pub fn reset_for_generation(&mut self, generation: WorkGeneration) {
         self.loaded_sample_id = None;
+        self.converted_sample_id = None;
         self.encoded.clear();
         self.converter.reset_for_generation(generation);
     }

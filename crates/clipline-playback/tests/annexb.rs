@@ -449,16 +449,42 @@ fn indexed_read_and_annex_b_conversion_are_separate_generation_safe_checkpoints(
         transport.convert_loaded_sample(superseded, OPEN_GENERATION),
         Err(AnnexBError::LoadedSampleSuperseded { .. })
     ));
+    let converted = transport
+        .prepare_loaded_sample(current, OPEN_GENERATION)
+        .unwrap();
+    assert_eq!(converted.sample_index(), 1);
+    assert_eq!(converted.generation(), OPEN_GENERATION);
     let unit = transport
-        .convert_loaded_sample(current, OPEN_GENERATION)
+        .converted_sample(converted, OPEN_GENERATION)
         .unwrap();
     assert_eq!(unit.sample_index, 1);
 
-    let stale_generation = transport.read_encoded_sample(2, OPEN_GENERATION).unwrap();
+    let next_loaded = transport.read_encoded_sample(2, OPEN_GENERATION).unwrap();
+    let next_converted = transport
+        .prepare_loaded_sample(next_loaded, OPEN_GENERATION)
+        .unwrap();
+    assert!(matches!(
+        transport.converted_sample(converted, OPEN_GENERATION),
+        Err(AnnexBError::ConvertedSampleSuperseded { .. })
+    ));
+    assert_eq!(
+        transport
+            .converted_sample(next_converted, OPEN_GENERATION)
+            .unwrap()
+            .sample_index,
+        2
+    );
+
+    let stale_generation = transport.read_encoded_sample(3, OPEN_GENERATION).unwrap();
     transport.reset_for_generation(SEEK_GENERATION);
     assert!(matches!(
         transport.convert_loaded_sample(stale_generation, OPEN_GENERATION),
         Err(AnnexBError::StaleGeneration { .. }) | Err(AnnexBError::LoadedSampleSuperseded { .. })
+    ));
+    assert!(matches!(
+        transport.converted_sample(next_converted, OPEN_GENERATION),
+        Err(AnnexBError::StaleGeneration { .. })
+            | Err(AnnexBError::ConvertedSampleSuperseded { .. })
     ));
 
     let seek = transport

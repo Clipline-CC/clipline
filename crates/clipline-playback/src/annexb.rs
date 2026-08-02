@@ -257,6 +257,13 @@ pub enum AnnexBError {
         loaded_id: u64,
         current_id: Option<u64>,
     },
+    #[error("converted video sample counter is exhausted")]
+    ConvertedSampleCounterExhausted,
+    #[error("converted video sample token {converted_id} was superseded by {current_id:?}")]
+    ConvertedSampleSuperseded {
+        converted_id: u64,
+        current_id: Option<u64>,
+    },
     #[error(transparent)]
     Index(#[from] clipline_mp4::PlaybackIndexError),
 }
@@ -423,6 +430,10 @@ impl H264AnnexBConverter {
 
     pub fn output_len(&self) -> usize {
         self.output.len()
+    }
+
+    pub(crate) fn output_bytes(&self) -> &[u8] {
+        &self.output
     }
 
     pub fn output_capacity(&self) -> usize {
