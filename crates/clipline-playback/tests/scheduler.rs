@@ -26,6 +26,7 @@ impl Drop for TestSurface {
 struct TestPublisher {
     published: Vec<usize>,
     cleared: Vec<PipelineToken>,
+    receipt: PublicationReceipt,
 }
 
 impl FramePublisher<TestSurface> for TestPublisher {
@@ -34,13 +35,55 @@ impl FramePublisher<TestSurface> for TestPublisher {
         frame: DecodedVideoFrame<TestSurface>,
     ) -> Result<PublicationReceipt, BackendError> {
         self.published.push(frame.surface().id);
-        Ok(PublicationReceipt)
+        Ok(self.receipt)
     }
 
     fn clear(&mut self, token: PipelineToken) -> Result<(), BackendError> {
         self.cleared.push(token);
         Ok(())
     }
+}
+
+#[test]
+fn publication_backpressure_and_occlusion_are_not_counted_as_presented() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let mut scheduler = FrameScheduler::new(TOKEN, SeekTarget::new(pos(0), 0));
+    let mut publisher = TestPublisher {
+        receipt: PublicationReceipt::Backpressured,
+        ..TestPublisher::default()
+    };
+    scheduler
+        .admit(frame(0, 0, 1, TOKEN, &drops), pos(0))
+        .unwrap();
+    assert!(!scheduler
+        .tick(
+            pos(0),
+            &mut publisher,
+            || panic!("a frame that was not presented has no publication clock"),
+            MonotonicTime100ns::new(0),
+        )
+        .unwrap());
+    assert_eq!(scheduler.metrics().presented_frames, 0);
+    assert_eq!(scheduler.metrics().presentation_backpressured_frames, 1);
+    assert_eq!(scheduler.metrics().scheduler_dropped_frames, 1);
+    assert_eq!(scheduler.metrics().late_or_dropped_frames, 1);
+
+    publisher.receipt = PublicationReceipt::Occluded;
+    scheduler
+        .admit(frame(1, 1, 1, TOKEN, &drops), pos(1))
+        .unwrap();
+    assert!(!scheduler
+        .tick(
+            pos(1),
+            &mut publisher,
+            || panic!("an occluded frame has no publication clock"),
+            MonotonicTime100ns::new(1),
+        )
+        .unwrap());
+    assert_eq!(scheduler.metrics().presented_frames, 0);
+    assert_eq!(scheduler.metrics().presentation_occluded_frames, 1);
+    assert_eq!(scheduler.metrics().scheduler_dropped_frames, 1);
+    assert_eq!(drops.load(Ordering::SeqCst), 2);
 }
 
 fn pos(ticks: u64) -> TimelinePosition {

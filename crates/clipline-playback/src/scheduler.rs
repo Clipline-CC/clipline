@@ -2,7 +2,7 @@ use thiserror::Error;
 
 use crate::backend::{
     BackendError, DecodedVideoFrame, FramePublisher, MonotonicTime100ns, PipelineToken,
-    RawAudioClock, TimelinePosition, PLAYBACK_TIMELINE_HZ,
+    PublicationReceipt, RawAudioClock, TimelinePosition, PLAYBACK_TIMELINE_HZ,
 };
 use crate::ClockError;
 
@@ -258,6 +258,8 @@ pub struct PlaybackMetrics {
     pub presented_frames: u64,
     pub late_frames: u64,
     pub scheduler_dropped_frames: u64,
+    pub presentation_backpressured_frames: u64,
+    pub presentation_occluded_frames: u64,
     pub late_or_dropped_frames: u64,
     pub stale_results: u64,
     pub preroll_frames: u64,
@@ -434,7 +436,25 @@ impl<S> FrameScheduler<S> {
             .ticks()
             .checked_add(duration.ticks())
             .ok_or(ClockError::TimelineOverflow)?;
-        publisher.publish(frame)?;
+        match publisher.publish(frame)? {
+            PublicationReceipt::Presented => {}
+            PublicationReceipt::Backpressured => {
+                self.metrics.presentation_backpressured_frames = self
+                    .metrics
+                    .presentation_backpressured_frames
+                    .saturating_add(1);
+                self.metrics.scheduler_dropped_frames =
+                    self.metrics.scheduler_dropped_frames.saturating_add(1);
+                self.metrics.late_or_dropped_frames =
+                    self.metrics.late_or_dropped_frames.saturating_add(1);
+                return Ok(false);
+            }
+            PublicationReceipt::Occluded => {
+                self.metrics.presentation_occluded_frames =
+                    self.metrics.presentation_occluded_frames.saturating_add(1);
+                return Ok(false);
+            }
+        }
         self.metrics.presented_frames = self.metrics.presented_frames.saturating_add(1);
 
         let publication_clock = match sample_after_publication() {

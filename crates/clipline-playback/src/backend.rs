@@ -302,8 +302,13 @@ pub trait AudioRenderer {
     fn close(&mut self);
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PublicationReceipt;
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum PublicationReceipt {
+    #[default]
+    Presented,
+    Backpressured,
+    Occluded,
+}
 
 pub trait FramePublisher<S> {
     fn publish(&mut self, frame: DecodedVideoFrame<S>) -> Result<PublicationReceipt, BackendError>;

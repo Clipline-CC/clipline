@@ -159,6 +159,8 @@ mod windows_app {
         presented_frames: u64,
         late_frames: u64,
         scheduler_dropped_frames: u64,
+        presentation_backpressured_frames: u64,
+        presentation_occluded_frames: u64,
         late_or_dropped_frames: u64,
         late_drop_ratio: f64,
         stale_results: u64,
@@ -236,6 +238,12 @@ mod windows_app {
             self.scheduler_dropped_frames = self
                 .scheduler_dropped_frames
                 .saturating_add(run.scheduler_dropped_frames);
+            self.presentation_backpressured_frames = self
+                .presentation_backpressured_frames
+                .saturating_add(run.presentation_backpressured_frames);
+            self.presentation_occluded_frames = self
+                .presentation_occluded_frames
+                .saturating_add(run.presentation_occluded_frames);
             self.late_or_dropped_frames = self
                 .late_or_dropped_frames
                 .saturating_add(run.late_or_dropped_frames);
@@ -386,6 +394,8 @@ mod windows_app {
         presented_frames: u64,
         late_frames: u64,
         scheduler_dropped_frames: u64,
+        presentation_backpressured_frames: u64,
+        presentation_occluded_frames: u64,
         late_or_dropped_frames: u64,
         stale_results: u64,
         max_av_error_ticks: u64,
@@ -434,6 +444,8 @@ mod windows_app {
         presented_frames: u64,
         late_frames: u64,
         scheduler_dropped_frames: u64,
+        presentation_backpressured_frames: u64,
+        presentation_occluded_frames: u64,
         late_or_dropped_frames: u64,
         max_av_error_ticks: u64,
         av_error_p95_ms: Option<u16>,
@@ -452,6 +464,12 @@ mod windows_app {
             self.scheduler_dropped_frames = self
                 .scheduler_dropped_frames
                 .saturating_add(metrics.scheduler_dropped_frames);
+            self.presentation_backpressured_frames = self
+                .presentation_backpressured_frames
+                .saturating_add(metrics.presentation_backpressured_frames);
+            self.presentation_occluded_frames = self
+                .presentation_occluded_frames
+                .saturating_add(metrics.presentation_occluded_frames);
             self.late_or_dropped_frames = self
                 .late_or_dropped_frames
                 .saturating_add(metrics.late_or_dropped_frames);
@@ -487,7 +505,7 @@ mod windows_app {
             self.presented = self.presented.saturating_add(1);
             self.last_sample_index = Some(frame.sample_index());
             drop(frame);
-            Ok(PublicationReceipt)
+            Ok(PublicationReceipt::Presented)
         }
 
         fn clear(&mut self, _token: PipelineToken) -> Result<(), clipline_playback::BackendError> {
@@ -1105,6 +1123,10 @@ mod windows_app {
                 presented_frames: self.scheduler_totals.presented_frames,
                 late_frames: self.scheduler_totals.late_frames,
                 scheduler_dropped_frames: self.scheduler_totals.scheduler_dropped_frames,
+                presentation_backpressured_frames: self
+                    .scheduler_totals
+                    .presentation_backpressured_frames,
+                presentation_occluded_frames: self.scheduler_totals.presentation_occluded_frames,
                 late_or_dropped_frames: self.scheduler_totals.late_or_dropped_frames,
                 stale_results,
                 max_av_error_ticks: self.scheduler_totals.max_av_error_ticks,
