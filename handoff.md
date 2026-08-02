@@ -4,7 +4,7 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
-## Checkpoint (2026-08-02): Slint replacement Milestone 6 native shell, Tasks 1--7
+## Checkpoint (2026-08-02): Slint replacement Milestone 6 native shell, Tasks 1--8
 
 Plan: `docs/superpowers/plans/2026-08-02-slint-native-shell.md`. The new
 `crates/clipline-shell` crate owns the framework-neutral launch/window/shutdown contract and the
@@ -78,6 +78,33 @@ are removed. The published 0.1.43 regular manifest and 54,315,070-byte installer
 untracked oracles; SHA-256 matched `b4e4cb2aa8a8b3ff98be5de511299b04045c42b9d4a11c8ccfde00354b8bbd4d`,
 and the exact installer passed the new streaming verifier with the embedded production key.
 
+Task 8 makes the Slint spike genuinely tray-first. `ShellLaunch` and the bounded shell command
+port are established before Slint; a distinct `io.clipline.app.slint-spike` activation identity
+cannot collide with the installed app. Autostart constructs activation, the empty hotkey service,
+the long-lived desktop reducer, and `SpikeTray`, but no `CliplineSpike`, winit window, renderer,
+playback session, video host, poster, or visible model. Slint's built-in tray maps left-button
+release and explicit Open/Save Replay/Diagnostics/Quit menu items into the shared command port.
+Normal and secondary activation Open requests coalesce onto one UI-thread window generation.
+
+The desktop adapter now survives every component generation. Attach synchronously rebuilds the
+latest neutral snapshot; posted projections are fenced by both attachment generation and desktop
+revision, and detach invalidates old closures without stopping the consumer. Window callbacks
+capture only weak shell/component handles. Close is deferred out of Slint's callback, publishes
+background first, joins playback/update work, closes the D3D host, clears image/list/timeline/upload
+models, detaches the desktop generation, hides the window to release Slint's retained show handle,
+and drops the component. `LiveSession` has a best-effort Drop guard, create failures return the
+lifecycle to tray so Open can retry, and Quit continues through service shutdown/event-loop exit
+even if an earlier teardown step reports an error.
+
+The benchmark adapter now treats app lifecycle JSONL separately from driver readiness, rejects any
+completed malformed/error record, and validates balanced window/desktop/playback/video/model
+counters plus zero final live resources. The real CPU diagnostic soak created and destroyed exactly
+100 Slint components, desktop attachments, playback sessions, and visible model sets with no error
+markers or retained presentation resources. A real secondary-instance activation produced one
+window and one drop. Debug diagnostic harness runs reported 3.4 MiB tree PWS p95 in autostart tray,
+7.2 MiB after close-to-tray, and 11.2 MiB after the 100-cycle soak; these are functional diagnostics,
+not formal memory claims, because the quiet matched benchmark gates remain pending.
+
 Validation is green: CI-mode `cargo test --workspace`, warning-denied workspace Clippy after fresh
 `clipline-shell` and `clipline-app` caches, 487 app unit tests, 92 UI contracts, 12
 repository-security contracts, 8 shared diagnostics tests, live disposable Credential Manager
@@ -94,7 +121,7 @@ Implementation commits are `026d0eb` (bounded shell/lifecycle), `23263e3` (neutr
 (authenticated single-instance activation), and the Task 6 commit containing this checkpoint. Plan
 commits are `13005af` and `9329e53`.
 
-Next: continue Tasks 8--11 (lazy Slint tray/window, shipping adapters, NSIS candidate, and final
+Next: continue Tasks 9--11 (shipping Tauri adapters, the isolated native NSIS candidate, and final
 validation) without switching production before the later gates pass.
 
 ## Checkpoint (2026-08-02): Slint replacement Milestone 5 desktop controller

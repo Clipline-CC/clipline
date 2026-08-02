@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use clipline_desktop::{
     CloudUploadProgress, DesktopController, Generation, RecorderEvent, UiEvent, MAX_ACTIVE_UPLOADS,
 };
-use clipline_slint_spike::desktop::{DesktopProjection, RevisionGate};
+use clipline_slint_spike::desktop::{AttachmentGate, DesktopProjection};
 
 fn spike_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -60,13 +60,31 @@ fn projection_is_revisioned_and_bounds_the_visible_upload_model() {
 }
 
 #[test]
-fn delayed_projection_is_rejected_after_a_newer_revision_is_posted() {
-    let gate = RevisionGate::default();
-    gate.post(4);
-    assert!(gate.is_current(4));
-    gate.post(5);
-    assert!(!gate.is_current(4));
-    assert!(gate.is_current(5));
+fn attachment_and_revision_both_fence_delayed_projection() {
+    let gate = AttachmentGate::default();
+    let first = gate.attach(4).unwrap();
+    assert!(gate.is_current(first, 4));
+    gate.post_revision(5);
+    assert!(!gate.is_current(first, 4));
+    assert!(gate.is_current(first, 5));
+
+    gate.detach(first).unwrap();
+    assert!(!gate.is_current(first, 5));
+    let second = gate.attach(5).unwrap();
+    assert_ne!(first, second);
+    assert!(!gate.is_current(first, 5));
+    assert!(gate.is_current(second, 5));
+}
+
+#[test]
+fn stale_detach_cannot_invalidate_a_replacement_attachment() {
+    let gate = AttachmentGate::default();
+    let first = gate.attach(1).unwrap();
+    gate.detach(first).unwrap();
+    let second = gate.attach(1).unwrap();
+
+    assert!(gate.detach(first).is_err());
+    assert!(gate.is_current(second, 1));
 }
 
 #[test]
@@ -76,10 +94,11 @@ fn adapter_source_posts_only_weak_revision_gated_ui_closures() {
         "ui_event_channel()",
         "thread::Builder::new()",
         "slint::invoke_from_event_loop",
-        "gate.is_current(revision)",
+        "gate.is_current(attachment, revision)",
         "weak.upgrade()",
         "slint::ModelRc::new",
-        "consumer_alive.store(false",
+        "pub fn attach(",
+        "pub fn detach(",
     ] {
         assert!(
             source.contains(required),
@@ -88,4 +107,5 @@ fn adapter_source_posts_only_weak_revision_gated_ui_closures() {
     }
     assert!(!source.contains("tauri"));
     assert!(!source.contains("webview"));
+    assert!(!source.contains("posted_consumer_alive.store(false"));
 }

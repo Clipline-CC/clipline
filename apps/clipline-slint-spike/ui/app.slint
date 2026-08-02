@@ -32,14 +32,21 @@ component SectionLabel inherits Text {
 
 export component SpikeTray inherits SystemTrayIcon {
     in property <image> tray-icon;
+    in-out property <string> recorder-state: "BUFFERING";
+    in-out property <string> save-replay-label: "Save Replay (Alt+F10)";
     icon: tray-icon;
-    tooltip: "Clipline Slint Presentation Spike";
+    tooltip: "Clipline · " + recorder-state;
     callback show-window();
+    callback save-replay();
+    callback open-diagnostics();
     callback quit-app();
+    clicked => { root.show-window(); }
     Menu {
-        MenuItem { title: "Show Clipline spike"; activated => { root.show-window(); } }
+        MenuItem { title: "Open Clipline"; activated => { root.show-window(); } }
+        MenuItem { title: root.save-replay-label; activated => { root.save-replay(); } }
+        MenuItem { title: "Open Diagnostics Folder"; activated => { root.open-diagnostics(); } }
         MenuSeparator { }
-        MenuItem { title: "Quit spike"; activated => { root.quit-app(); } }
+        MenuItem { title: "Quit"; activated => { root.quit-app(); } }
     }
 }
 
@@ -56,6 +63,7 @@ export component CliplineSpike inherits Window {
     in property <[TimelineMarker]> timeline-markers: [];
     in property <[DesktopUploadItem]> desktop-uploads: [];
     in-out property <string> recorder-state: "BUFFERING";
+    in-out property <string> save-replay-label: "Alt+F10  Save Replay";
     in-out property <string> desktop-notice: "";
     in-out property <bool> review-visible: false;
     in-out property <bool> playing: false;
@@ -183,7 +191,7 @@ export component CliplineSpike inherits Window {
             border-color: #392c21;
             Rectangle { x: 12px; y: 14px; width: 8px; height: 8px; border-radius: 4px; background: #d9962a; }
             Text { x: 28px; y: 8px; width: 146px; height: 20px; text: root.recorder-state; color: #e5c183; font-size: 11px; font-weight: 700; vertical-alignment: center; overflow: elide; }
-            Text { x: 12px; y: 36px; width: 166px; height: 17px; text: "Alt+F10  Save Replay"; color: #d8ccbd; font-size: 11px; }
+            Text { x: 12px; y: 36px; width: 166px; height: 17px; text: root.save-replay-label; color: #d8ccbd; font-size: 11px; }
             Text { x: 12px; y: 58px; width: 166px; height: 16px; text: "Memory  35.5 MiB p95"; color: #8d7d6d; font-size: 10px; }
         }
 

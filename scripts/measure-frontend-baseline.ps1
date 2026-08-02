@@ -438,18 +438,30 @@ function Invoke-TauriDriverWorker {
 function Get-CliplineDriverMarker {
     param([Parameter(Mandatory = $true)][string]$Path)
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
-    $lines = @(Get-Content -LiteralPath $Path -ErrorAction Stop)
-    $latest = $null
-    foreach ($line in $lines) {
-        if ([string]::IsNullOrWhiteSpace($line)) { continue }
-        try {
-            $marker = $line | ConvertFrom-Json
-            if ($marker.schemaVersion -ne 1) { throw 'unsupported marker schema version' }
-            if ($marker.kind -in @('ready', 'error')) { $latest = $marker }
-        } catch {
-            # A concurrent writer may not have flushed the final line yet.
-        }
+    [string]$raw = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop
+    $lines = @($raw -split "`r?`n")
+    $lineCount = $lines.Count
+    if ($raw.Length -gt 0 -and $raw -notmatch "(`r`n|`n)$") {
+        # The driver writes concurrently. Ignore only its unfinished final
+        # line; every completed marker remains fail-closed.
+        $lineCount--
     }
+    $latest = $null
+    $firstError = $null
+    for ($index = 0; $index -lt $lineCount; $index++) {
+        $line = $lines[$index]
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        try { $marker = $line | ConvertFrom-Json -ErrorAction Stop } catch {
+            throw "malformed completed driver marker line $($index + 1): $($_.Exception.Message)"
+        }
+        if ($marker.schemaVersion -ne 1) { throw 'unsupported marker schema version' }
+        if ($marker.kind -notin @('ready', 'error')) {
+            throw "unsupported driver marker kind '$($marker.kind)'"
+        }
+        if ($marker.kind -eq 'error' -and -not $firstError) { $firstError = $marker }
+        if ($marker.kind -eq 'ready') { $latest = $marker }
+    }
+    if ($firstError) { return $firstError }
     return $latest
 }
 
@@ -464,6 +476,113 @@ function Assert-CliplineDriverHealthy {
     }
     if ($DriverProcess.HasExited -and $DriverProcess.ExitCode -ne 0) {
         throw "frontend driver exited $($DriverProcess.ExitCode) after readiness"
+    }
+}
+
+function Assert-SlintLifecycleTelemetry {
+    param(
+        [Parameter(Mandatory = $true)][object]$Telemetry,
+        [Parameter(Mandatory = $true)][string]$ScenarioName
+    )
+    if ($Telemetry.schemaVersion -ne 1 -or -not $Telemetry.lifecycle) {
+        throw 'Slint final telemetry is missing the lifecycle-v1 contract'
+    }
+    $lifecycle = $Telemetry.lifecycle
+    foreach ($field in @(
+        'openAccepted', 'closeAccepted', 'windowCreated', 'windowDropped',
+        'maxLiveWindows', 'desktopAttached', 'desktopDetached',
+        'playbackStarted', 'playbackStopped', 'videoHostCreated',
+        'videoHostDropped', 'liveDesktopAttachments', 'livePlaybackSessions',
+        'liveVideoHosts', 'modelSetsCreated', 'modelSetsDropped',
+        'liveModelSets', 'presentationResourcesLive', 'trayReady',
+        'desktopConsumerAlive', 'hotkeyServiceAlive',
+        'activationServiceAlive', 'quitAccepted'
+    )) {
+        if (-not $lifecycle.PSObject.Properties[$field]) {
+            throw "Slint lifecycle telemetry is missing $field"
+        }
+    }
+    if ([bool]$lifecycle.windowActive) {
+        throw 'Slint exited with a live window attachment'
+    }
+    if ([long]$lifecycle.maxLiveWindows -gt 1) {
+        throw "Slint exceeded the one-window bound: $($lifecycle.maxLiveWindows)"
+    }
+    foreach ($pair in @(
+        [pscustomobject]@{ Started = 'windowCreated'; Stopped = 'windowDropped' },
+        [pscustomobject]@{ Started = 'desktopAttached'; Stopped = 'desktopDetached' },
+        [pscustomobject]@{ Started = 'playbackStarted'; Stopped = 'playbackStopped' },
+        [pscustomobject]@{ Started = 'videoHostCreated'; Stopped = 'videoHostDropped' },
+        [pscustomobject]@{ Started = 'modelSetsCreated'; Stopped = 'modelSetsDropped' }
+    )) {
+        if ([long]$lifecycle.($pair.Started) -ne [long]$lifecycle.($pair.Stopped)) {
+            throw "Slint lifecycle counters are unbalanced: $($pair.Started)=$($lifecycle.($pair.Started)) $($pair.Stopped)=$($lifecycle.($pair.Stopped))"
+        }
+    }
+    foreach ($field in @(
+        'liveDesktopAttachments', 'livePlaybackSessions', 'liveVideoHosts',
+        'liveModelSets', 'presentationResourcesLive'
+    )) {
+        if ([long]$lifecycle.$field -ne 0) {
+            throw "Slint exited with $field=$($lifecycle.$field)"
+        }
+    }
+    if ([long]$lifecycle.quitAccepted -ne 1) {
+        throw "Slint graceful shutdown must accept Quit exactly once (got $($lifecycle.quitAccepted))"
+    }
+    foreach ($field in @(
+        'trayReady', 'desktopConsumerAlive', 'hotkeyServiceAlive',
+        'activationServiceAlive'
+    )) {
+        if ([bool]$lifecycle.$field) {
+            throw "Slint exited while lifecycle service $field was still live"
+        }
+    }
+    switch ($ScenarioName) {
+        'autostart-tray' {
+            foreach ($field in @(
+                'openAccepted', 'closeAccepted', 'windowCreated', 'windowDropped',
+                'desktopAttached', 'playbackStarted', 'videoHostCreated',
+                'modelSetsCreated'
+            )) {
+                if ([long]$lifecycle.$field -ne 0) {
+                    throw "autostart tray must keep $field at zero (got $($lifecycle.$field))"
+                }
+            }
+        }
+        'close-to-tray' {
+            if ([long]$lifecycle.windowCreated -ne 1 -or
+                [long]$lifecycle.windowDropped -ne 1 -or
+                [long]$lifecycle.closeAccepted -ne 1 -or
+                [long]$lifecycle.desktopAttached -ne 1 -or
+                [long]$lifecycle.desktopDetached -ne 1 -or
+                [long]$lifecycle.playbackStarted -ne 1 -or
+                [long]$lifecycle.playbackStopped -ne 1 -or
+                [long]$lifecycle.modelSetsCreated -ne 1 -or
+                [long]$lifecycle.modelSetsDropped -ne 1) {
+                throw 'close-to-tray must create, close, and drop exactly one real Slint window'
+            }
+        }
+        'reveal-close-100' {
+            if ([long]$lifecycle.openAccepted -ne 100 -or
+                [long]$lifecycle.closeAccepted -ne 100 -or
+                [long]$lifecycle.windowCreated -ne 100 -or
+                [long]$lifecycle.windowDropped -ne 100 -or
+                [long]$lifecycle.desktopAttached -ne 100 -or
+                [long]$lifecycle.desktopDetached -ne 100 -or
+                [long]$lifecycle.playbackStarted -ne 100 -or
+                [long]$lifecycle.playbackStopped -ne 100 -or
+                [long]$lifecycle.modelSetsCreated -ne 100 -or
+                [long]$lifecycle.modelSetsDropped -ne 100 -or
+                [long]$lifecycle.maxLiveWindows -ne 1) {
+                throw 'reveal-close-100 must report exactly 100 balanced window, desktop, and playback lifecycles'
+            }
+            $expectedVideoHosts = if ($Telemetry.presentation.path -eq 'd3d11-child-window') { 100 } else { 0 }
+            if ([long]$lifecycle.videoHostCreated -ne $expectedVideoHosts -or
+                [long]$lifecycle.videoHostDropped -ne $expectedVideoHosts) {
+                throw "reveal-close-100 video-host lifecycle does not match presentation path $($Telemetry.presentation.path)"
+            }
+        }
     }
 }
 
@@ -839,7 +958,7 @@ if (-not [string]::IsNullOrWhiteSpace($FixturesDir)) {
 }
 $requestedFixture = $FixturePath
 if ($Frontend -eq 'slint' -and [string]::IsNullOrWhiteSpace($requestedFixture) -and
-    $Scenario -in @('review-idle', 'review-playing', 'scrub-storm', 'reveal-close-100')) {
+    $Scenario -in @('review-idle', 'review-playing', 'scrub-storm', 'close-to-tray', 'reveal-close-100')) {
     # The native index intentionally rejects FFmpeg's mid-sample edit lists.
     # This first-party remux is hash-covered by production_mux_oracles and uses
     # the same encoded streams without those foreign edit boxes.
@@ -848,6 +967,10 @@ if ($Frontend -eq 'slint' -and [string]::IsNullOrWhiteSpace($requestedFixture) -
 $resolvedFixture = Resolve-CliplineFixture -ScenarioName $Scenario `
     -FixtureDirectory $resolvedFixtures -RequestedPath $requestedFixture
 if ($Frontend -eq 'slint' -and $Scenario -eq 'reveal-close-100' -and -not $resolvedFixture) {
+    $resolvedFixture = Resolve-CliplineFixture -ScenarioName 'review-idle' `
+        -FixtureDirectory $resolvedFixtures -RequestedPath $requestedFixture
+}
+if ($Frontend -eq 'slint' -and $Scenario -eq 'close-to-tray' -and -not $resolvedFixture) {
     $resolvedFixture = Resolve-CliplineFixture -ScenarioName 'review-idle' `
         -FixtureDirectory $resolvedFixtures -RequestedPath $requestedFixture
 }
@@ -894,6 +1017,7 @@ Initialize-CliplineFixtureProfile -ScenarioName $Scenario -MediaPath $mediaPath 
     -SourceFixture $resolvedFixture
 
 $markerPath = Join-Path $profileRoot 'driver-markers.jsonl'
+$frontendMarkerPath = Join-Path $profileRoot 'slint-markers.jsonl'
 $stopPath = Join-Path $profileRoot 'driver.stop'
 $frontendTelemetryPath = Join-Path $profileRoot 'frontend-telemetry.json'
 $contextPath = Join-Path $profileRoot 'driver-context.json'
@@ -940,19 +1064,39 @@ try {
         $env:WEBVIEW2_USER_DATA_FOLDER = $webViewUserData
     }
     $arguments = @()
-    if ($Scenario -eq 'autostart-tray') { $arguments += '--autostart' }
+    if ($Frontend -eq 'tauri' -and $Scenario -eq 'autostart-tray') { $arguments += '--autostart' }
     if ($Frontend -eq 'slint') {
-        if ($Scenario -notin @('review-idle', 'review-playing', 'scrub-storm', 'reveal-close-100')) {
+        if ($Scenario -notin @(
+            'autostart-tray', 'review-idle', 'review-playing', 'scrub-storm',
+            'close-to-tray', 'reveal-close-100'
+        )) {
             throw "Slint presentation spike does not implement baseline scenario $Scenario"
         }
         $arguments += @(
-            '--fixture', "`"$resolvedFixture`"",
             '--renderer', 'winit-software',
-            '--scenario', $Scenario,
-            '--marker-path', "`"$markerPath`"",
+            '--marker-path', "`"$frontendMarkerPath`"",
             '--stop-path', "`"$stopPath`"",
             '--telemetry-path', "`"$frontendTelemetryPath`""
         )
+        switch ($Scenario) {
+            'autostart-tray' {
+                $arguments += '--autostart'
+            }
+            'close-to-tray' {
+                $arguments += @('--fixture', "`"$resolvedFixture`"", '--scenario', 'review-idle')
+            }
+            'reveal-close-100' {
+                # The cycle gate starts from the same truly lazy tray state as
+                # production autostart, then performs exactly 100 real builds.
+                $arguments += @(
+                    '--autostart', '--fixture', "`"$resolvedFixture`"",
+                    '--scenario', 'reveal-close-100'
+                )
+            }
+            default {
+                $arguments += @('--fixture', "`"$resolvedFixture`"", '--scenario', $Scenario)
+            }
+        }
         if ($Renderer -eq 'winit-software-cpu-diagnostic') {
             $arguments += '--cpu-frame-diagnostic'
         }
@@ -1007,6 +1151,7 @@ try {
         mediaPath = $mediaPath
         fixturePath = $resolvedFixture
         markerPath = $markerPath
+        frontendMarkerPath = $frontendMarkerPath
         stopPath = $stopPath
         frontendTelemetryPath = $frontendTelemetryPath
         diagnosticLogPath = $diagnosticLogPath
@@ -1127,7 +1272,9 @@ try {
         Get-Content -LiteralPath $frontendTelemetryPath -Raw | ConvertFrom-Json
     } else { $null }
     if ($Frontend -eq 'slint') {
-        $expectedPresentationPath = if ($Renderer -eq 'winit-software-cpu-diagnostic') {
+        $expectedPresentationPath = if ($Scenario -eq 'autostart-tray') {
+            'none'
+        } elseif ($Renderer -eq 'winit-software-cpu-diagnostic') {
             'cpu-shared-pixel-buffer-diagnostic'
         } else {
             'd3d11-child-window'
@@ -1136,6 +1283,7 @@ try {
             $frontendTelemetry.presentation.path -ne $expectedPresentationPath) {
             throw "Slint renderer label '$Renderer' does not match presentation path '$($frontendTelemetry.presentation.path)'"
         }
+        Assert-SlintLifecycleTelemetry -Telemetry $frontendTelemetry -ScenarioName $Scenario
     }
     $metadata = [pscustomobject][ordered]@{
         schemaVersion = 1

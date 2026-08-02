@@ -26,6 +26,21 @@ function Assert-True {
     if (-not $Condition) { throw $Message }
 }
 
+function Import-TestedFunction {
+    param(
+        [Parameter(Mandatory = $true)][System.Management.Automation.Language.Ast]$Ast,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+    $definition = @($Ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq $Name
+    }, $true)) | Select-Object -First 1
+    if (-not $definition) { throw "function $Name was not found in the tested script" }
+    $scriptDefinition = $definition.Extent.Text -replace '^function\s+([^\s{]+)', 'function script:$1'
+    Invoke-Expression $scriptDefinition
+}
+
 $rootStart = [datetime]'2026-08-01T00:00:00Z'
 $rows = @(
     [pscustomobject]@{ ProcessId = 11; ParentProcessId = 10; CreationDate = $rootStart.AddSeconds(1) },
@@ -79,6 +94,102 @@ if ($env:OS -eq 'Windows_NT') {
     Assert-True ($live.WorkingSetBytes -gt 0) 'live ordinary working set must be readable'
     Assert-True ($live.HandleCount -gt 0) 'live handle count must be readable'
     Assert-True ($live.ThreadCount -gt 0) 'live thread count must be readable'
+}
+
+foreach ($scriptName in @('measure-frontend-baseline.ps1', 'drive-slint-spike.ps1')) {
+    $scriptPath = Join-Path $PSScriptRoot $scriptName
+    $tokens = $null
+    $parseErrors = $null
+    [System.Management.Automation.Language.Parser]::ParseFile(
+        $scriptPath,
+        [ref]$tokens,
+        [ref]$parseErrors
+    ) | Out-Null
+    Assert-Equal 0 $parseErrors.Count "$scriptName must parse without PowerShell errors"
+}
+
+$measureSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'measure-frontend-baseline.ps1') -Raw
+foreach ($contract in @(
+    "`$frontendMarkerPath = Join-Path `$profileRoot 'slint-markers.jsonl'",
+    'frontendMarkerPath = $frontendMarkerPath',
+    "'--autostart'",
+    'same truly lazy tray state',
+    "'autostart-tray', 'review-idle', 'review-playing', 'scrub-storm'",
+    "'close-to-tray', 'reveal-close-100'",
+    'Assert-SlintLifecycleTelemetry -Telemetry $frontendTelemetry',
+    '[long]$lifecycle.openAccepted -ne 100',
+    '[long]$lifecycle.windowDropped -ne 100',
+    "`$Scenario -eq 'autostart-tray'",
+    "'none'"
+)) {
+    Assert-True ($measureSource.Contains($contract)) "Slint baseline contract missing: $contract"
+}
+
+$adapterSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'drive-slint-spike.ps1') -Raw
+foreach ($contract in @(
+    "'trayReady', 'windowCreated', 'windowDropped', 'saveReplay', 'ready', 'error'",
+    'Get-SlintMarkerState -Path $context.frontendMarkerPath',
+    'throw "Slint spike failed: $($errors[0].detail)"',
+    'Request-SlintWindowClose -Context $context',
+    '$state.Ready.Count -gt 0',
+    "'autostart tray created a Slint window before Open'",
+    "'native close request dropped the Slint window and returned to tray'"
+)) {
+    Assert-True ($adapterSource.Contains($contract)) "Slint adapter contract missing: $contract"
+}
+
+$measurePath = Join-Path $PSScriptRoot 'measure-frontend-baseline.ps1'
+$measureTokens = $null
+$measureErrors = $null
+$measureAst = [System.Management.Automation.Language.Parser]::ParseFile(
+    $measurePath,
+    [ref]$measureTokens,
+    [ref]$measureErrors
+)
+Import-TestedFunction -Ast $measureAst -Name 'Get-CliplineDriverMarker'
+Import-TestedFunction -Ast $measureAst -Name 'Assert-SlintLifecycleTelemetry'
+
+$testRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("clipline-harness-test-{0}" -f [guid]::NewGuid())
+New-Item -ItemType Directory -Path $testRoot | Out-Null
+try {
+    $markerPath = Join-Path $testRoot 'driver.jsonl'
+    @(
+        [pscustomobject]@{ schemaVersion = 1; kind = 'ready'; detail = 'early' },
+        [pscustomobject]@{ schemaVersion = 1; kind = 'error'; detail = 'must win' },
+        [pscustomobject]@{ schemaVersion = 1; kind = 'ready'; detail = 'late' }
+    ) | ForEach-Object { $_ | ConvertTo-Json -Compress } |
+        Set-Content -LiteralPath $markerPath -Encoding UTF8
+    Assert-Equal 'error' (Get-CliplineDriverMarker -Path $markerPath).kind `
+        'a later ready marker must never mask any completed error marker'
+
+    $lifecycle = [pscustomobject]@{
+        mode = 'tray'; windowActive = $false; quitting = $true
+        openAccepted = 100; closeAccepted = 100
+        windowCreated = 100; windowDropped = 100; maxLiveWindows = 1
+        desktopAttached = 100; desktopDetached = 100
+        playbackStarted = 100; playbackStopped = 100
+        videoHostCreated = 100; videoHostDropped = 100
+        modelSetsCreated = 100; modelSetsDropped = 100
+        liveDesktopAttachments = 0; livePlaybackSessions = 0
+        liveVideoHosts = 0; liveModelSets = 0; presentationResourcesLive = 0
+        trayReady = $false; desktopConsumerAlive = $false
+        hotkeyServiceAlive = $false; activationServiceAlive = $false
+        quitAccepted = 1
+    }
+    $telemetry = [pscustomobject]@{
+        schemaVersion = 1
+        lifecycle = $lifecycle
+        presentation = [pscustomobject]@{ path = 'd3d11-child-window' }
+    }
+    Assert-SlintLifecycleTelemetry -Telemetry $telemetry -ScenarioName 'reveal-close-100'
+    $lifecycle.windowDropped = 99
+    $unbalancedFailed = $false
+    try {
+        Assert-SlintLifecycleTelemetry -Telemetry $telemetry -ScenarioName 'reveal-close-100'
+    } catch { $unbalancedFailed = $true }
+    Assert-True $unbalancedFailed 'unbalanced Slint lifecycle telemetry must fail closed'
+} finally {
+    Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 Write-Host 'frontend baseline helper self-tests passed'

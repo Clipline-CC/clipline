@@ -1,7 +1,8 @@
 //! Slint event-loop adapter for the framework-neutral desktop contract.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -10,7 +11,7 @@ use clipline_desktop::{
     UiEventPublishOutcome, UiEventReceiver, UiEventSendError, UiEventSender, MAX_ACTIVE_UPLOADS,
 };
 
-use crate::{CliplineSpike, DesktopUploadItem};
+use crate::{CliplineSpike, DesktopUploadItem, SpikeTray};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesktopUploadProjection {
@@ -73,40 +74,190 @@ impl DesktopProjection {
     }
 }
 
-#[derive(Clone, Default)]
-pub struct RevisionGate(Arc<AtomicU64>);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DesktopAttachment(u64);
 
-impl RevisionGate {
-    pub fn post(&self, revision: u64) {
-        self.0.store(revision, Ordering::Release);
+impl DesktopAttachment {
+    #[must_use]
+    pub const fn generation(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttachmentError {
+    AlreadyAttached,
+    GenerationExhausted,
+    StaleAttachment,
+}
+
+impl fmt::Display for AttachmentError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{self:?}")
+    }
+}
+
+impl std::error::Error for AttachmentError {}
+
+#[derive(Default)]
+struct AttachmentGateState {
+    generation: u64,
+    current: Option<DesktopAttachment>,
+    latest_revision: u64,
+}
+
+#[derive(Clone, Default)]
+pub struct AttachmentGate(Arc<Mutex<AttachmentGateState>>);
+
+impl AttachmentGate {
+    pub fn attach(&self, revision: u64) -> Result<DesktopAttachment, AttachmentError> {
+        let mut state = self.0.lock().unwrap_or_else(|poison| poison.into_inner());
+        if state.current.is_some() {
+            return Err(AttachmentError::AlreadyAttached);
+        }
+        state.generation = state
+            .generation
+            .checked_add(1)
+            .ok_or(AttachmentError::GenerationExhausted)?;
+        let attachment = DesktopAttachment(state.generation);
+        state.current = Some(attachment);
+        state.latest_revision = state.latest_revision.max(revision);
+        Ok(attachment)
+    }
+
+    pub fn detach(&self, attachment: DesktopAttachment) -> Result<(), AttachmentError> {
+        let mut state = self.0.lock().unwrap_or_else(|poison| poison.into_inner());
+        if state.current != Some(attachment) {
+            return Err(AttachmentError::StaleAttachment);
+        }
+        state.current = None;
+        Ok(())
+    }
+
+    pub fn post_revision(&self, revision: u64) {
+        let mut state = self.0.lock().unwrap_or_else(|poison| poison.into_inner());
+        state.latest_revision = state.latest_revision.max(revision);
     }
 
     #[must_use]
-    pub fn is_current(&self, revision: u64) -> bool {
-        self.0.load(Ordering::Acquire) == revision
+    pub fn is_current(&self, attachment: DesktopAttachment, revision: u64) -> bool {
+        let state = self.0.lock().unwrap_or_else(|poison| poison.into_inner());
+        state.current == Some(attachment) && state.latest_revision == revision
     }
+
+    #[must_use]
+    fn is_latest(&self, revision: u64) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .latest_revision
+            == revision
+    }
+}
+
+struct DesktopRuntimeState {
+    controller: DesktopController<()>,
+    attachment: Option<(DesktopAttachment, slint::Weak<CliplineSpike>)>,
 }
 
 pub struct SlintDesktopAdapter {
     sender: UiEventSender,
+    state: Arc<Mutex<DesktopRuntimeState>>,
+    gate: AttachmentGate,
     consumer_alive: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
 }
 
 impl SlintDesktopAdapter {
-    pub fn start(window: slint::Weak<CliplineSpike>) -> Result<Self, String> {
+    pub fn start_detached() -> Result<Self, String> {
+        Self::start_inner(None)
+    }
+
+    pub fn start_with_tray(tray: slint::Weak<SpikeTray>) -> Result<Self, String> {
+        Self::start_inner(Some(tray))
+    }
+
+    fn start_inner(tray: Option<slint::Weak<SpikeTray>>) -> Result<Self, String> {
         let (sender, receiver) = ui_event_channel();
         let consumer_alive = Arc::new(AtomicBool::new(true));
-        let worker = spawn_consumer(receiver, window, Arc::clone(&consumer_alive))?;
+        let controller =
+            DesktopController::new((), Vec::new()).map_err(|error| error.to_string())?;
+        let initial_projection = DesktopProjection::from_snapshot(&controller.snapshot());
+        if let Some(tray) = tray.as_ref().and_then(slint::Weak::upgrade) {
+            apply_tray_projection(&tray, &initial_projection);
+        }
+        let state = Arc::new(Mutex::new(DesktopRuntimeState {
+            controller,
+            attachment: None,
+        }));
+        let gate = AttachmentGate::default();
+        gate.post_revision(initial_projection.revision.get());
+        let worker = spawn_consumer(
+            receiver,
+            Arc::clone(&state),
+            gate.clone(),
+            tray,
+            Arc::clone(&consumer_alive),
+        )?;
         Ok(Self {
             sender,
+            state,
+            gate,
             consumer_alive,
             worker: Some(worker),
         })
     }
 
+    pub fn attach(
+        &self,
+        window: slint::Weak<CliplineSpike>,
+    ) -> Result<DesktopAttachment, AttachmentError> {
+        let Some(component) = window.upgrade() else {
+            return Err(AttachmentError::StaleAttachment);
+        };
+        let (attachment, projection) = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            let projection = DesktopProjection::from_snapshot(&state.controller.snapshot());
+            let attachment = self.gate.attach(projection.revision.get())?;
+            state.attachment = Some((attachment, window));
+            (attachment, projection)
+        };
+        apply_projection(&component, projection);
+        Ok(attachment)
+    }
+
+    pub fn detach(&self, attachment: DesktopAttachment) -> Result<(), AttachmentError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if state.attachment.as_ref().map(|current| current.0) != Some(attachment) {
+            return Err(AttachmentError::StaleAttachment);
+        }
+        self.gate.detach(attachment)?;
+        state.attachment = None;
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn projection(&self) -> DesktopProjection {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        DesktopProjection::from_snapshot(&state.controller.snapshot())
+    }
+
     pub fn try_publish(&self, event: UiEvent) -> Result<UiEventPublishOutcome, UiEventSendError> {
         self.sender.try_publish(event)
+    }
+
+    #[must_use]
+    pub fn consumer_alive(&self) -> bool {
+        self.consumer_alive.load(Ordering::Acquire)
     }
 }
 
@@ -121,42 +272,50 @@ impl Drop for SlintDesktopAdapter {
 
 fn spawn_consumer(
     receiver: UiEventReceiver,
-    window: slint::Weak<CliplineSpike>,
+    state: Arc<Mutex<DesktopRuntimeState>>,
+    gate: AttachmentGate,
+    tray: Option<slint::Weak<SpikeTray>>,
     consumer_alive: Arc<AtomicBool>,
 ) -> Result<JoinHandle<()>, String> {
     thread::Builder::new()
         .name("clipline-slint-desktop-events".to_owned())
         .spawn(move || {
-            let mut controller =
-                DesktopController::new((), Vec::new()).expect("empty desktop snapshot is valid");
-            let gate = RevisionGate::default();
             while consumer_alive.load(Ordering::Acquire) {
                 let update = match receiver.wait_recv(Duration::from_millis(50)) {
                     Ok(Some(update)) => update,
                     Ok(None) => continue,
                     Err(_) => break,
                 };
-                let Ok(outcome) = controller.apply_event(update.event) else {
-                    continue;
+                let (projection, attachment) = {
+                    let mut state = state.lock().unwrap_or_else(|poison| poison.into_inner());
+                    let Ok(outcome) = state.controller.apply_event(update.event) else {
+                        continue;
+                    };
+                    if !matches!(outcome, ApplyEventOutcome::Applied { .. }) {
+                        continue;
+                    }
+                    let projection = DesktopProjection::from_snapshot(&state.controller.snapshot());
+                    gate.post_revision(projection.revision.get());
+                    (projection, state.attachment.clone())
                 };
-                if !matches!(outcome, ApplyEventOutcome::Applied { .. }) {
-                    continue;
-                }
-                let projection = DesktopProjection::from_snapshot(&controller.snapshot());
                 let revision = projection.revision.get();
-                gate.post(revision);
                 let gate = gate.clone();
-                let weak = window.clone();
-                let posted_consumer_alive = Arc::clone(&consumer_alive);
+                let tray = tray.clone();
                 if slint::invoke_from_event_loop(move || {
-                    if !gate.is_current(revision) {
+                    if !gate.is_latest(revision) {
                         return;
                     }
-                    let Some(window) = weak.upgrade() else {
-                        posted_consumer_alive.store(false, Ordering::Release);
-                        return;
-                    };
-                    apply_projection(&window, projection);
+                    if let Some(tray) = tray.and_then(|weak| weak.upgrade()) {
+                        apply_tray_projection(&tray, &projection);
+                    }
+                    if let Some((attachment, weak)) = attachment {
+                        if !gate.is_current(attachment, revision) {
+                            return;
+                        }
+                        if let Some(window) = weak.upgrade() {
+                            apply_projection(&window, projection);
+                        }
+                    }
                 })
                 .is_err()
                 {
@@ -166,6 +325,10 @@ fn spawn_consumer(
             }
         })
         .map_err(|error| format!("spawn Slint desktop event consumer: {error}"))
+}
+
+fn apply_tray_projection(tray: &SpikeTray, projection: &DesktopProjection) {
+    tray.set_recorder_state(projection.recorder_label.clone().into());
 }
 
 fn apply_projection(window: &CliplineSpike, projection: DesktopProjection) {

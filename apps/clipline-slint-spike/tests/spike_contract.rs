@@ -143,6 +143,24 @@ fn spike_is_exactly_pinned_small_and_non_distributed() {
             "missing Slint UI contract: {contract}"
         );
     }
+    for tray_contract in [
+        "clicked => { root.show-window(); }",
+        "callback save-replay()",
+        "callback open-diagnostics()",
+        "title: \"Open Clipline\"",
+        "title: root.save-replay-label",
+        "title: \"Open Diagnostics Folder\"",
+        "title: \"Quit\"",
+    ] {
+        assert!(
+            ui.contains(tray_contract),
+            "missing tray-first contract: {tray_contract}"
+        );
+    }
+    assert!(
+        !ui.contains("global "),
+        "tray/window state must not use a Slint global"
+    );
 
     let main = read(root.join("apps/clipline-slint-spike/src/main.rs"));
     assert!(main.contains("--clipline-benchmark-probe"));
@@ -152,6 +170,36 @@ fn spike_is_exactly_pinned_small_and_non_distributed() {
             "missing final telemetry contract: {contract}"
         );
     }
+    assert!(!main.contains("RuntimeState"));
+    assert!(!main.contains("CloseRequestResponse::HideWindow"));
+    assert!(main.contains("ShellLaunch::parse"));
+    assert!(main.contains("run_windows_shell(options)"));
+
+    let shell = read(root.join("apps/clipline-slint-spike/src/shell.rs"));
+    for shell_contract in [
+        "io.clipline.app.slint-spike",
+        "acquire_or_activate(",
+        "WindowsHotkeyService::start",
+        "SlintDesktopAdapter::start_with_tray",
+        "Option<WindowResources>",
+        "slint::run_event_loop_until_quit()",
+        "Rc::downgrade",
+        "CloseRequestResponse::KeepWindowShown",
+        "100 real Slint create/drop cycles",
+    ] {
+        assert!(
+            shell.contains(shell_contract),
+            "missing lazy shell contract: {shell_contract}"
+        );
+    }
+    assert!(!shell.contains("CloseRequestResponse::HideWindow"));
+    assert!(shell.contains("stop_observed"));
+    let live = read(root.join("apps/clipline-slint-spike/src/live.rs"));
+    assert!(
+        !live.contains("stop_path"),
+        "the stop watcher must outlive every window-owned playback session"
+    );
+    assert!(live.contains("impl Drop for LiveSession"));
 
     for config in [
         "apps/clipline-app/tauri.conf.json",

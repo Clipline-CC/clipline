@@ -17,6 +17,7 @@ fn command_line_selects_only_explicit_bounded_paths() {
         "winit-software",
         "--cpu-frame-diagnostic",
         "--exit-after-ready",
+        "--autostart",
         "--scenario",
         "review-playing",
         "--marker-path",
@@ -34,6 +35,7 @@ fn command_line_selects_only_explicit_bounded_paths() {
     assert_eq!(options.renderer, "winit-software");
     assert!(options.cpu_frame_diagnostic);
     assert!(options.exit_after_ready);
+    assert!(options.autostart);
     assert_eq!(options.scenario, SpikeScenario::ReviewPlaying);
     assert_eq!(
         options.marker_path.unwrap(),
@@ -55,6 +57,31 @@ fn command_line_selects_only_explicit_bounded_paths() {
     assert!(matches!(
         SpikeOptions::parse(args(&["spike", "--scenario", "scrub-storm"])),
         Err(OptionsError::FixtureRequired(SpikeScenario::ScrubStorm))
+    ));
+}
+
+#[test]
+fn autostart_is_opt_in_and_fixtureless_for_the_interactive_tray_shell() {
+    let defaults = SpikeOptions::parse(args(&["spike"])).unwrap();
+    assert!(!defaults.autostart);
+
+    let autostart = SpikeOptions::parse(args(&["spike", "--autostart"])).unwrap();
+    assert!(autostart.autostart);
+    assert_eq!(autostart.scenario, SpikeScenario::Interactive);
+    assert!(autostart.fixture.is_none());
+    assert!(SpikeOptions::usage().contains("--autostart"));
+}
+
+#[test]
+fn autostart_does_not_relax_fixture_requirements_for_media_scenarios() {
+    assert!(matches!(
+        SpikeOptions::parse(args(&[
+            "spike",
+            "--autostart",
+            "--scenario",
+            "reveal-close-100",
+        ])),
+        Err(OptionsError::FixtureRequired(SpikeScenario::RevealClose100))
     ));
 }
 

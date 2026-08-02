@@ -3,6 +3,7 @@ use std::fmt;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -45,6 +46,7 @@ pub struct SpikeOptions {
     pub renderer: String,
     pub cpu_frame_diagnostic: bool,
     pub exit_after_ready: bool,
+    pub autostart: bool,
     pub scenario: SpikeScenario,
     pub marker_path: Option<PathBuf>,
     pub stop_path: Option<PathBuf>,
@@ -58,6 +60,7 @@ impl Default for SpikeOptions {
             renderer: "winit-software".to_owned(),
             cpu_frame_diagnostic: false,
             exit_after_ready: false,
+            autostart: false,
             scenario: SpikeScenario::Interactive,
             marker_path: None,
             stop_path: None,
@@ -88,6 +91,7 @@ impl SpikeOptions {
                 }
                 "--cpu-frame-diagnostic" => options.cpu_frame_diagnostic = true,
                 "--exit-after-ready" => options.exit_after_ready = true,
+                "--autostart" => options.autostart = true,
                 "--scenario" => {
                     options.scenario = SpikeScenario::parse(
                         &next_value(&mut args, "--scenario")?.to_string_lossy(),
@@ -117,7 +121,7 @@ impl SpikeOptions {
     pub const fn usage() -> &'static str {
         "clipline-slint-spike [--fixture <mp4>] [--renderer winit-software] \
          [--cpu-frame-diagnostic] [--exit-after-ready] [--scenario interactive|review-idle|review-playing|scrub-storm|reveal-close-100] \
-         [--marker-path <jsonl>] [--stop-path <file>] [--telemetry-path <json>]"
+         [--autostart] [--marker-path <jsonl>] [--stop-path <file>] [--telemetry-path <json>]"
     }
 }
 
@@ -155,6 +159,21 @@ struct ReadinessMarker<'a> {
     detail: &'a str,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LifecycleMarker<'a> {
+    schema_version: u8,
+    kind: &'a str,
+    timestamp_utc: String,
+    detail: &'a str,
+    lifecycle: &'a serde_json::Value,
+}
+
+fn marker_write_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
 pub fn write_marker(path: &PathBuf, kind: &str, detail: &str) -> Result<(), std::io::Error> {
     let marker = ReadinessMarker {
         schema_version: 1,
@@ -162,9 +181,33 @@ pub fn write_marker(path: &PathBuf, kind: &str, detail: &str) -> Result<(), std:
         timestamp_utc: utc_timestamp(SystemTime::now()),
         detail,
     };
+    append_marker(path, &marker)
+}
+
+pub fn write_lifecycle_marker(
+    path: &PathBuf,
+    kind: &str,
+    detail: &str,
+    lifecycle: &serde_json::Value,
+) -> Result<(), std::io::Error> {
+    let marker = LifecycleMarker {
+        schema_version: 1,
+        kind,
+        timestamp_utc: utc_timestamp(SystemTime::now()),
+        detail,
+        lifecycle,
+    };
+    append_marker(path, &marker)
+}
+
+fn append_marker(path: &PathBuf, marker: &impl Serialize) -> Result<(), std::io::Error> {
+    let mut record = serde_json::to_vec(marker)?;
+    record.push(b'\n');
+    let _guard = marker_write_lock()
+        .lock()
+        .map_err(|_| std::io::Error::other("marker write lock poisoned"))?;
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    serde_json::to_writer(&mut file, &marker)?;
-    file.write_all(b"\n")?;
+    file.write_all(&record)?;
     file.flush()
 }
 

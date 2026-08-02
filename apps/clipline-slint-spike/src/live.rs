@@ -12,6 +12,7 @@ use clipline_playback::{
     BackendError, DecodedVideoFrame, FramePublisher, PipelineToken, PlaybackCommand, PlaybackEvent,
     PlaybackTime, PublicationReceipt, PLAYBACK_TIMELINE_HZ,
 };
+use clipline_shell::{ShellCommand, ShellCommandSender};
 
 use crate::controller::{
     ApplyUpdateOutcome, ControllerUpdate, ControllerUpdatePayload, PlaybackCommandPort,
@@ -102,8 +103,8 @@ impl LiveSession {
         fixture: PathBuf,
         scenario: SpikeScenario,
         marker_path: Option<PathBuf>,
-        stop_path: Option<PathBuf>,
         exit_after_ready: bool,
+        shell_commands: ShellCommandSender,
     ) -> Result<Self, String> {
         let (client, runtime) = session_channel();
         let client = Arc::new(client);
@@ -129,8 +130,8 @@ impl LiveSession {
                 window,
                 scenario,
                 marker_path,
-                stop_path,
                 exit_after_ready,
+                shell_commands,
             },
         )?;
         Ok(Self {
@@ -147,6 +148,10 @@ impl LiveSession {
     }
 
     pub fn shutdown(mut self) -> Result<LiveSessionReport, String> {
+        self.shutdown_inner()
+    }
+
+    fn shutdown_inner(&mut self) -> Result<LiveSessionReport, String> {
         self.drain_updates.store(true, Ordering::Release);
         if let Ok(controller) = self.controller.lock() {
             let _ = controller.close();
@@ -187,14 +192,22 @@ impl LiveSession {
     }
 }
 
+impl Drop for LiveSession {
+    fn drop(&mut self) {
+        if self.playback.is_some() || self.updates.is_some() {
+            let _ = self.shutdown_inner();
+        }
+    }
+}
+
 struct UpdatePumpConfig {
     drain_only: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     window: slint::Weak<CliplineSpike>,
     scenario: SpikeScenario,
     marker_path: Option<PathBuf>,
-    stop_path: Option<PathBuf>,
     exit_after_ready: bool,
+    shell_commands: ShellCommandSender,
 }
 
 fn spawn_update_pump(
@@ -208,8 +221,8 @@ fn spawn_update_pump(
         window,
         scenario,
         marker_path,
-        stop_path,
         exit_after_ready,
+        shell_commands,
     } = config;
     thread::Builder::new()
         .name("clipline-slint-updates".to_owned())
@@ -222,9 +235,6 @@ fn spawn_update_pump(
             let mut scrub_near_end = false;
             let mut marker_written = false;
             while !stop.load(Ordering::Acquire) {
-                if stop_path.as_ref().is_some_and(|path| path.exists()) {
-                    let _ = slint::quit_event_loop();
-                }
                 let mut progressed = false;
                 while let Some(update) = client.try_recv_update() {
                     progressed = true;
@@ -282,7 +292,7 @@ fn spawn_update_pump(
                                     }
                                     marker_written = true;
                                     if exit_after_ready {
-                                        let _ = slint::quit_event_loop();
+                                        let _ = shell_commands.try_send(ShellCommand::Quit);
                                     }
                                 }
                                 _ => {}
@@ -338,7 +348,7 @@ fn spawn_update_pump(
                         }
                         marker_written = true;
                         if exit_after_ready {
-                            let _ = slint::quit_event_loop();
+                            let _ = shell_commands.try_send(ShellCommand::Quit);
                         }
                     }
                 }
