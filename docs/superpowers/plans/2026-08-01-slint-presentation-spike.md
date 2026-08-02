@@ -96,10 +96,21 @@ an explicit Milestone 9/final-parity requirement.
 
 - Create: `crates/clipline-playback/src/windows/session.rs`
 - Modify: `crates/clipline-playback/src/windows/mod.rs`
+- Modify: `crates/clipline-playback/src/sample_buffer.rs`
+- Modify: `crates/clipline-playback/src/worker.rs`
+- Modify: `crates/clipline-playback/src/state.rs`
 - Modify: `crates/clipline-playback/examples/headless_playback.rs`
+- Modify: `crates/clipline-playback/tests/annexb.rs`
+- Modify: `crates/clipline-playback/tests/lifecycle.rs`
 - Create: `crates/clipline-playback/tests/windows_session.rs`
 - Modify: `crates/clipline-playback/tests/fixture_playback.rs`
 
+- [ ] Before extraction, close the audited worker seams with failing neutral tests. Add an opaque,
+      generation-fenced converted-video handle so Read/Convert/Decode remain distinct actions;
+      install bounded default audio tracks as part of successful indexing; accept token-fenced
+      steady-state backend failures into the existing recovery budget; and resolve signed Step to
+      an exact clamped source-sample target. A live executor must not merely bypass the worker while
+      claiming it as its authority.
 - [ ] Write failing fake-backend tests proving that `PlaybackWorker` remains the authority for
       open/play/pause/seek/track/volume/close, only the final generation publishes, a full command
       inbox rejects non-fence work without losing Close, and every terminal path releases the file,
@@ -110,8 +121,10 @@ an explicit Milestone 9/final-parity requirement.
 - [ ] Give the executor one bounded command port with last-writer-wins transport/volume intent,
       coalesced seeks, ordered Open/Close fences, and typed full/disconnected results. It may sleep
       only to a bounded next-deadline and must observe Close promptly.
-- [ ] Expose revisioned snapshots/events and the existing honest metrics. Callback delivery must be
-      panic-isolated and may not block playback or retain a decoded frame.
+- [ ] Expose revisioned, owned snapshots/events and the existing honest metrics through a bounded
+      non-blocking update sink. The session never executes an arbitrary user callback; panic
+      isolation belongs in the later Slint event-loop adapter. Updates carry a monotonic sequence
+      and exact pipeline token and may never retain a decoded frame.
 - [ ] Re-run every Milestone 3 deterministic/live test and confirm the headless telemetry schema and
       fixture results remain compatible before committing the extraction.
 
