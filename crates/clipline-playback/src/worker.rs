@@ -178,8 +178,11 @@ pub enum WorkerError {
         expected: &'static str,
         actual: &'static str,
     },
-    #[error("published position does not match the seek target")]
-    WrongPublishedPosition,
+    #[error("published position {actual:?} does not match seek target {expected:?}")]
+    WrongPublishedPosition {
+        expected: PlaybackTime,
+        actual: PlaybackTime,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -484,7 +487,10 @@ impl PlaybackWorker {
                 WorkerCompletion::Published { position },
             ) => {
                 if !same_time(position, plan.target) {
-                    return self.completion_error(WorkerError::WrongPublishedPosition);
+                    return self.completion_error(WorkerError::WrongPublishedPosition {
+                        expected: plan.target,
+                        actual: position,
+                    });
                 }
                 if let Err(error) = self.finish_operation(operation, position) {
                     return self.completion_error(error);

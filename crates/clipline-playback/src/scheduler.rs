@@ -250,6 +250,14 @@ impl MetricHistogram {
     pub const fn overflow(&self) -> u64 {
         self.overflow
     }
+
+    fn accumulate(&mut self, next: &Self) {
+        for (total, value) in self.buckets.iter_mut().zip(&next.buckets) {
+            *total = total.saturating_add(*value);
+        }
+        self.overflow = self.overflow.saturating_add(next.overflow);
+        self.total = self.total.saturating_add(next.total);
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -280,6 +288,41 @@ impl PlaybackMetrics {
         } else {
             self.late_or_dropped_frames as f64 / self.decoded_eligible_frames as f64
         }
+    }
+
+    pub fn accumulate_generation(&mut self, next: &Self) {
+        self.decoded_eligible_frames = self
+            .decoded_eligible_frames
+            .saturating_add(next.decoded_eligible_frames);
+        self.presented_frames = self.presented_frames.saturating_add(next.presented_frames);
+        self.late_frames = self.late_frames.saturating_add(next.late_frames);
+        self.scheduler_dropped_frames = self
+            .scheduler_dropped_frames
+            .saturating_add(next.scheduler_dropped_frames);
+        self.presentation_backpressured_frames = self
+            .presentation_backpressured_frames
+            .saturating_add(next.presentation_backpressured_frames);
+        self.presentation_occluded_frames = self
+            .presentation_occluded_frames
+            .saturating_add(next.presentation_occluded_frames);
+        self.late_or_dropped_frames = self
+            .late_or_dropped_frames
+            .saturating_add(next.late_or_dropped_frames);
+        self.stale_results = self.stale_results.max(next.stale_results);
+        self.preroll_frames = self.preroll_frames.saturating_add(next.preroll_frames);
+        self.cancelled_frames = self.cancelled_frames.max(next.cancelled_frames);
+        self.unmeasured_presentations = self
+            .unmeasured_presentations
+            .saturating_add(next.unmeasured_presentations);
+        self.latest_av_error_ticks = next.latest_av_error_ticks.or(self.latest_av_error_ticks);
+        self.max_av_error_ticks = self.max_av_error_ticks.max(next.max_av_error_ticks);
+        self.av_error_histogram.accumulate(&next.av_error_histogram);
+        self.latest_seek_latency_100ns = next
+            .latest_seek_latency_100ns
+            .or(self.latest_seek_latency_100ns);
+        self.seek_latency_histogram
+            .accumulate(&next.seek_latency_histogram);
+        self.settled_seeks = self.settled_seeks.saturating_add(next.settled_seeks);
     }
 }
 
@@ -493,6 +536,10 @@ impl<S> FrameScheduler<S> {
 
     pub fn pending_frames(&self) -> usize {
         usize::from(self.pending.is_some())
+    }
+
+    pub fn pending_sample_index(&self) -> Option<usize> {
+        self.pending.as_ref().map(DecodedVideoFrame::sample_index)
     }
 
     pub const fn token(&self) -> PipelineToken {

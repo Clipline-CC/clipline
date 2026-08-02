@@ -508,6 +508,43 @@ fn zero_track_gap_and_audio_tail_silence_are_explicit_and_bounded() {
 }
 
 #[test]
+fn metric_generations_accumulate_without_double_counting_cumulative_fences() {
+    let mut total = clipline_playback::PlaybackMetrics {
+        decoded_eligible_frames: 10,
+        presented_frames: 9,
+        late_frames: 1,
+        stale_results: 2,
+        cancelled_frames: 3,
+        settled_seeks: 1,
+        latest_av_error_ticks: Some(5),
+        max_av_error_ticks: 5,
+        ..Default::default()
+    };
+    let next = clipline_playback::PlaybackMetrics {
+        decoded_eligible_frames: 20,
+        presented_frames: 18,
+        late_frames: 2,
+        stale_results: 3,
+        cancelled_frames: 4,
+        settled_seeks: 1,
+        latest_av_error_ticks: Some(7),
+        max_av_error_ticks: 7,
+        ..Default::default()
+    };
+
+    total.accumulate_generation(&next);
+
+    assert_eq!(total.decoded_eligible_frames, 30);
+    assert_eq!(total.presented_frames, 27);
+    assert_eq!(total.late_frames, 3);
+    assert_eq!(total.stale_results, 3);
+    assert_eq!(total.cancelled_frames, 4);
+    assert_eq!(total.settled_seeks, 2);
+    assert_eq!(total.latest_av_error_ticks, Some(7));
+    assert_eq!(total.max_av_error_ticks, 7);
+}
+
+#[test]
 fn eof_waits_for_the_final_video_interval_and_fires_once_for_short_clips() {
     let mut tracker = EndOfStreamTracker::new(pos(800));
     assert!(!tracker.update(pos(10_000)));
