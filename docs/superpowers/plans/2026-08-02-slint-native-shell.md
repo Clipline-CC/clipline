@@ -73,8 +73,10 @@ Pinned bounds and policies:
 - Create: `crates/clipline-shell/src/lib.rs`
 - Create: `crates/clipline-shell/src/contract.rs`
 - Create: `crates/clipline-shell/src/channel.rs`
+- Create: `crates/clipline-shell/src/shutdown.rs`
 - Create: `crates/clipline-shell/tests/contract.rs`
 - Create: `crates/clipline-shell/tests/channel.rs`
+- Create: `crates/clipline-shell/tests/shutdown.rs`
 - Modify: `apps/clipline-app/tests/repository_security.rs`
 
 **Test first**
@@ -87,6 +89,9 @@ Pinned bounds and policies:
   within the current barrier epoch, reports Full/Disconnected distinctly, and never wraps sequence.
 - `WindowPolicy` deterministically maps normal/autostart launch, close, minimize, reveal, taskbar,
   and explicit quit to lifecycle effects without framework types.
+- `ShutdownCoordinator` advances only through durable-state publication, window-media shutdown,
+  recorder finalization, and diagnostics flush acknowledgements for the current generation. Stale,
+  duplicate, out-of-order, or post-deadline acknowledgements fail closed and never authorize exit.
 - Repository security rejects Tauri/Slint/Win32 imports in neutral modules and unsafe outside
   `src/windows/`.
 
@@ -94,6 +99,8 @@ Pinned bounds and policies:
 
 - Keep shell decisions data-only. Effects name application work but do not call recorder/UI APIs.
 - Add typed checked `ShellGeneration`/`ShellSequence`; no saturating or wrapping identity counters.
+- Keep shutdown deadlines monotonic and caller-supplied so neutral tests use deterministic time;
+  native adapters may launch an installer or exit only after `ReadyToExit`.
 - Match capture/playback's reviewed `windows` 0.62 line only in the Windows target dependency.
 
 ## Task 2: Move hotkey grammar out of the Tauri plugin
@@ -215,6 +222,8 @@ Pinned bounds and policies:
 - Create: `crates/clipline-shell/src/windows/shell_execute.rs`
 - Create: `crates/clipline-shell/src/windows/clipboard.rs`
 - Create: `crates/clipline-shell/src/windows/credential.rs`
+- Create: `crates/clipline-shell/src/diagnostics.rs`
+- Create: `crates/clipline-shell/tests/diagnostics.rs`
 - Modify: `apps/clipline-app/src/windows/mod.rs`
 - Modify: `apps/clipline-app/src/windows/credential_store.rs`
 - Modify: `apps/clipline-app/src/library.rs`
@@ -230,6 +239,9 @@ Pinned bounds and policies:
 - File clipboard ownership closes every opened path, retries only bounded transient contention,
   transfers global memory exactly once, and preserves verbatim-UNC normalization.
 - Credential CRUD preserves existing target/value labels and secret bytes without logging them.
+- The shared diagnostics service preserves the existing 2,048-line lossy queue, 16 KiB record,
+  five-by-4-MiB rotation, 15-second snapshot barrier, explicit flush acknowledgement, and panic
+  record bounds without importing either frontend framework.
 - Repository security confirms all moved unsafe is under `clipline-shell/src/windows/` and the app
   reaches only safe functions.
 
@@ -403,6 +415,8 @@ Pinned bounds and policies:
 
 - Stop if primary ownership is acquired after recorder/services start, a peer is not same-user
   authenticated, activation/update input is unbounded, or a hook/pipe thread cannot stop/join.
+- Stop if Quit or update can exit before the current-generation durable-state, window-media,
+  recorder-finalization, and diagnostics-flush acknowledgements complete within a bounded deadline.
 - Stop if debug/benchmark code can modify the installed Run entry, or autostart rollback cannot
   restore an exact pre-existing foreign value.
 - Stop if any updater path launches before exact signature verification, follows an unapproved
