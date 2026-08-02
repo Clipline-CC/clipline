@@ -1,4 +1,5 @@
 use boa_engine::{Context, Source};
+use clipline_library::{account_key, CloudAccountFields};
 use std::fs;
 use std::path::Path;
 
@@ -74,6 +75,16 @@ fn account_key_is_stable_and_account_scoped() {
                credential_target: 'credential-7'\
              })",
         ),
+        "https://clips.example|user-7|credential-7"
+    );
+    assert_eq!(
+        account_key(&CloudAccountFields {
+            host_url: "https://clips.example".into(),
+            connected_user_id: "user-7".into(),
+            credential_target: "credential-7".into(),
+        })
+        .unwrap()
+        .as_str(),
         "https://clips.example|user-7|credential-7"
     );
 }

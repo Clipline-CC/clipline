@@ -1,4 +1,8 @@
 use boa_engine::{Context, Source};
+use clipline_library::{
+    ClipPathIdentity, DecodedImageWindow, GalleryPageState, MAX_CATALOG_PAGE_ROWS,
+    MAX_DECODED_PAGE_IMAGES,
+};
 use std::fs;
 use std::path::Path;
 
@@ -67,6 +71,18 @@ fn clip_path_keys_match_windows_paths_without_collapsing_other_paths() {
             ])"#,
         ),
         r#"["windows:c:\\clips\\one.mp4","windows:c:\\clips\\one.mp4","windows:c:\\clips\\one.mp4","exact:/clips/One.mp4","exact:/clips/one.mp4"]"#
+    );
+    assert_eq!(
+        ClipPathIdentity::from_text(r"C:\Clips\One.mp4")
+            .unwrap()
+            .as_str(),
+        r"windows:c:\clips\one.mp4"
+    );
+    assert_eq!(
+        ClipPathIdentity::from_text("/clips/One.mp4")
+            .unwrap()
+            .as_str(),
+        "exact:/clips/One.mp4"
     );
 }
 
@@ -138,6 +154,15 @@ fn local_and_cloud_library_sizes_never_exceed_the_card_window() {
         ),
         r#"[{"count":50,"localCards":50,"localImages":50,"cloudCards":50,"cloudImages":50,"pages":1},{"count":500,"localCards":60,"localImages":60,"cloudCards":60,"cloudImages":60,"pages":9},{"count":2000,"localCards":60,"localImages":60,"cloudCards":60,"cloudImages":60,"pages":34}]"#
     );
+    for count in [50, 500, 2_000] {
+        let items: Vec<_> = (0..count).collect();
+        let mut state = GalleryPageState::default();
+        state.update(format!("local:{count}"), count, None).unwrap();
+        let window = state.window_items(&items);
+        assert_eq!(window.items.len(), count.min(MAX_CATALOG_PAGE_ROWS));
+        let decoded = DecodedImageWindow::around(window.items.len(), 0, 24, 8);
+        assert!(decoded.len() <= MAX_DECODED_PAGE_IMAGES);
+    }
 }
 
 #[test]

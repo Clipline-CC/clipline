@@ -9,4 +9,5 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+boa_engine = "0.21.1"
 serde_json = { workspace = true }

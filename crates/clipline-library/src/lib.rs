@@ -5,9 +5,17 @@
 //! implementations can be shared without coupling them to Tauri or Slint.
 
 mod channel;
+mod cloud_model;
 mod contract;
+mod detail;
+mod gallery;
 mod identity;
+mod presentation;
 
 pub use channel::*;
+pub use cloud_model::*;
 pub use contract::*;
+pub use detail::*;
+pub use gallery::*;
 pub use identity::*;
+pub use presentation::*;

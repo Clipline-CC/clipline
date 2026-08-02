@@ -5,6 +5,7 @@
 //! Tauri-free for this to work — that constraint is the point.
 
 use boa_engine::{Context, Source};
+use clipline_library::{gallery_card_preview, GalleryCardInput, GalleryPresentation};
 use std::fs;
 use std::path::Path;
 
@@ -2163,6 +2164,21 @@ fn gallery_card_preview_prefers_custom_title() {
             &mut ctx,
             "PlayerCore.galleryCardPreview({ name: 'session_123.mp4', title: 'Ranked win vs Lux', markers: {} }, 'session', 'Jul 2 · 7:30 PM')"
         ),
+        r#"{"title":"Ranked win vs Lux","titleSource":"clip","summary":""}"#
+    );
+    let rust = gallery_card_preview(
+        &GalleryCardInput {
+            name: "session_123.mp4".into(),
+            title: Some("Ranked win vs Lux".into()),
+            kind: "session".into(),
+            fallback_title: "Jul 2 · 7:30 PM".into(),
+            ..GalleryCardInput::default()
+        },
+        &GalleryPresentation::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::to_string(&rust).unwrap(),
         r#"{"title":"Ranked win vs Lux","titleSource":"clip","summary":""}"#
     );
 }

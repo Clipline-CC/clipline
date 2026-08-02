@@ -69,6 +69,7 @@ tauri-build = { version = "2", features = [] }
 [dev-dependencies]
 shiguredo_opus = { workspace = true }
 boa_engine = "0.21.1"
+clipline-library = { path = "../../crates/clipline-library" }
 clipline-test-utils = { path = "../../crates/clipline-test-utils" }
 httpmock = { workspace = true }
 png = "0.17"
