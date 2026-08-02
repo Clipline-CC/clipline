@@ -11,6 +11,57 @@ fn workspace_root() -> PathBuf {
 }
 
 #[test]
+fn neutral_library_contract_has_no_framework_or_platform_escape_hatches() {
+    let root = workspace_root();
+    let source_root = root.join("crates/clipline-library/src");
+    assert!(source_root.is_dir(), "missing neutral library crate");
+
+    for path in rust_sources_below(&source_root) {
+        let source = fs::read_to_string(&path).expect("read neutral library source");
+        for forbidden in [
+            "tauri::",
+            "slint::",
+            "windows::Win32",
+            "windows_sys::Win32",
+            "webview2",
+            "apps::clipline_app",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "neutral library source {} imports forbidden {forbidden}",
+                path.display()
+            );
+        }
+        assert!(
+            !source
+                .split_whitespace()
+                .any(|token| token == "unsafe" || token.starts_with("unsafe{")),
+            "first-party unsafe is forbidden in neutral library source {}",
+            path.display()
+        );
+    }
+
+    let workspace = fs::read_to_string(root.join("Cargo.toml")).expect("read workspace manifest");
+    assert!(workspace.contains("\"crates/clipline-library\""));
+    let manifest =
+        fs::read_to_string(root.join("crates/clipline-library/Cargo.toml")).expect("read manifest");
+    for forbidden in ["tauri", "slint", "windows", "webview"] {
+        assert!(
+            !manifest.to_ascii_lowercase().contains(forbidden),
+            "neutral library manifest contains forbidden dependency {forbidden}"
+        );
+    }
+
+    let spike_manifest =
+        fs::read_to_string(root.join("apps/clipline-slint-spike/Cargo.toml"))
+            .expect("read Slint candidate manifest");
+    assert!(
+        !spike_manifest.contains("clipline-app"),
+        "Slint candidate must not depend on the Tauri application binary"
+    );
+}
+
+#[test]
 fn neutral_shell_contract_has_no_framework_or_platform_escape_hatches() {
     let root = workspace_root();
     let source_root = root.join("crates/clipline-shell/src");
