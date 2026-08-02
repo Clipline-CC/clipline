@@ -681,15 +681,24 @@ impl DecoderSession {
                 .ok_or_else(|| corrupt_error("decoder output timestamp offset overflow"))?;
             if let Some(expected_offset) = self.output_time_offset_100ns {
                 if offset != expected_offset {
-                    return Err(BackendError {
-                        component: BackendComponent::VideoDecoder,
-                        kind: BackendErrorKind::DecoderFailure,
-                        recovery: RecoveryDisposition::RetryPipeline,
-                        native_code: None,
-                        message: format!(
-                            "H.264 decoder timestamp offset changed from {expected_offset} to {offset}"
-                        ),
-                    });
+                    // The inbox decoder may stamp only the first post-flush
+                    // keyframe at zero, then resume the submitted timeline on
+                    // the next output. Accept exactly that one-way transition;
+                    // every later frame must keep the zero offset. Clipline's
+                    // no-B-frame contract still makes FIFO metadata canonical.
+                    if expected_offset < 0 && offset == 0 {
+                        self.output_time_offset_100ns = Some(0);
+                    } else {
+                        return Err(BackendError {
+                            component: BackendComponent::VideoDecoder,
+                            kind: BackendErrorKind::DecoderFailure,
+                            recovery: RecoveryDisposition::RetryPipeline,
+                            native_code: None,
+                            message: format!(
+                                "H.264 decoder timestamp offset changed from {expected_offset} to {offset}"
+                            ),
+                        });
+                    }
                 }
             } else {
                 // The inbox software decoder may rebase the first post-flush

@@ -316,17 +316,20 @@ fn flush_fences_old_output_and_decoder_can_be_reopened() {
     fixture.transport.reset_for_generation(SEEK_GENERATION);
     let seek_sync = fixture.sync_samples[1];
     let mut sought = BTreeSet::new();
-    submit_fixture_sample(
-        &mut fixture,
-        &mut decoder,
-        seek_sync,
-        SEEK_GENERATION,
-        SEEK_TOKEN,
-        &mut sought,
-    )
-    .expect("decode after flush");
-    drain_to_count(&mut decoder, SEEK_TOKEN, &mut sought, 1).expect("drain after flush");
+    for sample_index in seek_sync..seek_sync + 3 {
+        submit_fixture_sample(
+            &mut fixture,
+            &mut decoder,
+            sample_index,
+            SEEK_GENERATION,
+            SEEK_TOKEN,
+            &mut sought,
+        )
+        .expect("decode after flush");
+    }
+    drain_to_count(&mut decoder, SEEK_TOKEN, &mut sought, 3).expect("drain after flush");
     assert_eq!(sought.first().copied(), Some(seek_sync));
+    assert_eq!(sought.last().copied(), Some(seek_sync + 2));
     decoder.close();
 
     let Some(mut reopened) = new_decoder_or_skip(decoder.preference()) else {
