@@ -15,8 +15,9 @@ pub use mft_decode::{
     DecoderOwnershipTelemetry, DecoderPreference, WindowsH264Decoder,
 };
 pub use presenter::{
-    classify_present_result, validate_video_bounds, PresentOutcome, VideoHostError,
-    WindowsVideoHost, WindowsVideoTarget,
+    classify_present_result, validate_video_bounds, D3D11PublisherTelemetry, PresentOutcome,
+    VideoHostError, WindowsD3D11Publisher, WindowsVideoHost, WindowsVideoTarget,
+    MAX_PRESENTATION_INPUT_SURFACES, PRESENTATION_SWAP_CHAIN_BUFFERS,
 };
 pub use wasapi_render::{
     classify_audio_failure, WasapiInitializationPath, WasapiRendererTelemetry,

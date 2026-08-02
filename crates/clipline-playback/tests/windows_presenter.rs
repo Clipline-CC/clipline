@@ -2,7 +2,7 @@
 
 use clipline_playback::windows::{
     classify_present_result, validate_video_bounds, PresentOutcome, VideoHostError,
-    WindowsVideoHost,
+    WindowsVideoHost, MAX_PRESENTATION_INPUT_SURFACES, PRESENTATION_SWAP_CHAIN_BUFFERS,
 };
 use clipline_playback::PhysicalVideoRect;
 use windows::Win32::Foundation::DXGI_STATUS_OCCLUDED;
@@ -40,6 +40,8 @@ fn parent_and_bounds_validation_fail_closed() {
 
 #[test]
 fn present_hresult_classification_is_recovery_aware() {
+    assert_eq!(PRESENTATION_SWAP_CHAIN_BUFFERS, 2);
+    assert_eq!(MAX_PRESENTATION_INPUT_SURFACES, 1);
     assert_eq!(classify_present_result(0), PresentOutcome::Presented);
     assert_eq!(
         classify_present_result(DXGI_STATUS_OCCLUDED.0),

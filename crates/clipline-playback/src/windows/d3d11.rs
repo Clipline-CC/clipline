@@ -219,7 +219,7 @@ impl PlaybackD3D11Device {
     }
 }
 
-fn ensure_multithread_protected(device: &ID3D11Device) -> Result<()> {
+pub(crate) fn ensure_multithread_protected(device: &ID3D11Device) -> Result<()> {
     let multithread: ID3D10Multithread = device.cast()?;
     // SAFETY: these accessors operate on a live device interface. Query after
     // setting so drivers cannot silently leave protection disabled.
@@ -235,7 +235,7 @@ fn ensure_multithread_protected(device: &ID3D11Device) -> Result<()> {
     Ok(())
 }
 
-fn adapter_luid(device: &ID3D11Device) -> Result<u64> {
+pub(crate) fn adapter_luid(device: &ID3D11Device) -> Result<u64> {
     let dxgi_device: IDXGIDevice = device.cast()?;
     // SAFETY: both queries return owned COM wrappers/values.
     let adapter = unsafe { dxgi_device.GetAdapter()? };
