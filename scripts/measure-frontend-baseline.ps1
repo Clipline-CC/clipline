@@ -1126,6 +1126,17 @@ try {
     $frontendTelemetry = if ($Frontend -eq 'slint') {
         Get-Content -LiteralPath $frontendTelemetryPath -Raw | ConvertFrom-Json
     } else { $null }
+    if ($Frontend -eq 'slint') {
+        $expectedPresentationPath = if ($Renderer -eq 'winit-software-cpu-diagnostic') {
+            'cpu-shared-pixel-buffer-diagnostic'
+        } else {
+            'd3d11-child-window'
+        }
+        if (-not $frontendTelemetry.presentation -or
+            $frontendTelemetry.presentation.path -ne $expectedPresentationPath) {
+            throw "Slint renderer label '$Renderer' does not match presentation path '$($frontendTelemetry.presentation.path)'"
+        }
+    }
     $metadata = [pscustomobject][ordered]@{
         schemaVersion = 1
         harnessVersion = $script:HarnessVersion

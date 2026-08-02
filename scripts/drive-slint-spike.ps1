@@ -12,9 +12,13 @@ function Get-LatestMarker {
     $latest = $null
     foreach ($line in Get-Content -LiteralPath $Path) {
         if ([string]::IsNullOrWhiteSpace($line)) { continue }
-        $marker = $line | ConvertFrom-Json
-        if ($marker.schemaVersion -ne 1) { throw 'unsupported Slint marker schema version' }
-        if ($marker.kind -in @('ready', 'error')) { $latest = $marker }
+        try {
+            $marker = $line | ConvertFrom-Json
+            if ($marker.schemaVersion -ne 1) { throw 'unsupported Slint marker schema version' }
+            if ($marker.kind -in @('ready', 'error')) { $latest = $marker }
+        } catch {
+            # A concurrent writer may not have flushed the final line yet.
+        }
     }
     return $latest
 }

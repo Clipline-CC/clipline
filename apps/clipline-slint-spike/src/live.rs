@@ -82,6 +82,7 @@ pub struct LiveSessionReport {
 
 pub struct LiveSession {
     controller: Arc<Mutex<PlaybackController<SessionCommandPort>>>,
+    drain_updates: Arc<AtomicBool>,
     stop_updates: Arc<AtomicBool>,
     playback: Option<
         JoinHandle<
@@ -117,11 +118,13 @@ impl LiveSession {
         client
             .try_send(PlaybackCommand::Open { path: fixture })
             .map_err(|error| format!("open native playback fixture: {error}"))?;
+        let drain_updates = Arc::new(AtomicBool::new(false));
         let stop_updates = Arc::new(AtomicBool::new(false));
         let updates = spawn_update_pump(
             Arc::clone(&client),
             Arc::clone(&controller),
             UpdatePumpConfig {
+                drain_only: Arc::clone(&drain_updates),
                 stop: Arc::clone(&stop_updates),
                 window,
                 scenario,
@@ -132,6 +135,7 @@ impl LiveSession {
         )?;
         Ok(Self {
             controller,
+            drain_updates,
             stop_updates,
             playback: Some(playback),
             updates: Some(updates),
@@ -143,8 +147,7 @@ impl LiveSession {
     }
 
     pub fn shutdown(mut self) -> Result<LiveSessionReport, String> {
-        self.stop_updates.store(true, Ordering::Release);
-        let updates_result = self.updates.take().map(JoinHandle::join);
+        self.drain_updates.store(true, Ordering::Release);
         if let Ok(controller) = self.controller.lock() {
             let _ = controller.close();
         }
@@ -153,6 +156,8 @@ impl LiveSession {
             .take()
             .ok_or_else(|| "native playback thread was already joined".to_owned())?;
         let playback_result = playback.join();
+        self.stop_updates.store(true, Ordering::Release);
+        let updates_result = self.updates.take().map(JoinHandle::join);
         if let Some(updates_result) = updates_result {
             updates_result.map_err(|_| "Slint update pump panicked".to_owned())?;
         }
@@ -183,6 +188,7 @@ impl LiveSession {
 }
 
 struct UpdatePumpConfig {
+    drain_only: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     window: slint::Weak<CliplineSpike>,
     scenario: SpikeScenario,
@@ -197,6 +203,7 @@ fn spawn_update_pump(
     config: UpdatePumpConfig,
 ) -> Result<JoinHandle<()>, String> {
     let UpdatePumpConfig {
+        drain_only,
         stop,
         window,
         scenario,
@@ -243,67 +250,76 @@ fn spawn_update_pump(
                     } else {
                         None
                     };
-                    if let Some(state) = state {
-                        latest_ui_sequence.store(sequence, Ordering::Release);
-                        let gate = Arc::clone(&latest_ui_sequence);
-                        let weak = window.clone();
-                        if slint::invoke_from_event_loop(move || {
-                            if gate.load(Ordering::Acquire) == sequence {
-                                if let Some(window) = weak.upgrade() {
-                                    apply_ui_state(&window, &state);
+                    if !drain_only.load(Ordering::Acquire) {
+                        if let Some(state) = state {
+                            latest_ui_sequence.store(sequence, Ordering::Release);
+                            let gate = Arc::clone(&latest_ui_sequence);
+                            let weak = window.clone();
+                            if slint::invoke_from_event_loop(move || {
+                                if gate.load(Ordering::Acquire) == sequence {
+                                    if let Some(window) = weak.upgrade() {
+                                        apply_ui_state(&window, &state);
+                                    }
                                 }
+                            })
+                            .is_err()
+                            {
+                                stop.store(true, Ordering::Release);
+                                break;
                             }
-                        })
-                        .is_err()
-                        {
-                            stop.store(true, Ordering::Release);
-                            break;
                         }
                     }
-                    if let Some(event) = event {
-                        match event {
-                            PlaybackEvent::Opened { .. } => opened = true,
-                            PlaybackEvent::SeekSettled { .. } => {
-                                settled_seeks = settled_seeks.saturating_add(1);
-                            }
-                            PlaybackEvent::Error { message, .. } => {
-                                if let Some(path) = marker_path.as_ref() {
-                                    let _ = write_marker(path, "error", &message);
+                    if !drain_only.load(Ordering::Acquire) {
+                        if let Some(event) = event {
+                            match event {
+                                PlaybackEvent::Opened { .. } => opened = true,
+                                PlaybackEvent::SeekSettled { .. } => {
+                                    settled_seeks = settled_seeks.saturating_add(1);
                                 }
-                                marker_written = true;
-                                if exit_after_ready {
-                                    let _ = slint::quit_event_loop();
+                                PlaybackEvent::Error { message, .. } => {
+                                    if let Some(path) = marker_path.as_ref() {
+                                        let _ = write_marker(path, "error", &message);
+                                    }
+                                    marker_written = true;
+                                    if exit_after_ready {
+                                        let _ = slint::quit_event_loop();
+                                    }
                                 }
+                                _ => {}
                             }
-                            _ => {}
                         }
                     }
                 }
 
-                if opened
-                    && !playing_requested
-                    && scenario == SpikeScenario::ReviewPlaying
-                    && client.try_send(PlaybackCommand::Play).is_ok()
-                {
-                    playing_requested = true;
-                }
-                if opened && scenario == SpikeScenario::ScrubStorm && Instant::now() >= next_scrub {
-                    let ticks = if scrub_near_end {
-                        4 * u64::from(PLAYBACK_TIMELINE_HZ)
-                    } else {
-                        u64::from(PLAYBACK_TIMELINE_HZ) / 2
-                    };
-                    let _ = client.try_send(PlaybackCommand::Seek {
-                        position: PlaybackTime {
-                            ticks,
-                            timescale: PLAYBACK_TIMELINE_HZ,
-                        },
-                    });
-                    scrub_near_end = !scrub_near_end;
-                    next_scrub = Instant::now() + SCRUB_INTERVAL;
+                if !drain_only.load(Ordering::Acquire) {
+                    if opened
+                        && !playing_requested
+                        && scenario == SpikeScenario::ReviewPlaying
+                        && client.try_send(PlaybackCommand::Play).is_ok()
+                    {
+                        playing_requested = true;
+                    }
+                    if opened
+                        && scenario == SpikeScenario::ScrubStorm
+                        && Instant::now() >= next_scrub
+                    {
+                        let ticks = if scrub_near_end {
+                            4 * u64::from(PLAYBACK_TIMELINE_HZ)
+                        } else {
+                            u64::from(PLAYBACK_TIMELINE_HZ) / 2
+                        };
+                        let _ = client.try_send(PlaybackCommand::Seek {
+                            position: PlaybackTime {
+                                ticks,
+                                timescale: PLAYBACK_TIMELINE_HZ,
+                            },
+                        });
+                        scrub_near_end = !scrub_near_end;
+                        next_scrub = Instant::now() + SCRUB_INTERVAL;
+                    }
                 }
 
-                if !marker_written {
+                if !marker_written && !drain_only.load(Ordering::Acquire) {
                     let ready = match scenario {
                         SpikeScenario::Interactive | SpikeScenario::ReviewIdle => opened,
                         SpikeScenario::ReviewPlaying => {
