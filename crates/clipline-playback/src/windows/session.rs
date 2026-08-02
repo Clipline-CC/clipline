@@ -1233,9 +1233,21 @@ impl SessionMedia {
         let occluded_before = self.scheduler.metrics().presentation_occluded_frames;
         let backpressured_before = self.scheduler.metrics().presentation_backpressured_frames;
         self.tick_scheduler(clock, publisher, now)?;
-        if self.scheduler.metrics().settled_seeks > settled_before
-            || self.scheduler.metrics().presentation_occluded_frames > occluded_before
-        {
+        if self.scheduler.metrics().settled_seeks > settled_before {
+            return Ok(ActionProgress::Complete(WorkerCompletion::Published {
+                position: self.settled_position,
+            }));
+        }
+        if self.scheduler.metrics().presentation_occluded_frames > occluded_before {
+            if !self
+                .scheduler
+                .settle_seek_after_occlusion(token, sample_index, now)
+            {
+                return Err(retry_media(
+                    BackendComponent::FramePublisher,
+                    "occluded publication did not match the pending seek target",
+                ));
+            }
             return Ok(ActionProgress::Complete(WorkerCompletion::Published {
                 position: self.settled_position,
             }));
@@ -1303,9 +1315,11 @@ impl SessionMedia {
         self.service_audio(before, self.backend_token)?;
         self.pump_steady_video(before)?;
         let pending_sample = self.scheduler.pending_sample_index();
-        let presented = self.tick_scheduler(before, publisher, now)?;
-        if presented && pending_sample == self.video_sample_count.checked_sub(1) {
-            self.eos.mark_final_frame_presented();
+        self.tick_scheduler(before, publisher, now)?;
+        if pending_sample == self.video_sample_count.checked_sub(1)
+            && self.scheduler.pending_frames() == 0
+        {
+            self.eos.mark_final_frame_consumed();
         }
         self.sample_clock()
     }

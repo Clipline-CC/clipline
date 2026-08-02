@@ -79,7 +79,10 @@ retained.
 - Seek flushes all affected backends, obtains `IndexedMovie::seek_plan`, restarts at its prior sync
   sample, decodes preroll, and discards samples before `video_preroll.samples.end - 1`. That exact
   sample is target-correct even when its PTS precedes a target inside the frame interval.
-  `SeekSettled` is emitted only after that sample is accepted for publication.
+  `SeekSettled` is emitted after that sample is accepted for presentation. If the backend is
+  occluded, consuming the target settles the seek and records an explicit occluded-seek metric so
+  a hidden window cannot indefinitely block transport. Restoring and republishing the target frame
+  belongs to the presentation lifecycle.
 - Step pauses playback, seeks by the requested signed source-frame count, and publishes exactly the
   settled frame. Subsequent playback requires a new Play command.
 - Changing selected audio tracks invalidates premixed audio, resets the participating decoder mix,

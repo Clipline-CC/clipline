@@ -86,6 +86,39 @@ fn publication_backpressure_and_occlusion_are_not_counted_as_presented() {
     assert_eq!(drops.load(Ordering::SeqCst), 2);
 }
 
+#[test]
+fn occluded_seek_settlement_is_explicit_and_clears_pending_state() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let accepted_at = MonotonicTime100ns::new(10_000);
+    let settled_at = MonotonicTime100ns::new(40_000);
+    let mut scheduler = FrameScheduler::new(TOKEN, SeekTarget::new(pos(50), 5));
+    scheduler.begin_seek(TOKEN, SeekTarget::new(pos(50), 5), accepted_at);
+    let mut publisher = TestPublisher {
+        receipt: PublicationReceipt::Occluded,
+        ..TestPublisher::default()
+    };
+    scheduler
+        .admit(frame(5, 50, 1, TOKEN, &drops), pos(50))
+        .unwrap();
+
+    assert!(!scheduler
+        .tick(
+            pos(50),
+            &mut publisher,
+            || panic!("an occluded frame has no publication clock"),
+            settled_at,
+        )
+        .unwrap());
+    assert!(scheduler.settle_seek_after_occlusion(TOKEN, 5, settled_at));
+    assert_eq!(scheduler.metrics().settled_seeks, 1);
+    assert_eq!(scheduler.metrics().occluded_settled_seeks, 1);
+    assert_eq!(
+        scheduler.metrics().latest_seek_latency_100ns,
+        Some(settled_at.elapsed_since(accepted_at))
+    );
+    assert!(!scheduler.settle_seek_after_occlusion(TOKEN, 5, settled_at));
+}
+
 fn pos(ticks: u64) -> TimelinePosition {
     TimelinePosition::new(ticks)
 }
@@ -548,7 +581,7 @@ fn metric_generations_accumulate_without_double_counting_cumulative_fences() {
 fn eof_waits_for_the_final_video_interval_and_fires_once_for_short_clips() {
     let mut tracker = EndOfStreamTracker::new(pos(800));
     assert!(!tracker.update(pos(10_000)));
-    tracker.mark_final_frame_presented();
+    tracker.mark_final_frame_consumed();
     assert!(!tracker.update(pos(799)));
     assert!(tracker.update(pos(800)));
     assert!(!tracker.update(pos(900)));

@@ -50,7 +50,7 @@ pub fn plan_audio_fill(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EndOfStreamTracker {
     video_end: TimelinePosition,
-    final_frame_presented: bool,
+    final_frame_consumed: bool,
     ended: bool,
 }
 
@@ -58,17 +58,17 @@ impl EndOfStreamTracker {
     pub const fn new(video_end: TimelinePosition) -> Self {
         Self {
             video_end,
-            final_frame_presented: false,
+            final_frame_consumed: false,
             ended: false,
         }
     }
 
-    pub fn mark_final_frame_presented(&mut self) {
-        self.final_frame_presented = true;
+    pub fn mark_final_frame_consumed(&mut self) {
+        self.final_frame_consumed = true;
     }
 
     pub fn update(&mut self, clock: TimelinePosition) -> bool {
-        if self.ended || !self.final_frame_presented || clock < self.video_end {
+        if self.ended || !self.final_frame_consumed || clock < self.video_end {
             return false;
         }
         self.ended = true;
@@ -279,6 +279,7 @@ pub struct PlaybackMetrics {
     pub latest_seek_latency_100ns: Option<u64>,
     pub seek_latency_histogram: MetricHistogram,
     pub settled_seeks: u64,
+    pub occluded_settled_seeks: u64,
 }
 
 impl PlaybackMetrics {
@@ -323,6 +324,9 @@ impl PlaybackMetrics {
         self.seek_latency_histogram
             .accumulate(&next.seek_latency_histogram);
         self.settled_seeks = self.settled_seeks.saturating_add(next.settled_seeks);
+        self.occluded_settled_seeks = self
+            .occluded_settled_seeks
+            .saturating_add(next.occluded_settled_seeks);
     }
 }
 
@@ -520,18 +524,17 @@ impl<S> FrameScheduler<S> {
                 self.metrics.late_or_dropped_frames.saturating_add(1);
         }
 
-        if let Some(seek) = self.pending_seek {
-            if seek.token == token && frame_sample_index == seek.target.sample_index {
-                let latency = monotonic_now.elapsed_since(seek.accepted_at);
-                self.metrics.latest_seek_latency_100ns = Some(latency);
-                self.metrics
-                    .seek_latency_histogram
-                    .observe_ceil_millis(latency, 10_000);
-                self.metrics.settled_seeks = self.metrics.settled_seeks.saturating_add(1);
-                self.pending_seek = None;
-            }
-        }
+        self.settle_matching_seek(token, frame_sample_index, monotonic_now, false);
         Ok(true)
+    }
+
+    pub fn settle_seek_after_occlusion(
+        &mut self,
+        token: PipelineToken,
+        sample_index: usize,
+        monotonic_now: MonotonicTime100ns,
+    ) -> bool {
+        self.settle_matching_seek(token, sample_index, monotonic_now, true)
     }
 
     pub fn pending_frames(&self) -> usize {
@@ -548,6 +551,33 @@ impl<S> FrameScheduler<S> {
 
     pub const fn metrics(&self) -> &PlaybackMetrics {
         &self.metrics
+    }
+
+    fn settle_matching_seek(
+        &mut self,
+        token: PipelineToken,
+        sample_index: usize,
+        monotonic_now: MonotonicTime100ns,
+        occluded: bool,
+    ) -> bool {
+        let Some(seek) = self.pending_seek else {
+            return false;
+        };
+        if seek.token != token || sample_index != seek.target.sample_index {
+            return false;
+        }
+        let latency = monotonic_now.elapsed_since(seek.accepted_at);
+        self.metrics.latest_seek_latency_100ns = Some(latency);
+        self.metrics
+            .seek_latency_histogram
+            .observe_ceil_millis(latency, 10_000);
+        self.metrics.settled_seeks = self.metrics.settled_seeks.saturating_add(1);
+        if occluded {
+            self.metrics.occluded_settled_seeks =
+                self.metrics.occluded_settled_seeks.saturating_add(1);
+        }
+        self.pending_seek = None;
+        true
     }
 
     fn reset_quality_metrics(&mut self) {

@@ -774,7 +774,7 @@ mod windows_app {
                 self.pump_video(before)?;
                 self.tick_scheduler(before)?;
                 if self.publisher.last_sample_index == self.video_sample_count.checked_sub(1) {
-                    self.eos.mark_final_frame_presented();
+                    self.eos.mark_final_frame_consumed();
                 }
                 let after = self.sample_clock()?;
                 self.record_seek_latency();

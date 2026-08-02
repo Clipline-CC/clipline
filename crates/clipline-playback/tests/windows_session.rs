@@ -1,6 +1,8 @@
 #![cfg(windows)]
 
 use std::fs;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -182,6 +184,47 @@ impl FramePublisher<D3D11VideoSurface> for BackpressuredPublisher {
     ) -> Result<PublicationReceipt, clipline_playback::BackendError> {
         drop(frame);
         Ok(PublicationReceipt::Backpressured)
+    }
+
+    fn clear(&mut self, _token: PipelineToken) -> Result<(), clipline_playback::BackendError> {
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct OccludedPublisher;
+
+impl FramePublisher<D3D11VideoSurface> for OccludedPublisher {
+    fn publish(
+        &mut self,
+        frame: DecodedVideoFrame<D3D11VideoSurface>,
+    ) -> Result<PublicationReceipt, clipline_playback::BackendError> {
+        drop(frame);
+        Ok(PublicationReceipt::Occluded)
+    }
+
+    fn clear(&mut self, _token: PipelineToken) -> Result<(), clipline_playback::BackendError> {
+        Ok(())
+    }
+}
+
+struct FinalFrameBackpressurePublisher {
+    final_sample_index: usize,
+    backpressured: Arc<AtomicBool>,
+}
+
+impl FramePublisher<D3D11VideoSurface> for FinalFrameBackpressurePublisher {
+    fn publish(
+        &mut self,
+        frame: DecodedVideoFrame<D3D11VideoSurface>,
+    ) -> Result<PublicationReceipt, clipline_playback::BackendError> {
+        let is_final = frame.sample_index() == self.final_sample_index;
+        drop(frame);
+        if is_final && !self.backpressured.swap(true, Ordering::SeqCst) {
+            Ok(PublicationReceipt::Backpressured)
+        } else {
+            Ok(PublicationReceipt::Presented)
+        }
     }
 
     fn clear(&mut self, _token: PipelineToken) -> Result<(), clipline_playback::BackendError> {
@@ -428,4 +471,150 @@ fn repeated_publication_backpressure_exhausts_recovery_and_releases_media() {
     assert_eq!(playback.join().unwrap().unwrap(), SessionExit::Closed);
     fs::remove_file(&active).unwrap();
     fs::remove_dir(&directory).unwrap();
+}
+
+fn run_near_eof<P>(label: &str, publisher: P) -> Option<clipline_playback::PlaybackMetrics>
+where
+    P: FramePublisher<D3D11VideoSurface> + Send + 'static,
+{
+    if std::env::var_os("CI").is_some() {
+        eprintln!("SKIP: Windows live playback session device test is disabled under CI");
+        return None;
+    }
+
+    let source = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/playback/hybrid-writer-h264-two-opus-5s.mp4");
+    let directory = std::env::temp_dir().join(format!(
+        "clipline-{label}-session-test-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory).unwrap();
+    let active = directory.join("active.mp4");
+    let released = directory.join("released.mp4");
+    let _ = fs::remove_file(&active);
+    let _ = fs::remove_file(&released);
+    fs::copy(source, &active).unwrap();
+
+    let (client, runtime) = session_channel();
+    let playback = thread::Builder::new()
+        .name(format!("clipline-{label}-session-test"))
+        .spawn(move || runtime.run(publisher))
+        .unwrap();
+    client
+        .try_send(PlaybackCommand::Open {
+            path: active.clone(),
+        })
+        .unwrap();
+
+    let mut opened = false;
+    let mut error = None;
+    let mut deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline && !opened && error.is_none() {
+        while let Some(update) = client.try_recv_update() {
+            match update.payload {
+                SessionUpdatePayload::Event(PlaybackEvent::Opened { .. }) => opened = true,
+                SessionUpdatePayload::Event(PlaybackEvent::Error { message, .. }) => {
+                    error = Some(message)
+                }
+                _ => {}
+            }
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+    if !opened {
+        client.try_send(PlaybackCommand::Close).unwrap();
+        assert_eq!(playback.join().unwrap().unwrap(), SessionExit::Closed);
+        fs::remove_file(&active).unwrap();
+        fs::remove_dir(&directory).unwrap();
+        if let Some(message) = error {
+            eprintln!("SKIP: live playback session devices are unavailable: {message}");
+            return None;
+        }
+        panic!("live session did not open within the device timeout");
+    }
+
+    client
+        .try_send(PlaybackCommand::Seek {
+            position: clipline_playback::PlaybackTime::new(4_800, 1_000).unwrap(),
+        })
+        .unwrap();
+    let mut seek_settled = false;
+    deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline && !seek_settled && error.is_none() {
+        while let Some(update) = client.try_recv_update() {
+            match update.payload {
+                SessionUpdatePayload::Event(PlaybackEvent::SeekSettled { position, .. }) => {
+                    seek_settled = u128::from(position.ticks) * 1_000
+                        >= u128::from(position.timescale) * 4_000;
+                }
+                SessionUpdatePayload::Event(PlaybackEvent::Error { message, .. }) => {
+                    error = Some(message)
+                }
+                _ => {}
+            }
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+
+    if seek_settled {
+        client.try_send(PlaybackCommand::Play).unwrap();
+    }
+    let mut ended = 0_u64;
+    let mut metrics = None;
+    deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline && ended == 0 && error.is_none() {
+        while let Some(update) = client.try_recv_update() {
+            match update.payload {
+                SessionUpdatePayload::Event(PlaybackEvent::Ended { .. }) => ended += 1,
+                SessionUpdatePayload::Event(PlaybackEvent::Error { message, .. }) => {
+                    error = Some(message)
+                }
+                SessionUpdatePayload::Metrics(update) => metrics = Some(*update),
+                _ => {}
+            }
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+
+    client.try_send(PlaybackCommand::Close).unwrap();
+    assert_eq!(playback.join().unwrap().unwrap(), SessionExit::Closed);
+    while let Some(update) = client.try_recv_update() {
+        if let SessionUpdatePayload::Metrics(update) = update.payload {
+            metrics = Some(*update);
+        }
+    }
+    fs::rename(&active, &released).expect("EOF session must release the indexed fixture");
+    fs::remove_file(&released).unwrap();
+    fs::remove_dir(&directory).unwrap();
+
+    assert!(
+        seek_settled,
+        "near-EOF seek did not settle; error={error:?}"
+    );
+    assert_eq!(ended, 1, "EOF event count was wrong; error={error:?}");
+    assert!(error.is_none(), "live session failed: {error:?}");
+    metrics
+}
+
+#[test]
+fn occluded_seek_settles_and_occluded_final_frame_still_ends() {
+    let Some(metrics) = run_near_eof("occluded-eof", OccludedPublisher) else {
+        return;
+    };
+    assert!(metrics.occluded_settled_seeks >= 1);
+    assert!(metrics.presentation_occluded_frames >= 1);
+}
+
+#[test]
+fn one_final_frame_backpressure_still_reaches_eof() {
+    let backpressured = Arc::new(AtomicBool::new(false));
+    let publisher = FinalFrameBackpressurePublisher {
+        final_sample_index: 149,
+        backpressured: Arc::clone(&backpressured),
+    };
+    let Some(metrics) = run_near_eof("backpressured-eof", publisher) else {
+        return;
+    };
+    assert!(backpressured.load(Ordering::SeqCst));
+    assert_eq!(metrics.presentation_backpressured_frames, 1);
 }
