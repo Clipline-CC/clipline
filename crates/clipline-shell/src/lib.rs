@@ -24,3 +24,16 @@ pub use shutdown::{
     ShutdownAcknowledgement, ShutdownCoordinator, ShutdownEffect, ShutdownError, ShutdownGate,
     ShutdownLease, ShutdownOwnershipError, ShutdownReason, ShutdownStage, MAX_SHUTDOWN_TIMEOUT_MS,
 };
+
+/// Atomically replace `to` with the already-synchronized sibling file `from`.
+/// Platform-specific replacement stays behind this safe shell boundary.
+pub fn replace_file(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        windows::filesystem::replace_file(from, to)
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::rename(from, to)
+    }
+}

@@ -1,5 +1,5 @@
 use semver::Version;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::cmp::Ordering;
 use std::error::Error;
 use std::fmt;
@@ -22,63 +22,7 @@ pub const STABLE_UPDATE_ENDPOINT: &str =
 pub const STABLE_STANDALONE_UPDATE_ENDPOINT: &str =
     "https://github.com/dain98/clipline/releases/latest/download/latest-standalone.json";
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum UpdateChannel {
-    Stable,
-    #[default]
-    Nightly,
-}
-
-impl UpdateChannel {
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Stable => "Stable",
-            Self::Nightly => "Nightly",
-        }
-    }
-
-    pub const fn manifest_endpoint(self, variant: UpdateVariant) -> &'static str {
-        match (self, variant) {
-            (Self::Nightly, UpdateVariant::Regular) => NIGHTLY_UPDATE_ENDPOINT,
-            (Self::Nightly, UpdateVariant::Standalone) => NIGHTLY_STANDALONE_UPDATE_ENDPOINT,
-            (Self::Stable, UpdateVariant::Regular) => STABLE_UPDATE_ENDPOINT,
-            (Self::Stable, UpdateVariant::Standalone) => STABLE_STANDALONE_UPDATE_ENDPOINT,
-        }
-    }
-
-    /// Compatibility spelling used by the shipping desktop command response.
-    pub const fn endpoint(self, standalone: bool) -> &'static str {
-        self.manifest_endpoint(UpdateVariant::from_standalone(standalone))
-    }
-
-    /// Stable releases are modeled but remain disabled until Clipline publishes them.
-    pub const fn enabled(self) -> bool {
-        matches!(self, Self::Nightly)
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum UpdateVariant {
-    #[default]
-    Regular,
-    Standalone,
-}
-
-impl UpdateVariant {
-    pub const fn from_standalone(standalone: bool) -> Self {
-        if standalone {
-            Self::Standalone
-        } else {
-            Self::Regular
-        }
-    }
-
-    pub const fn is_standalone(self) -> bool {
-        matches!(self, Self::Standalone)
-    }
-}
+pub use clipline_settings::{UpdateChannel, UpdateVariant};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdatePolicy {

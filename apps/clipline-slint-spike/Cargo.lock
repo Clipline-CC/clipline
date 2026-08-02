@@ -825,6 +825,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "clipline-settings"
+version = "0.1.0"
+dependencies = [
+ "clipline-shell",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "clipline-shell"
 version = "0.1.0"
 dependencies = [
@@ -841,13 +851,19 @@ dependencies = [
  "clipline-desktop",
  "clipline-mp4",
  "clipline-playback",
+ "clipline-settings",
  "clipline-shell",
+ "clipline-test-utils",
  "raw-window-handle",
  "serde",
  "serde_json",
  "slint",
  "slint-build",
 ]
+
+[[package]]
+name = "clipline-test-utils"
+version = "0.1.0"
 
 [[package]]
 name = "clru"

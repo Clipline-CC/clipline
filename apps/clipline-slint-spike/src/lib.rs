@@ -5,6 +5,7 @@ pub mod cpu_frame;
 pub mod desktop;
 pub mod model;
 pub mod options;
+pub mod settings;
 pub mod shell;
 
 #[cfg(windows)]

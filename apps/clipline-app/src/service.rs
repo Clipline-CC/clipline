@@ -239,85 +239,34 @@ pub enum CaptureSource {
     DisplayRegion(CaptureRegion),
 }
 
-/// Which screen-capture backend to use for display/region capture (issue #42).
-/// `Auto` and `Wgc` both use Windows Graphics Capture today; `Wgc` is the
-/// persisted force-WGC escape hatch that survives any future change to `Auto`.
-/// `DesktopDuplication` uses DXGI Desktop Duplication, which has no Windows 10
-/// privacy border but is display/region only (never per-window) and silently
-/// falls back to WGC when it can't initialize (multi-GPU, rotated display, etc).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CaptureBackend {
-    #[default]
-    Auto,
-    Wgc,
-    DesktopDuplication,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AudioChannelMode {
-    #[default]
-    Mono,
-    Stereo,
-}
+pub use clipline_settings::{AudioChannelMode, CaptureBackend, VideoEncoder};
 
 /// The user's encoder choice. `Auto` prefers H.264 for playback compatibility while
 /// respecting backend merit order within a codec; the explicit variants force a
 /// (backend, codec) pair (still falling back through Auto if it can't open).
 /// Legacy saved values (`auto`, `nvenc_h264`, `amf_h264`, `quick_sync_h264`)
 /// still deserialize.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum VideoEncoder {
-    #[default]
-    Auto,
-    NvencH264,
-    NvencHevc,
-    NvencAv1,
-    AmfH264,
-    AmfHevc,
-    AmfAv1,
-    QuickSyncH264,
-    QuickSyncHevc,
-    QuickSyncAv1,
-    SvtAv1,
+trait VideoEncoderRuntimeExt: Sized {
+    fn preference(self) -> EncoderPreference;
+    fn from_parts(backend: EncoderBackend, codec: Codec) -> Option<Self>;
 }
 
-impl VideoEncoder {
+impl VideoEncoderRuntimeExt for VideoEncoder {
     fn preference(self) -> EncoderPreference {
         let (backend, codec) = match self {
-            Self::Auto => return EncoderPreference::Auto,
-            Self::NvencH264 => (EncoderBackend::Nvenc, Codec::H264),
-            Self::NvencHevc => (EncoderBackend::Nvenc, Codec::Hevc),
-            Self::NvencAv1 => (EncoderBackend::Nvenc, Codec::Av1),
-            Self::AmfH264 => (EncoderBackend::Amf, Codec::H264),
-            Self::AmfHevc => (EncoderBackend::Amf, Codec::Hevc),
-            Self::AmfAv1 => (EncoderBackend::Amf, Codec::Av1),
-            Self::QuickSyncH264 => (EncoderBackend::QuickSync, Codec::H264),
-            Self::QuickSyncHevc => (EncoderBackend::QuickSync, Codec::Hevc),
-            Self::QuickSyncAv1 => (EncoderBackend::QuickSync, Codec::Av1),
-            Self::SvtAv1 => (EncoderBackend::SvtAv1, Codec::Av1),
+            VideoEncoder::Auto => return EncoderPreference::Auto,
+            VideoEncoder::NvencH264 => (EncoderBackend::Nvenc, Codec::H264),
+            VideoEncoder::NvencHevc => (EncoderBackend::Nvenc, Codec::Hevc),
+            VideoEncoder::NvencAv1 => (EncoderBackend::Nvenc, Codec::Av1),
+            VideoEncoder::AmfH264 => (EncoderBackend::Amf, Codec::H264),
+            VideoEncoder::AmfHevc => (EncoderBackend::Amf, Codec::Hevc),
+            VideoEncoder::AmfAv1 => (EncoderBackend::Amf, Codec::Av1),
+            VideoEncoder::QuickSyncH264 => (EncoderBackend::QuickSync, Codec::H264),
+            VideoEncoder::QuickSyncHevc => (EncoderBackend::QuickSync, Codec::Hevc),
+            VideoEncoder::QuickSyncAv1 => (EncoderBackend::QuickSync, Codec::Av1),
+            VideoEncoder::SvtAv1 => (EncoderBackend::SvtAv1, Codec::Av1),
         };
         EncoderPreference::Explicit { backend, codec }
-    }
-
-    /// The settings/serde id (snake_case). Kept in lockstep with the
-    /// `serde(rename_all = "snake_case")` derive by a test.
-    fn id(self) -> &'static str {
-        match self {
-            Self::Auto => "auto",
-            Self::NvencH264 => "nvenc_h264",
-            Self::NvencHevc => "nvenc_hevc",
-            Self::NvencAv1 => "nvenc_av1",
-            Self::AmfH264 => "amf_h264",
-            Self::AmfHevc => "amf_hevc",
-            Self::AmfAv1 => "amf_av1",
-            Self::QuickSyncH264 => "quick_sync_h264",
-            Self::QuickSyncHevc => "quick_sync_hevc",
-            Self::QuickSyncAv1 => "quick_sync_av1",
-            Self::SvtAv1 => "svt_av1",
-        }
     }
 
     /// The explicit variant for a (backend, codec) pair, if Clipline exposes
@@ -325,16 +274,16 @@ impl VideoEncoder {
     /// (e.g. `MfSoftware`, or SvtAv1 paired with a non-AV1 codec).
     fn from_parts(backend: EncoderBackend, codec: Codec) -> Option<Self> {
         Some(match (backend, codec) {
-            (EncoderBackend::Nvenc, Codec::H264) => Self::NvencH264,
-            (EncoderBackend::Nvenc, Codec::Hevc) => Self::NvencHevc,
-            (EncoderBackend::Nvenc, Codec::Av1) => Self::NvencAv1,
-            (EncoderBackend::Amf, Codec::H264) => Self::AmfH264,
-            (EncoderBackend::Amf, Codec::Hevc) => Self::AmfHevc,
-            (EncoderBackend::Amf, Codec::Av1) => Self::AmfAv1,
-            (EncoderBackend::QuickSync, Codec::H264) => Self::QuickSyncH264,
-            (EncoderBackend::QuickSync, Codec::Hevc) => Self::QuickSyncHevc,
-            (EncoderBackend::QuickSync, Codec::Av1) => Self::QuickSyncAv1,
-            (EncoderBackend::SvtAv1, Codec::Av1) => Self::SvtAv1,
+            (EncoderBackend::Nvenc, Codec::H264) => VideoEncoder::NvencH264,
+            (EncoderBackend::Nvenc, Codec::Hevc) => VideoEncoder::NvencHevc,
+            (EncoderBackend::Nvenc, Codec::Av1) => VideoEncoder::NvencAv1,
+            (EncoderBackend::Amf, Codec::H264) => VideoEncoder::AmfH264,
+            (EncoderBackend::Amf, Codec::Hevc) => VideoEncoder::AmfHevc,
+            (EncoderBackend::Amf, Codec::Av1) => VideoEncoder::AmfAv1,
+            (EncoderBackend::QuickSync, Codec::H264) => VideoEncoder::QuickSyncH264,
+            (EncoderBackend::QuickSync, Codec::Hevc) => VideoEncoder::QuickSyncHevc,
+            (EncoderBackend::QuickSync, Codec::Av1) => VideoEncoder::QuickSyncAv1,
+            (EncoderBackend::SvtAv1, Codec::Av1) => VideoEncoder::SvtAv1,
             _ => return None,
         })
     }
@@ -452,38 +401,7 @@ pub enum RecordingMode {
     ReplaysOnly,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct OutputResolutionBounds {
-    pub width: u32,
-    pub height: u32,
-}
-
-#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-pub enum OutputResolution {
-    #[default]
-    #[serde(rename = "source")]
-    Source,
-    #[serde(rename = "1440p")]
-    P1440,
-    #[serde(rename = "1080p")]
-    P1080,
-    #[serde(rename = "720p")]
-    P720,
-    #[serde(rename = "480p")]
-    P480,
-}
-
-impl OutputResolution {
-    fn bounds(self) -> Option<(u32, u32)> {
-        match self {
-            Self::Source => None,
-            Self::P1440 => Some((2560, 1440)),
-            Self::P1080 => Some((1920, 1080)),
-            Self::P720 => Some((1280, 720)),
-            Self::P480 => Some((854, 480)),
-        }
-    }
-}
+pub use clipline_settings::{OutputResolution, OutputResolutionBounds};
 
 pub use clipline_desktop::RecorderEvent as Event;
 

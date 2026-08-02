@@ -51,6 +51,7 @@ pub struct SpikeOptions {
     pub marker_path: Option<PathBuf>,
     pub stop_path: Option<PathBuf>,
     pub telemetry_path: Option<PathBuf>,
+    pub settings_profile: Option<PathBuf>,
 }
 
 impl Default for SpikeOptions {
@@ -65,6 +66,7 @@ impl Default for SpikeOptions {
             marker_path: None,
             stop_path: None,
             telemetry_path: None,
+            settings_profile: None,
         }
     }
 }
@@ -108,6 +110,10 @@ impl SpikeOptions {
                     options.telemetry_path =
                         Some(PathBuf::from(next_value(&mut args, "--telemetry-path")?));
                 }
+                "--settings-profile" => {
+                    options.settings_profile =
+                        Some(PathBuf::from(next_value(&mut args, "--settings-profile")?));
+                }
                 "--help" | "-h" => return Err(OptionsError::HelpRequested),
                 _ => return Err(OptionsError::UnknownArgument(argument.into_owned())),
             }
@@ -121,7 +127,8 @@ impl SpikeOptions {
     pub const fn usage() -> &'static str {
         "clipline-slint-spike [--fixture <mp4>] [--renderer winit-software] \
          [--cpu-frame-diagnostic] [--exit-after-ready] [--scenario interactive|review-idle|review-playing|scrub-storm|reveal-close-100] \
-         [--autostart] [--marker-path <jsonl>] [--stop-path <file>] [--telemetry-path <json>]"
+         [--autostart] [--marker-path <jsonl>] [--stop-path <file>] [--telemetry-path <json>] \
+         [--settings-profile <isolated-directory>]"
     }
 }
 

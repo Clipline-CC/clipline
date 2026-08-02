@@ -5,11 +5,11 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use super::types::OutputResolution;
 use super::types::ReplayStorageMode;
 use super::{
     normalize_replay_cache_dir, replay_cache_quota_bytes_from_gb, AppSettings, CaptureMode,
 };
-use crate::service::OutputResolution;
 
 pub const MIN_REPLAY_WINDOW_S: f64 = 5.0;
 pub const MAX_REPLAY_WINDOW_S: f64 = 120.0;
@@ -127,7 +127,7 @@ impl AppSettings {
         let mut ids = HashSet::new();
         for game in &self.games.custom_games {
             let id = game.id.trim();
-            crate::game_identity::validate_custom_game_id(id)?;
+            super::games::validate_custom_game_id(id)?;
             if !ids.insert(id.to_ascii_lowercase()) {
                 return Err(format!("custom game id {id:?} is duplicated"));
             }

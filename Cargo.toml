@@ -5,6 +5,7 @@ members = [
     "crates/clipline-lol",
     "crates/clipline-buffer",
     "crates/clipline-storage",
+    "crates/clipline-settings",
     "crates/clipline-capture",
     "crates/clipline-library",
     "crates/clipline-desktop",

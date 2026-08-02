@@ -41,7 +41,9 @@ use crate::games::{DetectedGame, GameWindowInfo};
 use crate::osu_enrichment::OsuTitleEvent;
 use crate::service::{self, Cmd, Event, ServiceOptions};
 use crate::settings::{
-    quota_bytes_from_gb, AppSettings, CaptureMode, CustomGameSettings, GameRecordingMode,
+    quota_bytes_from_gb, AppSettings, AppSettingsServiceExt, CaptureMode, CustomGameSettings,
+    GameRecordingMode, SettingsChange, SettingsProfile, SettingsSnapshot, SettingsStore,
+    SettingsTransaction,
 };
 use crate::updates::{channel_enabled, UpdateChannel};
 use crate::util::unix_now_i64;
@@ -729,7 +731,11 @@ fn checked_generation_next(current: u64, domain: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("{domain} generation exhausted"))
 }
 
-pub(crate) struct RuntimeState(Mutex<RuntimeInner>, RecorderStopAcknowledgement);
+pub(crate) struct RuntimeState(
+    Mutex<RuntimeInner>,
+    RecorderStopAcknowledgement,
+    Option<SettingsStore>,
+);
 
 #[derive(Default)]
 struct RecorderStopAcknowledgement {
@@ -801,6 +807,11 @@ struct PreparedRuntimeRestart {
     settings: AppSettings,
 }
 
+struct PersistedSettingsCommit {
+    before: Option<SettingsSnapshot>,
+    after: Option<SettingsSnapshot>,
+}
+
 struct PreparedServiceRestart {
     old_tx: Option<Sender<Cmd>>,
     replacement: Option<(ServiceOptions, u64)>,
@@ -844,16 +855,26 @@ fn emit_waiting_for_game<R: Runtime>(app: &AppHandle<R>, generation: u64) {
 }
 
 impl RuntimeState {
+    #[cfg(test)]
     fn new(settings: AppSettings, lol_url: Option<String>) -> Self {
-        Self::from_parts(None, settings, lol_url)
+        Self::from_parts(None, settings, lol_url, None)
+    }
+
+    fn with_store(settings: AppSettings, lol_url: Option<String>, store: SettingsStore) -> Self {
+        Self::from_parts(None, settings, lol_url, Some(store))
     }
 
     #[cfg(test)]
     fn with_sender(tx: Sender<Cmd>, settings: AppSettings, lol_url: Option<String>) -> Self {
-        Self::from_parts(Some(tx), settings, lol_url)
+        Self::from_parts(Some(tx), settings, lol_url, None)
     }
 
-    fn from_parts(tx: Option<Sender<Cmd>>, settings: AppSettings, lol_url: Option<String>) -> Self {
+    fn from_parts(
+        tx: Option<Sender<Cmd>>,
+        settings: AppSettings,
+        lol_url: Option<String>,
+        store: Option<SettingsStore>,
+    ) -> Self {
         let mut inner = RuntimeInner {
             tx: None,
             recording_generation: 0,
@@ -872,7 +893,11 @@ impl RuntimeState {
             Self::install_recording_sender(&mut inner, tx)
                 .expect("initial recording generation is available");
         }
-        Self(Mutex::new(inner), RecorderStopAcknowledgement::default())
+        Self(
+            Mutex::new(inner),
+            RecorderStopAcknowledgement::default(),
+            store,
+        )
     }
 
     fn install_recording_sender(inner: &mut RuntimeInner, tx: Sender<Cmd>) -> Result<u64, String> {
@@ -1359,7 +1384,24 @@ impl RuntimeState {
     where
         F: FnOnce(&mut crate::settings::CloudSettings),
     {
-        self.update_cloud_with(update, AppSettings::save)
+        let Some(store) = self.2.as_ref() else {
+            return self.update_cloud_with(update, AppSettings::save);
+        };
+        let _save_guard = Self::lock_cloud_settings_save()?;
+        let before = store.snapshot().map_err(|error| error.to_string())?;
+        let mut cloud = before.document.cloud.clone();
+        update(&mut cloud);
+        cloud.normalize();
+        let after = store
+            .transact(SettingsTransaction {
+                expected_revision: before.revision,
+                expected_account_generation: before.account_generation,
+                change: SettingsChange::ReplaceCloudSettings(cloud),
+            })
+            .map_err(|error| error.to_string())?;
+        let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+        inner.settings.cloud = after.document.cloud;
+        Ok(inner.settings.clone())
     }
 
     fn update_cloud_with<F>(
@@ -1393,7 +1435,24 @@ impl RuntimeState {
     where
         F: FnOnce(&mut crate::settings::OsuApiSettings),
     {
-        self.update_osu_with(update, AppSettings::save)
+        let Some(store) = self.2.as_ref() else {
+            return self.update_osu_with(update, AppSettings::save);
+        };
+        let _save_guard = Self::lock_cloud_settings_save()?;
+        let before = store.snapshot().map_err(|error| error.to_string())?;
+        let mut osu = before.document.osu.clone();
+        update(&mut osu);
+        osu.normalize();
+        let after = store
+            .transact(SettingsTransaction {
+                expected_revision: before.revision,
+                expected_account_generation: before.account_generation,
+                change: SettingsChange::ReplaceOsuProfile(osu),
+            })
+            .map_err(|error| error.to_string())?;
+        let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+        inner.settings.osu = after.document.osu;
+        Ok(inner.settings.clone())
     }
 
     fn update_osu_with<F>(
@@ -1425,6 +1484,64 @@ impl RuntimeState {
         CLOUD_SETTINGS_SAVE_LOCK
             .lock()
             .map_err(|_| "cloud settings save lock poisoned".to_string())
+    }
+
+    fn persist_ui_preferences(
+        &self,
+        settings: &AppSettings,
+    ) -> Result<PersistedSettingsCommit, String> {
+        let Some(store) = self.2.as_ref() else {
+            settings.save()?;
+            return Ok(PersistedSettingsCommit {
+                before: None,
+                after: None,
+            });
+        };
+        let before = store.snapshot().map_err(|error| error.to_string())?;
+        let after = store
+            .transact(SettingsTransaction {
+                expected_revision: before.revision,
+                expected_account_generation: before.account_generation,
+                change: SettingsChange::ReplaceUiPreferences(settings.clone()),
+            })
+            .map_err(|error| error.to_string())?;
+        Ok(PersistedSettingsCommit {
+            before: Some(before),
+            after: Some(after),
+        })
+    }
+
+    fn publish_durable_settings(&self) -> Result<(), String> {
+        let _save_guard = Self::lock_cloud_settings_save()?;
+        let settings = self
+            .0
+            .lock()
+            .map_err(|_| "runtime state lock poisoned")?
+            .settings
+            .clone();
+        self.persist_ui_preferences(&settings).map(|_| ())
+    }
+
+    fn rollback_persisted_settings(
+        &self,
+        commit: &PersistedSettingsCommit,
+        fallback: &AppSettings,
+    ) -> Result<(), String> {
+        let (Some(store), Some(before), Some(after)) = (
+            self.2.as_ref(),
+            commit.before.as_ref(),
+            commit.after.as_ref(),
+        ) else {
+            return fallback.save();
+        };
+        store
+            .transact(SettingsTransaction {
+                expected_revision: after.revision,
+                expected_account_generation: after.account_generation,
+                change: SettingsChange::ReplaceDocument(before.document.clone()),
+            })
+            .map(|_| ())
+            .map_err(|error| error.to_string())
     }
 
     fn set_recording<R: Runtime>(
@@ -1970,20 +2087,12 @@ fn shutdown_app<R: Runtime>(
     loop {
         effect = match effect {
             ShutdownEffect::PublishDurableState { generation } => {
-                let save_guard = RuntimeState::lock_cloud_settings_save().map_err(|message| {
-                    TauriShellError::Action {
-                        command: ShellCommand::Quit,
-                        message,
-                    }
-                })?;
                 app.state::<RuntimeState>()
-                    .settings()
-                    .save()
+                    .publish_durable_settings()
                     .map_err(|message| TauriShellError::Action {
                         command: ShellCommand::Quit,
                         message,
                     })?;
-                drop(save_guard);
                 shutdown.acknowledge(
                     generation,
                     ShutdownAcknowledgement::DurableStatePublished,
@@ -2292,11 +2401,9 @@ impl<R: Runtime> UpdateShutdown for TauriUpdateShutdown<'_, R> {
     type Error = AppUpdateShutdownError;
 
     fn publish_durable_state(&mut self) -> Result<(), Self::Error> {
-        let save_guard =
-            RuntimeState::lock_cloud_settings_save().map_err(AppUpdateShutdownError)?;
-        let result = self.state.settings().save().map_err(AppUpdateShutdownError);
-        drop(save_guard);
-        result
+        self.state
+            .publish_durable_settings()
+            .map_err(AppUpdateShutdownError)
     }
 
     fn stop_window_media(&mut self) -> Result<(), Self::Error> {
@@ -2962,14 +3069,17 @@ fn save_settings<R: Runtime>(
             return Err(settings_transaction_error(primary, rollback));
         }
     };
-    if let Err(error) = settings.save() {
-        let rollback =
-            rollback_settings_side_effects(&app, &tray_items, &old, &old_hotkeys, &applied);
-        return Err(settings_transaction_error(error, rollback));
-    }
+    let persisted_commit = match state.persist_ui_preferences(&settings) {
+        Ok(commit) => commit,
+        Err(error) => {
+            let rollback =
+                rollback_settings_side_effects(&app, &tray_items, &old, &old_hotkeys, &applied);
+            return Err(settings_transaction_error(error, rollback));
+        }
+    };
     if let Err(primary) = state.finish_prepared_restart(app.clone(), prepared_restart) {
         let mut rollback = Vec::new();
-        if let Err(error) = old.save() {
+        if let Err(error) = state.rollback_persisted_settings(&persisted_commit, &old) {
             rollback.push(format!("restore settings.json: {error}"));
         }
         rollback.extend(rollback_settings_side_effects(
@@ -3011,9 +3121,12 @@ pub fn run(
     if let Err(error) = install_diagnostic_handler(|event| log_diagnostic(event.to_string())) {
         log_diagnostic(format!("capture diagnostic setup: {error}"));
     }
-    let startup_load = AppSettings::load_for_startup();
-    let mut settings = startup_load.settings;
-    let mut startup_warnings = startup_load.warnings;
+    let settings_store = SettingsStore::open(SettingsProfile::installed());
+    let mut settings = settings_store
+        .snapshot()
+        .expect("new settings store lock is available")
+        .document;
+    let mut startup_warnings = settings_store.startup_warnings().to_vec();
     for warning in &startup_warnings {
         log_diagnostic(format!("settings recovery: {warning}"));
         tracing::warn!(event = "settings_recovery_warning", message = %warning);
@@ -3075,7 +3188,11 @@ pub fn run(
     let launched_by_autostart = launch.mode() == LaunchMode::Autostart;
 
     tauri::Builder::default()
-        .manage(RuntimeState::new(settings.clone(), lol_url))
+        .manage(RuntimeState::with_store(
+            settings.clone(),
+            lol_url,
+            settings_store,
+        ))
         .manage(desktop_state)
         .manage(crate::desktop::ProducerGenerations::default())
         .manage(ui_event_sink)
@@ -3732,6 +3849,7 @@ mod tests {
     use crate::settings::{
         CloudUploadRecord, GameRecordingMode, ReplayStorageMode, ReplayStorageSettings,
     };
+    use clipline_test_utils::TestDir;
     use std::sync::Arc;
 
     #[test]
@@ -3889,6 +4007,83 @@ mod tests {
 
         assert_eq!(error, "settings denied");
         assert!(state.settings().osu.client_id.is_none());
+    }
+
+    #[test]
+    fn store_backed_cloud_update_commits_before_updating_the_runtime_mirror() {
+        let dir = TestDir::new("clipline-app", "settings-store-cloud-update");
+        let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));
+        let initial = store.snapshot().unwrap();
+        let state = RuntimeState::with_store(initial.document.clone(), None, store.clone());
+
+        let result = state
+            .update_cloud(|cloud| cloud.host_url = "https://clips.example.com".into())
+            .unwrap();
+        let persisted = store.snapshot().unwrap();
+
+        assert_eq!(result.cloud.host_url, "https://clips.example.com");
+        assert_eq!(state.settings().cloud, persisted.document.cloud);
+        assert_eq!(persisted.revision.get(), initial.revision.get() + 1);
+    }
+
+    #[test]
+    fn rejected_store_commit_leaves_the_runtime_mirror_unchanged() {
+        let dir = TestDir::new("clipline-app", "settings-store-external-edit");
+        let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));
+        let initial = store.snapshot().unwrap();
+        let state = RuntimeState::with_store(initial.document.clone(), None, store.clone());
+        initial
+            .document
+            .save_to(store.profile().settings_path())
+            .unwrap();
+
+        let error = state
+            .update_cloud(|cloud| cloud.host_url = "https://clips.example.com".into())
+            .unwrap_err();
+
+        assert!(error.contains("changed outside this process"), "{error}");
+        assert_eq!(state.settings(), initial.document);
+        assert_eq!(store.snapshot().unwrap(), initial);
+    }
+
+    #[test]
+    fn durable_publish_advances_the_shared_store_snapshot() {
+        let dir = TestDir::new("clipline-app", "durable-settings-publish");
+        let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));
+        let initial = store.snapshot().unwrap();
+        let state = RuntimeState::with_store(initial.document.clone(), None, store.clone());
+
+        state.publish_durable_settings().unwrap();
+
+        let committed = store.snapshot().unwrap();
+        assert_eq!(committed.document, initial.document);
+        assert_eq!(committed.revision.get(), initial.revision.get() + 1);
+        assert!(store.profile().settings_path().is_file());
+    }
+
+    #[test]
+    fn rejected_durable_publish_preserves_external_file_backup_store_and_runtime() {
+        let dir = TestDir::new("clipline-app", "durable-settings-external-edit");
+        let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));
+        let initial = store.snapshot().unwrap();
+        let state = RuntimeState::with_store(initial.document.clone(), None, store.clone());
+        state.publish_durable_settings().unwrap();
+        state.publish_durable_settings().unwrap();
+        let before = store.snapshot().unwrap();
+        let primary_path = store.profile().settings_path();
+        let backup_path = primary_path.with_file_name("settings.json.bak");
+        let mut external_primary = std::fs::read(primary_path).unwrap();
+        external_primary.extend_from_slice(b"\n");
+        std::fs::write(primary_path, &external_primary).unwrap();
+        let backup = std::fs::read(&backup_path).unwrap();
+
+        let error = state.publish_durable_settings().unwrap_err();
+
+        assert!(error.contains("changed outside this process"), "{error}");
+        assert_eq!(std::fs::read(primary_path).unwrap(), external_primary);
+        assert_eq!(std::fs::read(backup_path).unwrap(), backup);
+        assert_eq!(store.snapshot().unwrap(), before);
+        assert_eq!(state.settings(), before.document);
     }
 
     #[test]

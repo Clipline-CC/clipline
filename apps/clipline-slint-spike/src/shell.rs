@@ -309,6 +309,7 @@ mod windows_runtime {
     use crate::desktop::{DesktopAttachment, SlintDesktopAdapter};
     use crate::live::{LiveSession, LiveSessionReport, SessionCommandPort, SpikePublisher};
     use crate::options::{write_lifecycle_marker, SpikeOptions, SpikeScenario};
+    use crate::settings::{CandidateSettings, CandidateSettingsProfile};
     use crate::windows::{attach_video_host, update_video_host};
     use crate::{CliplineSpike, DesktopUploadItem, LibraryItem, SpikeTray, TimelineMarker};
 
@@ -364,6 +365,7 @@ mod windows_runtime {
         hotkeys: Option<WindowsHotkeyService>,
         tray: SpikeTray,
         desktop: SlintDesktopAdapter,
+        _settings: CandidateSettings,
         window: Option<WindowResources>,
         options: SpikeOptions,
         latest_session: Option<LiveSessionReport>,
@@ -402,6 +404,13 @@ mod windows_runtime {
                 PACKAGE_INSTALL_FENCE_NAME,
             )
             .map_err(|error| format!("acquire package install fence: {error}"))?;
+        let settings = CandidateSettings::open(CandidateSettingsProfile::from_isolated_path(
+            options.settings_profile.as_deref(),
+        ))
+        .map_err(|error| format!("open Slint candidate settings profile: {error}"))?;
+        settings
+            .snapshot()
+            .map_err(|error| format!("open Slint candidate settings: {error}"))?;
         let hotkeys = WindowsHotkeyService::start(shell_commands.clone())
             .map_err(|error| format!("start Slint spike hotkey service: {error}"))?;
 
@@ -426,6 +435,7 @@ mod windows_runtime {
             hotkeys: Some(hotkeys),
             tray,
             desktop,
+            _settings: settings,
             window: None,
             options,
             latest_session: None,

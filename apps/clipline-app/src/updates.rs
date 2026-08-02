@@ -4,7 +4,8 @@ pub const fn channel_enabled(channel: UpdateChannel) -> bool {
     channel.enabled()
 }
 
-pub fn normalize_channel(channel: UpdateChannel) -> UpdateChannel {
+#[cfg(test)]
+fn normalize_channel(channel: UpdateChannel) -> UpdateChannel {
     if channel_enabled(channel) {
         channel
     } else {

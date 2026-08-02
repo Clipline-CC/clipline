@@ -899,6 +899,7 @@ dependencies = [
  "clipline-library",
  "clipline-lol",
  "clipline-mp4",
+ "clipline-settings",
  "clipline-shell",
  "clipline-storage",
  "clipline-test-utils",
@@ -1036,6 +1037,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "clipline-settings"
+version = "0.1.0"
+dependencies = [
+ "clipline-shell",
+ "clipline-test-utils",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "clipline-shell"
 version = "0.1.0"
 dependencies = [
@@ -1061,6 +1073,7 @@ name = "clipline-updater"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "clipline-settings",
  "clipline-test-utils",
  "httpmock",
  "minisign-verify",

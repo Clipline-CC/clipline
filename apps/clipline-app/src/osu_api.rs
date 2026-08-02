@@ -19,7 +19,6 @@ const OSU_API_VERSION: &str = "20220705";
 const RECENT_LIMIT: usize = 100;
 const RECENT_SCORE_CEILING: usize = 500;
 const OSU_RECENT_MODE: &str = "osu";
-const CREDENTIAL_PREFIX: &str = "Clipline osu!";
 const OSU_CREDENTIALS: CredentialStore = CredentialStore::new("osu! client secret");
 static ENRICHMENT_PASSES: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 
@@ -749,7 +748,7 @@ fn clean_optional(value: Option<String>) -> Option<String> {
 }
 
 fn credential_target(client_id: &str, user: &str) -> String {
-    format!("{CREDENTIAL_PREFIX}:{client_id}:{user}")
+    clipline_settings::osu::osu_credential_target(client_id, user)
 }
 
 #[derive(Debug, PartialEq, Eq)]

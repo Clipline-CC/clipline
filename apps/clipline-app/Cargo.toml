@@ -15,6 +15,7 @@ clipline-events = { path = "../../crates/clipline-events" }
 clipline-lol = { path = "../../crates/clipline-lol" }
 clipline-mp4 = { path = "../../crates/clipline-mp4" }
 clipline-storage = { path = "../../crates/clipline-storage" }
+clipline-settings = { path = "../../crates/clipline-settings" }
 clipline-updater = { path = "../../crates/clipline-updater" }
 # Pinned to an immutable rev (not a branch): a branch ref isn't reproducible —
 # a force-push or rename silently breaks every build. Bump the rev deliberately.

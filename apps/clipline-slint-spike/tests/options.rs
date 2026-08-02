@@ -26,6 +26,8 @@ fn command_line_selects_only_explicit_bounded_paths() {
         "driver.stop",
         "--telemetry-path",
         "telemetry.json",
+        "--settings-profile",
+        "isolated-profile",
     ]))
     .unwrap();
     assert_eq!(
@@ -48,6 +50,10 @@ fn command_line_selects_only_explicit_bounded_paths() {
     assert_eq!(
         options.telemetry_path.unwrap(),
         std::path::PathBuf::from("telemetry.json")
+    );
+    assert_eq!(
+        options.settings_profile.unwrap(),
+        std::path::PathBuf::from("isolated-profile")
     );
 
     assert!(matches!(

@@ -7,14 +7,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::service::{
-    AudioChannelMode, AudioOptions, CaptureRegion, OutputResolution, OutputResolutionBounds,
-    ReplayStorageOptions,
-};
-
 use super::persistence::{
     bool_field, clamp_u32, deserialize_field, f64_field, i32_field, integer_field,
-    normalize_replay_cache_dir, optional_string_field, replay_cache_quota_bytes_from_gb,
+    optional_string_field,
 };
 use super::validation::{
     MAX_AUDIO_VOLUME, MAX_BITRATE_MBPS, MAX_CAPTURE_REGION_SIDE, MAX_EXACT_FPS,
@@ -23,6 +18,91 @@ use super::validation::{
 };
 
 pub const MAX_ICON_DATA_URL_LEN: usize = 256 * 1024;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureBackend {
+    #[default]
+    Auto,
+    Wgc,
+    DesktopDuplication,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioChannelMode {
+    #[default]
+    Mono,
+    Stereo,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoEncoder {
+    #[default]
+    Auto,
+    NvencH264,
+    NvencHevc,
+    NvencAv1,
+    AmfH264,
+    AmfHevc,
+    AmfAv1,
+    QuickSyncH264,
+    QuickSyncHevc,
+    QuickSyncAv1,
+    SvtAv1,
+}
+
+impl VideoEncoder {
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::NvencH264 => "nvenc_h264",
+            Self::NvencHevc => "nvenc_hevc",
+            Self::NvencAv1 => "nvenc_av1",
+            Self::AmfH264 => "amf_h264",
+            Self::AmfHevc => "amf_hevc",
+            Self::AmfAv1 => "amf_av1",
+            Self::QuickSyncH264 => "quick_sync_h264",
+            Self::QuickSyncHevc => "quick_sync_hevc",
+            Self::QuickSyncAv1 => "quick_sync_av1",
+            Self::SvtAv1 => "svt_av1",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum OutputResolution {
+    #[default]
+    #[serde(rename = "source")]
+    Source,
+    #[serde(rename = "1440p")]
+    P1440,
+    #[serde(rename = "1080p")]
+    P1080,
+    #[serde(rename = "720p")]
+    P720,
+    #[serde(rename = "480p")]
+    P480,
+}
+
+impl OutputResolution {
+    pub const fn bounds(self) -> Option<(u32, u32)> {
+        match self {
+            Self::Source => None,
+            Self::P1440 => Some((2560, 1440)),
+            Self::P1080 => Some((1920, 1080)),
+            Self::P720 => Some((1280, 720)),
+            Self::P480 => Some((854, 480)),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OutputResolutionBounds {
+    pub width: u32,
+    pub height: u32,
+}
 
 fn default_enabled() -> bool {
     true
@@ -78,16 +158,6 @@ impl CaptureRegionSettings {
             height: integer_field(object, "height")
                 .map(|value| clamp_u32(value, MIN_CAPTURE_REGION_SIDE, MAX_CAPTURE_REGION_SIDE))
                 .unwrap_or(defaults.height),
-        }
-    }
-
-    pub fn to_service_region(&self) -> CaptureRegion {
-        CaptureRegion {
-            display_id: self.display_id.clone(),
-            x: self.x,
-            y: self.y,
-            width: self.width,
-            height: self.height,
         }
     }
 }
@@ -151,25 +221,6 @@ impl AudioSettings {
                 .unwrap_or(defaults.mic_volume),
             mic_channels: deserialize_field(object, "mic_channels")
                 .unwrap_or(defaults.mic_channels),
-        }
-    }
-
-    pub fn to_service_options(&self) -> AudioOptions {
-        AudioOptions {
-            output_enabled: self.output_enabled,
-            output_device_id: self
-                .output_device_id
-                .clone()
-                .filter(|id| !id.trim().is_empty()),
-            output_volume: self.output_volume,
-            split_output_by_process: self.split_output_by_process,
-            mic_enabled: self.mic_enabled,
-            mic_device_id: self
-                .mic_device_id
-                .clone()
-                .filter(|id| !id.trim().is_empty()),
-            mic_volume: self.mic_volume,
-            mic_channels: self.mic_channels,
         }
     }
 }
@@ -349,17 +400,7 @@ impl Default for ReplayStorageSettings {
     }
 }
 
-impl ReplayStorageSettings {
-    pub fn to_service_options(&self) -> Result<ReplayStorageOptions, String> {
-        match self.mode {
-            ReplayStorageMode::Memory => Ok(ReplayStorageOptions::Memory),
-            ReplayStorageMode::Disk => Ok(ReplayStorageOptions::Disk {
-                dir: normalize_replay_cache_dir(&self.disk_dir)?,
-                quota_bytes: replay_cache_quota_bytes_from_gb(self.disk_quota_gb)?,
-            }),
-        }
-    }
-}
+impl ReplayStorageSettings {}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CustomGameSettings {

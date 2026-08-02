@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+clipline-settings = { path = "../clipline-settings" }
 base64 = "0.22"
 minisign-verify = "=0.2.5"
 reqwest = { workspace = true, features = ["stream"] }

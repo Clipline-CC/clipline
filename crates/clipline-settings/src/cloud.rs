@@ -7,6 +7,16 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+pub const CLOUD_CREDENTIAL_PREFIX: &str = "Clipline Cloud";
+
+pub fn cloud_credential_target(host_url: &str, user_id: &str) -> String {
+    format!(
+        "{CLOUD_CREDENTIAL_PREFIX}:{}:{}",
+        host_url.trim().trim_end_matches('/'),
+        user_id.trim()
+    )
+}
+
 fn default_cloud_visibility() -> String {
     "private".to_string()
 }

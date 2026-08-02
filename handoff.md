@@ -4,6 +4,47 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-02): Slint replacement Milestone 7, Tasks 1--3
+
+Plan: `docs/superpowers/plans/2026-08-02-slint-library-cloud.md`. Task 1 added the neutral,
+framework-free Library contract and bounded result channel. It owns exact Windows path identities,
+checked catalog/request/foreground/account generations, account-scoped work and upload tokens, and
+fixed-capacity coalescing that cannot cross durable barriers. Task 2 ported the bounded gallery,
+detail-card, CloudCore, and authoritative Cloud/local merge behavior to Rust with shared JavaScript
+parity fixtures. The 50/500/2,000-item cases retain only one 50/60/60-row active page and cap decoded
+visible/overscan images at 32; deterministic ordering and path identity no longer depend on map
+iteration or lossy encoded strings.
+
+Task 3 moves the complete persisted settings schema, defaults, repair/migration, validation,
+last-known-good backup, corrupt-file quarantine, atomic replacement, and exact credential-target
+helpers into the new `crates/clipline-settings` crate. The shipping Tauri module is now a
+compatibility adapter over those shared types, while recorder/device conversions remain app-owned.
+The concrete `SettingsStore` owns a process-scoped full document and performs revision plus Cloud
+account-generation compare-and-swap transactions for narrow UI, media-root, Cloud profile/record,
+and osu! changes. Stale revisions, stale accounts, external file edits, validation failures,
+counter exhaustion, and injected post-mutation persistence failures leave the primary, backup,
+in-memory snapshot, and revision unchanged; independently opened stores share the commit boundary.
+Quit and signed-updater shutdown publish durable state through the same transaction instead of
+bypassing it with a direct settings write.
+
+The Slint candidate owns the same store before tray/hotkey/window creation. Tests require an
+isolated profile, resolve relative roots to absolute paths without consulting the installed
+profile, load a complete validated document without writing on bootstrap, and persist only through
+the shared transaction API. No credential reader, secret field, Tauri/Slint type, direct Win32
+import, or linked media dependency enters the settings crate; Windows atomic replacement remains
+behind the safe `clipline-shell` wrapper. The installed Clipline process and its profile were not
+stopped or mutated.
+
+Validation is green under CI-mode full-workspace tests, warning-denied workspace Clippy, the
+standalone Slint all-target test/Clippy suites, 61 unchanged migrated schema tests, 11 Tauri service
+adapter tests, transactional failure/CAS tests, and an independent final Task 3 audit. Live
+request/result account fencing, Cloud extraction, upload/status/profile race fixes, and actual
+`LibraryConfig`/`CloudAccountStore` service injection remain explicitly owned by Tasks 4 and 6--7;
+no Cloud parity status is advanced early.
+
+Next: Task 4, extract the local Library scan/mutation service behind the shared settings-backed
+configuration while preserving every shipping Tauri command and JSON contract.
+
 ## Checkpoint (2026-08-02): Slint replacement Milestone 6 native shell, Tasks 1--11
 
 Plan: `docs/superpowers/plans/2026-08-02-slint-native-shell.md`. The new

@@ -28,15 +28,6 @@ pub enum GameRecordingMode {
     ReplaysOnly,
 }
 
-impl From<GameRecordingMode> for crate::service::RecordingMode {
-    fn from(value: GameRecordingMode) -> Self {
-        match value {
-            GameRecordingMode::FullSession => Self::FullSession,
-            GameRecordingMode::ReplaysOnly => Self::ReplaysOnly,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GamePluginSettings {
     #[serde(default = "default_enabled")]
@@ -217,17 +208,13 @@ impl GameSettings {
         let mut occupied = self
             .custom_games
             .iter()
-            .filter(|game| crate::game_identity::validate_custom_game_id(&game.id).is_ok())
+            .filter(|game| validate_custom_game_id(&game.id).is_ok())
             .map(|game| game.id.clone())
             .collect::<HashSet<_>>();
         for game in &mut self.custom_games {
-            if crate::game_identity::validate_custom_game_id(&game.id).is_err() {
+            if validate_custom_game_id(&game.id).is_err() {
                 let legacy_id = game.id.clone();
-                game.id = crate::game_identity::unique_migrated_custom_game_id(
-                    &game.id,
-                    &game.name,
-                    &mut occupied,
-                );
+                game.id = unique_migrated_custom_game_id(&game.id, &game.name, &mut occupied);
                 if !legacy_id.is_empty() && !game.legacy_ids.contains(&legacy_id) {
                     game.legacy_ids.push(legacy_id);
                 }
@@ -252,4 +239,83 @@ fn normalize_game_plugin_id(raw: &str) -> String {
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join("_")
+}
+
+const BUILT_IN_IDS: &[&str] = &["league_of_legends", "valorant", "cs2", "osu"];
+const CUSTOM_PREFIX: &str = "custom-";
+const MIGRATED_PREFIX: &str = "custom-migrated-";
+const MAX_CUSTOM_ID_LEN: usize = 96;
+
+pub fn validate_custom_game_id(id: &str) -> Result<(), String> {
+    if BUILT_IN_IDS.contains(&id) {
+        return Err(format!(
+            "custom game id {id:?} is reserved for a built-in game"
+        ));
+    }
+    if id.len() > MAX_CUSTOM_ID_LEN {
+        return Err(format!(
+            "custom game id must be at most {MAX_CUSTOM_ID_LEN} characters"
+        ));
+    }
+    let Some(slug) = id.strip_prefix(CUSTOM_PREFIX) else {
+        return Err(format!(
+            "custom game id {id:?} must use the {CUSTOM_PREFIX} namespace"
+        ));
+    };
+    if slug.is_empty()
+        || slug.starts_with('-')
+        || slug.ends_with('-')
+        || slug.contains("--")
+        || !slug
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return Err(format!("custom game id {id:?} is not a canonical slug"));
+    }
+    Ok(())
+}
+
+pub fn migrated_custom_game_id(raw_id: &str, fallback_name: &str) -> String {
+    let source = if raw_id.trim().is_empty() {
+        fallback_name
+    } else {
+        raw_id
+    };
+    let max_slug_len = MAX_CUSTOM_ID_LEN - MIGRATED_PREFIX.len();
+    let mut slug = source
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    slug.truncate(max_slug_len);
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    if slug.is_empty() {
+        slug.push_str("game");
+    }
+    format!("{MIGRATED_PREFIX}{slug}")
+}
+
+pub fn unique_migrated_custom_game_id(
+    raw_id: &str,
+    fallback_name: &str,
+    occupied: &mut HashSet<String>,
+) -> String {
+    let base = migrated_custom_game_id(raw_id, fallback_name);
+    let mut candidate = base.clone();
+    let mut suffix = 2_u32;
+    while occupied.contains(&candidate) {
+        let suffix_text = format!("-{suffix}");
+        let stem_len = MAX_CUSTOM_ID_LEN - suffix_text.len();
+        candidate = format!("{}{suffix_text}", &base[..base.len().min(stem_len)]);
+        suffix += 1;
+    }
+    occupied.insert(candidate.clone());
+    candidate
 }

@@ -2491,7 +2491,7 @@ fn cloud_owner_clip_page_url(
 }
 
 fn credential_target(host_url: &str, user_id: &str) -> String {
-    format!("Clipline Cloud:{host_url}:{user_id}")
+    clipline_settings::cloud::cloud_credential_target(host_url, user_id)
 }
 
 fn write_credential(target: &str, username: &str, token: &str) -> Result<(), String> {

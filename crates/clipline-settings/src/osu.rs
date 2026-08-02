@@ -5,6 +5,16 @@
 
 use serde::{Deserialize, Serialize};
 
+pub const OSU_CREDENTIAL_PREFIX: &str = "Clipline osu!";
+
+pub fn osu_credential_target(client_id: &str, user: &str) -> String {
+    format!(
+        "{OSU_CREDENTIAL_PREFIX}:{}:{}",
+        client_id.trim(),
+        user.trim()
+    )
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OsuApiSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
