@@ -4,7 +4,7 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
-## Checkpoint (2026-08-02): Slint replacement Milestone 6 native shell, Tasks 1--9
+## Checkpoint (2026-08-02): Slint replacement Milestone 6 native shell, Tasks 1--11
 
 Plan: `docs/superpowers/plans/2026-08-02-slint-native-shell.md`. The new
 `crates/clipline-shell` crate owns the framework-neutral launch/window/shutdown contract and the
@@ -122,7 +122,32 @@ diagnostics, and only then exits. Administrator restart launches the exact eleva
 that final ready-to-exit edge. Successful passive installs latch both gates so another shutdown
 path cannot race the already-authorized exit; failures release their leases and remain visible.
 
-Validation is green: CI-mode `cargo test --workspace`, warning-denied workspace Clippy after fresh
+Task 10 proves a first-party, non-distributed NSIS path for both intrinsic Slint package variants.
+The feature-specific executable reports an exact, side-effect-free package identity probe before
+any application state starts. The builder requires an independently supplied executable SHA-256,
+bounds every contract/probe input, anchors every source by size/hash, reruns the existing FFmpeg
+integrity verifier against the owned staged copy, and caps both pre-staging sources and final
+manifest-inclusive payload at 512 MiB. It never downloads tools, uses the reviewed NSIS 3.11 and
+explicit 7-Zip 26.02 binaries, and compares every extracted payload hash without executing the
+installer.
+
+The internal current-user installers use fixed, variant-isolated directories/registry keys and
+cannot be redirected into the shipping Clipline tree. Exact command-line token scanning keeps
+`/R`, `/REINSTALL`, `/UPDATE`, and `/ARGS` distinct. The primary Slint process owns a thread-affine
+named mutex; install, update, and uninstall acquire it with a 30-second bound before registry
+validation or file mutation. Uninstall aborts while preserving its metadata/uninstaller if any
+required payload cannot be removed. Regular and standalone frozen candidates extracted with zero
+WebView/Tauri payloads; their local receipt hashes and pending evidence boundary are recorded in
+`docs/slint/native-shell-package-protocol.md`. They were never executed, installed, signed, or
+published.
+
+Task 11 validation is green: CI-mode `cargo test --workspace`, warning-denied workspace Clippy,
+both package-feature Slint test/Clippy runs, the PowerShell installer tamper/bounds suite, the live
+Windows package-fence test, migration/repository contracts, and debug/optimized benchmark probes.
+The debug probe correctly reports benchmark-safe false at opt-level 0; both probes report no
+autostart registry mutation, while the optimized profile reports benchmark-safe true at opt-level
+3. Two independent final package/NSIS audits returned GO. Earlier M6 validation also included
+warning-denied workspace Clippy after fresh
 `clipline-shell` and `clipline-app` caches, 488 app unit tests, 92 UI contracts, 12
 repository-security contracts, 8 shared diagnostics tests, live disposable Credential Manager
 CRUD, four disposable HKCU autostart device tests, both native hotkey device tests, three neutral
@@ -133,14 +158,24 @@ Generated Tauri schemas and `Cargo.lock` remain current.
 The user's installed Clipline process and profile remained untouched, so no shipping debug app was
 launched and no test used the production instance identity.
 
+The remaining gates are deliberately pending: formal quiet matched memory/CPU samples, real-GPU
+D3D playback, approved Windows 10/11 install/upgrade/uninstall/update VMs, release signing,
+production activation/installer identity migration, DPI/Narrator coverage, and rollback. Package,
+updater UI, and installed/manual ledger rows remain `in_progress`; compile/extraction evidence was
+not promoted into an installed-pass claim.
+
 Implementation commits through Task 8 are `026d0eb` (bounded shell/lifecycle), `23263e3` (neutral
 hotkey grammar), `d20e421` (native Windows hotkey service), `a6d74b9` (transactional HKCU
 autostart), `ff57dc1` (authenticated single-instance activation), `b20ba8b` (shared Windows shell
 services), `71448aa` (signed updater), and `bc74ca0` (lazy Slint tray shell). Plan commits are
-`13005af` and `9329e53`.
+`13005af` and `9329e53`. Task 9 is `399c38d` (shared Tauri shell contracts) and Task 10 is
+`480b141` (internal native installer proof). The HTTPS OAuth credential currently lacks GitHub's
+`workflow` scope, so pushing `480b141` and the Task 11 closeout commit is pending credential refresh;
+the existing draft PR remains #132 and local history is intact.
 
-Next: continue Tasks 10--11 (the isolated native NSIS candidate and final validation) without
-switching production before the later gates pass.
+Next: plan and execute Milestone 7's Library and Cloud port. Keep the shipping Tauri frontend and
+its rollback path intact, model only bounded active pages/windows in Slint, and do not switch
+production before the later measured/manual gates pass.
 
 ## Checkpoint (2026-08-02): Slint replacement Milestone 5 desktop controller
 

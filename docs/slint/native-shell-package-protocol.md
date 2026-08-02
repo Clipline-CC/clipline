@@ -83,6 +83,21 @@ isolated Windows VMs:
 Until those gates are accepted, this output is not a release artifact and Milestone 6 makes no
 installed-package claim.
 
+## Milestone 6 closeout validation
+
+Task 11 validation passed on 2026-08-02 without starting the shipping application or touching its
+profile: CI-mode `cargo test --workspace`, warning-denied workspace Clippy, package-feature Slint
+tests and strict Clippy for both variants, the PowerShell installer helper suite, the live Windows
+process-fence test, the migration/repository contracts, and both debug and optimized benchmark
+probes. The debug probe reported opt-level 0 and therefore correctly refused benchmark-safe status;
+both probes reported `autostart_registry_mutation: false`, while the optimized benchmark profile
+reported opt-level 3 and `benchmark_shell_safe: true`.
+
+Two independent read-only audits returned GO after the fixed-directory, mutex-transaction,
+uninstall-retry, exact-argument, source-anchoring, bounded-I/O, and extraction-receipt fixes. These
+checks close the non-distributed construction/extraction proof only. The isolated VM, signing,
+installed update, real-GPU, matched-memory, and accessibility gates above remain pending.
+
 ## 2026-08-02 local extraction evidence
 
 Both optimized feature-specific binaries were packaged from the reviewed FFmpeg staging and

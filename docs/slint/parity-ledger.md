@@ -17,10 +17,10 @@ stable; the baseline commit preserves exact historical locations.
 | Stable token | Current source and behavior | Target owner | Acceptance | Status |
 |---|---|---|---|---|
 | `command:save_replay` | `UiAction::SaveReplay` dispatches through the neutral controller; Tauri remains a signature/result adapter. | M5 recorder controller | Automated save request/event test; manual tray and window save. | `implemented` |
-| `command:restart_as_administrator` | `app.rs`; elevated relaunch, parent handoff, orderly quit. | M6 Windows shell | Automated argument/handoff tests; manual elevated-game flow. | `not_started` |
+| `command:restart_as_administrator` | `app.rs`; elevated relaunch, parent handoff, orderly quit. | M6 Windows shell | Automated argument/handoff tests; manual elevated-game flow. | `in_progress` |
 | `command:set_recording` | `UiAction::SetRecording` dispatches through the neutral controller and preserves start/stop/games-only service behavior. | M5 recorder controller | Existing recorder tests plus Slint action-state test. | `implemented` |
 | `command:get_settings` | Reconciles and returns the settings value owned by the versioned desktop snapshot. | M5 desktop controller | Snapshot parity fixture. | `implemented` |
-| `command:minimize_main_window` | `app.rs`; settings-dependent tray/taskbar transition. | M6 lifecycle | Lifecycle state-machine test and manual Windows check. | `not_started` |
+| `command:minimize_main_window` | `app.rs`; settings-dependent tray/taskbar transition. | M6 lifecycle | Lifecycle state-machine test and manual Windows check. | `in_progress` |
 | `command:choose_media_folder` | `app.rs`; native picker and one-shot media authorization. | M8 settings | Picker cancel/select integration test. | `not_started` |
 | `command:choose_replay_cache_folder` | `app.rs`; native replay-cache folder picker. | M8 settings | Picker cancel/select integration test. | `not_started` |
 | `command:list_displays` | `app.rs`; enumerate displays and stable identifiers. | M8 capture settings | Device fixture and live multi-display check. | `not_started` |
@@ -35,16 +35,16 @@ stable; the baseline commit preserves exact historical locations.
 | `command:frontend_ready` | Returns the versioned authoritative desktop snapshot plus its last reduced event sequence; legacy fields remain additive. | M5 bootstrap snapshot | Startup race and stale-revision tests. | `implemented` |
 | `command:start_microphone_test` | `app.rs`; start native microphone monitor stream. | M8 capture settings | Start/idempotence/device-error tests. | `not_started` |
 | `command:stop_microphone_test` | `app.rs`; synchronously stop microphone monitor. | M8 capture settings | Stop/background-entry tests. | `not_started` |
-| `command:get_autostart_status` | `app.rs`; report configured per-user launch state. | M6 Windows shell | Registry adapter test and installed smoke test. | `not_started` |
-| `command:check_for_updates` | `app.rs`; check selected signed update channel. | M6 updater | Manifest/offline/channel tests. | `not_started` |
-| `command:install_update` | `app.rs`; recheck, stop services, download/install. | M6 updater | Signed/tampered/cancel/install tests. | `not_started` |
+| `command:get_autostart_status` | `app.rs`; report configured per-user launch state. | M6 Windows shell | Registry adapter test and installed smoke test. | `in_progress` |
+| `command:check_for_updates` | `app.rs`; check selected signed update channel. | M6 updater | Manifest/offline/channel tests. | `in_progress` |
+| `command:install_update` | `app.rs`; recheck, stop services, download/install. | M6 updater | Signed/tampered/cancel/install tests. | `in_progress` |
 | `command:save_settings` | `app.rs`; transactional hotkey, tray, autostart, persistence, quota, and recorder update with compensation. | M8 settings controller | Failure-injection transaction suite. | `not_started` |
 | `command:prepare_bug_report` | `app/support.rs`; sanitize and stage reviewable support bundle. | M8 support | Existing redaction and preparation tests. | `not_started` |
 | `command:submit_bug_report` | `app/support.rs`; bounded cancellable upload of approved bundle. | M8 support | Upload/cancel/rate-limit fixture. | `not_started` |
 | `command:cancel_bug_report` | `app/support.rs`; cancel active preparation/submission. | M8 support | Cancellation state-machine test. | `not_started` |
 | `command:discard_bug_report` | `app/support.rs`; remove staged report. | M8 support | Cleanup/file-release test. | `not_started` |
 | `command:save_prepared_bug_report` | `app/support.rs`; native save picker for reviewed bundle. | M8 support | Cancel/save picker test. | `not_started` |
-| `command:open_diagnostics_folder` | `app/support.rs`; reveal diagnostics directory. | M6 Windows shell | Shell adapter test and manual Explorer check. | `not_started` |
+| `command:open_diagnostics_folder` | `app/support.rs`; reveal diagnostics directory. | M6 Windows shell | Shell adapter test and manual Explorer check. | `in_progress` |
 | `command:diagnostics_location` | `app/support.rs`; return diagnostics path. | M8 support | Path/scope fixture. | `not_started` |
 | `command:support_capabilities` | `app/support.rs`; report honest support workflow capabilities. | M8 support | Existing capability contract vectors. | `not_started` |
 | `command:log_frontend_event` | `app/support.rs`; rate-limited and redacted UI diagnostics. | M5 diagnostics | Redaction/rate-limit test. | `not_started` |
@@ -128,7 +128,7 @@ stable; the baseline commit preserves exact historical locations.
 
 | Stable token | Current contract | Owner | Acceptance | Status |
 |---|---|---|---|---|
-| `shortcut:global-save-replay` | Two configurable keyboard/mouse chords; default Alt+F10; Windows-reserved combinations rejected; low-level hook plus registered shortcut. | M6 hotkeys | Existing parser vectors, rollback tests, elevated live check. | `not_started` |
+| `shortcut:global-save-replay` | Two configurable keyboard/mouse chords; default Alt+F10; Windows-reserved combinations rejected; low-level hook plus registered shortcut. | M6 hotkeys | Existing parser vectors, rollback tests, elevated live check. | `in_progress` |
 | `shortcut:play-pause` | Space/K toggles playback outside modal/settings contexts. | M9 review | Player intent vectors. | `not_started` |
 | `shortcut:seek-five-seconds` | Left/Right seeks ±5 s. | M9 review | Player intent vectors. | `not_started` |
 | `shortcut:seek-one-second` | Shift+Left/Right seeks ±1 s. | M9 review | Player intent vectors. | `not_started` |
@@ -165,21 +165,21 @@ stable; the baseline commit preserves exact historical locations.
 
 | Stable token | Current contract | Owner | Acceptance | Status |
 |---|---|---|---|---|
-| `tray:open` | Open/rebuild/reveal the main window. | M6 shell | Tray-only and destroyed-window smoke tests. | `not_started` |
-| `tray:save-replay` | Save Replay with dynamically configured hotkey label. | M6 shell | Label/action/recording tests. | `not_started` |
-| `tray:open-diagnostics` | Open diagnostics directory. | M6 shell | Shell error/manual Explorer test. | `not_started` |
-| `tray:quit` | Stop mic/recorder and allow explicit exit. | M6 shell | Orderly shutdown/file-finalization test. | `not_started` |
-| `tray:left-click-open` | Left-button release opens; other transitions do not. | M6 shell | Existing mouse-event matrix. | `not_started` |
-| `lifecycle:normal-launch` | Start services, build tray, reveal initially hidden window. | M6 shell | Cold-start readiness measurement. | `not_started` |
-| `lifecycle:autostart-tray` | `--autostart` starts services without revealing UI. | M6 shell | Installed autostart and zero-window gate. | `not_started` |
-| `lifecycle:single-instance-reveal` | Secondary non-autostart launch reveals primary. | M6 shell | Same-user activation tests. | `not_started` |
-| `lifecycle:close-to-tray-or-quit` | Close obeys setting; background stops mic and releases review work. | M6 shell | Setting matrix and 100-cycle soak. | `not_started` |
-| `lifecycle:minimize-to-tray-or-taskbar` | Minimize obeys setting and publishes revisioned mode. | M6 shell | Setting matrix and focus restore test. | `not_started` |
+| `tray:open` | Slint tray Open creates or reveals one fenced window generation. | M6 shell | Tray-only and destroyed-window smoke tests. | `implemented` |
+| `tray:save-replay` | Save Replay enters the shared bounded command port with the configured label; production recorder binding remains pending. | M6 shell | Label/action/recording tests. | `in_progress` |
+| `tray:open-diagnostics` | Open Diagnostics enters the shared command port; installed Explorer smoke remains pending. | M6 shell | Shell error/manual Explorer test. | `in_progress` |
+| `tray:quit` | Slint Quit tears down window/media/models/services before event-loop exit. | M6 shell | Orderly shutdown/file-finalization test. | `implemented` |
+| `tray:left-click-open` | Slint left-button release opens; other transitions do not. | M6 shell | Existing mouse-event matrix. | `implemented` |
+| `lifecycle:normal-launch` | Primary Slint launch creates one initial window after shell ownership. | M6 shell | Cold-start readiness measurement. | `implemented` |
+| `lifecycle:autostart-tray` | `--autostart` creates shell services and tray without constructing a window/renderer. | M6 shell | Installed autostart and zero-window gate. | `implemented` |
+| `lifecycle:single-instance-reveal` | Same-user authenticated secondary activation reveals the primary Slint shell. | M6 shell | Same-user activation tests. | `implemented` |
+| `lifecycle:close-to-tray-or-quit` | Close drops component, media, host, models, and desktop attachment before returning to tray. | M6 shell | Setting matrix and 100-cycle soak. | `implemented` |
+| `lifecycle:minimize-to-tray-or-taskbar` | Shared policy and Tauri adapter are implemented; native Slint settings binding/manual focus check remain. | M6 shell | Setting matrix and focus restore test. | `in_progress` |
 | `lifecycle:foreground-bootstrap-snapshot` | Ready returns one authoritative versioned snapshot plus reduced-event sequence; JS refreshes on sequence gaps without replaying effects. | M5 controller | Startup race/generation suite. | `implemented` |
-| `updater:silent-check` | Delayed startup check on selected channel without interrupting on no update. | M6 updater | Timer/channel/offline test. | `not_started` |
-| `updater:manual-check` | User check shows current/update/error result. | M6 updater | State and keyboard test. | `not_started` |
-| `updater:install` | Recheck, stop services, verify/download, passive install, exit. | M6 updater | Signed/tampered/cancel/install matrix. | `not_started` |
-| `updater:signature-verification` | Existing committed minisign public key gates artifacts. | M6 updater | Known-good/bad signature tests. | `not_started` |
+| `updater:silent-check` | Bounded channel/manifest check backend is shared; Slint timer and visible state remain pending. | M6 updater | Timer/channel/offline test. | `in_progress` |
+| `updater:manual-check` | Bounded shared check backend and Tauri adapter exist; Slint result UI remains pending. | M6 updater | State and keyboard test. | `in_progress` |
+| `updater:install` | Signed bounded download, durable shutdown, suspended handoff, and Tauri adapter exist; approved installed smoke remains pending. | M6 updater | Signed/tampered/cancel/install matrix. | `in_progress` |
+| `updater:signature-verification` | Existing committed minisign public key gates exact installer bytes; production oracle verifies locally, release signing smoke remains pending. | M6 updater | Known-good/bad signature tests. | `in_progress` |
 | `package:regular-nsis` | First-party current-user, WebView-free regular Slint candidate with isolated internal artifact/install identity; shipping Tauri remains unchanged. | M6/M10 packaging | Extracted hash parity plus approved clean install/upgrade/uninstall VM smoke. | `in_progress` |
 | `package:standalone-nsis` | First-party current-user, WebView-free standalone Slint candidate with an intrinsic variant probe and cross-variant refusal. | M6/M10 packaging | Extracted hash parity, manifest crossing, and approved upgrade VM smoke. | `in_progress` |
 | `package:webview2-runtime` | Required/bundled WebView runtime remains until cutover, then is removed with Tauri. | M10 cutover | Bundle inspection and repair-path decision. | `not_started` |
