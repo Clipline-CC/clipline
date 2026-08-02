@@ -133,7 +133,10 @@ impl CpuFrameProducer {
         height: u32,
     ) -> Result<CpuFrameWrite, CpuFrameError> {
         let bytes = rgb_frame_bytes(width, height)?;
-        let mut state = self.state.lock().map_err(|_| CpuFrameError::Backpressured)?;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| CpuFrameError::Backpressured)?;
         if state.active_token != Some(token) {
             state.telemetry.stale_frames = state.telemetry.stale_frames.saturating_add(1);
             return Err(CpuFrameError::StaleToken);
@@ -179,7 +182,10 @@ impl CpuFrameProducer {
         write: CpuFrameWrite,
         copy_time_100ns: u64,
     ) -> Result<(), CpuFrameError> {
-        let mut state = self.state.lock().map_err(|_| CpuFrameError::Backpressured)?;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| CpuFrameError::Backpressured)?;
         if state.active_token != Some(write.token) {
             state.telemetry.stale_frames = state.telemetry.stale_frames.saturating_add(1);
             recycle_buffer(&mut state, write.pixels);
@@ -227,11 +233,7 @@ impl CpuFrameConsumer {
 }
 
 fn rgb_frame_bytes(width: u32, height: u32) -> Result<usize, CpuFrameError> {
-    if width == 0
-        || height == 0
-        || !width.is_multiple_of(2)
-        || !height.is_multiple_of(2)
-    {
+    if width == 0 || height == 0 || !width.is_multiple_of(2) || !height.is_multiple_of(2) {
         return Err(CpuFrameError::InvalidDimensions { width, height });
     }
     let pixels = usize::try_from(width)
