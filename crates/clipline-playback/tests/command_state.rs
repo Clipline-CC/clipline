@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use clipline_playback::{
     CommandError, CommandInbox, EnqueueError, EnqueueOutcome, MonotonicTime100ns, PlaybackCommand,
     PlaybackEvent, PlaybackPhase, PlaybackState, PlaybackTime, WorkGeneration,
-    COMMAND_INBOX_CAPACITY,
+    COMMAND_INBOX_CAPACITY, MAX_SELECTED_AUDIO_TRACKS,
 };
 
 fn open(path: &str) -> PlaybackCommand {
@@ -113,6 +113,17 @@ fn invalid_commands_fail_without_mutating_state() {
             audio_track_indices: vec![1, 1],
         }),
         Err(CommandError::DuplicateTrack { track_index: 1 })
+    );
+    assert_eq!(state.snapshot(), before);
+    let too_many: Vec<_> = (0..=MAX_SELECTED_AUDIO_TRACKS).collect();
+    assert_eq!(
+        state.apply(PlaybackCommand::SetTracks {
+            audio_track_indices: too_many,
+        }),
+        Err(CommandError::TooManyAudioTracks {
+            count: MAX_SELECTED_AUDIO_TRACKS + 1,
+            limit: MAX_SELECTED_AUDIO_TRACKS,
+        })
     );
     assert_eq!(state.snapshot(), before);
     assert_eq!(

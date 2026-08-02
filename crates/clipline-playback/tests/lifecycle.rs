@@ -41,6 +41,7 @@ fn drive_open(worker: &mut PlaybackWorker, path: &str) {
         WorkerCompletion::Indexed {
             duration: at(10, 1),
             video_sample_count: 10,
+            default_audio_track_indices: Vec::new(),
         },
     );
     let flush = next(worker);
@@ -216,6 +217,7 @@ fn close_during_open_or_seek_releases_the_pipeline_and_fences_old_completion() {
             WorkerCompletion::Indexed {
                 duration: at(10, 1),
                 video_sample_count: 10,
+                default_audio_track_indices: Vec::new(),
             }
         )
         .unwrap());
@@ -393,6 +395,7 @@ fn drive_open_after_enqueued(worker: &mut PlaybackWorker) {
         WorkerCompletion::Indexed {
             duration: at(1, 1),
             video_sample_count: 1,
+            default_audio_track_indices: Vec::new(),
         },
     );
     let flush = next(worker);
@@ -481,4 +484,132 @@ fn steady_progress_and_eof_are_token_fenced_and_ended_emits_once() {
         worker.take_events().as_slice(),
         [PlaybackEvent::Ended { .. }]
     ));
+}
+
+#[test]
+fn indexed_default_audio_tracks_are_installed_before_the_initial_seek() {
+    let mut worker = PlaybackWorker::new();
+    worker
+        .enqueue(
+            PlaybackCommand::Open {
+                path: PathBuf::from("clip.mp4"),
+            },
+            MonotonicTime100ns::new(10),
+        )
+        .unwrap();
+    let indexed = next(&mut worker);
+    complete(
+        &mut worker,
+        &indexed,
+        WorkerCompletion::Indexed {
+            duration: at(10, 1),
+            video_sample_count: 10,
+            default_audio_track_indices: vec![1, 2],
+        },
+    );
+    let flush = next(&mut worker);
+    complete(&mut worker, &flush, WorkerCompletion::Done);
+    let plan = next(&mut worker);
+
+    assert!(matches!(
+        plan.kind(),
+        WorkerActionKind::PlanSeek {
+            audio_track_indices,
+            ..
+        } if audio_track_indices == &vec![1, 2]
+    ));
+    assert_eq!(worker.snapshot().audio_track_indices, vec![1, 2]);
+}
+
+#[test]
+fn invalid_indexed_default_audio_tracks_fail_without_partial_selection() {
+    let mut worker = PlaybackWorker::new();
+    worker
+        .enqueue(
+            PlaybackCommand::Open {
+                path: PathBuf::from("clip.mp4"),
+            },
+            MonotonicTime100ns::new(10),
+        )
+        .unwrap();
+    let indexed = next(&mut worker);
+
+    assert!(matches!(
+        worker.complete(
+            &indexed,
+            WorkerCompletion::Indexed {
+                duration: at(10, 1),
+                video_sample_count: 10,
+                default_audio_track_indices: vec![1, 1],
+            },
+        ),
+        Err(clipline_playback::WorkerError::Command(
+            clipline_playback::CommandError::DuplicateTrack { track_index: 1 }
+        ))
+    ));
+    assert_eq!(worker.snapshot().phase, PlaybackPhase::Failed);
+    assert!(worker.snapshot().audio_track_indices.is_empty());
+}
+
+#[test]
+fn steady_state_backend_failure_is_token_fenced_and_enters_recovery() {
+    let mut worker = PlaybackWorker::new();
+    drive_open(&mut worker, "clip.mp4");
+    worker.take_events();
+    let token = worker.token();
+    let stale = clipline_playback::PipelineToken::new(
+        token.work(),
+        token.revision().checked_sub(1).unwrap(),
+    );
+    let failure = BackendError {
+        component: BackendComponent::VideoDecoder,
+        kind: BackendErrorKind::DeviceLost,
+        recovery: RecoveryDisposition::RecreateComponent,
+        native_code: None,
+        message: "steady-state device loss".into(),
+    };
+
+    let before = worker.snapshot();
+    assert!(!worker.report_failure(stale, failure.clone()).unwrap());
+    assert_eq!(worker.snapshot(), before);
+    assert_eq!(worker.stale_completions(), 1);
+
+    assert!(worker.report_failure(token, failure).unwrap());
+    assert!(worker.token().revision() > token.revision());
+    assert_eq!(worker.snapshot().phase, PlaybackPhase::Seeking);
+    assert_eq!(next(&mut worker).kind(), &WorkerActionKind::Flush);
+}
+
+#[test]
+fn fatal_steady_state_failure_is_terminal_and_emits_once() {
+    let mut worker = PlaybackWorker::new();
+    drive_open(&mut worker, "clip.mp4");
+    worker.take_events();
+    let token = worker.token();
+    let failure = BackendError {
+        component: BackendComponent::AudioRenderer,
+        kind: BackendErrorKind::EndpointInvalidated,
+        recovery: RecoveryDisposition::Fatal,
+        native_code: None,
+        message: "steady-state audio failure".into(),
+    };
+
+    assert!(worker.report_failure(token, failure).unwrap());
+    assert_eq!(worker.snapshot().phase, PlaybackPhase::Failed);
+    assert!(matches!(
+        worker.take_events().as_slice(),
+        [PlaybackEvent::Error { message, .. }] if message == "steady-state audio failure"
+    ));
+    assert!(!worker
+        .report_failure(
+            token,
+            BackendError {
+                component: BackendComponent::AudioRenderer,
+                kind: BackendErrorKind::EndpointInvalidated,
+                recovery: RecoveryDisposition::Fatal,
+                native_code: None,
+                message: "duplicate".into(),
+            },
+        )
+        .unwrap());
 }

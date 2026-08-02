@@ -127,6 +127,7 @@ pub enum WorkerCompletion {
     Indexed {
         duration: PlaybackTime,
         video_sample_count: usize,
+        default_audio_track_indices: Vec<usize>,
     },
     SeekPlanned(WorkerSeekPlan),
     Published {
@@ -159,6 +160,8 @@ pub enum WorkerError {
     },
     #[error("indexed media has no video samples")]
     EmptyVideo,
+    #[error("indexed audio tracks cannot be installed while media is not opening")]
+    InvalidOpenState,
     #[error(
         "seek target sample {target_sample_index} is outside {video_sample_count} video samples"
     )]
@@ -379,6 +382,7 @@ impl PlaybackWorker {
                 WorkerCompletion::Indexed {
                     duration,
                     video_sample_count,
+                    default_audio_track_indices,
                 },
             ) => {
                 if duration.timescale == 0 {
@@ -387,8 +391,22 @@ impl PlaybackWorker {
                 if video_sample_count == 0 {
                     return self.completion_error(WorkerError::EmptyVideo);
                 }
+                let next_token = match self.token.next_revision() {
+                    Some(token) => token,
+                    None => return self.completion_error(WorkerError::RevisionExhausted),
+                };
+                match self
+                    .state
+                    .install_open_audio_tracks(self.token.work(), default_audio_track_indices)
+                {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return self.completion_error(WorkerError::InvalidOpenState);
+                    }
+                    Err(error) => return self.completion_error(error.into()),
+                }
                 self.video_sample_count = video_sample_count;
-                self.bump_revision()?;
+                self.token = next_token;
                 WorkerStage::Flush(SeekOperation {
                     origin: OperationOrigin::Open { duration },
                     requested: PlaybackTime {
@@ -501,11 +519,32 @@ impl PlaybackWorker {
             return Ok(false);
         }
         self.current_action = None;
+        self.handle_backend_failure(error)?;
+        Ok(true)
+    }
+
+    pub fn report_failure(
+        &mut self,
+        token: PipelineToken,
+        error: BackendError,
+    ) -> Result<bool, WorkerError> {
+        if token != self.token
+            || !matches!(self.stage, WorkerStage::Ready)
+            || self.current_action.is_some()
+        {
+            self.stale_completions = self.stale_completions.saturating_add(1);
+            return Ok(false);
+        }
+        self.handle_backend_failure(error)?;
+        Ok(true)
+    }
+
+    fn handle_backend_failure(&mut self, error: BackendError) -> Result<(), WorkerError> {
         if error.recovery == RecoveryDisposition::Fatal
             || self.recovery_attempts >= MAX_PIPELINE_RECOVERY_ATTEMPTS
         {
             self.fail_terminal(error.message);
-            return Ok(true);
+            return Ok(());
         }
 
         self.recovery_attempts += 1;
@@ -515,7 +554,7 @@ impl PlaybackWorker {
         } else {
             self.stage = recovery_stage;
         }
-        Ok(true)
+        Ok(())
     }
 
     pub fn snapshot(&self) -> PlaybackSnapshot {

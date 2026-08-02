@@ -60,11 +60,13 @@ impl FixtureBackend {
                 let index = movie.index();
                 let duration = at(index.duration_ticks, index.movie_timescale);
                 let video_sample_count = index.tracks[video_track_index].samples.len();
+                let default_audio_track_indices = audio_tracks(&movie);
                 self.movie = Some(movie);
                 self.video_track_index = Some(video_track_index);
                 WorkerCompletion::Indexed {
                     duration,
                     video_sample_count,
+                    default_audio_track_indices,
                 }
             }
             WorkerActionKind::PlanSeek {
@@ -303,6 +305,7 @@ fn track_switch_during_playback_reseeks_at_position_and_preserves_playing_intent
         2,
         "production fixture must contain two Opus tracks"
     );
+    assert_eq!(worker.snapshot().audio_track_indices, selected);
 
     worker
         .enqueue(PlaybackCommand::Play, MonotonicTime100ns::new(10))
@@ -314,7 +317,7 @@ fn track_switch_during_playback_reseeks_at_position_and_preserves_playing_intent
     worker
         .enqueue(
             PlaybackCommand::SetTracks {
-                audio_track_indices: selected.clone(),
+                audio_track_indices: vec![selected[0]],
             },
             MonotonicTime100ns::new(20),
         )
@@ -322,8 +325,8 @@ fn track_switch_during_playback_reseeks_at_position_and_preserves_playing_intent
     backend.drive_until_idle(&mut worker);
 
     let indexed = backend.last_seek.as_ref().expect("track switch seek plan");
-    assert_eq!(backend.last_selected_audio_tracks, selected);
-    assert_eq!(indexed.audio_preroll.len(), 2);
+    assert_eq!(backend.last_selected_audio_tracks, vec![selected[0]]);
+    assert_eq!(indexed.audio_preroll.len(), 1);
     assert!(indexed
         .audio_preroll
         .iter()
@@ -365,6 +368,7 @@ fn stale_completion_from_an_old_open_cannot_mutate_the_replacement() {
             WorkerCompletion::Indexed {
                 duration: at(99, 1),
                 video_sample_count: 1,
+                default_audio_track_indices: Vec::new(),
             },
         )
         .unwrap());

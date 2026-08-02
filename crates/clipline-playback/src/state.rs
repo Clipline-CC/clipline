@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use clipline_mp4::PlaybackTime;
 use thiserror::Error;
 
-use crate::PlaybackCommand;
+use crate::{audio::MAX_SELECTED_AUDIO_TRACKS, PlaybackCommand};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct WorkGeneration {
@@ -89,6 +89,8 @@ pub enum CommandError {
     InvalidTime,
     #[error("audio track {track_index} was selected more than once")]
     DuplicateTrack { track_index: usize },
+    #[error("selected {count} audio tracks, exceeding the limit of {limit}")]
+    TooManyAudioTracks { count: usize, limit: usize },
     #[error("playback generation counter is exhausted")]
     GenerationExhausted,
 }
@@ -227,12 +229,7 @@ impl PlaybackState {
                 audio_track_indices,
             } => {
                 self.require_ready_media()?;
-                let mut selected = BTreeSet::new();
-                for &track_index in &audio_track_indices {
-                    if !selected.insert(track_index) {
-                        return Err(CommandError::DuplicateTrack { track_index });
-                    }
-                }
+                Self::validate_audio_tracks(&audio_track_indices)?;
                 if self.audio_track_indices != audio_track_indices {
                     self.begin_seek()?;
                     self.audio_track_indices = audio_track_indices;
@@ -257,6 +254,19 @@ impl PlaybackState {
             }
         }
         Ok(self.generation)
+    }
+
+    pub(crate) fn install_open_audio_tracks(
+        &mut self,
+        generation: WorkGeneration,
+        audio_track_indices: Vec<usize>,
+    ) -> Result<bool, CommandError> {
+        Self::validate_audio_tracks(&audio_track_indices)?;
+        if !self.accepts(generation) || self.phase != PlaybackPhase::Opening {
+            return Ok(false);
+        }
+        self.audio_track_indices = audio_track_indices;
+        Ok(true)
     }
 
     pub fn complete_open(&mut self, generation: WorkGeneration, duration: PlaybackTime) -> bool {
@@ -367,6 +377,22 @@ impl PlaybackState {
             .ok_or(CommandError::GenerationExhausted)?;
         self.generation.seek = next_seek;
         self.phase = PlaybackPhase::Seeking;
+        Ok(())
+    }
+
+    fn validate_audio_tracks(audio_track_indices: &[usize]) -> Result<(), CommandError> {
+        if audio_track_indices.len() > MAX_SELECTED_AUDIO_TRACKS {
+            return Err(CommandError::TooManyAudioTracks {
+                count: audio_track_indices.len(),
+                limit: MAX_SELECTED_AUDIO_TRACKS,
+            });
+        }
+        let mut selected = BTreeSet::new();
+        for &track_index in audio_track_indices {
+            if !selected.insert(track_index) {
+                return Err(CommandError::DuplicateTrack { track_index });
+            }
+        }
         Ok(())
     }
 
