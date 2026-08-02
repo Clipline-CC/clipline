@@ -984,6 +984,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "clipline-desktop"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "clipline-events"
 version = "0.1.0"
 dependencies = [
