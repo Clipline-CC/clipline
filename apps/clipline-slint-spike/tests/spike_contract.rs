@@ -19,6 +19,24 @@ const FORBIDDEN_DEPENDENCY_TOKENS: &[&str] = &[
     "webview",
 ];
 
+const REQUIRED_UI_CONTRACT: &[&str] = &[
+    "in property <[LibraryItem]> library-items",
+    "in property <[TimelineMarker]> timeline-markers",
+    "in-out property <bool> review-visible",
+    "out property <length> video-stage-x",
+    "out property <length> video-stage-y",
+    "out property <length> video-stage-width",
+    "out property <length> video-stage-height",
+    "callback show-library()",
+    "callback show-review()",
+    "callback play-pause()",
+    "callback seek(relative-seconds: float)",
+    "callback set-track(track-id: int, selected: bool)",
+    "callback set-volume(value: float)",
+    "accessible-label: \"Local Library\"",
+    "accessible-label: \"Review player\"",
+];
+
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -91,6 +109,12 @@ fn spike_is_exactly_pinned_small_and_non_distributed() {
     assert!(ui.contains("export component CliplineSpike inherits Window"));
     assert!(ui.contains("preferred-width: 1200px"));
     assert!(ui.contains("preferred-height: 760px"));
+    for contract in REQUIRED_UI_CONTRACT {
+        assert!(
+            ui.contains(contract),
+            "missing Slint UI contract: {contract}"
+        );
+    }
 
     for config in [
         "apps/clipline-app/tauri.conf.json",

@@ -1,3 +1,29 @@
+import { Button, CheckBox, ListView, Slider } from "std-widgets.slint";
+
+export struct LibraryItem {
+    title: string,
+    subtitle: string,
+    duration: string,
+    kind: string,
+    kind-color: color,
+    poster-a: color,
+    poster-b: color,
+}
+
+export struct TimelineMarker {
+    position: float,
+    label: string,
+    marker-color: color,
+}
+
+component SectionLabel inherits Text {
+    color: #a89784;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    vertical-alignment: center;
+}
+
 export component CliplineSpike inherits Window {
     title: "Clipline Slint Presentation Spike";
     preferred-width: 1200px;
@@ -5,13 +31,281 @@ export component CliplineSpike inherits Window {
     min-width: 960px;
     min-height: 640px;
     background: #14100c;
+    default-font-family: "Segoe UI";
 
-    Text {
-        text: "Clipline";
-        color: #f3eadf;
-        font-size: 24px;
-        font-weight: 700;
-        horizontal-alignment: center;
-        vertical-alignment: center;
+    in property <[LibraryItem]> library-items: [];
+    in property <[TimelineMarker]> timeline-markers: [];
+    in-out property <bool> review-visible: false;
+    in-out property <bool> playing: false;
+    in-out property <bool> track-one-selected: true;
+    in-out property <bool> track-two-selected: true;
+    in-out property <float> volume: 0.82;
+    in-out property <string> current-time: "00:14.233";
+    in-out property <string> duration-time: "00:30.000";
+    in-out property <string> status-text: "Native playback ready · software decoder";
+
+    out property <length> video-stage-x: side-bar.width + 24px;
+    out property <length> video-stage-y: top-bar.height + 46px;
+    out property <length> video-stage-width: root.width - side-bar.width - 48px;
+    out property <length> video-stage-height: min((root.width - side-bar.width - 48px) * 9 / 16, root.height - top-bar.height - 250px);
+
+    callback show-library();
+    callback show-review();
+    callback play-pause();
+    callback seek(relative-seconds: float);
+    callback set-track(track-id: int, selected: bool);
+    callback set-volume(value: float);
+
+    top-bar := Rectangle {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: 36px;
+        background: #1c1611;
+        border-width: 1px;
+        border-color: #30251c;
+
+        Text {
+            x: 14px;
+            width: 160px;
+            height: parent.height;
+            text: "CLIPLINE";
+            color: #f3eadf;
+            font-size: 15px;
+            font-weight: 800;
+            letter-spacing: 2px;
+            vertical-alignment: center;
+        }
+
+        Text {
+            x: 174px;
+            width: parent.width - 320px;
+            height: parent.height;
+            text: "SLINT NATIVE PRESENTATION SPIKE";
+            color: #8d7d6d;
+            font-size: 10px;
+            letter-spacing: 1px;
+            vertical-alignment: center;
+        }
+
+        Rectangle {
+            x: parent.width - 126px;
+            y: 9px;
+            width: 110px;
+            height: 18px;
+            border-radius: 9px;
+            background: #203522;
+            Text {
+                text: "NON-DISTRIBUTED";
+                color: #9dd19c;
+                font-size: 9px;
+                font-weight: 700;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+
+    side-bar := Rectangle {
+        x: 0;
+        y: top-bar.height;
+        width: 214px;
+        height: parent.height - top-bar.height;
+        background: #17110c;
+        border-width: 1px;
+        border-color: #30251c;
+
+        SectionLabel { x: 16px; y: 18px; width: 180px; height: 20px; text: "WORKSPACE"; }
+
+        Button {
+            x: 12px;
+            y: 46px;
+            width: 190px;
+            height: 38px;
+            text: "Local Library";
+            accessible-label: "Local Library";
+            clicked => { root.review-visible = false; root.show-library(); }
+        }
+        Button {
+            x: 12px;
+            y: 92px;
+            width: 190px;
+            height: 38px;
+            text: "Review player";
+            accessible-label: "Review player";
+            clicked => { root.review-visible = true; root.show-review(); }
+        }
+
+        SectionLabel { x: 16px; y: 160px; width: 180px; height: 20px; text: "RECORDER"; }
+        Rectangle {
+            x: 12px;
+            y: 188px;
+            width: 190px;
+            height: 86px;
+            border-radius: 7px;
+            background: #211a14;
+            border-width: 1px;
+            border-color: #392c21;
+            Rectangle { x: 12px; y: 14px; width: 8px; height: 8px; border-radius: 4px; background: #d9962a; }
+            Text { x: 28px; y: 8px; width: 146px; height: 20px; text: "BUFFERING"; color: #e5c183; font-size: 11px; font-weight: 700; vertical-alignment: center; }
+            Text { x: 12px; y: 36px; width: 166px; height: 17px; text: "Alt+F10  Save Replay"; color: #d8ccbd; font-size: 11px; }
+            Text { x: 12px; y: 58px; width: 166px; height: 16px; text: "Memory  35.5 MiB p95"; color: #8d7d6d; font-size: 10px; }
+        }
+
+        Text {
+            x: 16px;
+            y: parent.height - 54px;
+            width: 180px;
+            height: 38px;
+            text: root.status-text;
+            color: #8d7d6d;
+            font-size: 10px;
+            wrap: word-wrap;
+        }
+    }
+
+    if !root.review-visible : library-view := Rectangle {
+        x: side-bar.width;
+        y: top-bar.height;
+        width: root.width - side-bar.width;
+        height: root.height - top-bar.height;
+        background: #14100c;
+        accessible-role: groupbox;
+        accessible-label: "Local Library";
+
+        Text { x: 24px; y: 20px; width: 500px; height: 30px; text: "Local Library"; color: #f3eadf; font-size: 23px; font-weight: 750; }
+        Text { x: 24px; y: 50px; width: 500px; height: 20px; text: "24 representative clips · bounded model"; color: #8d7d6d; font-size: 11px; }
+
+        Rectangle {
+            x: 24px;
+            y: 80px;
+            width: parent.width - 48px;
+            height: 28px;
+            background: #1c1611;
+            border-radius: 5px;
+            SectionLabel { x: 10px; width: 58px; height: parent.height; text: "POSTER"; }
+            SectionLabel { x: 76px; width: parent.width - 330px; height: parent.height; text: "CLIP"; }
+            SectionLabel { x: parent.width - 230px; width: 94px; height: parent.height; text: "TYPE"; }
+            SectionLabel { x: parent.width - 118px; width: 98px; height: parent.height; text: "DURATION"; horizontal-alignment: right; }
+        }
+
+        ListView {
+            x: 24px;
+            y: 112px;
+            width: parent.width - 48px;
+            height: parent.height - 132px;
+            accessible-label: "Twenty four local clips";
+            for row[index] in root.library-items : Rectangle {
+                width: parent.width;
+                height: 22px;
+                background: Math.mod(index, 2) == 0 ? #18120e : #1b1510;
+                border-width: 1px;
+                border-color: #241b15;
+
+                Rectangle {
+                    x: 5px;
+                    y: 3px;
+                    width: 56px;
+                    height: 16px;
+                    border-radius: 3px;
+                    background: @linear-gradient(90deg, row.poster-a, row.poster-b);
+                    Rectangle { x: 5px + Math.mod(index * 11, 34) * 1px; y: 3px; width: 7px; height: 10px; background: #ffffff28; }
+                }
+                Text { x: 72px; y: 1px; width: parent.width - 330px; height: 13px; text: row.title; color: #eee4d8; font-size: 10.5px; font-weight: 650; overflow: elide; }
+                Text { x: 72px; y: 11px; width: parent.width - 330px; height: 9px; text: row.subtitle; color: #827466; font-size: 8px; overflow: elide; }
+                Rectangle {
+                    x: parent.width - 224px;
+                    y: 3px;
+                    width: 82px;
+                    height: 16px;
+                    border-radius: 8px;
+                    background: row.kind-color;
+                    Text { text: row.kind; color: #17110c; font-size: 8px; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; }
+                }
+                Text { x: parent.width - 118px; width: 98px; height: parent.height; text: row.duration; color: #c0b3a5; font-size: 9.5px; horizontal-alignment: right; vertical-alignment: center; }
+            }
+        }
+    }
+
+    if root.review-visible : review-view := Rectangle {
+        x: side-bar.width;
+        y: top-bar.height;
+        width: root.width - side-bar.width;
+        height: root.height - top-bar.height;
+        background: #0f0c09;
+        accessible-role: groupbox;
+        accessible-label: "Review player";
+
+        Text { x: 24px; y: 14px; width: parent.width - 48px; height: 24px; text: "Review · Clip 07 · osu!"; color: #f3eadf; font-size: 17px; font-weight: 700; }
+
+        video-stage := Rectangle {
+            x: 24px;
+            y: 46px;
+            width: parent.width - 48px;
+            height: min((parent.width - 48px) * 9 / 16, parent.height - 250px);
+            background: #050403;
+            border-width: 1px;
+            border-color: #3b2b1e;
+            accessible-role: image;
+            accessible-label: "Native video surface";
+
+            Rectangle {
+                x: (parent.width - 290px) / 2;
+                y: (parent.height - 70px) / 2;
+                width: 290px;
+                height: 70px;
+                border-radius: 8px;
+                background: #1c1611cc;
+                Text { x: 12px; y: 12px; width: parent.width - 24px; height: 21px; text: "D3D11 VIDEO SURFACE"; color: #d9962a; font-size: 13px; font-weight: 800; horizontal-alignment: center; }
+                Text { x: 12px; y: 37px; width: parent.width - 24px; height: 18px; text: "Reserved child HWND · 1920×1080 NV12"; color: #a89784; font-size: 10px; horizontal-alignment: center; }
+            }
+        }
+
+        timeline := Rectangle {
+            x: 24px;
+            y: video-stage.y + video-stage.height + 14px;
+            width: parent.width - 48px;
+            height: 54px;
+            border-radius: 5px;
+            background: #1c1611;
+            border-width: 1px;
+            border-color: #3b2b1e;
+            accessible-role: slider;
+            accessible-label: "Playback timeline";
+            accessible-value: root.current-time;
+
+            Rectangle { x: 10px; y: 27px; width: parent.width - 20px; height: 3px; border-radius: 2px; background: #44362b; }
+            Rectangle { x: 10px; y: 27px; width: (parent.width - 20px) * 0.474; height: 3px; border-radius: 2px; background: #d9962a; }
+            for marker in root.timeline-markers : Rectangle {
+                x: 10px + (parent.width - 20px) * marker.position;
+                y: 10px;
+                width: 2px;
+                height: 31px;
+                background: marker.marker-color;
+                accessible-role: image;
+                accessible-label: marker.label;
+            }
+            Rectangle { x: 10px + (parent.width - 20px) * 0.474 - 4px; y: 22px; width: 9px; height: 13px; border-radius: 5px; background: #f3eadf; }
+        }
+
+        controls := Rectangle {
+            x: 24px;
+            y: timeline.y + timeline.height + 12px;
+            width: parent.width - 48px;
+            height: 74px;
+            background: #17110c;
+            border-radius: 6px;
+
+            Button { x: 10px; y: 9px; width: 42px; height: 28px; text: "−5"; accessible-label: "Seek back five seconds"; clicked => { root.seek(-5); } }
+            Button { x: 58px; y: 9px; width: 74px; height: 28px; text: root.playing ? "Pause" : "Play"; accessible-label: root.playing ? "Pause playback" : "Play video"; clicked => { root.playing = !root.playing; root.play-pause(); } }
+            Button { x: 138px; y: 9px; width: 42px; height: 28px; text: "+5"; accessible-label: "Seek forward five seconds"; clicked => { root.seek(5); } }
+            Text { x: 194px; y: 9px; width: 145px; height: 28px; text: root.current-time + " / " + root.duration-time; color: #d8ccbd; font-size: 10.5px; vertical-alignment: center; }
+            Rectangle { x: 344px; y: 14px; width: 38px; height: 18px; border-radius: 9px; background: #34281e; Text { text: "1x"; color: #e5c183; font-size: 9px; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; } }
+
+            CheckBox { x: 10px; y: 44px; width: 150px; height: 22px; text: "Game audio"; checked: root.track-one-selected; accessible-label: "Game audio track"; toggled => { root.track-one-selected = !root.track-one-selected; root.set-track(1, root.track-one-selected); } }
+            CheckBox { x: 168px; y: 44px; width: 160px; height: 22px; text: "Microphone"; checked: root.track-two-selected; accessible-label: "Microphone audio track"; toggled => { root.track-two-selected = !root.track-two-selected; root.set-track(2, root.track-two-selected); } }
+            Text { x: parent.width - 300px; y: 45px; width: 56px; height: 20px; text: "Volume"; color: #a89784; font-size: 10px; vertical-alignment: center; }
+            Slider { x: parent.width - 240px; y: 46px; width: 230px; height: 18px; minimum: 0; maximum: 1; step: 0.01; value: root.volume; accessible-label: "Playback volume"; changed(value) => { root.volume = value; root.set-volume(value); } }
+        }
     }
 }
