@@ -4,6 +4,7 @@ mod annexb;
 mod audio;
 mod backend;
 mod command;
+mod presentation;
 mod ring;
 mod sample_buffer;
 mod scheduler;
@@ -35,6 +36,10 @@ pub use clipline_mp4::PlaybackTime;
 pub use command::{
     AcceptedCommand, CommandInbox, EnqueueError, EnqueueOutcome, PlaybackCommand,
     COMMAND_INBOX_CAPACITY,
+};
+pub use presentation::{
+    fit_aspect_ratio, LogicalVideoRect, PhysicalVideoRect, PresentationError,
+    PresentationLifecycle, PresentationState, PresentationUpdate, ScaleFactor,
 };
 pub use ring::{RingTelemetry, StereoRingBuffer, MAX_AUDIO_QUEUE_FRAMES};
 pub use sample_buffer::{
