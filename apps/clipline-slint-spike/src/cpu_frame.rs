@@ -1,7 +1,20 @@
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
-use clipline_playback::PipelineToken;
+use clipline_playback::{
+    BackendComponent, BackendError, BackendErrorKind, DecodedVideoFrame, FramePublisher,
+    PipelineToken, PublicationReceipt, RecoveryDisposition,
+};
+
+#[cfg(windows)]
+use clipline_playback::windows::{
+    D3D11VideoSurface, Nv12ReadbackTelemetry, WindowsNv12Readback,
+};
+#[cfg(windows)]
+use slint::{Rgb8Pixel, SharedPixelBuffer};
+
+#[cfg(windows)]
+use crate::CliplineSpike;
 
 pub const MAX_CPU_FRAME_PIXELS: usize = 3_840 * 2_160;
 
@@ -92,6 +105,7 @@ struct MailboxState {
     active_token: Option<PipelineToken>,
     pending: Option<CpuRgbFrame>,
     recycled: Option<Vec<u8>>,
+    delivery_scheduled: bool,
     telemetry: CpuFrameTelemetry,
 }
 
@@ -211,13 +225,28 @@ impl CpuFrameProducer {
             .lock()
             .map_or_else(|_| CpuFrameTelemetry::default(), |state| state.telemetry)
     }
+
+    /// Returns true exactly once while a UI delivery is outstanding.
+    pub fn request_delivery(&mut self) -> bool {
+        let Ok(mut state) = self.state.lock() else {
+            return false;
+        };
+        if state.pending.is_none() || state.delivery_scheduled {
+            return false;
+        }
+        state.delivery_scheduled = true;
+        true
+    }
 }
 
 impl CpuFrameConsumer {
     pub fn take_latest(&mut self, token: PipelineToken) -> Option<CpuRgbFrame> {
         let mut state = self.state.lock().ok()?;
+        if state.active_token != Some(token) {
+            return None;
+        }
         let frame = state.pending.take()?;
-        if frame.token != token || state.active_token != Some(token) {
+        if frame.token != token {
             state.telemetry.stale_frames = state.telemetry.stale_frames.saturating_add(1);
             recycle_buffer(&mut state, frame.pixels);
             return None;
@@ -228,6 +257,26 @@ impl CpuFrameConsumer {
     pub fn recycle(&mut self, frame: CpuRgbFrame) {
         if let Ok(mut state) = self.state.lock() {
             recycle_buffer(&mut state, frame.pixels);
+        }
+    }
+
+    /// Completes one UI delivery and returns the token of a newer pending frame
+    /// that arrived while the event-loop closure converted the previous one.
+    pub fn finish_delivery(&mut self) -> Option<PipelineToken> {
+        let Ok(mut state) = self.state.lock() else {
+            return None;
+        };
+        if let Some(frame) = state.pending.as_ref() {
+            Some(frame.token)
+        } else {
+            state.delivery_scheduled = false;
+            None
+        }
+    }
+
+    pub fn cancel_delivery(&mut self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.delivery_scheduled = false;
         }
     }
 }
@@ -266,5 +315,139 @@ fn recycle_buffer(state: &mut MailboxState, buffer: Vec<u8>) {
         .is_none_or(|current| current.capacity() < buffer.capacity());
     if replace {
         state.recycled = Some(buffer);
+    }
+}
+
+#[cfg(windows)]
+pub struct CpuDiagnosticPublisher {
+    readback: WindowsNv12Readback,
+    producer: CpuFrameProducer,
+    consumer: CpuFrameConsumer,
+    window: slint::Weak<CliplineSpike>,
+}
+
+#[cfg(windows)]
+impl CpuDiagnosticPublisher {
+    pub fn new(window: slint::Weak<CliplineSpike>) -> Self {
+        let (producer, consumer) = cpu_frame_mailbox();
+        Self {
+            readback: WindowsNv12Readback::new(),
+            producer,
+            consumer,
+            window,
+        }
+    }
+
+    pub fn frame_telemetry(&self) -> CpuFrameTelemetry {
+        self.producer.telemetry()
+    }
+
+    pub const fn readback_telemetry(&self) -> Nv12ReadbackTelemetry {
+        self.readback.telemetry()
+    }
+
+    fn schedule_delivery(&mut self, token: PipelineToken) -> Result<(), BackendError> {
+        if !self.producer.request_delivery() {
+            return Ok(());
+        }
+        enqueue_cpu_delivery(self.window.clone(), self.consumer.clone(), token).map_err(|error| {
+            self.consumer.cancel_delivery();
+            publication_failure(format!("queue CPU diagnostic frame on Slint event loop: {error}"))
+        })
+    }
+}
+
+#[cfg(windows)]
+impl FramePublisher<D3D11VideoSurface> for CpuDiagnosticPublisher {
+    fn publish(
+        &mut self,
+        frame: DecodedVideoFrame<D3D11VideoSurface>,
+    ) -> Result<PublicationReceipt, BackendError> {
+        let token = frame.token();
+        let format = self.readback.configure(frame.surface())?;
+        let mut write = match self.producer.acquire(token, format.width, format.height) {
+            Ok(write) => write,
+            Err(CpuFrameError::Backpressured) => {
+                drop(frame);
+                return Ok(PublicationReceipt::Backpressured);
+            }
+            Err(error) => return Err(cpu_frame_failure(error)),
+        };
+        let sample = self
+            .readback
+            .read_rgb8(frame.surface(), write.pixels_mut())?;
+        drop(frame);
+        self.producer
+            .commit(write, sample.copy_time_100ns)
+            .map_err(cpu_frame_failure)?;
+        self.schedule_delivery(token)?;
+        Ok(PublicationReceipt::Presented)
+    }
+
+    fn clear(&mut self, token: PipelineToken) -> Result<(), BackendError> {
+        self.producer.clear(token);
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn enqueue_cpu_delivery(
+    window: slint::Weak<CliplineSpike>,
+    mut consumer: CpuFrameConsumer,
+    token: PipelineToken,
+) -> Result<(), slint::EventLoopError> {
+    slint::invoke_from_event_loop(move || {
+        if let Some(frame) = consumer.take_latest(token) {
+            let pixels = SharedPixelBuffer::<Rgb8Pixel>::clone_from_slice(
+                frame.pixels(),
+                frame.width(),
+                frame.height(),
+            );
+            if let Some(window) = window.upgrade() {
+                window.set_cpu_video_frame(slint::Image::from_rgb8(pixels));
+            }
+            consumer.recycle(frame);
+        }
+        if let Some(next_token) = consumer.finish_delivery() {
+            let _ = enqueue_cpu_delivery(window, consumer, next_token);
+        }
+    })
+}
+
+#[cfg(windows)]
+fn cpu_frame_failure(error: CpuFrameError) -> BackendError {
+    let (kind, recovery) = match error {
+        CpuFrameError::StaleToken => (
+            BackendErrorKind::StaleWork,
+            RecoveryDisposition::RetryPipeline,
+        ),
+        CpuFrameError::Backpressured => (
+            BackendErrorKind::PublicationFailure,
+            RecoveryDisposition::RetryPipeline,
+        ),
+        CpuFrameError::InvalidDimensions { .. }
+        | CpuFrameError::FrameTooLarge { .. }
+        | CpuFrameError::AllocationFailed { .. } => (
+            BackendErrorKind::CorruptInput,
+            RecoveryDisposition::RetryPipeline,
+        ),
+    };
+    BackendError {
+        component: BackendComponent::FramePublisher,
+        kind,
+        recovery,
+        native_code: None,
+        message: error.to_string(),
+    }
+}
+
+#[cfg(windows)]
+fn publication_failure(message: String) -> BackendError {
+    BackendError {
+        component: BackendComponent::FramePublisher,
+        kind: BackendErrorKind::PublicationFailure,
+        recovery: RecoveryDisposition::RetryPipeline,
+        native_code: None,
+        message,
     }
 }

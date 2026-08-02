@@ -67,3 +67,26 @@ fn producer_backpressures_until_the_event_loop_recycles_the_buffer() {
     consumer.recycle(frame);
     assert!(producer.acquire(active, 2, 2).is_ok());
 }
+
+#[test]
+fn at_most_one_event_loop_delivery_is_outstanding() {
+    let (mut producer, mut consumer) = cpu_frame_mailbox();
+    let active = token(1, 0, 0);
+    producer.clear(active);
+    let frame = producer.acquire(active, 2, 2).unwrap();
+    producer.commit(frame, 1).unwrap();
+    assert!(producer.request_delivery());
+    assert!(!producer.request_delivery());
+
+    let first = consumer.take_latest(active).unwrap();
+    consumer.recycle(first);
+    let frame = producer.acquire(active, 2, 2).unwrap();
+    producer.commit(frame, 2).unwrap();
+    assert!(!producer.request_delivery());
+    assert_eq!(consumer.finish_delivery(), Some(active));
+
+    let second = consumer.take_latest(active).unwrap();
+    consumer.recycle(second);
+    assert_eq!(consumer.finish_delivery(), None);
+    assert!(!producer.request_delivery());
+}

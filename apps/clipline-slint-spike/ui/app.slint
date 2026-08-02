@@ -39,10 +39,15 @@ export component CliplineSpike inherits Window {
     in-out property <bool> playing: false;
     in-out property <bool> track-one-selected: true;
     in-out property <bool> track-two-selected: true;
+    in-out property <int> track-one-id: 2;
+    in-out property <int> track-two-id: 3;
     in-out property <float> volume: 0.82;
     in-out property <string> current-time: "00:14.233";
     in-out property <string> duration-time: "00:30.000";
     in-out property <string> status-text: "Native playback ready · software decoder";
+    in-out property <bool> cpu-frame-diagnostic: false;
+    in-out property <image> cpu-video-frame;
+    in-out property <string> presentation-path: cpu-frame-diagnostic ? "CPU diagnostic · SharedPixelBuffer" : "D3D11 child window · fast path";
 
     out property <length> video-stage-x: side-bar.width + 24px;
     out property <length> video-stage-y: top-bar.height + 46px;
@@ -55,6 +60,14 @@ export component CliplineSpike inherits Window {
     callback seek(relative-seconds: float);
     callback set-track(track-id: int, selected: bool);
     callback set-volume(value: float);
+    callback video-geometry-changed();
+
+    changed video-stage-x => { root.video-geometry-changed(); }
+    changed video-stage-y => { root.video-geometry-changed(); }
+    changed video-stage-width => { root.video-geometry-changed(); }
+    changed video-stage-height => { root.video-geometry-changed(); }
+    changed review-visible => { root.video-geometry-changed(); }
+    changed minimized => { root.video-geometry-changed(); }
 
     top-bar := Rectangle {
         x: 0;
@@ -249,7 +262,16 @@ export component CliplineSpike inherits Window {
             accessible-role: image;
             accessible-label: "Native video surface";
 
-            Rectangle {
+            Image {
+                visible: root.cpu-frame-diagnostic;
+                width: parent.width;
+                height: parent.height;
+                source: root.cpu-video-frame;
+                image-fit: contain;
+                accessible-label: "CPU diagnostic video frame";
+            }
+
+            if !root.cpu-frame-diagnostic : Rectangle {
                 x: (parent.width - 290px) / 2;
                 y: (parent.height - 70px) / 2;
                 width: 290px;
@@ -258,6 +280,16 @@ export component CliplineSpike inherits Window {
                 background: #1c1611cc;
                 Text { x: 12px; y: 12px; width: parent.width - 24px; height: 21px; text: "D3D11 VIDEO SURFACE"; color: #d9962a; font-size: 13px; font-weight: 800; horizontal-alignment: center; }
                 Text { x: 12px; y: 37px; width: parent.width - 24px; height: 18px; text: "Reserved child HWND · 1920×1080 NV12"; color: #a89784; font-size: 10px; horizontal-alignment: center; }
+            }
+
+            Rectangle {
+                x: 8px;
+                y: 8px;
+                width: 220px;
+                height: 20px;
+                border-radius: 10px;
+                background: #14100cdd;
+                Text { x: 8px; width: parent.width - 16px; height: parent.height; text: root.presentation-path; color: #e5c183; font-size: 9px; font-weight: 700; vertical-alignment: center; overflow: elide; }
             }
         }
 
@@ -302,8 +334,8 @@ export component CliplineSpike inherits Window {
             Text { x: 194px; y: 9px; width: 145px; height: 28px; text: root.current-time + " / " + root.duration-time; color: #d8ccbd; font-size: 10.5px; vertical-alignment: center; }
             Rectangle { x: 344px; y: 14px; width: 38px; height: 18px; border-radius: 9px; background: #34281e; Text { text: "1x"; color: #e5c183; font-size: 9px; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; } }
 
-            CheckBox { x: 10px; y: 44px; width: 150px; height: 22px; text: "Game audio"; checked: root.track-one-selected; accessible-label: "Game audio track"; toggled => { root.track-one-selected = !root.track-one-selected; root.set-track(1, root.track-one-selected); } }
-            CheckBox { x: 168px; y: 44px; width: 160px; height: 22px; text: "Microphone"; checked: root.track-two-selected; accessible-label: "Microphone audio track"; toggled => { root.track-two-selected = !root.track-two-selected; root.set-track(2, root.track-two-selected); } }
+            CheckBox { x: 10px; y: 44px; width: 150px; height: 22px; text: "Game audio"; checked: root.track-one-selected; accessible-label: "Game audio track"; toggled => { root.track-one-selected = !root.track-one-selected; root.set-track(root.track-one-id, root.track-one-selected); } }
+            CheckBox { x: 168px; y: 44px; width: 160px; height: 22px; text: "Microphone"; checked: root.track-two-selected; accessible-label: "Microphone audio track"; toggled => { root.track-two-selected = !root.track-two-selected; root.set-track(root.track-two-id, root.track-two-selected); } }
             Text { x: parent.width - 300px; y: 45px; width: 56px; height: 20px; text: "Volume"; color: #a89784; font-size: 10px; vertical-alignment: center; }
             Slider { x: parent.width - 240px; y: 46px; width: 230px; height: 18px; minimum: 0; maximum: 1; step: 0.01; value: root.volume; accessible-label: "Playback volume"; changed(value) => { root.volume = value; root.set-volume(value); } }
         }
