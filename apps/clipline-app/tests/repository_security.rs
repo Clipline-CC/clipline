@@ -155,6 +155,8 @@ fn playback_windows_interop_lives_under_the_windows_module() {
         "windows::Win32::Media::MediaFoundation",
         "windows::Win32::Media::Audio",
         "windows::Win32::Graphics::Direct3D11",
+        "windows::Win32::Graphics::Dxgi",
+        "windows::Win32::UI::WindowsAndMessaging",
         "MFStartup(",
         "MFShutdown(",
         "MFTEnumEx(",
@@ -166,6 +168,8 @@ fn playback_windows_interop_lives_under_the_windows_module() {
         "IAudioClock",
         "D3D11CreateDevice(",
         "ID3D11",
+        "CreateWindowExW(",
+        "CreateSwapChainForHwnd(",
     ] {
         let escaped_owners: Vec<_> = neutral_sources
             .iter()
