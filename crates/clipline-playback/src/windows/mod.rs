@@ -21,9 +21,9 @@ pub use presenter::{
     MAX_PRESENTATION_INPUT_SURFACES, PRESENTATION_SWAP_CHAIN_BUFFERS,
 };
 pub use session::{
-    session_channel, SessionClient, SessionExit, SessionRunError, SessionRuntime, SessionSendError,
-    SessionUpdate, SessionUpdateError, SessionUpdatePayload, UpdatePublishOutcome,
-    SESSION_MAX_WAIT, SESSION_UPDATE_CAPACITY,
+    session_channel, SessionClient, SessionExit, SessionReport, SessionRunError, SessionRuntime,
+    SessionSendError, SessionTelemetry, SessionUpdate, SessionUpdateError, SessionUpdatePayload,
+    UpdatePublishOutcome, SESSION_MAX_WAIT, SESSION_UPDATE_CAPACITY,
 };
 pub use wasapi_render::{
     classify_audio_failure, WasapiInitializationPath, WasapiRendererTelemetry,

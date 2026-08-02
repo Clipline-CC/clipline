@@ -7,18 +7,22 @@ use std::time::{Duration, Instant};
 use clipline_mp4::{IndexedMovie, PlaybackTime, PlaybackTrackConfig, SeekPlan, TrackSampleRange};
 use thiserror::Error;
 
-use super::{D3D11VideoSurface, DecoderPreference, WindowsH264Decoder, WindowsWasapiRenderer};
+use super::{
+    D3D11VideoSurface, DecoderOwnershipTelemetry, DecoderPreference, WasapiRendererTelemetry,
+    WindowsH264Decoder, WindowsWasapiRenderer,
+};
 use crate::{
     plan_audio_fill, plan_video_sample_buffers, AcceptedCommand, AdmitOutcome, AudioAvailability,
-    AudioRenderer, AudioResetPoint, AudioTrackSpec, BackendComponent, BackendError,
-    BackendErrorKind, ClockError, CommandInbox, ConvertedVideoSample, EncodedVideoPacket,
-    EndOfStreamTracker, EnqueueError, EnqueueOutcome, FramePublisher, FrameScheduler,
-    H264DecoderConfig, IndexedAudioPacketReader, LoadedVideoSample, MonotonicTime100ns,
-    OpusDecoderBank, PipelineToken, PlaybackCommand, PlaybackEvent, PlaybackMetrics, PlaybackPhase,
-    PlaybackSnapshot, PlaybackWorker, RebasedAudioClock, RecoveryDisposition, SeekTarget,
-    SubmitStatus, TimelineAudioMixer, TimelineDuration, TimelinePosition, VideoDecoder,
-    VideoSampleTransport, WorkGeneration, WorkerAction, WorkerActionKind, WorkerCompletion,
-    WorkerError, WorkerSeekPlan, MAX_AUDIO_QUEUE_FRAMES, MAX_AUDIO_WRITE_FRAMES,
+    AudioPacketTelemetry, AudioRenderer, AudioResetPoint, AudioTrackSpec, BackendComponent,
+    BackendError, BackendErrorKind, ClockError, CommandInbox, ConvertedVideoSample,
+    EncodedVideoPacket, EndOfStreamTracker, EnqueueError, EnqueueOutcome, FramePublisher,
+    FrameScheduler, H264DecoderConfig, IndexedAudioPacketReader, LoadedVideoSample,
+    MonotonicTime100ns, OpusDecodeStats, OpusDecoderBank, PipelineToken, PlaybackCommand,
+    PlaybackEvent, PlaybackMetrics, PlaybackPhase, PlaybackSnapshot, PlaybackWorker,
+    RebasedAudioClock, RecoveryDisposition, SampleBufferTelemetry, SeekTarget, SubmitStatus,
+    TimelineAudioMixer, TimelineAudioStats, TimelineDuration, TimelinePosition, VideoDecoder,
+    VideoDecoderInfo, VideoSampleTransport, WorkGeneration, WorkerAction, WorkerActionKind,
+    WorkerCompletion, WorkerError, WorkerSeekPlan, MAX_AUDIO_QUEUE_FRAMES, MAX_AUDIO_WRITE_FRAMES,
     MAX_OPUS_FRAME_SAMPLES, MAX_SELECTED_AUDIO_TRACKS, PLAYBACK_TIMELINE_HZ,
 };
 
@@ -31,6 +35,37 @@ const MAX_SESSION_PUMP_STEPS: usize = 64;
 pub enum SessionExit {
     Closed,
     ClientDisconnected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionTelemetry {
+    pub metrics: PlaybackMetrics,
+    pub decoder_info: Option<VideoDecoderInfo>,
+    pub decoder_ownership: DecoderOwnershipTelemetry,
+    pub renderer: WasapiRendererTelemetry,
+    pub video_buffers: SampleBufferTelemetry,
+    pub audio_packets: AudioPacketTelemetry,
+    pub audio_decode: OpusDecodeStats,
+    pub audio_mix: TimelineAudioStats,
+    pub audio_midstream_underruns: u64,
+    pub audio_terminal_playout_episodes: u64,
+}
+
+pub struct SessionReport<P> {
+    pub exit: SessionExit,
+    pub telemetry: Option<SessionTelemetry>,
+    pub publisher: P,
+}
+
+impl<P> std::fmt::Debug for SessionReport<P> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SessionReport")
+            .field("exit", &self.exit)
+            .field("telemetry", &self.telemetry)
+            .field("publisher", &std::any::type_name::<P>())
+            .finish()
+    }
 }
 
 #[derive(Debug, Error)]
@@ -285,7 +320,7 @@ impl SessionRuntime {
         }
     }
 
-    pub fn run<P>(mut self, publisher: P) -> Result<SessionExit, SessionRunError>
+    pub fn run<P>(mut self, publisher: P) -> Result<SessionReport<P>, SessionRunError>
     where
         P: FramePublisher<D3D11VideoSurface>,
     {
@@ -297,13 +332,12 @@ impl SessionRuntime {
         let mut last_terminal_metrics = None;
 
         if !self.publish_worker_updates(&mut worker, &mut last_snapshot)? {
-            return Ok(SessionExit::ClientDisconnected);
+            return Ok(pipeline.finish(SessionExit::ClientDisconnected));
         }
 
         loop {
             if !self.client_connected() {
-                pipeline.close_media();
-                return Ok(SessionExit::ClientDisconnected);
+                return Ok(pipeline.finish(SessionExit::ClientDisconnected));
             }
 
             let mut made_progress = false;
@@ -337,8 +371,7 @@ impl SessionRuntime {
                         message: error.to_string(),
                     };
                     if !self.publish_payload(worker.token(), SessionUpdatePayload::Event(event))? {
-                        pipeline.close_media();
-                        return Ok(SessionExit::ClientDisconnected);
+                        return Ok(pipeline.finish(SessionExit::ClientDisconnected));
                     }
                     made_progress = true;
                 }
@@ -384,8 +417,7 @@ impl SessionRuntime {
             }
 
             if !self.publish_worker_updates(&mut worker, &mut last_snapshot)? {
-                pipeline.close_media();
-                return Ok(SessionExit::ClientDisconnected);
+                return Ok(pipeline.finish(SessionExit::ClientDisconnected));
             }
             let terminal_key = matches!(
                 worker.snapshot().phase,
@@ -400,8 +432,7 @@ impl SessionRuntime {
                         worker.token(),
                         SessionUpdatePayload::Metrics(Box::new(metrics)),
                     )? {
-                        pipeline.close_media();
-                        return Ok(SessionExit::ClientDisconnected);
+                        return Ok(pipeline.finish(SessionExit::ClientDisconnected));
                     }
                 }
                 last_metrics_publish = Instant::now();
@@ -417,8 +448,7 @@ impl SessionRuntime {
                     .is_some_and(|snapshot| snapshot.phase == PlaybackPhase::Closed)
                 && worker.token().work() != WorkGeneration::INITIAL
             {
-                pipeline.close_media();
-                return Ok(SessionExit::Closed);
+                return Ok(pipeline.finish(SessionExit::Closed));
             }
 
             if !made_progress {
@@ -519,6 +549,9 @@ struct SessionMedia {
     audio_playback_start: u64,
     audio_mix_scratch: Vec<f32>,
     audio_output: Vec<f32>,
+    last_observed_underruns: u64,
+    audio_midstream_underruns: u64,
+    audio_terminal_playout_episodes: u64,
     started: bool,
     recreate_decoder: bool,
     recreate_audio: bool,
@@ -673,6 +706,9 @@ impl SessionMedia {
             audio_playback_start: 0,
             audio_mix_scratch: vec![0.0; MAX_OPUS_FRAME_SAMPLES * 2],
             audio_output: vec![0.0; MAX_AUDIO_WRITE_FRAMES * 2],
+            last_observed_underruns: 0,
+            audio_midstream_underruns: 0,
+            audio_terminal_playout_episodes: 0,
             started: false,
             recreate_decoder: false,
             recreate_audio: false,
@@ -710,11 +746,59 @@ impl SessionMedia {
         self.renderer.close();
     }
 
+    fn finish_telemetry(&mut self) -> SessionTelemetry {
+        if self.started {
+            let _ = self.renderer.pause(self.backend_token);
+            self.started = false;
+        }
+        self.observe_renderer_underruns(self.clock.position());
+        SessionTelemetry {
+            metrics: self.metrics_snapshot(),
+            decoder_info: self.decoder.info(),
+            decoder_ownership: self.decoder.ownership_telemetry(),
+            renderer: self.renderer.telemetry(),
+            video_buffers: self.video.buffer_telemetry(),
+            audio_packets: self.audio_reader.telemetry(),
+            audio_decode: self.audio_bank.stats(),
+            audio_mix: self.audio_mixer.stats(),
+            audio_midstream_underruns: self.audio_midstream_underruns,
+            audio_terminal_playout_episodes: self.audio_terminal_playout_episodes,
+        }
+    }
+
     fn metrics_snapshot(&self) -> PlaybackMetrics {
         let mut metrics = self.accumulated_metrics.clone();
         metrics.accumulate_generation(self.scheduler.metrics());
         metrics
     }
+
+    fn observe_renderer_underruns(&mut self, clock: TimelinePosition) {
+        let telemetry = self.renderer.telemetry();
+        let new_episodes = telemetry
+            .underruns
+            .saturating_sub(self.last_observed_underruns);
+        if new_episodes == 0 {
+            return;
+        }
+        if is_terminal_playout(clock, self.video_end, telemetry.buffer_frames) {
+            self.audio_terminal_playout_episodes = self
+                .audio_terminal_playout_episodes
+                .saturating_add(new_episodes);
+        } else {
+            self.audio_midstream_underruns =
+                self.audio_midstream_underruns.saturating_add(new_episodes);
+        }
+        self.last_observed_underruns = telemetry.underruns;
+    }
+}
+
+fn is_terminal_playout(
+    clock: TimelinePosition,
+    video_end: TimelinePosition,
+    endpoint_buffer_frames: usize,
+) -> bool {
+    video_end.ticks().saturating_sub(clock.ticks())
+        <= u64::try_from(endpoint_buffer_frames).unwrap_or(u64::MAX)
 }
 
 fn corrupt_media(component: BackendComponent, error: impl std::fmt::Display) -> BackendError {
@@ -798,9 +882,9 @@ enum ActionProgress {
 }
 
 struct SessionPipeline<P> {
-    publisher: P,
+    publisher: Option<P>,
     media: Option<SessionMedia>,
-    final_metrics: Option<PlaybackMetrics>,
+    final_telemetry: Option<SessionTelemetry>,
     anchor: Instant,
 }
 
@@ -810,9 +894,9 @@ where
 {
     fn new(publisher: P, anchor: Instant) -> Self {
         Self {
-            publisher,
+            publisher: Some(publisher),
             media: None,
-            final_metrics: None,
+            final_telemetry: None,
             anchor,
         }
     }
@@ -821,21 +905,21 @@ where
         match action.kind() {
             WorkerActionKind::IndexOpen { path } => {
                 self.close_media();
-                self.publisher.clear(action.token())?;
+                self.publisher_mut().clear(action.token())?;
                 let media = SessionMedia::open(path, action.token())?;
                 let completion = WorkerCompletion::Indexed {
                     duration: media.duration,
                     video_sample_count: media.video_sample_count,
                     default_audio_track_indices: media.default_audio_tracks(),
                 };
-                self.final_metrics = None;
+                self.final_telemetry = None;
                 self.media = Some(media);
                 Ok(ActionProgress::Complete(completion))
             }
             WorkerActionKind::Flush => {
                 let media = self.require_media()?;
                 media.flush(action.token())?;
-                self.publisher.clear(action.token())?;
+                self.publisher_mut().clear(action.token())?;
                 Ok(ActionProgress::Complete(WorkerCompletion::Done))
             }
             WorkerActionKind::PlanSeek {
@@ -912,7 +996,7 @@ where
             }
             WorkerActionKind::CloseBackends => {
                 self.close_media();
-                self.publisher.clear(action.token())?;
+                self.publisher_mut().clear(action.token())?;
                 Ok(ActionProgress::Complete(WorkerCompletion::Done))
             }
         }
@@ -950,7 +1034,11 @@ where
         self.media
             .as_ref()
             .map(SessionMedia::metrics_snapshot)
-            .or_else(|| self.final_metrics.clone())
+            .or_else(|| {
+                self.final_telemetry
+                    .as_ref()
+                    .map(|telemetry| telemetry.metrics.clone())
+            })
     }
 
     fn note_failure(&mut self, error: &BackendError) {
@@ -961,8 +1049,20 @@ where
 
     fn close_media(&mut self) {
         if let Some(mut media) = self.media.take() {
-            self.final_metrics = Some(media.metrics_snapshot());
+            self.final_telemetry = Some(media.finish_telemetry());
             media.close();
+        }
+    }
+
+    fn finish(&mut self, exit: SessionExit) -> SessionReport<P> {
+        self.close_media();
+        SessionReport {
+            exit,
+            telemetry: self.final_telemetry.clone(),
+            publisher: self
+                .publisher
+                .take()
+                .expect("session publisher is returned exactly once"),
         }
     }
 
@@ -976,7 +1076,17 @@ where
         let media = self.media.as_mut().ok_or_else(|| {
             unavailable_media("playback session action requires indexed media resources")
         })?;
-        Ok((media, &mut self.publisher))
+        let publisher = self
+            .publisher
+            .as_mut()
+            .expect("session publisher exists until the runtime returns");
+        Ok((media, publisher))
+    }
+
+    fn publisher_mut(&mut self) -> &mut P {
+        self.publisher
+            .as_mut()
+            .expect("session publisher exists until the runtime returns")
     }
 
     fn monotonic_now(&self) -> MonotonicTime100ns {
@@ -995,6 +1105,7 @@ impl<P> Drop for SessionPipeline<P> {
 
 impl SessionMedia {
     fn flush(&mut self, token: PipelineToken) -> Result<(), BackendError> {
+        self.observe_renderer_underruns(self.clock.position());
         if self.started {
             if !self.recreate_audio {
                 self.renderer.pause(self.backend_token)?;
@@ -1283,6 +1394,7 @@ impl SessionMedia {
                 .pause(raw)
                 .map_err(|error| clock_backend_error("pause audio clock", error))?;
             self.started = false;
+            self.observe_renderer_underruns(self.clock.position());
         }
         self.backend_token = token;
         Ok(())
@@ -1313,6 +1425,7 @@ impl SessionMedia {
     {
         let before = self.sample_clock()?;
         self.service_audio(before, self.backend_token)?;
+        self.observe_renderer_underruns(before);
         self.pump_steady_video(before)?;
         let pending_sample = self.scheduler.pending_sample_index();
         self.tick_scheduler(before, publisher, now)?;

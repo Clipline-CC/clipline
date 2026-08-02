@@ -157,6 +157,17 @@ fn update_sink_is_owned_revisioned_coalesced_and_bounded() {
     );
 }
 
+#[test]
+fn runtime_report_distinguishes_sessions_that_never_opened_media() {
+    let (client, runtime) = session_channel();
+    let playback = thread::spawn(move || runtime.run(DropPublisher));
+    client.try_send(PlaybackCommand::Close).unwrap();
+
+    let report = playback.join().unwrap().unwrap();
+    assert_eq!(report.exit, SessionExit::Closed);
+    assert!(report.telemetry.is_none());
+}
+
 #[derive(Default)]
 struct DropPublisher;
 
@@ -274,7 +285,7 @@ fn live_session_routes_worker_commands_and_releases_every_backend_on_close() {
                 SessionUpdatePayload::Event(PlaybackEvent::Error { message, .. }) => {
                     client.try_send(PlaybackCommand::Close).unwrap();
                     let exit = playback.join().unwrap().unwrap();
-                    assert_eq!(exit, SessionExit::Closed);
+                    assert_eq!(exit.exit, SessionExit::Closed);
                     let _ = fs::remove_file(&active);
                     let _ = fs::remove_dir(&directory);
                     eprintln!("SKIP: live playback session devices are unavailable: {message}");
@@ -377,7 +388,21 @@ fn live_session_routes_worker_commands_and_releases_every_backend_on_close() {
     assert!(final_snapshot.is_some(), "live controls did not settle");
 
     client.try_send(PlaybackCommand::Close).unwrap();
-    assert_eq!(playback.join().unwrap().unwrap(), SessionExit::Closed);
+    let report = playback.join().unwrap().unwrap();
+    assert_eq!(report.exit, SessionExit::Closed);
+    let telemetry = report
+        .telemetry
+        .expect("a successfully opened session must return final telemetry");
+    assert!(telemetry.decoder_info.is_some());
+    assert!(telemetry.decoder_ownership.presentable_frames > 0);
+    assert!(telemetry.video_buffers.encoded_capacity > 0);
+    assert!(telemetry.audio_packets.packet_capacity > 0);
+    assert_eq!(
+        telemetry.renderer.underruns,
+        telemetry
+            .audio_midstream_underruns
+            .saturating_add(telemetry.audio_terminal_playout_episodes)
+    );
     fs::rename(&active, &renamed).expect("session close must release the indexed fixture");
     fs::rename(&renamed, &active).unwrap();
 
@@ -407,7 +432,7 @@ fn live_session_routes_worker_commands_and_releases_every_backend_on_close() {
     assert!(reopened, "disconnect teardown session did not open");
     drop(disconnecting_client);
     assert_eq!(
-        disconnected_playback.join().unwrap().unwrap(),
+        disconnected_playback.join().unwrap().unwrap().exit,
         SessionExit::ClientDisconnected
     );
     fs::rename(&active, &renamed).expect("client disconnect must release the indexed fixture");
@@ -468,7 +493,7 @@ fn repeated_publication_backpressure_exhausts_recovery_and_releases_media() {
     fs::rename(&released, &active).unwrap();
 
     client.try_send(PlaybackCommand::Close).unwrap();
-    assert_eq!(playback.join().unwrap().unwrap(), SessionExit::Closed);
+    assert_eq!(playback.join().unwrap().unwrap().exit, SessionExit::Closed);
     fs::remove_file(&active).unwrap();
     fs::remove_dir(&directory).unwrap();
 }
@@ -523,7 +548,7 @@ where
     }
     if !opened {
         client.try_send(PlaybackCommand::Close).unwrap();
-        assert_eq!(playback.join().unwrap().unwrap(), SessionExit::Closed);
+        assert_eq!(playback.join().unwrap().unwrap().exit, SessionExit::Closed);
         fs::remove_file(&active).unwrap();
         fs::remove_dir(&directory).unwrap();
         if let Some(message) = error {
@@ -577,7 +602,7 @@ where
     }
 
     client.try_send(PlaybackCommand::Close).unwrap();
-    assert_eq!(playback.join().unwrap().unwrap(), SessionExit::Closed);
+    assert_eq!(playback.join().unwrap().unwrap().exit, SessionExit::Closed);
     while let Some(update) = client.try_recv_update() {
         if let SessionUpdatePayload::Metrics(update) = update.payload {
             metrics = Some(*update);
