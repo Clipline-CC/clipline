@@ -1,10 +1,10 @@
 use thiserror::Error;
 
 use crate::{
-    CloudUploadSnapshot, DesktopSnapshot, GameSnapshot, Generation, GenerationError,
-    MediaRootSnapshot, MicrophonePhase, MicrophoneSnapshot, Notice, NoticeKind, RecorderEvent,
-    RecorderSnapshot, RecorderStatus, Revision, SavedReplay, StorageStatus, UiAction, UiEffect,
-    UiEvent, WindowLifecycleSnapshot,
+    CloudAccountScope, CloudUploadSnapshot, DesktopSnapshot, GameSnapshot, Generation,
+    GenerationError, MediaRootSnapshot, MicrophonePhase, MicrophoneSnapshot, Notice, NoticeKind,
+    RecorderEvent, RecorderSnapshot, RecorderStatus, Revision, SavedReplay, StorageStatus,
+    UiAction, UiEffect, UiEvent, WindowLifecycleSnapshot,
 };
 
 pub const MAX_PENDING_NOTICES: usize = 64;
@@ -229,19 +229,20 @@ where
                 }
             }
             UiEvent::CloudUploadProgress {
+                account,
                 generation,
                 progress,
             } => {
                 if next
                     .uploads
                     .binary_search_by(|upload| {
-                        upload.progress.local_clip_id.cmp(&progress.local_clip_id)
+                        upload_order(upload, account, &progress.local_clip_id)
                     })
                     .is_ok_and(|index| generation < next.uploads[index].generation)
                 {
                     return Ok(ApplyEventOutcome::Stale);
                 }
-                apply_cloud_progress(&mut next, generation, progress)?
+                apply_cloud_progress(&mut next, account, generation, progress)?
             }
             UiEvent::EnrichmentUpdated { generation } => {
                 if generation < next.enrichment_generation {
@@ -383,12 +384,13 @@ fn apply_recorder_event<S>(
 
 fn apply_cloud_progress<S>(
     snapshot: &mut DesktopSnapshot<S>,
+    account: CloudAccountScope,
     generation: Generation,
     progress: crate::CloudUploadProgress,
 ) -> Result<bool, ControllerError> {
     match snapshot
         .uploads
-        .binary_search_by(|upload| upload.progress.local_clip_id.cmp(&progress.local_clip_id))
+        .binary_search_by(|upload| upload_order(upload, account, &progress.local_clip_id))
     {
         Ok(index) => {
             let current = &snapshot.uploads[index];
@@ -396,6 +398,7 @@ fn apply_cloud_progress<S>(
                 return Ok(false);
             }
             let replacement = CloudUploadSnapshot {
+                account,
                 generation,
                 progress,
             };
@@ -422,13 +425,14 @@ fn apply_cloud_progress<S>(
                 index = snapshot
                     .uploads
                     .binary_search_by(|upload| {
-                        upload.progress.local_clip_id.cmp(&progress.local_clip_id)
+                        upload_order(upload, account, &progress.local_clip_id)
                     })
                     .expect_err("the new upload was not present before insertion");
             }
             snapshot.uploads.insert(
                 index,
                 CloudUploadSnapshot {
+                    account,
                     generation,
                     progress,
                 },
@@ -436,6 +440,17 @@ fn apply_cloud_progress<S>(
             Ok(true)
         }
     }
+}
+
+fn upload_order(
+    upload: &CloudUploadSnapshot,
+    account: CloudAccountScope,
+    local_clip_id: &str,
+) -> std::cmp::Ordering {
+    upload
+        .account
+        .cmp(&account)
+        .then_with(|| upload.progress.local_clip_id.as_str().cmp(local_clip_id))
 }
 
 fn upload_is_terminal(status: &str) -> bool {
@@ -495,11 +510,10 @@ fn validate_snapshot<S>(snapshot: &DesktopSnapshot<S>) -> Result<(), ControllerE
     {
         return Err(ControllerError::InvalidSnapshot("notice sequence is stale"));
     }
-    if snapshot
-        .uploads
-        .windows(2)
-        .any(|pair| pair[0].progress.local_clip_id >= pair[1].progress.local_clip_id)
-    {
+    if snapshot.uploads.windows(2).any(|pair| {
+        upload_order(&pair[0], pair[1].account, &pair[1].progress.local_clip_id)
+            != std::cmp::Ordering::Less
+    }) {
         return Err(ControllerError::InvalidSnapshot(
             "uploads are not uniquely sorted",
         ));

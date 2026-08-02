@@ -58,6 +58,7 @@ macro_rules! checked_counter {
 
 checked_counter!(Generation);
 checked_counter!(Revision);
+checked_counter!(CloudAccountScope);
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -206,6 +207,7 @@ impl Default for MicrophoneSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CloudUploadSnapshot {
+    pub account: CloudAccountScope,
     pub generation: Generation,
     pub progress: CloudUploadProgress,
 }

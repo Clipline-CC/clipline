@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-use crate::{Generation, RecorderEvent, Revision, UiEvent, WindowLifecycleMode};
+use crate::{CloudAccountScope, Generation, RecorderEvent, Revision, UiEvent, WindowLifecycleMode};
 
 pub const UI_EVENT_CAPACITY: usize = 128;
 
@@ -55,7 +55,7 @@ enum GenerationDomain {
     Recorder,
     Microphone,
     GameDetection,
-    CloudUpload(String),
+    CloudUpload(CloudAccountScope, String),
     Enrichment,
 }
 
@@ -66,7 +66,7 @@ enum CoalescingKey {
     WindowLifecycle,
     MicrophoneMonitor,
     GameDetection,
-    CloudUpload(String),
+    CloudUpload(CloudAccountScope, String),
     Enrichment,
 }
 
@@ -265,10 +265,11 @@ fn generation_domain(event: &UiEvent) -> Option<(GenerationDomain, Generation)> 
             Some((GenerationDomain::GameDetection, *generation))
         }
         UiEvent::CloudUploadProgress {
+            account,
             generation,
             progress,
         } => Some((
-            GenerationDomain::CloudUpload(progress.local_clip_id.clone()),
+            GenerationDomain::CloudUpload(*account, progress.local_clip_id.clone()),
             *generation,
         )),
         UiEvent::EnrichmentUpdated { generation } => {
@@ -338,9 +339,12 @@ fn coalescing_key(event: &UiEvent) -> Option<CoalescingKey> {
         UiEvent::WindowLifecycle { .. } => Some(CoalescingKey::WindowLifecycle),
         UiEvent::MicMonitor { .. } => Some(CoalescingKey::MicrophoneMonitor),
         UiEvent::GameDetection { .. } => Some(CoalescingKey::GameDetection),
-        UiEvent::CloudUploadProgress { progress, .. } => {
-            Some(CoalescingKey::CloudUpload(progress.local_clip_id.clone()))
-        }
+        UiEvent::CloudUploadProgress {
+            account, progress, ..
+        } => Some(CoalescingKey::CloudUpload(
+            *account,
+            progress.local_clip_id.clone(),
+        )),
         UiEvent::EnrichmentUpdated { .. } => Some(CoalescingKey::Enrichment),
         UiEvent::Recorder {
             event: RecorderEvent::Saved { .. } | RecorderEvent::Error { .. },

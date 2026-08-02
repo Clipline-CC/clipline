@@ -1,7 +1,7 @@
 use clipline_desktop::{
-    CloudUploadProgress, GameDetection, Generation, GenerationError, MicMonitor, RecorderEvent,
-    Revision, UiAction, UiEffect, UiEvent, WindowLifecycleMode, WindowLifecycleSnapshot,
-    MAX_MIC_MONITOR_SAMPLES,
+    CloudAccountScope, CloudUploadProgress, GameDetection, Generation, GenerationError, MicMonitor,
+    RecorderEvent, Revision, UiAction, UiEffect, UiEvent, WindowLifecycleMode,
+    WindowLifecycleSnapshot, MAX_MIC_MONITOR_SAMPLES,
 };
 use serde_json::json;
 
@@ -146,6 +146,7 @@ fn ui_events_carry_generations_for_stale_completion_domains() {
         error: None,
     };
     let event = UiEvent::CloudUploadProgress {
+        account: CloudAccountScope::new(7),
         generation: Generation::new(4),
         progress,
     };

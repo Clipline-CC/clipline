@@ -4,9 +4,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use clipline_desktop::{
-    ui_event_channel, CloudUploadProgress, Generation, MicMonitor, RecorderEvent, Revision,
-    UiEvent, UiEventPublishOutcome, UiEventReceiveError, UiEventSendError, WindowLifecycleMode,
-    WindowLifecycleSnapshot, UI_EVENT_CAPACITY,
+    ui_event_channel, CloudAccountScope, CloudUploadProgress, Generation, MicMonitor,
+    RecorderEvent, Revision, UiEvent, UiEventPublishOutcome, UiEventReceiveError, UiEventSendError,
+    WindowLifecycleMode, WindowLifecycleSnapshot, UI_EVENT_CAPACITY,
 };
 
 fn status(generation: u64, segments: usize) -> UiEvent {
@@ -26,8 +26,18 @@ fn status(generation: u64, segments: usize) -> UiEvent {
 }
 
 fn cloud(generation: u64, id: impl Into<String>, received: u64) -> UiEvent {
+    cloud_for_account(1, generation, id, received)
+}
+
+fn cloud_for_account(
+    account_generation: u64,
+    generation: u64,
+    id: impl Into<String>,
+    received: u64,
+) -> UiEvent {
     let local_clip_id = id.into();
     UiEvent::CloudUploadProgress {
+        account: CloudAccountScope::new(account_generation),
         generation: Generation::new(generation),
         progress: CloudUploadProgress {
             path: format!(r"C:\{local_clip_id}.mp4"),
@@ -40,6 +50,40 @@ fn cloud(generation: u64, id: impl Into<String>, received: u64) -> UiEvent {
             error: None,
         },
     }
+}
+
+#[test]
+fn cloud_progress_never_coalesces_or_stales_across_accounts() {
+    let (sender, receiver) = ui_event_channel();
+
+    assert_eq!(
+        sender
+            .try_publish(cloud_for_account(1, 9, "same-clip", 10))
+            .unwrap(),
+        UiEventPublishOutcome::Queued
+    );
+    assert_eq!(
+        sender
+            .try_publish(cloud_for_account(2, 1, "same-clip", 20))
+            .unwrap(),
+        UiEventPublishOutcome::Queued
+    );
+    assert_eq!(receiver.len(), 2);
+
+    assert_eq!(
+        sender.try_publish(cloud_for_account(1, 8, "same-clip", 30)),
+        Err(UiEventSendError::Stale {
+            current: Generation::new(9),
+            received: Generation::new(8),
+        })
+    );
+    assert_eq!(
+        sender
+            .try_publish(cloud_for_account(2, 2, "same-clip", 40))
+            .unwrap(),
+        UiEventPublishOutcome::Replaced
+    );
+    assert_eq!(receiver.len(), 2);
 }
 
 #[test]

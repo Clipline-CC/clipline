@@ -18,7 +18,7 @@ use clipline_cloud_api::{
     sha256_hex, ClipDetailResponse, ClipSummaryResponse, CloudApiError, CloudClient,
     CreateUploadRequest, DiscoveryResponse, ListClipsRequest, MeResponse, UpdateVisibilityRequest,
 };
-use clipline_desktop::{Generation, UiEvent, UiEventSink};
+use clipline_desktop::{CloudAccountScope, Generation, UiEvent, UiEventSink};
 use clipline_events::ClipMarkers;
 use clipline_shell::windows::credential::CredentialStore;
 use serde::de::DeserializeOwned;
@@ -1498,6 +1498,7 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
                 error: None,
             };
             let _ = ui_sink.try_publish(UiEvent::CloudUploadProgress {
+                account: CloudAccountScope::INITIAL,
                 generation: upload_generation,
                 progress: event,
             });
@@ -2381,6 +2382,7 @@ fn emit_upload_progress(
     error: Option<String>,
 ) {
     let _ = sink.try_publish(UiEvent::CloudUploadProgress {
+        account: CloudAccountScope::INITIAL,
         generation,
         progress: CloudUploadProgressEvent {
             local_clip_id: record.local_clip_id.clone(),

@@ -20,8 +20,8 @@ pub use event::{
     MAX_MIC_MONITOR_SAMPLES,
 };
 pub use snapshot::{
-    CloudUploadSnapshot, DesktopSnapshot, GameSnapshot, Generation, GenerationError,
-    MediaRootSnapshot, MicrophonePhase, MicrophoneSnapshot, Notice, NoticeKind, RecorderSnapshot,
-    RecorderStatus, Revision, SavedReplay, StorageStatus, WindowLifecycleMode,
+    CloudAccountScope, CloudUploadSnapshot, DesktopSnapshot, GameSnapshot, Generation,
+    GenerationError, MediaRootSnapshot, MicrophonePhase, MicrophoneSnapshot, Notice, NoticeKind,
+    RecorderSnapshot, RecorderStatus, Revision, SavedReplay, StorageStatus, WindowLifecycleMode,
     WindowLifecycleSnapshot,
 };

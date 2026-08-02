@@ -1,7 +1,7 @@
 use clipline_desktop::{
-    ApplyEventOutcome, CloudUploadProgress, ControllerError, DesktopController, GameDetection,
-    Generation, MicMonitor, MicrophonePhase, NoticeKind, RecorderEvent, Revision, UiAction,
-    UiEffect, UiEvent, WindowLifecycleMode, WindowLifecycleSnapshot, MAX_ACTIVE_UPLOADS,
+    ApplyEventOutcome, CloudAccountScope, CloudUploadProgress, ControllerError, DesktopController,
+    GameDetection, Generation, MicMonitor, MicrophonePhase, NoticeKind, RecorderEvent, Revision,
+    UiAction, UiEffect, UiEvent, WindowLifecycleMode, WindowLifecycleSnapshot, MAX_ACTIVE_UPLOADS,
     MAX_PENDING_NOTICES,
 };
 
@@ -42,7 +42,18 @@ fn cloud(generation: u64, id: &str, received: u64) -> UiEvent {
 }
 
 fn cloud_with_status(generation: u64, id: &str, received: u64, status: &str) -> UiEvent {
+    cloud_for_account_with_status(1, generation, id, received, status)
+}
+
+fn cloud_for_account_with_status(
+    account_generation: u64,
+    generation: u64,
+    id: &str,
+    received: u64,
+    status: &str,
+) -> UiEvent {
     UiEvent::CloudUploadProgress {
+        account: CloudAccountScope::new(account_generation),
         generation: Generation::new(generation),
         progress: CloudUploadProgress {
             local_clip_id: id.to_owned(),
@@ -55,6 +66,51 @@ fn cloud_with_status(generation: u64, id: &str, received: u64, status: &str) -> 
             error: None,
         },
     }
+}
+
+#[test]
+fn same_local_clip_id_is_independent_across_cloud_accounts() {
+    let mut controller = DesktopController::new((), Vec::new()).unwrap();
+    controller
+        .apply_event(cloud_for_account_with_status(
+            1,
+            9,
+            "same-clip",
+            10,
+            "uploading",
+        ))
+        .unwrap();
+    controller
+        .apply_event(cloud_for_account_with_status(
+            2,
+            1,
+            "same-clip",
+            20,
+            "uploading",
+        ))
+        .unwrap();
+
+    let snapshot = controller.snapshot();
+    assert_eq!(snapshot.uploads.len(), 2);
+    assert_eq!(snapshot.uploads[0].account, CloudAccountScope::new(1));
+    assert_eq!(snapshot.uploads[0].generation, Generation::new(9));
+    assert_eq!(snapshot.uploads[1].account, CloudAccountScope::new(2));
+    assert_eq!(snapshot.uploads[1].generation, Generation::new(1));
+
+    let before = controller.snapshot();
+    assert_eq!(
+        controller
+            .apply_event(cloud_for_account_with_status(
+                1,
+                8,
+                "same-clip",
+                99,
+                "failed",
+            ))
+            .unwrap(),
+        ApplyEventOutcome::Stale
+    );
+    assert_eq!(controller.snapshot(), before);
 }
 
 #[test]

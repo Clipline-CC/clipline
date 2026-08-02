@@ -2,7 +2,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use clipline_desktop::{
-    CloudUploadProgress, DesktopController, Generation, RecorderEvent, UiEvent, MAX_ACTIVE_UPLOADS,
+    CloudAccountScope, CloudUploadProgress, DesktopController, Generation, RecorderEvent, UiEvent,
+    MAX_ACTIVE_UPLOADS,
 };
 use clipline_slint_spike::desktop::{AttachmentGate, DesktopProjection};
 
@@ -12,6 +13,7 @@ fn spike_root() -> PathBuf {
 
 fn upload(generation: u64, id: &str) -> UiEvent {
     UiEvent::CloudUploadProgress {
+        account: CloudAccountScope::INITIAL,
         generation: Generation::new(generation),
         progress: CloudUploadProgress {
             local_clip_id: id.into(),
