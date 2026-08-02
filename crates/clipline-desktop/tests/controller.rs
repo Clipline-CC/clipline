@@ -38,12 +38,16 @@ fn game(generation: u64, name: &str) -> UiEvent {
 }
 
 fn cloud(generation: u64, id: &str, received: u64) -> UiEvent {
+    cloud_with_status(generation, id, received, "uploading")
+}
+
+fn cloud_with_status(generation: u64, id: &str, received: u64, status: &str) -> UiEvent {
     UiEvent::CloudUploadProgress {
         generation: Generation::new(generation),
         progress: CloudUploadProgress {
             local_clip_id: id.to_owned(),
             path: format!(r"C:\{id}.mp4"),
-            upload_status: "uploading".to_owned(),
+            upload_status: status.to_owned(),
             received_size_bytes: received,
             file_size_bytes: 100,
             remote_clip_id: None,
@@ -254,4 +258,31 @@ fn upload_collection_has_a_hard_deterministic_bound() {
         .map(|upload| upload.progress.local_clip_id.as_str())
         .collect::<Vec<_>>();
     assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
+}
+
+#[test]
+fn completed_uploads_are_evicted_oldest_first_under_capacity_pressure() {
+    let mut controller = DesktopController::new((), Vec::new()).unwrap();
+    for index in 0..MAX_ACTIVE_UPLOADS {
+        controller
+            .apply_event(cloud_with_status(
+                index as u64 + 1,
+                &format!("complete-{index:02}"),
+                100,
+                "uploaded_private",
+            ))
+            .unwrap();
+    }
+
+    controller.apply_event(cloud(100, "new-upload", 0)).unwrap();
+    let snapshot = controller.snapshot();
+    assert_eq!(snapshot.uploads.len(), MAX_ACTIVE_UPLOADS);
+    assert!(!snapshot
+        .uploads
+        .iter()
+        .any(|upload| upload.progress.local_clip_id == "complete-00"));
+    assert!(snapshot
+        .uploads
+        .iter()
+        .any(|upload| upload.progress.local_clip_id == "new-upload"));
 }

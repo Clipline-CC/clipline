@@ -1,5 +1,6 @@
 //! Application-owned desktop state, independent of the active UI framework.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use clipline_desktop::{
@@ -12,6 +13,39 @@ use crate::settings::AppSettings;
 pub mod tauri_sink;
 
 pub struct DesktopState(Mutex<DesktopController<AppSettings>>);
+
+#[derive(Default)]
+pub struct ProducerGenerations {
+    game_detection: AtomicU64,
+    cloud_upload: AtomicU64,
+    enrichment: AtomicU64,
+}
+
+impl ProducerGenerations {
+    pub fn next_game_detection(&self) -> Result<clipline_desktop::Generation, String> {
+        next_generation(&self.game_detection, "game detection")
+    }
+
+    pub fn next_cloud_upload(&self) -> Result<clipline_desktop::Generation, String> {
+        next_generation(&self.cloud_upload, "cloud upload")
+    }
+
+    pub fn next_enrichment(&self) -> Result<clipline_desktop::Generation, String> {
+        next_generation(&self.enrichment, "enrichment")
+    }
+}
+
+fn next_generation(
+    counter: &AtomicU64,
+    domain: &str,
+) -> Result<clipline_desktop::Generation, String> {
+    counter
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            current.checked_add(1)
+        })
+        .map(|previous| clipline_desktop::Generation::new(previous + 1))
+        .map_err(|_| format!("{domain} generation exhausted"))
+}
 
 impl DesktopState {
     pub fn new(settings: AppSettings, warnings: Vec<String>) -> Result<Self, ControllerError> {
@@ -69,5 +103,14 @@ mod tests {
         let snapshot = state.snapshot();
         assert_eq!(snapshot.settings, settings);
         assert_eq!(snapshot.notices[0].message, "warning");
+    }
+
+    #[test]
+    fn producer_generations_are_monotonic_and_domain_scoped() {
+        let generations = ProducerGenerations::default();
+        assert_eq!(generations.next_game_detection().unwrap().get(), 1);
+        assert_eq!(generations.next_game_detection().unwrap().get(), 2);
+        assert_eq!(generations.next_cloud_upload().unwrap().get(), 1);
+        assert_eq!(generations.next_enrichment().unwrap().get(), 1);
     }
 }

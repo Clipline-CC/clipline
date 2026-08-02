@@ -5,8 +5,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use chrono::DateTime;
+use clipline_desktop::{UiEvent, UiEventSink};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tauri::{AppHandle, Manager, Runtime};
 
 use crate::app::RuntimeState;
 use crate::library::StorageSettings;
@@ -245,7 +246,12 @@ pub async fn retry_pending_enrichment<R: Runtime>(
 ) -> Result<(), String> {
     let settings = app.state::<RuntimeState>().settings().osu;
     if retry_pending_enrichment_with_settings(&settings, media_root).await? {
-        let _ = app.emit("osu-enrichment-updated", ());
+        let generation = app
+            .state::<crate::desktop::ProducerGenerations>()
+            .next_enrichment()?;
+        let _ = app
+            .state::<crate::desktop::tauri_sink::TauriUiEventSink>()
+            .try_publish(UiEvent::EnrichmentUpdated { generation });
     }
     Ok(())
 }

@@ -11,9 +11,7 @@ use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem};
 use tauri::path::BaseDirectory;
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{
-    AppHandle, Emitter, Manager, Runtime, WebviewWindow, WebviewWindowBuilder, WindowEvent,
-};
+use tauri::{AppHandle, Manager, Runtime, WebviewWindow, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 use tauri_plugin_updater::UpdaterExt;
@@ -207,6 +205,47 @@ impl GameDetectionEvent {
                 elevated_hotkeys_blocked: false,
             },
         }
+    }
+
+    fn into_ui_event(self) -> clipline_desktop::GameDetection {
+        clipline_desktop::GameDetection {
+            active: self.active,
+            name: self.name,
+            window_title: self.window_title,
+            process_id: self.process_id,
+            process_instance_id: self.process_instance_id,
+            exe_name: self.exe_name,
+            recording_mode: self.recording_mode.map(|mode| match mode {
+                GameRecordingMode::FullSession => "full_session".to_owned(),
+                GameRecordingMode::ReplaysOnly => "replays_only".to_owned(),
+            }),
+            elevated_hotkeys_blocked: self.elevated_hotkeys_blocked,
+        }
+    }
+}
+
+fn publish_game_detection<R: Runtime>(
+    app: &AppHandle<R>,
+    event: GameDetectionEvent,
+) -> Result<(), String> {
+    let generation = app
+        .state::<crate::desktop::ProducerGenerations>()
+        .next_game_detection()?;
+    app.state::<crate::desktop::tauri_sink::TauriUiEventSink>()
+        .try_publish(UiEvent::GameDetection {
+            generation,
+            detection: event.into_ui_event(),
+        })
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn publish_user_error<R: Runtime>(app: &AppHandle<R>, message: String) {
+    if let Err(error) = app
+        .state::<crate::desktop::tauri_sink::TauriUiEventSink>()
+        .try_publish(UiEvent::UserError { message })
+    {
+        tracing::error!(event = "user_error_publish_failed", error = %error);
     }
 }
 
@@ -489,16 +528,6 @@ impl StartupWarnings {
             )],
         }
     }
-}
-
-#[derive(serde::Serialize, Clone)]
-// Tauri events are JSON, so the live monitor keeps 30 ms chunks as compact
-// i16 samples instead of shipping f32 PCM through IPC.
-struct MicMonitorEvent {
-    rms: f32,
-    peak: f32,
-    sample_count: usize,
-    samples: Vec<i16>,
 }
 
 #[derive(Default)]
@@ -1114,7 +1143,7 @@ impl RuntimeState {
             emit_waiting_for_game(&app, generation);
         }
         if cleared_active_game {
-            let _ = app.emit("game-detection", GameDetectionEvent::from_detected(None));
+            publish_game_detection(&app, GameDetectionEvent::from_detected(None))?;
         }
         Ok(())
     }
@@ -1364,7 +1393,7 @@ impl RuntimeState {
             }
         }
         if emit_event {
-            let _ = app.emit("game-detection", event);
+            publish_game_detection(&app, event)?;
         }
         Ok(())
     }
@@ -2194,6 +2223,10 @@ fn start_microphone_test<R: Runtime>(
         state.finish_if_active(generation);
         return Err(error);
     }
+    let ui_sink = app
+        .state::<crate::desktop::tauri_sink::TauriUiEventSink>()
+        .inner()
+        .clone();
     let worker_app = app.clone();
     let worker = std::thread::Builder::new()
         .name(format!("clipline-mic-test-{generation}"))
@@ -2229,15 +2262,23 @@ fn start_microphone_test<R: Runtime>(
                         .collect();
                     let mic_state = worker_app.state::<MicTestState>();
                     mic_state.publish_if_active(generation, || {
-                        let _ = worker_app.emit(
-                            "mic-test",
-                            MicMonitorEvent {
-                                rms: chunk.level.rms,
-                                peak: chunk.level.peak,
-                                sample_count: chunk.level.sample_count,
-                                samples,
-                            },
-                        );
+                        match clipline_desktop::MicMonitor::from_parts(
+                            chunk.level.rms,
+                            chunk.level.peak,
+                            chunk.level.sample_count,
+                            samples,
+                        ) {
+                            Ok(monitor) => {
+                                let _ = ui_sink.try_publish(UiEvent::MicMonitor {
+                                    generation: Generation::new(generation),
+                                    monitor,
+                                });
+                            }
+                            Err(error) => tracing::error!(
+                                event = "microphone_monitor_payload_rejected",
+                                error = %error
+                            ),
+                        }
                     });
                 }
                 Ok(())
@@ -2245,8 +2286,10 @@ fn start_microphone_test<R: Runtime>(
             if let Err(e) = run() {
                 let mic_state = worker_app.state::<MicTestState>();
                 mic_state.finish_if_active_with(generation, || {
-                    let _ = worker_app.emit("mic-test-error", e);
-                    let _ = worker_app.emit("mic-test-stopped", ());
+                    let _ = ui_sink.try_publish(UiEvent::MicTestError {
+                        generation: Generation::new(generation),
+                        message: e,
+                    });
                 });
             }
         });
@@ -2491,7 +2534,7 @@ fn save_settings<R: Runtime>(
     drop(cloud_save_guard);
     for message in warnings {
         tracing::warn!(event = "settings_apply_warning", message = %message);
-        let _ = app.emit("error", message);
+        publish_user_error(&app, message);
     }
     storage_settings.set_quota_bytes(quota_bytes);
     storage_settings.set_media_dir(media_dir.clone());
@@ -2569,6 +2612,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(RuntimeState::new(settings.clone(), lol_url))
         .manage(desktop_state)
+        .manage(crate::desktop::ProducerGenerations::default())
         .manage(ui_event_sink)
         .manage(StartupWarnings::new(startup_warnings))
         .manage(WindowLifecycleState::default())
@@ -2687,7 +2731,7 @@ pub fn run() {
                     let message =
                         format!("global save hotkey unavailable; continuing without it: {e}");
                     tracing::warn!(event = "global_hotkey_registration_failed", message = %message);
-                    let _ = app.handle().emit("error", message);
+                    publish_user_error(app.handle(), message);
                 }
             }
             if let Err(e) = crate::hotkeys::install_save_hook(&settings.hotkeys(), {
@@ -2699,7 +2743,7 @@ pub fn run() {
             }) {
                 let message = format!("low-level save hotkey unavailable: {e}");
                 tracing::warn!(event = "save_hook_install_failed", message = %message);
-                let _ = app.handle().emit("error", message);
+                publish_user_error(app.handle(), message);
             }
             if let Err(e) = crate::library::prune_audio_preview_cache_on_startup() {
                 tracing::warn!(event = "audio_preview_startup_prune_failed", error = %e);
@@ -2801,7 +2845,7 @@ pub fn run() {
             {
                 let message = format!("recorder startup failed: {e}");
                 tracing::error!(event = "recorder_startup_failed", message = %message);
-                let _ = app.handle().emit("error", message);
+                publish_user_error(app.handle(), message);
             } else if let Err(error) = app
                 .state::<crate::desktop::DesktopState>()
                 .set_recorder_desired(true)
@@ -2902,7 +2946,11 @@ fn spawn_game_detector<R: Runtime>(app: AppHandle<R>) {
                     Ok(()) => last_error = None,
                     Err(e) if last_error.as_deref() != Some(e.as_str()) => {
                         last_error = Some(e.clone());
-                        let _ = app.emit("error", format!("game detection: {e}"));
+                        let _ = app
+                            .state::<crate::desktop::tauri_sink::TauriUiEventSink>()
+                            .try_publish(UiEvent::UserError {
+                                message: format!("game detection: {e}"),
+                            });
                     }
                     Err(_) => {}
                 }

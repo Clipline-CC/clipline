@@ -406,11 +406,25 @@ fn apply_cloud_progress<S>(
                 Ok(true)
             }
         }
-        Err(index) => {
+        Err(mut index) => {
             if snapshot.uploads.len() >= MAX_ACTIVE_UPLOADS {
-                return Err(ControllerError::UploadsFull {
-                    capacity: MAX_ACTIVE_UPLOADS,
-                });
+                let eviction_index = snapshot
+                    .uploads
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, upload)| upload_is_terminal(&upload.progress.upload_status))
+                    .min_by_key(|(_, upload)| upload.generation)
+                    .map(|(index, _)| index)
+                    .ok_or(ControllerError::UploadsFull {
+                        capacity: MAX_ACTIVE_UPLOADS,
+                    })?;
+                snapshot.uploads.remove(eviction_index);
+                index = snapshot
+                    .uploads
+                    .binary_search_by(|upload| {
+                        upload.progress.local_clip_id.cmp(&progress.local_clip_id)
+                    })
+                    .expect_err("the new upload was not present before insertion");
             }
             snapshot.uploads.insert(
                 index,
@@ -422,6 +436,10 @@ fn apply_cloud_progress<S>(
             Ok(true)
         }
     }
+}
+
+fn upload_is_terminal(status: &str) -> bool {
+    matches!(status, "failed" | "uploaded_private" | "uploaded_public")
 }
 
 fn microphone_event_is_stale(snapshot: &MicrophoneSnapshot, generation: Generation) -> bool {

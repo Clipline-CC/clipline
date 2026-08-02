@@ -18,10 +18,11 @@ use clipline_cloud_api::{
     sha256_hex, ClipDetailResponse, ClipSummaryResponse, CloudApiError, CloudClient,
     CreateUploadRequest, DiscoveryResponse, ListClipsRequest, MeResponse, UpdateVisibilityRequest,
 };
+use clipline_desktop::{Generation, UiEvent, UiEventSink};
 use clipline_events::ClipMarkers;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tauri::{AppHandle, Manager, Runtime};
 use tokio::io::AsyncWriteExt;
 
 use crate::app::RuntimeState;
@@ -38,7 +39,6 @@ const READY_MEDIA_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 const CLOUD_LIBRARY_PAGE_SIZE: i64 = 100;
 const CLOUD_LIBRARY_MAX_PAGES: i64 = 100;
 const CLOUD_LIBRARY_MAX_CLIPS: usize = 10_000;
-const CLOUD_UPLOAD_PROGRESS_EVENT: &str = "cloud-upload-progress";
 const REMOTE_NOT_FOUND_SYNC_MARKER: &str = "remote clip not found during status sync";
 const MAX_AVATAR_BYTES: usize = 2 * 1024 * 1024;
 const CLOUD_CACHE_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
@@ -110,18 +110,7 @@ pub struct CloudUserProfile {
     pub profile_url: String,
 }
 
-#[derive(Debug, Serialize, Clone)]
-pub struct CloudUploadProgressEvent {
-    pub local_clip_id: String,
-    pub path: String,
-    pub upload_status: String,
-    pub received_size_bytes: u64,
-    pub file_size_bytes: u64,
-    pub remote_clip_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub remote_url: Option<String>,
-    pub error: Option<String>,
-}
+pub type CloudUploadProgressEvent = clipline_desktop::CloudUploadProgress;
 
 #[derive(Debug, Serialize)]
 pub struct CloudUploadResult {
@@ -1438,6 +1427,13 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
             local_deleted: false,
         });
     }
+    let upload_generation = app
+        .state::<crate::desktop::ProducerGenerations>()
+        .next_cloud_upload()?;
+    let ui_sink = app
+        .state::<crate::desktop::tauri_sink::TauriUiEventSink>()
+        .inner()
+        .clone();
     let token_target = cloud
         .credential_target
         .clone()
@@ -1464,7 +1460,7 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
         updated_at_unix: unix_now(),
     };
     persist_record(&state, &record)?;
-    emit_upload_progress(&app, &record, 0, payload_size, None);
+    emit_upload_progress(&ui_sink, upload_generation, &record, 0, payload_size, None);
 
     let upload_request = create_upload_request(UploadRequestInput {
         path: &target,
@@ -1500,7 +1496,10 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
                 remote_url: None,
                 error: None,
             };
-            let _ = app.emit(CLOUD_UPLOAD_PROGRESS_EVENT, event);
+            let _ = ui_sink.try_publish(UiEvent::CloudUploadProgress {
+                generation: upload_generation,
+                progress: event,
+            });
         },
     )
     .await;
@@ -1512,7 +1511,14 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
             record.error = Some(cloud_error(error));
             record.updated_at_unix = unix_now();
             persist_record(&state, &record)?;
-            emit_upload_progress(&app, &record, 0, payload_size, record.error.clone());
+            emit_upload_progress(
+                &ui_sink,
+                upload_generation,
+                &record,
+                0,
+                payload_size,
+                record.error.clone(),
+            );
             return Ok(CloudUploadResult {
                 record,
                 clip: None,
@@ -1528,7 +1534,8 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
     record.updated_at_unix = unix_now();
     persist_record(&state, &record)?;
     emit_upload_progress(
-        &app,
+        &ui_sink,
+        upload_generation,
         &record,
         progress.received_size_bytes,
         progress.file_size_bytes,
@@ -1545,7 +1552,13 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
                     .to_string(),
             );
             record.updated_at_unix = unix_now();
-            persist_post_upload_record(&app, &state, &record, progress.file_size_bytes)?;
+            persist_post_upload_record(
+                &ui_sink,
+                upload_generation,
+                &state,
+                &record,
+                progress.file_size_bytes,
+            )?;
             return Ok(CloudUploadResult {
                 record,
                 clip: None,
@@ -1554,7 +1567,13 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
         }
         Ok(ReadyClipOutcome::TimedOut) => {
             mark_ready_timeout(&mut record);
-            persist_post_upload_record(&app, &state, &record, progress.file_size_bytes)?;
+            persist_post_upload_record(
+                &ui_sink,
+                upload_generation,
+                &state,
+                &record,
+                progress.file_size_bytes,
+            )?;
             return Ok(CloudUploadResult {
                 record,
                 clip: None,
@@ -1569,7 +1588,13 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
                     cloud_error(error)
                 ),
             );
-            persist_post_upload_record(&app, &state, &record, progress.file_size_bytes)?;
+            persist_post_upload_record(
+                &ui_sink,
+                upload_generation,
+                &state,
+                &record,
+                progress.file_size_bytes,
+            )?;
             return Ok(CloudUploadResult {
                 record,
                 clip: None,
@@ -1592,7 +1617,13 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
                         updated.status
                     ),
                 );
-                persist_post_upload_record(&app, &state, &record, progress.file_size_bytes)?;
+                persist_post_upload_record(
+                    &ui_sink,
+                    upload_generation,
+                    &state,
+                    &record,
+                    progress.file_size_bytes,
+                )?;
                 return Ok(CloudUploadResult {
                     record,
                     clip: None,
@@ -1607,7 +1638,13 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
                         cloud_error(error)
                     ),
                 );
-                persist_post_upload_record(&app, &state, &record, progress.file_size_bytes)?;
+                persist_post_upload_record(
+                    &ui_sink,
+                    upload_generation,
+                    &state,
+                    &record,
+                    progress.file_size_bytes,
+                )?;
                 return Ok(CloudUploadResult {
                     record,
                     clip: None,
@@ -1618,7 +1655,13 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
     };
 
     apply_remote_clip_to_record(&mut record, &clip);
-    persist_post_upload_record(&app, &state, &record, progress.file_size_bytes)?;
+    persist_post_upload_record(
+        &ui_sink,
+        upload_generation,
+        &state,
+        &record,
+        progress.file_size_bytes,
+    )?;
 
     if cloud.delete_local_after_upload {
         if let Err(error) = verify_ready_cloud_media(&cloud, &token, &clip.id).await {
@@ -1628,7 +1671,13 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
                     "cloud reported the upload ready, but its media could not be verified: {error}; the local clip was preserved"
                 ),
             );
-            persist_post_upload_record(&app, &state, &record, progress.file_size_bytes)?;
+            persist_post_upload_record(
+                &ui_sink,
+                upload_generation,
+                &state,
+                &record,
+                progress.file_size_bytes,
+            )?;
             return Ok(CloudUploadResult {
                 record,
                 clip: Some(clip),
@@ -1642,7 +1691,13 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
                 "cloud upload is ready, but local cleanup failed: {error}"
             ));
             record.updated_at_unix = unix_now();
-            persist_post_upload_record(&app, &state, &record, progress.file_size_bytes)?;
+            persist_post_upload_record(
+                &ui_sink,
+                upload_generation,
+                &state,
+                &record,
+                progress.file_size_bytes,
+            )?;
         }
         return Ok(CloudUploadResult {
             record,
@@ -2185,15 +2240,17 @@ fn mark_post_upload_problem(record: &mut CloudUploadRecord, message: String) {
     record.updated_at_unix = unix_now();
 }
 
-fn persist_post_upload_record<R: Runtime>(
-    app: &AppHandle<R>,
+fn persist_post_upload_record(
+    sink: &dyn UiEventSink,
+    generation: Generation,
     state: &RuntimeState,
     record: &CloudUploadRecord,
     file_size_bytes: u64,
 ) -> Result<(), String> {
     persist_record(state, record)?;
     emit_upload_progress(
-        app,
+        sink,
+        generation,
         record,
         file_size_bytes,
         file_size_bytes,
@@ -2314,16 +2371,17 @@ fn delete_uploaded_local_files(target: &Path) -> std::io::Result<()> {
     }
 }
 
-fn emit_upload_progress<R: Runtime>(
-    app: &AppHandle<R>,
+fn emit_upload_progress(
+    sink: &dyn UiEventSink,
+    generation: Generation,
     record: &CloudUploadRecord,
     received_size_bytes: u64,
     file_size_bytes: u64,
     error: Option<String>,
 ) {
-    let _ = app.emit(
-        CLOUD_UPLOAD_PROGRESS_EVENT,
-        CloudUploadProgressEvent {
+    let _ = sink.try_publish(UiEvent::CloudUploadProgress {
+        generation,
+        progress: CloudUploadProgressEvent {
             local_clip_id: record.local_clip_id.clone(),
             path: record.path.clone(),
             upload_status: record.upload_status.clone(),
@@ -2333,7 +2391,7 @@ fn emit_upload_progress<R: Runtime>(
             remote_url: record.remote_url.clone(),
             error,
         },
-    );
+    });
 }
 
 async fn wait_for_ready_clip(

@@ -42,3 +42,14 @@ fn recorder_entry_points_use_typed_actions_and_shared_events() {
     assert!(service.contains("pub use clipline_desktop::RecorderEvent as Event;"));
     assert!(!service.contains("pub enum Event"));
 }
+
+#[test]
+fn migrated_producers_cannot_emit_directly_to_tauri() {
+    for relative in ["src/app.rs", "src/cloud.rs", "src/osu_api.rs"] {
+        let source = fs::read_to_string(app_root().join(relative)).unwrap();
+        assert!(
+            !source.contains(".emit("),
+            "{relative} bypasses the bounded desktop event adapter"
+        );
+    }
+}

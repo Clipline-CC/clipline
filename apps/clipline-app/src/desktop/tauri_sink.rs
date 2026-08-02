@@ -10,6 +10,7 @@ use super::DesktopState;
 const WINDOW_LIFECYCLE_EVENT: &str = "window-lifecycle";
 const CLOUD_UPLOAD_PROGRESS_EVENT: &str = "cloud-upload-progress";
 
+#[derive(Clone)]
 pub struct TauriUiEventSink(UiEventSender);
 
 impl TauriUiEventSink {
@@ -40,7 +41,7 @@ pub fn spawn_event_pump<R: Runtime>(
                     let state = app.state::<DesktopState>();
                     match state.apply_event(update.event.clone()) {
                         Ok(ApplyEventOutcome::Applied { .. }) => {
-                            if let Some(emission) = tauri_emission(&update.event) {
+                            for emission in tauri_emissions(&update.event) {
                                 if let Err(error) = app.emit(emission.name, emission.payload) {
                                     tracing::error!(
                                         event = "tauri_ui_event_emit_failed",
@@ -70,39 +71,47 @@ struct TauriEmission {
     payload: Value,
 }
 
-fn tauri_emission(event: &UiEvent) -> Option<TauriEmission> {
-    let (name, payload) = match event {
+fn tauri_emissions(event: &UiEvent) -> Vec<TauriEmission> {
+    let emission = |name, payload| TauriEmission { name, payload };
+    let one = |name, payload| vec![emission(name, payload)];
+    match event {
         UiEvent::Recorder { event, .. } => match event {
-            RecorderEvent::MediaRootResolved { .. } => return None,
-            RecorderEvent::Status { .. } => ("status", serde_json::to_value(event).ok()?),
-            RecorderEvent::Saved { .. } => ("saved", serde_json::to_value(event).ok()?),
-            RecorderEvent::Error { message } => ("error", Value::String(message.clone())),
+            RecorderEvent::MediaRootResolved { .. } => Vec::new(),
+            RecorderEvent::Status { .. } => serde_json::to_value(event)
+                .map_or_else(|_| Vec::new(), |payload| one("status", payload)),
+            RecorderEvent::Saved { .. } => serde_json::to_value(event)
+                .map_or_else(|_| Vec::new(), |payload| one("saved", payload)),
+            RecorderEvent::Error { message } => one("error", Value::String(message.clone())),
         },
-        UiEvent::WindowLifecycle { snapshot } => {
-            (WINDOW_LIFECYCLE_EVENT, serde_json::to_value(snapshot).ok()?)
-        }
-        UiEvent::MicMonitor { monitor, .. } => ("mic-test", serde_json::to_value(monitor).ok()?),
-        UiEvent::MicTestError { message, .. } => ("mic-test-error", Value::String(message.clone())),
-        UiEvent::MicTestStopped { .. } => ("mic-test-stopped", Value::Null),
-        UiEvent::GameDetection { detection, .. } => {
-            ("game-detection", serde_json::to_value(detection).ok()?)
-        }
-        UiEvent::CloudUploadProgress { progress, .. } => (
-            CLOUD_UPLOAD_PROGRESS_EVENT,
-            serde_json::to_value(progress).ok()?,
+        UiEvent::WindowLifecycle { snapshot } => serde_json::to_value(snapshot).map_or_else(
+            |_| Vec::new(),
+            |payload| one(WINDOW_LIFECYCLE_EVENT, payload),
         ),
-        UiEvent::EnrichmentUpdated { .. } => ("osu-enrichment-updated", Value::Null),
-        UiEvent::UserError { message } => ("error", Value::String(message.clone())),
-    };
-    Some(TauriEmission { name, payload })
+        UiEvent::MicMonitor { monitor, .. } => serde_json::to_value(monitor)
+            .map_or_else(|_| Vec::new(), |payload| one("mic-test", payload)),
+        UiEvent::MicTestError { message, .. } => vec![
+            emission("mic-test-error", Value::String(message.clone())),
+            emission("mic-test-stopped", Value::Null),
+        ],
+        UiEvent::MicTestStopped { .. } => one("mic-test-stopped", Value::Null),
+        UiEvent::GameDetection { detection, .. } => serde_json::to_value(detection)
+            .map_or_else(|_| Vec::new(), |payload| one("game-detection", payload)),
+        UiEvent::CloudUploadProgress { progress, .. } => serde_json::to_value(progress)
+            .map_or_else(
+                |_| Vec::new(),
+                |payload| one(CLOUD_UPLOAD_PROGRESS_EVENT, payload),
+            ),
+        UiEvent::EnrichmentUpdated { .. } => one("osu-enrichment-updated", Value::Null),
+        UiEvent::UserError { message } => one("error", Value::String(message.clone())),
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use clipline_desktop::{Generation, RecorderEvent, UiEvent};
+    use clipline_desktop::{GameDetection, Generation, RecorderEvent, UiEvent};
     use serde_json::json;
 
-    use super::tauri_emission;
+    use super::tauri_emissions;
 
     #[test]
     fn recorder_status_and_error_keep_legacy_event_json() {
@@ -119,7 +128,8 @@ mod tests {
                 capture_backend: "wgc".into(),
             },
         };
-        let emission = tauri_emission(&status).unwrap();
+        let mut emissions = tauri_emissions(&status);
+        let emission = emissions.remove(0);
         assert_eq!(emission.name, "status");
         assert_eq!(
             emission.payload,
@@ -139,9 +149,53 @@ mod tests {
         let error = UiEvent::UserError {
             message: "failed".into(),
         };
-        let emission = tauri_emission(&error).unwrap();
+        let mut emissions = tauri_emissions(&error);
+        let emission = emissions.remove(0);
         assert_eq!(emission.name, "error");
         assert_eq!(emission.payload, json!("failed"));
+    }
+
+    #[test]
+    fn microphone_failure_preserves_legacy_error_then_stopped_order() {
+        let emissions = tauri_emissions(&UiEvent::MicTestError {
+            generation: Generation::new(2),
+            message: "device lost".into(),
+        });
+        assert_eq!(emissions.len(), 2);
+        assert_eq!(emissions[0].name, "mic-test-error");
+        assert_eq!(emissions[1].name, "mic-test-stopped");
+    }
+
+    #[test]
+    fn game_detection_keeps_legacy_field_names_and_recording_mode() {
+        let mut emissions = tauri_emissions(&UiEvent::GameDetection {
+            generation: Generation::new(3),
+            detection: GameDetection {
+                active: true,
+                name: Some("osu!".into()),
+                window_title: Some("osu! - player".into()),
+                process_id: Some(42),
+                process_instance_id: Some("42:100".into()),
+                exe_name: Some("osu!.exe".into()),
+                recording_mode: Some("replays_only".into()),
+                elevated_hotkeys_blocked: false,
+            },
+        });
+        let emission = emissions.remove(0);
+        assert_eq!(emission.name, "game-detection");
+        assert_eq!(
+            emission.payload,
+            json!({
+                "active": true,
+                "name": "osu!",
+                "window_title": "osu! - player",
+                "process_id": 42,
+                "process_instance_id": "42:100",
+                "exe_name": "osu!.exe",
+                "recording_mode": "replays_only",
+                "elevated_hotkeys_blocked": false
+            })
+        );
     }
 
     #[test]

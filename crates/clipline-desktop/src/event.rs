@@ -66,6 +66,16 @@ pub struct MicMonitor {
 
 impl MicMonitor {
     pub fn new(rms: f32, peak: f32, samples: Vec<i16>) -> Result<Self, EventPayloadError> {
+        let sample_count = samples.len();
+        Self::from_parts(rms, peak, sample_count, samples)
+    }
+
+    pub fn from_parts(
+        rms: f32,
+        peak: f32,
+        sample_count: usize,
+        samples: Vec<i16>,
+    ) -> Result<Self, EventPayloadError> {
         if !rms.is_finite() || !peak.is_finite() || rms < 0.0 || peak < 0.0 {
             return Err(EventPayloadError::InvalidMicrophoneLevel);
         }
@@ -78,7 +88,7 @@ impl MicMonitor {
         Ok(Self {
             rms,
             peak,
-            sample_count: samples.len(),
+            sample_count,
             samples,
         })
     }
