@@ -22,7 +22,8 @@ mod windows_app {
 
     use clipline_mp4::{IndexedMovie, PlaybackTime, PlaybackTrackConfig, TrackSampleRange};
     use clipline_playback::windows::{
-        D3D11VideoSurface, DecoderPreference, WindowsH264Decoder, WindowsWasapiRenderer,
+        D3D11VideoSurface, DecoderPreference, WasapiInitializationPath, WindowsH264Decoder,
+        WindowsWasapiRenderer,
     };
     use clipline_playback::{
         plan_audio_fill, plan_video_sample_buffers, AdmitOutcome, AudioAvailability, AudioRenderer,
@@ -151,6 +152,8 @@ mod windows_app {
         completed_playbacks: u64,
         requested_seeks: u64,
         settled_seeks: u64,
+        exact_seek_targets: u64,
+        seek_target_mismatches: u64,
         decoded_frames: u64,
         decoded_eligible_frames: u64,
         presented_frames: u64,
@@ -164,10 +167,29 @@ mod windows_app {
         av_error_histogram_overflowed: bool,
         seek_settle_p95_ms: Option<u16>,
         audio_underruns: u64,
+        cycles_with_audio_underrun: u64,
+        max_audio_underruns_per_cycle: u64,
+        audio_midstream_underruns: u64,
+        cycles_with_midstream_underrun: u64,
+        max_midstream_underruns_per_cycle: u64,
+        audio_terminal_playout_episodes: u64,
         audio_underrun_frames_estimate: u64,
         audio_mixed_frames: u64,
         audio_silent_frames: u64,
         audio_corrupt_packets: u64,
+        audio_endpoint_id: String,
+        audio_device_format: String,
+        audio_device_sample_rate: u32,
+        audio_device_channels: u16,
+        audio_device_bits_per_sample: u16,
+        audio_device_valid_bits_per_sample: Option<u16>,
+        audio_device_channel_mask: Option<u32>,
+        audio_device_buffer_duration_100ns: u64,
+        audio_conversion_active: bool,
+        audio_initialization_path: String,
+        audio_engine_period_frames: usize,
+        audio_clock_frequency: u64,
+        audio_recovery_count: u64,
         video_encoded_buffer_capacity: usize,
         video_converted_buffer_capacity: usize,
         video_encoded_high_water: usize,
@@ -175,6 +197,12 @@ mod windows_app {
         audio_packet_capacity: usize,
         audio_packet_high_water: usize,
         audio_queue_high_water_frames: usize,
+        first_cycle_audio_queue_high_water_frames: Option<usize>,
+        last_cycle_audio_queue_high_water_frames: Option<usize>,
+        first_cycle_video_encoded_buffer_capacity: Option<usize>,
+        last_cycle_video_encoded_buffer_capacity: Option<usize>,
+        first_cycle_audio_packet_capacity: Option<usize>,
+        last_cycle_audio_packet_capacity: Option<usize>,
         endpoint_buffer_frames: usize,
         endpoint_epoch: u64,
         decoder_acceleration: String,
@@ -188,12 +216,17 @@ mod windows_app {
 
     impl AggregateMetrics {
         fn absorb(&mut self, run: RunMetrics) {
+            let is_first_cycle = self.cycles == 0;
             self.cycles = self.cycles.saturating_add(1);
             self.completed_playbacks = self
                 .completed_playbacks
                 .saturating_add(u64::from(run.ended));
             self.requested_seeks = self.requested_seeks.saturating_add(run.requested_seeks);
             self.settled_seeks = self.settled_seeks.saturating_add(run.settled_seeks);
+            self.exact_seek_targets = self.exact_seek_targets.saturating_add(run.settled_seeks);
+            self.seek_target_mismatches = self
+                .seek_target_mismatches
+                .saturating_add(run.requested_seeks.saturating_sub(run.settled_seeks));
             self.decoded_frames = self.decoded_frames.saturating_add(run.decoded_frames);
             self.decoded_eligible_frames = self
                 .decoded_eligible_frames
@@ -216,6 +249,23 @@ mod windows_app {
             );
             self.seek_settle_p95_ms = max_option(self.seek_settle_p95_ms, run.seek_settle_p95_ms);
             self.audio_underruns = self.audio_underruns.saturating_add(run.audio_underruns);
+            self.cycles_with_audio_underrun = self
+                .cycles_with_audio_underrun
+                .saturating_add(u64::from(run.audio_underruns != 0));
+            self.max_audio_underruns_per_cycle =
+                self.max_audio_underruns_per_cycle.max(run.audio_underruns);
+            self.audio_midstream_underruns = self
+                .audio_midstream_underruns
+                .saturating_add(run.audio_midstream_underruns);
+            self.cycles_with_midstream_underrun = self
+                .cycles_with_midstream_underrun
+                .saturating_add(u64::from(run.audio_midstream_underruns != 0));
+            self.max_midstream_underruns_per_cycle = self
+                .max_midstream_underruns_per_cycle
+                .max(run.audio_midstream_underruns);
+            self.audio_terminal_playout_episodes = self
+                .audio_terminal_playout_episodes
+                .saturating_add(run.audio_terminal_playout_episodes);
             self.audio_underrun_frames_estimate = self
                 .audio_underrun_frames_estimate
                 .saturating_add(run.audio_underrun_frames_estimate);
@@ -228,6 +278,38 @@ mod windows_app {
             self.audio_corrupt_packets = self
                 .audio_corrupt_packets
                 .saturating_add(run.audio_corrupt_packets);
+            merge_descriptor(&mut self.audio_endpoint_id, run.audio_endpoint_id);
+            merge_descriptor(&mut self.audio_device_format, run.audio_device_format);
+            self.audio_device_sample_rate = self
+                .audio_device_sample_rate
+                .max(run.audio_device_sample_rate);
+            self.audio_device_channels = self.audio_device_channels.max(run.audio_device_channels);
+            self.audio_device_bits_per_sample = self
+                .audio_device_bits_per_sample
+                .max(run.audio_device_bits_per_sample);
+            self.audio_device_valid_bits_per_sample = max_option(
+                self.audio_device_valid_bits_per_sample,
+                run.audio_device_valid_bits_per_sample,
+            );
+            self.audio_device_channel_mask = max_option(
+                self.audio_device_channel_mask,
+                run.audio_device_channel_mask,
+            );
+            self.audio_device_buffer_duration_100ns = self
+                .audio_device_buffer_duration_100ns
+                .max(run.audio_device_buffer_duration_100ns);
+            self.audio_conversion_active |= run.audio_conversion_active;
+            merge_descriptor(
+                &mut self.audio_initialization_path,
+                run.audio_initialization_path,
+            );
+            self.audio_engine_period_frames = self
+                .audio_engine_period_frames
+                .max(run.audio_engine_period_frames);
+            self.audio_clock_frequency = self.audio_clock_frequency.max(run.audio_clock_frequency);
+            self.audio_recovery_count = self
+                .audio_recovery_count
+                .saturating_add(run.audio_recovery_count);
             self.video_encoded_buffer_capacity = self
                 .video_encoded_buffer_capacity
                 .max(run.video_encoded_buffer_capacity);
@@ -247,6 +329,16 @@ mod windows_app {
             self.audio_queue_high_water_frames = self
                 .audio_queue_high_water_frames
                 .max(run.audio_queue_high_water_frames);
+            if is_first_cycle {
+                self.first_cycle_audio_queue_high_water_frames =
+                    Some(run.audio_queue_high_water_frames);
+                self.first_cycle_video_encoded_buffer_capacity =
+                    Some(run.video_encoded_buffer_capacity);
+                self.first_cycle_audio_packet_capacity = Some(run.audio_packet_capacity);
+            }
+            self.last_cycle_audio_queue_high_water_frames = Some(run.audio_queue_high_water_frames);
+            self.last_cycle_video_encoded_buffer_capacity = Some(run.video_encoded_buffer_capacity);
+            self.last_cycle_audio_packet_capacity = Some(run.audio_packet_capacity);
             self.endpoint_buffer_frames =
                 self.endpoint_buffer_frames.max(run.endpoint_buffer_frames);
             self.endpoint_epoch = self.endpoint_epoch.max(run.endpoint_epoch);
@@ -301,10 +393,25 @@ mod windows_app {
         av_error_histogram_overflowed: bool,
         seek_settle_p95_ms: Option<u16>,
         audio_underruns: u64,
+        audio_midstream_underruns: u64,
+        audio_terminal_playout_episodes: u64,
         audio_underrun_frames_estimate: u64,
         audio_mixed_frames: u64,
         audio_silent_frames: u64,
         audio_corrupt_packets: u64,
+        audio_endpoint_id: String,
+        audio_device_format: String,
+        audio_device_sample_rate: u32,
+        audio_device_channels: u16,
+        audio_device_bits_per_sample: u16,
+        audio_device_valid_bits_per_sample: Option<u16>,
+        audio_device_channel_mask: Option<u32>,
+        audio_device_buffer_duration_100ns: u64,
+        audio_conversion_active: bool,
+        audio_initialization_path: String,
+        audio_engine_period_frames: usize,
+        audio_clock_frequency: u64,
+        audio_recovery_count: u64,
         video_encoded_buffer_capacity: usize,
         video_converted_buffer_capacity: usize,
         video_encoded_high_water: usize,
@@ -421,6 +528,9 @@ mod windows_app {
         last_recorded_settled_seeks: u64,
         seek_target_sample: usize,
         scheduler_totals: SchedulerTotals,
+        last_observed_underruns: u64,
+        audio_midstream_underruns: u64,
+        audio_terminal_playout_episodes: u64,
         decoder_acceleration: String,
     }
 
@@ -542,6 +652,9 @@ mod windows_app {
                 last_recorded_settled_seeks: 0,
                 seek_target_sample: 0,
                 scheduler_totals: SchedulerTotals::default(),
+                last_observed_underruns: 0,
+                audio_midstream_underruns: 0,
+                audio_terminal_playout_episodes: 0,
                 decoder_acceleration,
             })
         }
@@ -551,6 +664,7 @@ mod windows_app {
                 self.renderer.pause(self.token)?;
                 self.started = false;
             }
+            self.observe_renderer_underruns(self.clock.position());
             let next_seek = self
                 .generation
                 .seek
@@ -708,6 +822,7 @@ mod windows_app {
 
         fn service_audio(&mut self, clock: TimelinePosition) -> AppResult<()> {
             let writable = self.renderer.writable_frames()?;
+            self.observe_renderer_underruns(clock);
             if writable == 0 || clock >= self.video_end {
                 return Ok(());
             }
@@ -753,6 +868,25 @@ mod windows_app {
                 }
             }
             Ok(())
+        }
+
+        fn observe_renderer_underruns(&mut self, clock: TimelinePosition) {
+            let telemetry = self.renderer.telemetry();
+            let new_episodes = telemetry
+                .underruns
+                .saturating_sub(self.last_observed_underruns);
+            if new_episodes == 0 {
+                return;
+            }
+            if is_terminal_playout(clock, self.video_end, telemetry.buffer_frames) {
+                self.audio_terminal_playout_episodes = self
+                    .audio_terminal_playout_episodes
+                    .saturating_add(new_episodes);
+            } else {
+                self.audio_midstream_underruns =
+                    self.audio_midstream_underruns.saturating_add(new_episodes);
+            }
+            self.last_observed_underruns = telemetry.underruns;
         }
 
         fn decode_audio_until(&mut self, target_frames: usize) -> AppResult<()> {
@@ -817,9 +951,11 @@ mod windows_app {
                     usize::try_from(self.audio_playback_start.saturating_sub(audible_start))
                         .unwrap_or(usize::MAX)
                         .min(frames);
-                let kept = frames - skipped;
+                let kept_start = audible_start.saturating_add(skipped as u64);
+                let timeline_remaining = self.video_end.ticks().saturating_sub(kept_start);
+                let kept = (frames - skipped)
+                    .min(usize::try_from(timeline_remaining).unwrap_or(usize::MAX));
                 if kept != 0 {
-                    let kept_start = audible_start.saturating_add(skipped as u64);
                     self.audio_mixer.mix_at(
                         kept_start,
                         kept,
@@ -942,6 +1078,7 @@ mod windows_app {
                 self.renderer.pause(self.token)?;
                 self.started = false;
             }
+            self.observe_renderer_underruns(self.clock.position());
             let stale_results = self.scheduler.metrics().stale_results;
             self.snapshot_scheduler_quality();
             if self.scheduler_totals.presented_frames != self.publisher.presented {
@@ -972,15 +1109,31 @@ mod windows_app {
                 stale_results,
                 max_av_error_ticks: self.scheduler_totals.max_av_error_ticks,
                 av_error_p95_ms: self.scheduler_totals.av_error_p95_ms,
-                av_error_histogram_overflowed: self
-                    .scheduler_totals
-                    .av_error_histogram_overflowed,
+                av_error_histogram_overflowed: self.scheduler_totals.av_error_histogram_overflowed,
                 seek_settle_p95_ms,
                 audio_underruns: renderer_info.underruns,
+                audio_midstream_underruns: self.audio_midstream_underruns,
+                audio_terminal_playout_episodes: self.audio_terminal_playout_episodes,
                 audio_underrun_frames_estimate: renderer_info.underrun_frames,
                 audio_mixed_frames: audio_mix.mixed_frames,
                 audio_silent_frames: audio_mix.silent_frames,
                 audio_corrupt_packets: audio_decode.corrupt_packets,
+                audio_endpoint_id: renderer_info.endpoint_id().to_owned(),
+                audio_device_format: renderer_info.device_format().to_owned(),
+                audio_device_sample_rate: renderer_info.device_sample_rate,
+                audio_device_channels: renderer_info.device_channels,
+                audio_device_bits_per_sample: renderer_info.device_bits_per_sample,
+                audio_device_valid_bits_per_sample: renderer_info.device_valid_bits_per_sample,
+                audio_device_channel_mask: renderer_info.device_channel_mask,
+                audio_device_buffer_duration_100ns: renderer_info.device_buffer_duration_100ns,
+                audio_conversion_active: renderer_info.conversion_active,
+                audio_initialization_path: initialization_path_label(
+                    renderer_info.initialization_path,
+                )
+                .to_owned(),
+                audio_engine_period_frames: renderer_info.engine_period_frames,
+                audio_clock_frequency: renderer_info.clock_frequency,
+                audio_recovery_count: renderer_info.recovery_count,
                 video_encoded_buffer_capacity: video_buffers.encoded_capacity,
                 video_converted_buffer_capacity: video_buffers.converted_capacity,
                 video_encoded_high_water: video_buffers.encoded_high_water,
@@ -1220,12 +1373,36 @@ mod windows_app {
         values.get(rank.saturating_sub(1)).copied()
     }
 
-    fn max_option(left: Option<u16>, right: Option<u16>) -> Option<u16> {
+    fn max_option<T: Copy + Ord>(left: Option<T>, right: Option<T>) -> Option<T> {
         match (left, right) {
             (Some(left), Some(right)) => Some(left.max(right)),
             (Some(value), None) | (None, Some(value)) => Some(value),
             (None, None) => None,
         }
+    }
+
+    fn merge_descriptor(current: &mut String, next: String) {
+        if current.is_empty() {
+            *current = next;
+        } else if *current != next {
+            *current = "mixed".to_owned();
+        }
+    }
+
+    const fn initialization_path_label(path: WasapiInitializationPath) -> &'static str {
+        match path {
+            WasapiInitializationPath::AudioClient3 => "audio-client-3",
+            WasapiInitializationPath::LegacySharedAutoConvert => "legacy-shared-auto-convert",
+        }
+    }
+
+    fn is_terminal_playout(
+        clock: TimelinePosition,
+        video_end: TimelinePosition,
+        endpoint_buffer_frames: usize,
+    ) -> bool {
+        video_end.ticks().saturating_sub(clock.ticks())
+            <= u64::try_from(endpoint_buffer_frames).unwrap_or(u64::MAX)
     }
 
     fn merge_fail_closed_percentile(
@@ -1251,7 +1428,7 @@ mod windows_app {
 
     #[cfg(test)]
     mod tests {
-        use super::merge_fail_closed_percentile;
+        use super::{is_terminal_playout, merge_fail_closed_percentile, TimelinePosition};
 
         #[test]
         fn percentile_aggregation_stays_failed_closed_after_any_overflow() {
@@ -1259,14 +1436,33 @@ mod windows_app {
             let first = merge_fail_closed_percentile(None, Some(12), &mut overflowed, false);
             assert_eq!(first, Some(12));
 
-            let rejected =
-                merge_fail_closed_percentile(first, None, &mut overflowed, true);
+            let rejected = merge_fail_closed_percentile(first, None, &mut overflowed, true);
             assert_eq!(rejected, None);
             assert!(overflowed);
 
             let still_rejected =
                 merge_fail_closed_percentile(rejected, Some(3), &mut overflowed, false);
             assert_eq!(still_rejected, None);
+        }
+
+        #[test]
+        fn endpoint_empty_is_terminal_only_inside_the_final_buffer_window() {
+            let end = TimelinePosition::new(240_000);
+            assert!(!is_terminal_playout(
+                TimelinePosition::new(238_943),
+                end,
+                1_056,
+            ));
+            assert!(is_terminal_playout(
+                TimelinePosition::new(238_944),
+                end,
+                1_056,
+            ));
+            assert!(is_terminal_playout(
+                TimelinePosition::new(240_001),
+                end,
+                1_056,
+            ));
         }
     }
 }
