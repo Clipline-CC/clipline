@@ -137,6 +137,7 @@ pub enum BackendComponent {
 pub enum BackendErrorKind {
     DecoderFailure,
     CorruptInput,
+    StaleWork,
     DeviceLost,
     EndpointInvalidated,
     Unavailable,

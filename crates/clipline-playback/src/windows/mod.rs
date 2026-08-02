@@ -7,8 +7,13 @@
 mod com;
 mod d3d11;
 mod mft_decode;
+mod wasapi_render;
 
 pub use mft_decode::{
     classify_device_failure, probe_h264_decoders, D3D11VideoSurface, DecoderCapabilities,
     DecoderOwnershipTelemetry, DecoderPreference, WindowsH264Decoder,
+};
+pub use wasapi_render::{
+    classify_audio_failure, WasapiInitializationPath, WasapiRendererTelemetry,
+    WindowsWasapiRenderer,
 };
