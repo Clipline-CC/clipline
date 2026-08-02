@@ -31,3 +31,14 @@ fn tauri_event_names_live_in_one_adapter() {
         assert!(sink.contains(name), "missing adapter event {name}");
     }
 }
+
+#[test]
+fn recorder_entry_points_use_typed_actions_and_shared_events() {
+    let app = fs::read_to_string(app_root().join("src/app.rs")).unwrap();
+    let service = fs::read_to_string(app_root().join("src/service.rs")).unwrap();
+    assert!(app.contains("dispatch_ui_action(&app, &state, UiAction::SaveReplay)"));
+    assert!(app.contains("UiAction::SetRecording { recording }"));
+    assert!(app.contains("UiEvent::Recorder"));
+    assert!(service.contains("pub use clipline_desktop::RecorderEvent as Event;"));
+    assert!(!service.contains("pub enum Event"));
+}

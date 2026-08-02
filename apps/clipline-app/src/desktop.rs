@@ -3,7 +3,8 @@
 use std::sync::Mutex;
 
 use clipline_desktop::{
-    ApplyEventOutcome, ControllerError, DesktopController, DesktopSnapshot, UiEvent,
+    ApplyEventOutcome, ControllerError, DesktopController, DesktopSnapshot, DispatchOutcome,
+    UiAction, UiEvent,
 };
 
 use crate::settings::AppSettings;
@@ -29,6 +30,14 @@ impl DesktopState {
             .lock()
             .map_err(|_| "desktop state lock poisoned".to_owned())?
             .apply_event(event)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn dispatch(&self, action: UiAction) -> Result<DispatchOutcome, String> {
+        self.0
+            .lock()
+            .map_err(|_| "desktop state lock poisoned".to_owned())?
+            .dispatch(action)
             .map_err(|error| error.to_string())
     }
 

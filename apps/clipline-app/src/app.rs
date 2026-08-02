@@ -20,7 +20,8 @@ use tauri_plugin_updater::UpdaterExt;
 
 use clipline_capture::diagnostics::install_diagnostic_handler;
 use clipline_desktop::{
-    Revision, UiEvent, UiEventSink, WindowLifecycleMode, WindowLifecycleSnapshot,
+    Generation, Revision, UiAction, UiEffect, UiEvent, UiEventSink, WindowLifecycleMode,
+    WindowLifecycleSnapshot,
 };
 
 use crate::game_discovery::DetectedGameCandidate;
@@ -454,8 +455,13 @@ fn frontend_ready<R: Runtime>(
     if !was_ready {
         log_diagnostic("frontend_ready received");
     }
-    if let Some(status) = runtime.current_waiting_status() {
-        let _ = app.emit("status", status);
+    if let Some((generation, status)) = runtime.current_waiting_status() {
+        let _ = app
+            .state::<crate::desktop::tauri_sink::TauriUiEventSink>()
+            .try_publish(UiEvent::Recorder {
+                generation: Generation::new(generation),
+                event: status,
+            });
     }
     if let Err(error) = desktop.replace_settings(runtime.settings()) {
         log_diagnostic(format!("desktop settings reconciliation failed: {error}"));
@@ -745,8 +751,13 @@ fn waiting_for_game_status() -> Event {
     }
 }
 
-fn emit_waiting_for_game<R: Runtime>(app: &AppHandle<R>) {
-    let _ = app.emit("status", waiting_for_game_status());
+fn emit_waiting_for_game<R: Runtime>(app: &AppHandle<R>, generation: u64) {
+    let _ = app
+        .state::<crate::desktop::tauri_sink::TauriUiEventSink>()
+        .try_publish(UiEvent::Recorder {
+            generation: Generation::new(generation),
+            event: waiting_for_game_status(),
+        });
 }
 
 impl RuntimeState {
@@ -804,6 +815,12 @@ impl RuntimeState {
         true
     }
 
+    fn service_generation_is_current(&self, generation: u64) -> bool {
+        self.0
+            .lock()
+            .is_ok_and(|inner| inner.recording_generation == generation && inner.tx.is_some())
+    }
+
     fn observe_runtime_event(&self, event: &Event) {
         let Ok(mut inner) = self.0.lock() else {
             return;
@@ -850,12 +867,12 @@ impl RuntimeState {
         }
     }
 
-    fn current_waiting_status(&self) -> Option<Event> {
+    fn current_waiting_status(&self) -> Option<(u64, Event)> {
         let inner = self.0.lock().ok()?;
         (inner.recording_desired
             && inner.tx.is_none()
             && !recorder_should_run(&inner.settings, inner.active_game.as_ref()))
-        .then(waiting_for_game_status)
+        .then(|| (inner.recording_generation, waiting_for_game_status()))
     }
 
     fn waiting_generation_is_current(&self, generation: u64) -> bool {
@@ -1067,11 +1084,10 @@ impl RuntimeState {
         if let Some((rx, generation)) = replacement {
             pump_events(app.clone(), rx, generation);
         }
-        if waiting_for_game
-            && waiting_generation
-                .is_some_and(|generation| self.waiting_generation_is_current(generation))
-        {
-            emit_waiting_for_game(&app);
+        if let Some(generation) = waiting_generation.filter(|generation| {
+            waiting_for_game && self.waiting_generation_is_current(*generation)
+        }) {
+            emit_waiting_for_game(&app, generation);
         }
         if cleared_active_game {
             let _ = app.emit("game-detection", GameDetectionEvent::from_detected(None));
@@ -1247,8 +1263,13 @@ impl RuntimeState {
         };
         if let Some((rx, generation)) = started {
             pump_events(app, rx, generation);
-        } else if let Some(status) = self.current_waiting_status() {
-            let _ = app.emit("status", status);
+        } else if let Some((generation, status)) = self.current_waiting_status() {
+            let _ = app
+                .state::<crate::desktop::tauri_sink::TauriUiEventSink>()
+                .try_publish(UiEvent::Recorder {
+                    generation: Generation::new(generation),
+                    event: status,
+                });
         }
         Ok(true)
     }
@@ -1311,11 +1332,10 @@ impl RuntimeState {
                     }
                 }
             }
-            if waiting_for_game
-                && waiting_generation
-                    .is_some_and(|generation| self.waiting_generation_is_current(generation))
-            {
-                emit_waiting_for_game(&app);
+            if let Some(generation) = waiting_generation.filter(|generation| {
+                waiting_for_game && self.waiting_generation_is_current(*generation)
+            }) {
+                emit_waiting_for_game(&app, generation);
             }
         }
         if emit_event {
@@ -1416,9 +1436,44 @@ fn active_game_still_configured(settings: &AppSettings, active: Option<&Detected
     }
 }
 
+enum AppUiActionResult {
+    None,
+    SaveQueued(bool),
+    Recording(bool),
+}
+
+fn dispatch_ui_action<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &RuntimeState,
+    action: UiAction,
+) -> Result<AppUiActionResult, String> {
+    let effect = app
+        .state::<crate::desktop::DesktopState>()
+        .dispatch(action)?
+        .effect;
+    match effect {
+        UiEffect::RequestSaveReplay => Ok(AppUiActionResult::SaveQueued(state.request_save())),
+        UiEffect::SetRecording { recording } => {
+            let recording = state.set_recording(app.clone(), recording)?;
+            app.state::<crate::desktop::DesktopState>()
+                .set_recorder_desired(recording)?;
+            Ok(AppUiActionResult::Recording(recording))
+        }
+        UiEffect::SetLifecycle { mode } => {
+            publish_window_lifecycle(app, mode);
+            Ok(AppUiActionResult::None)
+        }
+        UiEffect::None => Ok(AppUiActionResult::None),
+    }
+}
+
 #[tauri::command]
-fn save_replay(state: tauri::State<RuntimeState>) {
-    state.request_save();
+fn save_replay<R: Runtime>(app: AppHandle<R>, state: tauri::State<RuntimeState>) {
+    if let Ok(AppUiActionResult::SaveQueued(queued)) =
+        dispatch_ui_action(&app, &state, UiAction::SaveReplay)
+    {
+        let _ = queued;
+    }
 }
 
 #[tauri::command]
@@ -1837,7 +1892,12 @@ fn set_recording<R: Runtime>(
     state: tauri::State<RuntimeState>,
     recording: bool,
 ) -> Result<bool, String> {
-    state.set_recording(app, recording)
+    match dispatch_ui_action(&app, &state, UiAction::SetRecording { recording })? {
+        AppUiActionResult::Recording(recording) => Ok(recording),
+        AppUiActionResult::None | AppUiActionResult::SaveQueued(_) => {
+            Err("recording action returned an incompatible result".to_owned())
+        }
+    }
 }
 
 /// Whether this build bundles a fixed WebView2 runtime (the "standalone"
@@ -2515,7 +2575,7 @@ pub fn run() {
                     if event.state() == ShortcutState::Pressed {
                         let state = _app.state::<RuntimeState>();
                         if state.active_shortcut_matches(shortcut) {
-                            state.request_save();
+                            let _ = dispatch_ui_action(_app, &state, UiAction::SaveReplay);
                         }
                     }
                 })
@@ -2608,7 +2668,8 @@ pub fn run() {
             if let Err(e) = crate::hotkeys::install_save_hook(&settings.hotkeys(), {
                 let app = app.handle().clone();
                 move || {
-                    app.state::<RuntimeState>().request_save();
+                    let state = app.state::<RuntimeState>();
+                    let _ = dispatch_ui_action(&app, &state, UiAction::SaveReplay);
                 }
             }) {
                 let message = format!("low-level save hotkey unavailable: {e}");
@@ -2674,7 +2735,8 @@ pub fn run() {
                     }
                     "save" => {
                         log_diagnostic("tray menu event: save");
-                        app.state::<RuntimeState>().request_save();
+                        let state = app.state::<RuntimeState>();
+                        let _ = dispatch_ui_action(app, &state, UiAction::SaveReplay);
                     }
                     "diagnostics" => {
                         log_diagnostic("tray menu event: diagnostics");
@@ -2977,6 +3039,17 @@ where
 fn pump_events<R: Runtime>(handle: AppHandle<R>, event_rx: Receiver<Event>, generation: u64) {
     std::thread::spawn(move || {
         for event in event_rx {
+            let accepted = match &event {
+                Event::Status { recording, .. } => handle
+                    .state::<RuntimeState>()
+                    .accept_service_status(generation, *recording),
+                _ => handle
+                    .state::<RuntimeState>()
+                    .service_generation_is_current(generation),
+            };
+            if !accepted {
+                continue;
+            }
             handle.state::<RuntimeState>().observe_runtime_event(&event);
             if let Event::MediaRootResolved { path, .. } = &event {
                 let media_root = PathBuf::from(path);
@@ -2984,20 +3057,15 @@ fn pump_events<R: Runtime>(handle: AppHandle<R>, event_rx: Receiver<Event>, gene
                     .state::<crate::library::StorageSettings>()
                     .set_media_dir(media_root);
             }
-            if let Event::Status { recording, .. } = &event {
-                let accepted = handle
-                    .state::<RuntimeState>()
-                    .accept_service_status(generation, *recording);
-                if !accepted {
-                    continue;
-                }
+            if let Err(error) = handle
+                .state::<crate::desktop::tauri_sink::TauriUiEventSink>()
+                .try_publish(UiEvent::Recorder {
+                    generation: Generation::new(generation),
+                    event: event.clone(),
+                })
+            {
+                tracing::error!(event = "recorder_ui_event_publish_failed", error = %error);
             }
-            let _ = match &event {
-                Event::MediaRootResolved { .. } => Ok(()),
-                Event::Status { .. } => handle.emit("status", &event),
-                Event::Saved { .. } => handle.emit("saved", &event),
-                Event::Error { message } => handle.emit("error", message.clone()),
-            };
             if let Event::Saved {
                 full_session: false,
                 ..
@@ -3506,11 +3574,14 @@ mod tests {
 
         assert!(matches!(
             state.current_waiting_status(),
-            Some(Event::Status {
-                recording: false,
-                waiting_for_game: true,
-                ..
-            })
+            Some((
+                _,
+                Event::Status {
+                    recording: false,
+                    waiting_for_game: true,
+                    ..
+                }
+            ))
         ));
     }
 

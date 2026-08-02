@@ -485,52 +485,7 @@ impl OutputResolution {
     }
 }
 
-#[derive(Clone, serde::Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Event {
-    MediaRootResolved {
-        path: String,
-        fell_back: bool,
-    },
-    Status {
-        recording: bool,
-        /// True when recording is armed but the games-only policy is waiting
-        /// for an enabled game before starting capture.
-        #[serde(default)]
-        waiting_for_game: bool,
-        segments: usize,
-        buffered_s: f64,
-        buffered_mb: f64,
-        /// True while a full-session writer is active in addition to the replay ring.
-        #[serde(default)]
-        full_session: bool,
-        /// Active encoder label (e.g. "AMD AMF · H.264"); empty when stopped.
-        #[serde(default)]
-        encoder: String,
-        /// Actual capture backend after any automatic selection or fallback.
-        #[serde(default)]
-        capture_backend: String,
-    },
-    Saved {
-        path: String,
-        seconds: f64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        recording_start_unix: Option<i64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        recording_end_unix: Option<i64>,
-        markers: usize,
-        #[serde(default)]
-        full_session: bool,
-        gc_deleted: usize,
-        gc_freed_bytes: u64,
-        storage_total_bytes: u64,
-        storage_quota_bytes: Option<u64>,
-        storage_over_quota: bool,
-    },
-    Error {
-        message: String,
-    },
-}
+pub use clipline_desktop::RecorderEvent as Event;
 
 /// The game a recording run is attributed to (plugin or custom), recorded
 /// alongside saved clips so the library can show its icon.
