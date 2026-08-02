@@ -1,5 +1,6 @@
 //! Non-distributed Slint presentation spike for Clipline.
 
+pub mod cpu_frame;
 pub mod model;
 
 slint::include_modules!();

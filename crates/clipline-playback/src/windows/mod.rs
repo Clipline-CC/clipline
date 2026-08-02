@@ -8,6 +8,7 @@ mod com;
 mod d3d11;
 mod mft_decode;
 mod presenter;
+mod readback;
 mod session;
 mod wasapi_render;
 
@@ -19,6 +20,10 @@ pub use presenter::{
     classify_present_result, validate_video_bounds, D3D11PublisherTelemetry, PresentOutcome,
     VideoHostError, WindowsD3D11Publisher, WindowsVideoHost, WindowsVideoTarget,
     MAX_PRESENTATION_INPUT_SURFACES, PRESENTATION_SWAP_CHAIN_BUFFERS,
+};
+pub use readback::{
+    convert_nv12_to_rgb8, Nv12FrameView, Nv12ReadbackError, Nv12ReadbackFormat, Nv12ReadbackSample,
+    Nv12ReadbackTelemetry, WindowsNv12Readback, MAX_DIAGNOSTIC_RGB_PIXELS,
 };
 pub use session::{
     session_channel, SessionClient, SessionExit, SessionReport, SessionRunError, SessionRuntime,
