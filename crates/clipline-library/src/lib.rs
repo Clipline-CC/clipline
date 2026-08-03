@@ -18,6 +18,10 @@ mod presentation;
 mod repository;
 mod scan;
 mod upload;
+#[path = "upload/preparation.rs"]
+mod upload_preparation;
+#[path = "upload/remote.rs"]
+mod upload_remote;
 #[path = "upload/transport.rs"]
 mod upload_transport;
 
@@ -35,4 +39,6 @@ pub use presentation::*;
 pub use repository::*;
 pub use scan::*;
 pub use upload::*;
+pub use upload_preparation::*;
+pub use upload_remote::*;
 pub use upload_transport::*;

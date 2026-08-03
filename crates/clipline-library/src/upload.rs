@@ -4,6 +4,10 @@
 //! transport/state machine can retain these guards across preparation, HTTP,
 //! persistence, and optional local deletion without depending on a UI runtime.
 
+mod service;
+
+pub use service::*;
+
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -15,7 +19,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     ClientClipId, CloudAccountGeneration, CloudAccountKey, DurableUploadToken, LocalClipId,
-    MutationLease, MutationPermit, ValidatedClipPath, ACTIVE_UPLOAD_MUTATION_ERROR,
+    LocalLibraryRepository, MutationLease, MutationPermit, ValidatedClipPath,
+    ACTIVE_UPLOAD_MUTATION_ERROR,
 };
 
 const MAX_TEMP_RESERVATION_ATTEMPTS: usize = 128;
@@ -217,7 +222,7 @@ impl ActiveFileRegistry {
             registry: self.clone(),
             owner,
             token,
-            canonical_path: source.canonical_path().to_path_buf(),
+            source: source.clone(),
             identity,
             file: Some(file),
             registered: true,
@@ -233,6 +238,17 @@ impl ActiveFileRegistry {
                 .uploads
                 .get(&owner)
                 .is_some_and(|registration| &registration.token == token)
+        })
+    }
+
+    /// Read-only identity probe for quota GC and other path owners that must
+    /// preserve any source currently held by an upload or exclusive delete.
+    #[must_use]
+    pub fn is_identity_active(&self, identity: FileIdentity) -> bool {
+        self.inner.state.lock().is_ok_and(|state| {
+            state.files.get(&identity).is_some_and(|activity| {
+                !activity.readers.is_empty() || activity.exclusive.is_some()
+            })
         })
     }
 }
@@ -275,7 +291,7 @@ pub struct UploadSourceLease {
     registry: ActiveFileRegistry,
     owner: UploadOwnerKey,
     token: DurableUploadToken,
-    canonical_path: PathBuf,
+    source: ValidatedClipPath,
     identity: FileIdentity,
     file: Option<File>,
     registered: bool,
@@ -286,7 +302,7 @@ impl std::fmt::Debug for UploadSourceLease {
         formatter
             .debug_struct("UploadSourceLease")
             .field("token", &self.token)
-            .field("canonical_path", &self.canonical_path)
+            .field("canonical_path", &self.source.canonical_path())
             .field("identity", &self.identity)
             .finish_non_exhaustive()
     }
@@ -300,7 +316,7 @@ impl UploadSourceLease {
 
     #[must_use]
     pub fn canonical_path(&self) -> &Path {
-        &self.canonical_path
+        self.source.canonical_path()
     }
 
     #[must_use]
@@ -351,7 +367,7 @@ impl UploadSourceLease {
             registry: self.registry.clone(),
             owner: self.owner.clone(),
             token: self.token.clone(),
-            canonical_path: self.canonical_path.clone(),
+            source: self.source.clone(),
             identity: self.identity,
             registered: true,
         })
@@ -399,7 +415,7 @@ pub struct UploadDeletePermit {
     registry: ActiveFileRegistry,
     owner: UploadOwnerKey,
     token: DurableUploadToken,
-    canonical_path: PathBuf,
+    source: ValidatedClipPath,
     identity: FileIdentity,
     registered: bool,
 }
@@ -409,7 +425,7 @@ impl std::fmt::Debug for UploadDeletePermit {
         formatter
             .debug_struct("UploadDeletePermit")
             .field("token", &self.token)
-            .field("canonical_path", &self.canonical_path)
+            .field("canonical_path", &self.source.canonical_path())
             .field("identity", &self.identity)
             .finish_non_exhaustive()
     }
@@ -423,7 +439,7 @@ impl UploadDeletePermit {
 
     #[must_use]
     pub fn canonical_path(&self) -> &Path {
-        &self.canonical_path
+        self.source.canonical_path()
     }
 
     #[must_use]
@@ -437,9 +453,34 @@ impl UploadDeletePermit {
         if !self.registry.is_current(&self.token) {
             return Err(UploadOwnershipError::SourceChanged);
         }
-        clipline_shell::remove_file_if_identity(&self.canonical_path, self.identity).map_err(
-            |error| UploadOwnershipError::file("delete upload source", &self.canonical_path, error),
-        )
+        clipline_shell::remove_file_if_identity(self.source.canonical_path(), self.identity)
+            .map_err(|error| {
+                UploadOwnershipError::file(
+                    "delete upload source",
+                    self.source.canonical_path(),
+                    error,
+                )
+            })
+    }
+
+    /// Delete the exact leased source and its four known Library sidecars
+    /// through the repository's preflighted, identity-fenced mutation path.
+    pub fn delete_clip_and_sidecars_if_current(
+        &self,
+        repository: &LocalLibraryRepository,
+    ) -> Result<(), UploadOwnershipError> {
+        if !self.registry.is_current(&self.token) {
+            return Err(UploadOwnershipError::SourceChanged);
+        }
+        repository
+            .delete_under_existing_permit(&self.source)
+            .map_err(|error| {
+                UploadOwnershipError::file(
+                    "delete uploaded clip",
+                    self.source.canonical_path(),
+                    error,
+                )
+            })
     }
 }
 
@@ -563,9 +604,7 @@ impl OwnedUploadTemp {
                 .open(&path)
             {
                 Ok(file) => {
-                    let identity = opened_file_identity(&file).map_err(|error| {
-                        UploadOwnershipError::file("identify upload payload", &path, error)
-                    })?;
+                    let (file, identity) = identify_owned_upload_temp(file, &path)?;
                     return Ok(Self {
                         path,
                         identity,
@@ -632,9 +671,67 @@ impl OwnedUploadTemp {
     }
 }
 
+fn identify_owned_upload_temp(
+    file: File,
+    path: &Path,
+) -> Result<(File, FileIdentity), UploadOwnershipError> {
+    identify_owned_upload_temp_with(file, path, opened_file_identity)
+}
+
+fn identify_owned_upload_temp_with(
+    file: File,
+    path: &Path,
+    identify: impl FnOnce(&File) -> std::io::Result<FileIdentity>,
+) -> Result<(File, FileIdentity), UploadOwnershipError> {
+    match identify(&file) {
+        Ok(identity) => Ok((file, identity)),
+        Err(error) => {
+            // Retry identity discovery while the create-new handle is still
+            // open. Cleanup stays identity-fenced even on this early return;
+            // a foreign replacement at the same path is never removed.
+            let cleanup_identity = opened_file_identity(&file).ok();
+            drop(file);
+            if let Some(identity) = cleanup_identity {
+                let _ = clipline_shell::remove_file_if_identity(path, identity);
+            }
+            Err(UploadOwnershipError::file(
+                "identify upload payload",
+                path,
+                error,
+            ))
+        }
+    }
+}
+
 impl Drop for OwnedUploadTemp {
     fn drop(&mut self) {
         drop(self.file.take());
         let _ = clipline_shell::remove_file_if_identity(&self.path, self.identity);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn temp_identity_failure_cleans_only_the_exact_reservation() {
+        let directory =
+            clipline_test_utils::TestDir::new("clipline-upload-source", "temp-identity-failure");
+        let path = directory.path().join("payload.tmp");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+
+        let error = identify_owned_upload_temp_with(file, &path, |_| {
+            Err(std::io::Error::other("injected identity failure"))
+        })
+        .unwrap_err();
+
+        assert!(matches!(error, UploadOwnershipError::File { .. }));
+        assert!(!path.exists());
     }
 }

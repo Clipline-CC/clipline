@@ -940,6 +940,19 @@ impl LocalLibraryRepository {
             .mutation_lease
             .acquire(clip.canonical_path(), current_identity)
             .map_err(RepositoryError::new)?;
+        self.delete_under_existing_permit(clip)
+    }
+
+    /// Delete a previously validated clip while the caller retains an existing
+    /// exclusive mutation permit for the exact source identity.
+    ///
+    /// This is crate-private so the upload ownership transition is the only
+    /// path that can bypass acquiring a second, self-conflicting permit.
+    pub(crate) fn delete_under_existing_permit(
+        &self,
+        clip: &ValidatedClipPath,
+    ) -> Result<(), RepositoryError> {
+        self.revalidate(clip)?;
         let mut fence = self.acquire_fence(clip)?;
         let sidecars = clip_sidecar_paths(clip.canonical_path());
         let sidecars = sidecars.into_array();

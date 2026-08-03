@@ -2,7 +2,7 @@ use std::io::Write;
 use std::sync::Arc;
 
 use clipline_library::{
-    client_clip_id_for_payload, local_clip_id_for_source, ActiveFileRegistry,
+    client_clip_id_for_payload, clip_sidecar_paths, local_clip_id_for_source, ActiveFileRegistry,
     CloudAccountGeneration, CloudAccountKey, DurableUploadToken, LocalClipId,
     LocalLibraryRepository, MutationLease, OwnedUploadTemp, StandardRepositoryFileSystem,
     UploadGeneration, UploadOwnershipError, ACTIVE_UPLOAD_MUTATION_ERROR,
@@ -112,9 +112,11 @@ fn exact_upload_token_is_current_only_for_its_registered_generation() {
 
     let lease = registry.acquire_upload(&source, current.clone()).unwrap();
     assert!(registry.is_current(&current));
+    assert!(registry.is_identity_active(source.file_identity()));
     assert!(!registry.is_current(&stale_generation));
     drop(lease);
     assert!(!registry.is_current(&current));
+    assert!(!registry.is_identity_active(source.file_identity()));
 }
 
 #[test]
@@ -267,6 +269,56 @@ fn delete_transition_remains_exclusive_while_closing_the_reader_handle() {
         .acquire(source.canonical_path(), source.file_identity())
         .unwrap();
     drop(mutation);
+}
+
+#[test]
+fn upload_delete_uses_repository_preflight_for_primary_and_all_sidecars() {
+    let (_directory, registry, repository, source) = fixture("delete-sidecars");
+    let sidecars = clip_sidecar_paths(source.canonical_path()).into_array();
+    for (index, sidecar) in sidecars.iter().enumerate() {
+        std::fs::write(sidecar, format!("sidecar-{index}")).unwrap();
+    }
+    let upload_token = token(&source, "account-a", 1, 1, "local-a");
+    let lease = registry
+        .acquire_upload(&source, upload_token.clone())
+        .unwrap();
+    let delete = lease.into_delete_permit().unwrap();
+
+    delete
+        .delete_clip_and_sidecars_if_current(&repository)
+        .unwrap();
+
+    assert!(!source.canonical_path().exists());
+    assert!(sidecars.iter().all(|sidecar| !sidecar.exists()));
+    assert!(registry.is_current(&upload_token));
+    drop(delete);
+    assert!(!registry.is_current(&upload_token));
+}
+
+#[test]
+fn upload_delete_preserves_a_replacement_and_its_existing_sidecars() {
+    let (_directory, registry, repository, source) = fixture("delete-replaced");
+    let sidecars = clip_sidecar_paths(source.canonical_path()).into_array();
+    for (index, sidecar) in sidecars.iter().enumerate() {
+        std::fs::write(sidecar, format!("sidecar-{index}")).unwrap();
+    }
+    let lease = registry
+        .acquire_upload(&source, token(&source, "account-a", 1, 1, "local-a"))
+        .unwrap();
+    let delete = lease.into_delete_permit().unwrap();
+    std::fs::remove_file(source.canonical_path()).unwrap();
+    std::fs::write(source.canonical_path(), b"foreign replacement").unwrap();
+
+    let error = delete
+        .delete_clip_and_sidecars_if_current(&repository)
+        .unwrap_err();
+
+    assert!(error.to_string().to_ascii_lowercase().contains("changed"));
+    assert_eq!(
+        std::fs::read(source.canonical_path()).unwrap(),
+        b"foreign replacement"
+    );
+    assert!(sidecars.iter().all(|sidecar| sidecar.exists()));
 }
 
 #[test]
