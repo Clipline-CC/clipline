@@ -4,6 +4,7 @@ pub mod cache;
 pub mod cache_identity;
 pub mod http;
 pub mod ports;
+pub mod protocol;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};

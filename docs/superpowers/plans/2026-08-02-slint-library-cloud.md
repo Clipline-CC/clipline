@@ -376,6 +376,8 @@ lease, or if the 2,000-clip absolute memory/process bound fails.
 
 **Files**
 
+- Create: `crates/clipline-library/src/cloud/protocol.rs`
+- Create: `crates/clipline-library/tests/cloud_protocol.rs`
 - Create: `crates/clipline-library/src/upload.rs`
 - Create: `crates/clipline-library/tests/upload.rs`
 - Create: `crates/clipline-library/tests/upload_account_fence.rs`

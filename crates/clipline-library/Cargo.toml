@@ -11,7 +11,7 @@ clipline-mp4 = { path = "../clipline-mp4" }
 clipline-settings = { path = "../clipline-settings" }
 clipline-shell = { path = "../clipline-shell" }
 bytes = "1"
-chrono = "0.4.45"
+chrono = { version = "0.4.45", features = ["serde"] }
 futures-util = "0.3"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 reqwest = { workspace = true, features = ["stream"] }

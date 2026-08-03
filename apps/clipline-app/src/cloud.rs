@@ -18,9 +18,7 @@ use clipline_cloud_api::{
     sha256_hex, ClipDetailResponse, CloudApiError, CloudClient, CreateUploadRequest,
     DiscoveryResponse, MeResponse, UpdateVisibilityRequest,
 };
-use clipline_desktop::{
-    CloudAccountScope, Generation, UiEvent, UiEventSink, WindowLifecycleMode,
-};
+use clipline_desktop::{CloudAccountScope, Generation, UiEvent, UiEventSink, WindowLifecycleMode};
 use clipline_events::ClipMarkers;
 use clipline_library::cache::{
     AccountPublicationGuard, AvailableSpacePort, CloudAssetRequest as SharedCloudAssetRequest,
@@ -544,13 +542,15 @@ impl AccountPublicationGuard for RuntimeCloudPublicationGuard {
             .with_cloud_settings_exclusive(|cloud, generation| {
                 let current = cloud_cache_account_fence(cloud, generation)
                     .map_err(|error| error.to_string())?;
-                publication_result = Some(if &current == account
-                    && self.app.state::<WindowLifecycleState>().snapshot() == self.lifecycle
-                {
-                    publication()
-                } else {
-                    Err(CloudCacheError::StaleAccount)
-                });
+                publication_result = Some(
+                    if &current == account
+                        && self.app.state::<WindowLifecycleState>().snapshot() == self.lifecycle
+                    {
+                        publication()
+                    } else {
+                        Err(CloudCacheError::StaleAccount)
+                    },
+                );
                 Ok(())
             })
             .map_err(CloudCacheError::Io)?;
