@@ -15,13 +15,14 @@ use clipline_library::{
     load_clip_detail, ActiveFileRegistry, CatalogAction, CatalogController, CatalogControllerError,
     CatalogDialogKind, CatalogDialogTextField, CatalogEffect, CatalogItemIdentity,
     CatalogLoadState, CatalogOperationOwner, CatalogProjection, CatalogResult, CatalogResultSender,
-    CatalogSource, CatalogUploadVisibility, CatalogWarning, CompactClipProjection,
-    ExpectedResultOwner, ForegroundGeneration, KnownGameIdentityResolver, LegacyAudioTrackProbe,
-    LocalClipFilter, LocalClipGrouping, LocalClipSort, LocalDay, LocalDayResolver,
-    LocalIndexCompletion, LocalLibraryRepository, LocalLibraryScanner, Mp4LegacyAudioTrackProbe,
-    PlatformEffect, PlaybackSourceLease, PosterPageItem, PresentationPoster, ResolvedLocalClip,
-    StandardRepositoryFileSystem, ValidatedClipPath, WindowAttachmentGeneration, WindowWorkToken,
-    MAX_CATALOG_STRING_BYTES, MAX_FOREGROUND_MESSAGE_BYTES,
+    CatalogSource, CatalogUploadVisibility, CatalogWarning, CloudThumbnailDescriptor,
+    CloudThumbnailManifest, CompactClipProjection, ExpectedResultOwner, ForegroundGeneration,
+    KnownGameIdentityResolver, LegacyAudioTrackProbe, LocalClipFilter, LocalClipGrouping,
+    LocalClipSort, LocalDay, LocalDayResolver, LocalIndexCompletion, LocalLibraryRepository,
+    LocalLibraryScanner, Mp4LegacyAudioTrackProbe, PlatformEffect, PlaybackSourceLease,
+    PosterPageItem, PresentationPoster, ResolvedLocalClip, StandardRepositoryFileSystem,
+    ValidatedClipPath, WindowAttachmentGeneration, WindowWorkToken, MAX_CATALOG_STRING_BYTES,
+    MAX_FOREGROUND_MESSAGE_BYTES,
 };
 use thiserror::Error;
 
@@ -644,6 +645,11 @@ pub struct CatalogPosterPage {
     )>,
 }
 
+pub struct CatalogCloudThumbnailPage {
+    pub manifest: Arc<CloudThumbnailManifest>,
+    pub ready: Vec<CloudThumbnailDescriptor>,
+}
+
 impl SlintCatalogController {
     pub fn new(days: Arc<dyn LocalDayResolver>) -> Result<Self, CatalogUiError> {
         Ok(Self {
@@ -718,6 +724,45 @@ impl SlintCatalogController {
             stamp.push((path.clone(), local.file_identity));
         }
         Ok(CatalogPosterPage { items, stamp })
+    }
+
+    /// Exact path-free Cloud owners and the subset whose cache fetch has
+    /// completed. The native decoder reopens those assets through the cache;
+    /// the path inside `PosterStatus::Ready` is deliberately ignored.
+    pub fn cloud_thumbnail_page(
+        &self,
+    ) -> Result<Option<CatalogCloudThumbnailPage>, CatalogUiError> {
+        let Some(manifest) = self.controller.cloud_thumbnail_manifest() else {
+            return Ok(None);
+        };
+        let projection = self.controller.state().projection.as_ref();
+        if projection.rows.len() != manifest.owners().len()
+            || projection
+                .rows
+                .iter()
+                .zip(manifest.owners())
+                .any(|(row, owner)| row.identity != owner.descriptor.item)
+        {
+            return Err(CatalogUiError::Controller(
+                CatalogControllerError::Invalid {
+                    field: "slint.cloud_thumbnail_manifest",
+                },
+            ));
+        }
+        let mut ready = Vec::new();
+        ready
+            .try_reserve_exact(projection.rows.len())
+            .map_err(|_| {
+                CatalogUiError::Controller(CatalogControllerError::Invalid {
+                    field: "slint.cloud_thumbnail_ready",
+                })
+            })?;
+        for (row, owner) in projection.rows.iter().zip(manifest.owners()) {
+            if matches!(row.poster, PresentationPoster::Ready { .. }) {
+                ready.push(owner.descriptor.clone());
+            }
+        }
+        Ok(Some(CatalogCloudThumbnailPage { manifest, ready }))
     }
 
     /// Exact revision retained in Rust. Slint's `int` is only 32-bit, so the

@@ -41,6 +41,9 @@ use clipline_settings::SettingsStore;
 use sha2::{Digest as _, Sha256};
 
 use crate::catalog::{CatalogEffectExecutor, CatalogEffectHandler, OwnedCatalogResult};
+use crate::cloud_thumbnail::{
+    decode_cached_cloud_thumbnail, CloudThumbnailDecodeOutcome, CloudThumbnailDecodePort,
+};
 
 const CLOUD_RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_NATIVE_CLOUD_MEDIA_LEASES: usize = 4;
@@ -870,6 +873,16 @@ impl NativeCloudRuntime {
         self.shared.media.clone()
     }
 
+    /// Process-owned decoder input. The returned port reopens the exact cache
+    /// hit under a fresh transient pin, so no path-only `PosterStatus` can
+    /// become image authority.
+    #[must_use]
+    pub fn thumbnail_decoder(&self) -> Arc<dyn CloudThumbnailDecodePort> {
+        Arc::new(NativeCloudThumbnailDecoder {
+            cache_provider: Arc::clone(&self.shared.cache_provider),
+        })
+    }
+
     pub fn shutdown(mut self) -> Result<(), String> {
         self.detach();
         self.shared.media.clear();
@@ -879,6 +892,80 @@ impl NativeCloudRuntime {
             .ok_or_else(|| "native Cloud runtime is already shut down".to_owned())?;
         runtime.shutdown_timeout(CLOUD_RUNTIME_SHUTDOWN_TIMEOUT);
         Ok(())
+    }
+}
+
+struct NativeCloudThumbnailDecoder {
+    cache_provider: Arc<dyn NativeCloudCacheProvider>,
+}
+
+impl CloudThumbnailDecodePort for NativeCloudThumbnailDecoder {
+    fn decode(
+        &self,
+        owner: &CloudThumbnailOwner,
+        cancellation: &CloudCancellation,
+    ) -> CloudThumbnailDecodeOutcome {
+        if owner.validate_bounds().is_err() {
+            return CloudThumbnailDecodeOutcome::Failed(
+                "Cloud thumbnail owner is invalid".to_owned(),
+            );
+        }
+        let context = match self.cache_provider.cache_for(&owner.token) {
+            Ok(context) => context,
+            Err(NativeCloudCacheProviderError::StaleAccount) => {
+                return CloudThumbnailDecodeOutcome::Stale
+            }
+            Err(NativeCloudCacheProviderError::Failed(error)) => {
+                return CloudThumbnailDecodeOutcome::Failed(error)
+            }
+        };
+        if context.account.account_key != owner.token.account_key
+            || context.account.account_generation != owner.token.account_generation
+        {
+            return CloudThumbnailDecodeOutcome::Stale;
+        }
+        let asset = match cloud_asset_key(
+            &owner.descriptor.item,
+            CloudAssetKind::Thumbnail,
+            owner.descriptor.version,
+        ) {
+            Ok(asset) => asset,
+            Err(error) => return CloudThumbnailDecodeOutcome::Failed(error),
+        };
+        let cached = match context.cache.get(
+            CloudAssetRequest {
+                account: context.account.clone(),
+                asset,
+                expected_size_bytes: None,
+            },
+            cancellation,
+        ) {
+            Ok(Some(cached)) => cached,
+            Ok(None) => return CloudThumbnailDecodeOutcome::Missing,
+            Err(CloudCacheError::Canceled | CloudCacheError::StaleAccount) => {
+                return CloudThumbnailDecodeOutcome::Stale
+            }
+            Err(error) => return CloudThumbnailDecodeOutcome::Failed(error.to_string()),
+        };
+        match decode_cached_cloud_thumbnail(&cached) {
+            Ok(pixels) => CloudThumbnailDecodeOutcome::Ready { pixels },
+            Err(error) if error.invalidates_cache() => {
+                let message = error.to_string();
+                match context
+                    .cache
+                    .invalidate_thumbnail(&context.account, cached, cancellation)
+                {
+                    Ok(()) => CloudThumbnailDecodeOutcome::Failed(message),
+                    Err(CloudCacheError::Canceled | CloudCacheError::StaleAccount) => {
+                        CloudThumbnailDecodeOutcome::Stale
+                    }
+                    Err(invalidation) => CloudThumbnailDecodeOutcome::Failed(format!(
+                        "{message}; exact cache invalidation failed: {invalidation}"
+                    )),
+                }
+            }
+            Err(error) => CloudThumbnailDecodeOutcome::Failed(error.to_string()),
+        }
     }
 }
 

@@ -40,6 +40,7 @@ use clipline_slint_spike::cloud::{
     NativeCloudCacheContext, NativeCloudCacheProvider, NativeCloudCacheProviderError,
     NativeCloudMediaRegistry, NativeCloudRuntime,
 };
+use clipline_slint_spike::cloud_thumbnail::CloudThumbnailDecodeOutcome;
 #[cfg(windows)]
 use clipline_slint_spike::live::{
     LiveMediaCommandPort, LiveMediaRequestToken, ValidatedLiveMediaSource,
@@ -362,6 +363,15 @@ fn thumbnail_effect(remote: &str, version: u64, request: u64) -> CatalogEffect {
     }
 }
 
+fn jpeg_bytes(width: u32, height: u32) -> Vec<u8> {
+    let pixels = vec![83_u8; (u64::from(width) * u64::from(height) * 3) as usize];
+    let mut encoded = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut encoded, 80)
+        .encode(&pixels, width, height, image::ExtendedColorType::Rgb8)
+        .unwrap();
+    encoded
+}
+
 fn media_owner(remote: &str, request: u64) -> CloudReviewMediaOwner {
     let token = token(request);
     CloudReviewMediaOwner::new(token.clone(), cloud_item(remote, &token)).unwrap()
@@ -505,6 +515,73 @@ fn thumbnail_uses_exact_remote_version_and_maps_ready_missing_and_bounded_failur
     assert_eq!(requests[2].remote_clip_id(), "failed");
     assert_eq!(requests[2].version(), 33);
     drop(requests);
+    harness.runtime.shutdown().unwrap();
+}
+
+#[test]
+fn native_decoder_regets_the_exact_cache_hit_and_invalidates_corrupt_owned_bytes() {
+    let valid = jpeg_bytes(8, 6);
+    let download = Arc::new(FakeDownload::new(AssetResponse::Found(valid)));
+    download.respond(
+        "corrupt",
+        CloudAssetKind::Thumbnail,
+        22,
+        AssetResponse::Found(b"not a jpeg".to_vec()),
+    );
+    let harness = make_harness("thumbnail-native-decode", download);
+    let decoder = harness.runtime.thumbnail_decoder();
+
+    let CatalogEffect::LoadCloudThumbnail { request } = thumbnail_effect("valid", 11, 1) else {
+        unreachable!();
+    };
+    let valid_owner = request.owner.clone();
+    harness
+        .handler
+        .execute(CatalogEffect::LoadCloudThumbnail { request })
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        decoder.decode(
+            &valid_owner,
+            &clipline_library::cache::CloudCancellation::default()
+        ),
+        CloudThumbnailDecodeOutcome::Ready { .. }
+    ));
+    assert_eq!(
+        harness.download.requests.lock().unwrap().len(),
+        1,
+        "decoder must reacquire a cache hit rather than trust a path or redownload"
+    );
+
+    let CatalogEffect::LoadCloudThumbnail { request } = thumbnail_effect("corrupt", 22, 2) else {
+        unreachable!();
+    };
+    let corrupt_owner = request.owner.clone();
+    let cached = harness
+        .handler
+        .execute(CatalogEffect::LoadCloudThumbnail { request })
+        .unwrap()
+        .unwrap();
+    let CatalogResult::CloudThumbnail {
+        status: PosterStatus::Ready { path },
+        ..
+    } = cached.result
+    else {
+        panic!("corrupt encoded bytes are cache-ready until the bounded decoder runs");
+    };
+    assert!(Path::new(&path).exists());
+    assert!(matches!(
+        decoder.decode(
+            &corrupt_owner,
+            &clipline_library::cache::CloudCancellation::default()
+        ),
+        CloudThumbnailDecodeOutcome::Failed(_)
+    ));
+    assert!(
+        !Path::new(&path).exists(),
+        "decoder rejection must remove only its exact owned cache entry"
+    );
+    drop(decoder);
     harness.runtime.shutdown().unwrap();
 }
 

@@ -146,28 +146,15 @@ pub fn decode_poster_file(request: PosterWorkRequest) -> Result<DecodedPoster, P
         return Err(PosterAdapterError::InvalidRequest);
     }
     let (encoded, opened_identity) = read_exact_poster(encoded_path)?;
-    let (width, height, expected_rgb_bytes) = match jpeg_dimensions(&encoded) {
-        Ok(dimensions) => dimensions,
+    let pixels = match decode_bounded_jpeg_bytes(encoded) {
+        Ok(pixels) => pixels,
         Err(error) => {
             let _ = clipline_shell::remove_file_if_identity(encoded_path, opened_identity);
             return Err(error);
         }
     };
 
-    let mut reader = ImageReader::with_format(Cursor::new(encoded), ImageFormat::Jpeg);
-    let mut limits = Limits::default();
-    limits.max_image_width = Some(MAX_POSTER_DIMENSION);
-    limits.max_image_height = Some(MAX_POSTER_DIMENSION);
-    limits.max_alloc = Some(MAX_POSTER_DECODER_ALLOC_BYTES);
-    reader.limits(limits);
-    let rgb = match reader.decode() {
-        Ok(image) => image.into_rgb8(),
-        Err(_) => {
-            let _ = clipline_shell::remove_file_if_identity(encoded_path, opened_identity);
-            return Err(PosterAdapterError::Decode);
-        }
-    };
-    if rgb.width() != width || rgb.height() != height || rgb.as_raw().len() != expected_rgb_bytes {
+    if pixels.width() == 0 || pixels.height() == 0 {
         let _ = clipline_shell::remove_file_if_identity(encoded_path, opened_identity);
         return Err(PosterAdapterError::Decode);
     }
@@ -181,9 +168,33 @@ pub fn decode_poster_file(request: PosterWorkRequest) -> Result<DecodedPoster, P
     }
     drop(current);
 
+    Ok(DecodedPoster { request, pixels })
+}
+
+/// Decode already-owned JPEG bytes into a bounded sendable RGB buffer.
+///
+/// Path identity and cache invalidation remain caller-owned. Both local
+/// posters and account-fenced Cloud thumbnails use this one allocation policy.
+pub fn decode_bounded_jpeg_bytes(
+    encoded: Vec<u8>,
+) -> Result<SharedPixelBuffer<Rgb8Pixel>, PosterAdapterError> {
+    let (width, height, expected_rgb_bytes) = jpeg_dimensions(&encoded)?;
+    let mut reader = ImageReader::with_format(Cursor::new(encoded), ImageFormat::Jpeg);
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(MAX_POSTER_DIMENSION);
+    limits.max_image_height = Some(MAX_POSTER_DIMENSION);
+    limits.max_alloc = Some(MAX_POSTER_DECODER_ALLOC_BYTES);
+    reader.limits(limits);
+    let rgb = reader
+        .decode()
+        .map_err(|_| PosterAdapterError::Decode)?
+        .into_rgb8();
+    if rgb.width() != width || rgb.height() != height || rgb.as_raw().len() != expected_rgb_bytes {
+        return Err(PosterAdapterError::Decode);
+    }
     let pixels = SharedPixelBuffer::<Rgb8Pixel>::clone_from_slice(rgb.as_raw(), width, height);
     drop(rgb);
-    Ok(DecodedPoster { request, pixels })
+    Ok(pixels)
 }
 
 /// Perform the final exact-token check on the UI thread before constructing

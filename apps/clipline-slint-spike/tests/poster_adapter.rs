@@ -8,9 +8,9 @@ use clipline_library::{
     MAX_POSTER_ENCODED_BYTES,
 };
 use clipline_slint_spike::poster::{
-    clone_ui_poster, decode_poster_file, poster_decode_pool_shape, poster_extraction_pool_shape,
-    publish_decoded_poster, validate_poster_dimensions, with_ui_poster_controller, DecodedPoster,
-    PosterAdapterError,
+    clone_ui_poster, decode_bounded_jpeg_bytes, decode_poster_file, poster_decode_pool_shape,
+    poster_extraction_pool_shape, publish_decoded_poster, validate_poster_dimensions,
+    with_ui_poster_controller, DecodedPoster, PosterAdapterError,
 };
 use image::codecs::jpeg::JpegEncoder;
 use image::ExtendedColorType;
@@ -83,6 +83,8 @@ fn valid_jpeg_decodes_to_an_exact_sendable_rgb8_buffer_and_closes_the_file() {
     let decoded = decode_poster_file(decode_request(&clip, &poster)).unwrap();
     assert_eq!(decoded.width(), 8);
     assert_eq!(decoded.height(), 6);
+    let portable = decode_bounded_jpeg_bytes(std::fs::read(&poster).unwrap()).unwrap();
+    assert_eq!((portable.width(), portable.height()), (8, 6));
     std::fs::rename(&poster, directory.0.join("moved.poster.jpg")).unwrap();
 }
 

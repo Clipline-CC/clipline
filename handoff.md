@@ -4,6 +4,36 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-03): Slint replacement Milestone 7, Task 9 native Cloud thumbnails
+
+The Slint candidate now owns bounded native decoding and retention for Cloud thumbnails. One
+process-owned pool has exactly two decoder workers, a 32-job queue, a 32-result queue, and at most
+32 issued-plus-retained image owners. Viewport churn cancels obsolete work but keeps its capacity
+charged until the exact completion is acknowledged, while checked monotonic tickets prevent a
+returning row from accepting an older decode with the same account/clip/version identity.
+
+Workers re-resolve the exact account generation and versioned cache key, reacquire the existing
+cache entry under independent cancellation, and retain its transient pin through no-follow open,
+identity and byte-length checks, bounded read, and the shared bounded JPEG decoder. Slint images
+are constructed only on the UI thread after the final owner/ticket fence. Decoder-rejected bytes
+are removed only through the cache's identity-fenced invalidation API; an exact current
+cache-Ready row may then become a bounded Failed row without admitting stale account, window,
+clip, or asset-version results.
+
+Window detach cancels work and drops retained images before clearing Slint models. Normal quit and
+exceptional shell Drop join the thumbnail pool before shutting down the Cloud cache/runtime. A
+disconnected pool releases every unsent ownership ticket, and concurrent cache truncation fails
+closed instead of decoding a partial file.
+
+Validation is green on the final tree: CI-mode workspace tests, warning-denied workspace Clippy,
+standalone Slint all-target tests and warning-denied Clippy, formatting checks, and
+`git diff --check`. Focused coverage includes the 32-item churn bound, stale-ticket image rejection,
+terminal-state non-looping, exact cache-hit reuse, corrupt-byte invalidation, and shared poster
+decoder bounds. A Fable medium final-diff audit returned GO with no P0/P1.
+
+Next: finish native Cloud profile/avatar/open-profile, public-share, upload/progress/status, and
+upload-dialog routing before the large-library and lifecycle gates.
+
 ## Checkpoint (2026-08-03): Slint replacement Milestone 7, Task 9 native Cloud media
 
 The Slint candidate now owns the complete account-fenced cache-to-player path for Cloud review

@@ -1028,6 +1028,21 @@ fn accepted_cloud_page_issues_versioned_bounded_thumbnail_work_and_rejects_stale
         }
     );
 
+    controller
+        .accept(CatalogResult::CloudThumbnail {
+            owner: first.clone(),
+            status: PosterStatus::Failed {
+                message: "bounded native JPEG decode rejected the cache entry".into(),
+            },
+        })
+        .unwrap();
+    assert_eq!(
+        controller.state().projection.rows[0].poster,
+        PresentationPoster::Failed {
+            message: "bounded native JPEG decode rejected the cache entry".into()
+        }
+    );
+
     let checkpoint = controller.state().clone();
     let stale_version = CloudThumbnailOwner::new(
         first.token.clone(),

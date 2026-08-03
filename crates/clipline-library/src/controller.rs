@@ -1118,10 +1118,23 @@ impl CatalogController {
                 Ok(true)
             }
             CatalogResult::CloudThumbnail { owner, status } => {
-                let Some(expected) = state.pending_cloud_thumbnails.get(&owner.descriptor) else {
-                    return Ok(false);
-                };
-                if expected != &owner || !cloud_thumbnail_is_current(state, &owner.descriptor) {
+                let pending_expected = state.pending_cloud_thumbnails.get(&owner.descriptor);
+                let exact_decode_failure = pending_expected.is_none()
+                    && matches!(&status, PosterStatus::Failed { .. })
+                    && matches!(
+                        state.cloud_posters.get(&owner.descriptor),
+                        Some(PosterStatus::Ready { .. })
+                    )
+                    && state
+                        .cloud_thumbnail_manifest
+                        .as_ref()
+                        .is_some_and(|manifest| {
+                            manifest.owners().iter().any(|entry| entry == &owner)
+                        });
+                if pending_expected.is_some_and(|expected| expected != &owner)
+                    || (pending_expected.is_none() && !exact_decode_failure)
+                    || !cloud_thumbnail_is_current(state, &owner.descriptor)
+                {
                     return Ok(false);
                 }
                 let mut pending = reserve_map_clone(

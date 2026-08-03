@@ -321,6 +321,7 @@ mod windows_runtime {
         SystemDayResolver,
     };
     use crate::cloud::{CatalogCloudLifetime, NativeCloudMediaRegistry, NativeCloudRuntime};
+    use crate::cloud_thumbnail::CloudThumbnailImageOwner;
     use crate::controller::PlaybackController;
     use crate::desktop::{DesktopAttachment, SlintDesktopAdapter};
     use crate::live::{
@@ -404,6 +405,7 @@ mod windows_runtime {
         tray: SpikeTray,
         desktop: SlintDesktopAdapter,
         _settings: CandidateSettings,
+        cloud_thumbnails: Option<CloudThumbnailImageOwner>,
         catalog_cloud: CatalogCloudLifetime,
         cloud_owner: Option<CloudCatalogOwner>,
         cloud_startup_error: Option<String>,
@@ -426,6 +428,11 @@ mod windows_runtime {
 
     impl Drop for SlintShell {
         fn drop(&mut self) {
+            if let Some(cloud_thumbnails) = self.cloud_thumbnails.as_mut() {
+                let _ = cloud_thumbnails.detach_window();
+                let _ = cloud_thumbnails.shutdown();
+            }
+            self.cloud_thumbnails = None;
             if let Some(resources) = self.window.as_mut() {
                 self.review_bridge
                     .revoke(resources.catalog_attachment, resources.catalog_foreground);
@@ -667,6 +674,10 @@ mod windows_runtime {
             |cloud| cloud.effect_handler(Arc::clone(&local_catalog_handler)),
         );
         let cloud_media = cloud.as_ref().map(NativeCloudRuntime::media_registry);
+        let cloud_thumbnails = cloud
+            .as_ref()
+            .map(|cloud| CloudThumbnailImageOwner::start(cloud.thumbnail_decoder()))
+            .transpose()?;
         let (catalog_sender, catalog_results) = catalog_result_channel();
         let catalog_executor = CatalogEffectExecutor::start(
             catalog_handler,
@@ -704,6 +715,7 @@ mod windows_runtime {
             tray,
             desktop,
             _settings: settings,
+            cloud_thumbnails,
             catalog_cloud,
             cloud_owner,
             cloud_startup_error,
@@ -834,7 +846,44 @@ mod windows_runtime {
             };
             dispatch_command(runtime, command.command)?;
         }
+        pump_cloud_thumbnail_completions(runtime)?;
         pump_catalog_results(runtime)?;
+        Ok(())
+    }
+
+    fn pump_cloud_thumbnail_completions(runtime: &Rc<RefCell<SlintShell>>) -> Result<(), String> {
+        let window = runtime
+            .borrow()
+            .window
+            .as_ref()
+            .map(|resources| resources.window.as_weak())
+            .and_then(|window| window.upgrade());
+        let Some(pump) = runtime
+            .borrow_mut()
+            .cloud_thumbnails
+            .as_mut()
+            .map(|owner| owner.pump_completions(window.as_ref()))
+            .transpose()?
+        else {
+            return Ok(());
+        };
+        let mut changed = pump.images_changed;
+        for result in pump.results {
+            let (effects, result_changed) = {
+                let mut runtime_ref = runtime.borrow_mut();
+                let before = runtime_ref.catalog.revision();
+                let effects = runtime_ref
+                    .catalog
+                    .accept(result)
+                    .map_err(|error| error.to_string())?;
+                (effects, runtime_ref.catalog.revision() != before)
+            };
+            changed |= result_changed;
+            route_catalog_effects(runtime, effects)?;
+        }
+        if changed {
+            publish_catalog_window(runtime)?;
+        }
         Ok(())
     }
 
@@ -867,6 +916,7 @@ mod windows_runtime {
         let (
             projection,
             poster_page,
+            cloud_thumbnail_page,
             window,
             attachment,
             catalog_attachment,
@@ -884,6 +934,10 @@ mod windows_runtime {
                 runtime_ref
                     .catalog
                     .poster_page()
+                    .map_err(|error| error.to_string())?,
+                runtime_ref
+                    .catalog
+                    .cloud_thumbnail_page()
                     .map_err(|error| error.to_string())?,
                 resources.window.as_weak(),
                 resources.attachment,
@@ -919,14 +973,37 @@ mod windows_runtime {
             resources.poster_token = poster_token;
             resources.poster_stamp = poster_page.stamp;
         }
+        {
+            let mut runtime_ref = runtime.borrow_mut();
+            if let Some(owner) = runtime_ref.cloud_thumbnails.as_mut() {
+                match cloud_thumbnail_page.as_ref() {
+                    Some(page) => {
+                        owner.reconcile(
+                            Some(page.manifest.as_ref()),
+                            &page.ready,
+                            poster_viewport_start,
+                        )?;
+                    }
+                    None => {
+                        owner.reconcile(None, &[], 0)?;
+                    }
+                }
+            }
+        }
         let Some(window) = window.upgrade() else {
             return Ok(());
         };
-        publish_projection(&window, projection.as_ref(), |identity| match identity {
-            CatalogItemIdentity::Local { path } => clone_ui_poster(path),
-            CatalogItemIdentity::Cloud { .. } => None,
-        })
-        .map_err(|error| error.to_string())?;
+        {
+            let runtime_ref = runtime.borrow();
+            publish_projection(&window, projection.as_ref(), |identity| match identity {
+                CatalogItemIdentity::Local { path } => clone_ui_poster(path),
+                CatalogItemIdentity::Cloud { .. } => runtime_ref
+                    .cloud_thumbnails
+                    .as_ref()
+                    .and_then(|owner| owner.image_for(identity)),
+            })
+            .map_err(|error| error.to_string())?;
+        }
         let mut runtime_ref = runtime.borrow_mut();
         let Some(resources) = runtime_ref.window.as_mut() else {
             return Ok(());
@@ -1648,6 +1725,10 @@ mod windows_runtime {
             };
             if let Err(error) = update_ui_poster_viewport(poster_token, start) {
                 report_shell_error(&runtime, &error);
+                return;
+            }
+            if let Err(error) = publish_catalog_window(&runtime) {
+                report_shell_error(&runtime, &error);
             }
         });
 
@@ -1993,6 +2074,9 @@ mod windows_runtime {
             .map(|resources| resources.poster_token)
             .ok_or_else(|| "poster detach requested without a window".to_owned())?;
         detach_ui_poster_window(poster_token)?;
+        if let Some(owner) = runtime.borrow_mut().cloud_thumbnails.as_mut() {
+            owner.detach_window()?;
+        }
         let mut resources = runtime
             .borrow_mut()
             .window
@@ -2111,18 +2195,34 @@ mod windows_runtime {
                 remember_first_error(&mut first_error, error);
             }
         }
-        let (hotkeys, activation, catalog_cloud_result, request_event_loop_quit) = {
+        let (
+            hotkeys,
+            activation,
+            cloud_thumbnail_result,
+            catalog_cloud_result,
+            request_event_loop_quit,
+        ) = {
             let mut runtime_ref = runtime.borrow_mut();
             let request = !runtime_ref.quit_event_loop_requested;
             runtime_ref.quit_event_loop_requested = true;
+            let cloud_thumbnail_result = runtime_ref
+                .cloud_thumbnails
+                .as_mut()
+                .map(CloudThumbnailImageOwner::shutdown)
+                .transpose();
+            runtime_ref.cloud_thumbnails = None;
             let catalog_cloud_result = runtime_ref.catalog_cloud.shutdown();
             (
                 runtime_ref.hotkeys.take(),
                 runtime_ref.activation.take(),
+                cloud_thumbnail_result,
                 catalog_cloud_result,
                 request,
             )
         };
+        if let Err(error) = cloud_thumbnail_result {
+            remember_first_error(&mut first_error, error);
+        }
         if let Err(error) = catalog_cloud_result {
             remember_first_error(&mut first_error, error);
         }
