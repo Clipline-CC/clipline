@@ -1792,6 +1792,10 @@ mod tests {
         let temporary_path = temporary.path();
         temporary.write_all(b"\xff\xd8complete\xff\xd9").unwrap();
 
+        // Retain the selected object while replacing its directory entry so a
+        // Unix filesystem cannot immediately reuse the unlinked inode and
+        // make the foreign winner appear to have the selected identity.
+        let _selected = std::fs::File::open(&poster).unwrap();
         std::fs::remove_file(&poster).unwrap();
         std::fs::write(&poster, b"concurrent winner").unwrap();
         assert!(temporary.publish(&poster).is_err());
