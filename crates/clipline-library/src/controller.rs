@@ -1315,6 +1315,13 @@ impl CatalogController {
         }
         for effect in &effects {
             effect.validate_bounds()?;
+            if let CatalogEffect::StartUpload { owner, .. } = effect {
+                if candidate.cloud_owner.as_ref() != Some(owner) {
+                    return Err(CatalogControllerError::Invalid {
+                        field: "upload.cloud_owner",
+                    });
+                }
+            }
         }
         candidate.projection = Arc::new(build_projection(
             &candidate,
@@ -2144,6 +2151,10 @@ fn confirm_dialog(
         }
         CatalogDialogKind::Upload => {
             let target = resolve_local(state, &dialog.target)?;
+            let owner = state
+                .cloud_owner
+                .clone()
+                .ok_or(CatalogControllerError::NoCloudOwner)?;
             let selected_track_count = dialog
                 .audio_tracks
                 .iter()
@@ -2165,6 +2176,7 @@ fn confirm_dialog(
             );
             effects.push(CatalogEffect::StartUpload {
                 token,
+                owner,
                 target,
                 options: CatalogUploadOptions {
                     title: dialog.text_value,

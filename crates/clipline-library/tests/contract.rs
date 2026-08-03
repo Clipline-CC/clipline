@@ -803,9 +803,14 @@ fn typed_effects_pin_exact_owners_and_resolved_paths() {
         audio_track_ids: vec!["track-1".into(), "track-2".into()],
         delete_local_after_upload: false,
     };
+    let upload_owner = CloudCatalogOwner {
+        account_key: CloudAccountKey::new("account-upload").unwrap(),
+        account_generation: CloudAccountGeneration::new(17),
+    };
     assert_eq!(
         CatalogEffect::StartUpload {
             token: window,
+            owner: upload_owner.clone(),
             target: target.clone(),
             options: valid_options,
         }
@@ -822,6 +827,7 @@ fn typed_effects_pin_exact_owners_and_resolved_paths() {
     assert_eq!(
         CatalogEffect::StartUpload {
             token: window,
+            owner: upload_owner,
             target,
             options: duplicate_audio,
         }

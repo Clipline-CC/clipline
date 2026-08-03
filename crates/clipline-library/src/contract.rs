@@ -1810,6 +1810,7 @@ pub enum CatalogEffect {
     },
     StartUpload {
         token: WindowWorkToken,
+        owner: CloudCatalogOwner,
         target: ResolvedLocalClip,
         options: CatalogUploadOptions,
     },
@@ -1933,8 +1934,12 @@ impl CatalogEffect {
             }
             Self::Delete { targets, .. } => validate_resolved_targets(targets),
             Self::StartUpload {
-                target, options, ..
+                owner,
+                target,
+                options,
+                ..
             } => {
+                validate_cloud_catalog_owner(owner)?;
                 target.validate_bounds()?;
                 options.validate_bounds()
             }
@@ -1944,6 +1949,18 @@ impl CatalogEffect {
                 check_string("cloud_link.url", url)
             }
         }
+    }
+}
+
+fn validate_cloud_catalog_owner(owner: &CloudCatalogOwner) -> Result<(), PayloadBoundsError> {
+    if owner.account_key.as_str().trim().is_empty()
+        || owner.account_key.as_str().len() > MAX_CATALOG_STRING_BYTES
+    {
+        Err(PayloadBoundsError::Invalid {
+            field: "cloud_catalog_owner.account_key",
+        })
+    } else {
+        Ok(())
     }
 }
 

@@ -1328,6 +1328,85 @@ fn upload_detail_uses_the_accepted_title_and_saved_cloud_preferences() {
     let dialog = controller.state().dialog.as_ref().unwrap();
     assert_eq!(dialog.visibility, Some(CatalogUploadVisibility::Unlisted));
     assert!(dialog.delete_local_after_upload);
+
+    let start = only_effect(controller.dispatch(CatalogAction::ConfirmDialog).unwrap());
+    assert!(matches!(
+        start,
+        CatalogEffect::StartUpload { owner, .. }
+            if owner == cloud_owner("account-a", 9)
+    ));
+}
+
+#[test]
+fn replacement_login_invalidates_the_old_upload_dialog_and_fences_the_new_generation() {
+    let mut controller = controller();
+    seed_local(&mut controller, vec![local_item(0)]);
+    controller
+        .set_cloud_owner(Some(cloud_owner("account-a", 9)))
+        .unwrap();
+
+    let first_detail = only_effect(
+        controller
+            .dispatch(CatalogAction::OpenUpload {
+                item: local_identity(0),
+            })
+            .unwrap(),
+    );
+    let first_request = match first_detail {
+        CatalogEffect::LoadClipDetail { request, .. } => request,
+        other => panic!("expected detail effect, got {other:?}"),
+    };
+    controller
+        .accept(CatalogResult::ClipDetail(ClipDetailResult::new(
+            &first_request,
+            ClipDetail::new(
+                0,
+                Vec::new(),
+                "",
+                Vec::new(),
+                UploadDialogSummary::new("Clip 00000", "", "", "").unwrap(),
+            )
+            .unwrap(),
+        )))
+        .unwrap();
+    assert!(controller.state().dialog.is_some());
+
+    controller
+        .set_cloud_owner(Some(cloud_owner("account-a", 10)))
+        .unwrap();
+    assert!(controller.state().dialog.is_none());
+    assert!(controller.dispatch(CatalogAction::ConfirmDialog).is_err());
+
+    let second_detail = only_effect(
+        controller
+            .dispatch(CatalogAction::OpenUpload {
+                item: local_identity(0),
+            })
+            .unwrap(),
+    );
+    let second_request = match second_detail {
+        CatalogEffect::LoadClipDetail { request, .. } => request,
+        other => panic!("expected detail effect, got {other:?}"),
+    };
+    controller
+        .accept(CatalogResult::ClipDetail(ClipDetailResult::new(
+            &second_request,
+            ClipDetail::new(
+                0,
+                Vec::new(),
+                "",
+                Vec::new(),
+                UploadDialogSummary::new("Clip 00000", "", "", "").unwrap(),
+            )
+            .unwrap(),
+        )))
+        .unwrap();
+    let start = only_effect(controller.dispatch(CatalogAction::ConfirmDialog).unwrap());
+    assert!(matches!(
+        start,
+        CatalogEffect::StartUpload { owner, .. }
+            if owner == cloud_owner("account-a", 10)
+    ));
 }
 
 #[test]
