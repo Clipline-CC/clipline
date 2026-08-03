@@ -12,6 +12,7 @@ use clipline_desktop::{
     Generation, Revision, UiAction, UiEffect, UiEvent, UiEventSink, WindowLifecycleMode,
     WindowLifecycleSnapshot,
 };
+use clipline_library::{ActiveFileRegistry, UploadService};
 use clipline_shell::hotkey::{HotkeyReplacementOutcome, HotkeySet};
 use clipline_shell::windows::activation::WindowsInstanceGuard;
 use clipline_shell::windows::autostart::{AutostartChange, WindowsAutostartRegistration};
@@ -41,9 +42,10 @@ use crate::games::{DetectedGame, GameWindowInfo};
 use crate::osu_enrichment::OsuTitleEvent;
 use crate::service::{self, Cmd, Event, ServiceOptions};
 use crate::settings::{
-    quota_bytes_from_gb, AppSettings, AppSettingsServiceExt, CaptureMode, CloudRecordCas,
-    CustomGameSettings, GameRecordingMode, SettingsChange, SettingsProfile, SettingsSnapshot,
-    SettingsStore, SettingsTransaction,
+    cloud_paths_equivalent, quota_bytes_from_gb, AppSettings, AppSettingsServiceExt, CaptureMode,
+    CloudRecordCas, CloudRecordCasKind, CloudRecordSlot, CustomGameSettings, GameRecordingMode,
+    SettingsChange, SettingsProfile, SettingsSnapshot, SettingsStore, SettingsTransaction,
+    MAX_CLOUD_RECORD_CAS_SLOTS,
 };
 use crate::updates::{channel_enabled, UpdateChannel};
 use crate::util::unix_now_i64;
@@ -58,6 +60,7 @@ const MAIN_WINDOW_LABEL: &str = "main";
 const AUTOSTART_VALUE_NAME: &str = "Clipline";
 const SHELL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
 const RECORDER_FINALIZATION_TIMEOUT: Duration = Duration::from_secs(10);
+const UPLOAD_FINALIZATION_TIMEOUT: Duration = Duration::from_secs(5);
 const UPDATE_QUIESCE_TIMEOUT: Duration = Duration::from_secs(21);
 const WEBVIEW_READY_TIMEOUT: Duration = Duration::from_secs(5);
 const GAME_DETECTOR_INTERVAL: Duration = Duration::from_millis(500);
@@ -111,6 +114,8 @@ fn ensure_foreground_microphone_test(state: &WindowLifecycleState) -> Result<(),
 struct FrontendReadyResponse {
     warnings: Vec<String>,
     window_lifecycle: WindowLifecycleSnapshot,
+    desktop_lifecycle_revision: String,
+    desktop_notices: Vec<crate::desktop::tauri_sink::DesktopNoticePresentation>,
     desktop_snapshot: clipline_desktop::DesktopSnapshot<AppSettings>,
     desktop_event_sequence: u64,
 }
@@ -538,12 +543,45 @@ fn frontend_ready<R: Runtime>(
         log_diagnostic(format!("desktop lifecycle reconciliation failed: {error}"));
     }
     let bootstrap = desktop.bootstrap();
+    let desktop_notices =
+        crate::desktop::tauri_sink::pending_notice_presentations(&bootstrap.snapshot);
     FrontendReadyResponse {
         warnings: startup_warnings.take(),
         window_lifecycle: lifecycle,
+        desktop_lifecycle_revision: lifecycle.revision.get().to_string(),
+        desktop_notices,
         desktop_snapshot: bootstrap.snapshot,
         desktop_event_sequence: bootstrap.event_sequence,
     }
+}
+
+#[tauri::command]
+fn acknowledge_desktop_notice(
+    desktop: tauri::State<crate::desktop::DesktopState>,
+    window_lifecycle: tauri::State<WindowLifecycleState>,
+    notice_id: String,
+    lifecycle_revision: String,
+) -> Result<bool, String> {
+    let notice_id = notice_id
+        .parse::<u64>()
+        .map_err(|_| "desktop notice identifier is invalid".to_owned())?;
+    let lifecycle_revision = lifecycle_revision
+        .parse::<u64>()
+        .map(Revision::new)
+        .map_err(|_| "desktop lifecycle revision is invalid".to_owned())?;
+
+    // Hold the lifecycle lock through controller dispatch. A concurrent tray
+    // transition therefore wins either entirely before or entirely after this
+    // exact foreground acknowledgement; it can never race through the fence.
+    let lifecycle = match window_lifecycle.0.lock() {
+        Ok(lifecycle) => lifecycle,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if lifecycle.mode != WindowLifecycleMode::Foreground || lifecycle.revision != lifecycle_revision
+    {
+        return Ok(false);
+    }
+    desktop.acknowledge_notice_if_lifecycle(notice_id, *lifecycle)
 }
 
 #[derive(Default)]
@@ -771,6 +809,7 @@ struct RuntimeInner {
     recording_generation: u64,
     recording_desired: bool,
     settings: AppSettings,
+    active_files: ActiveFileRegistry,
     lol_url: Option<String>,
     active_game: Option<DetectedGame>,
     osu_title_events: Vec<OsuTitleEvent>,
@@ -860,8 +899,18 @@ impl RuntimeState {
         Self::from_parts(None, settings, lol_url, None)
     }
 
+    #[cfg(test)]
     fn with_store(settings: AppSettings, lol_url: Option<String>, store: SettingsStore) -> Self {
         Self::from_parts(None, settings, lol_url, Some(store))
+    }
+
+    fn with_store_and_registry(
+        settings: AppSettings,
+        lol_url: Option<String>,
+        store: SettingsStore,
+        active_files: ActiveFileRegistry,
+    ) -> Self {
+        Self::from_parts_with_registry(None, settings, lol_url, Some(store), active_files)
     }
 
     #[cfg(test)]
@@ -869,17 +918,29 @@ impl RuntimeState {
         Self::from_parts(Some(tx), settings, lol_url, None)
     }
 
+    #[cfg(test)]
     fn from_parts(
         tx: Option<Sender<Cmd>>,
         settings: AppSettings,
         lol_url: Option<String>,
         store: Option<SettingsStore>,
     ) -> Self {
+        Self::from_parts_with_registry(tx, settings, lol_url, store, ActiveFileRegistry::new())
+    }
+
+    fn from_parts_with_registry(
+        tx: Option<Sender<Cmd>>,
+        settings: AppSettings,
+        lol_url: Option<String>,
+        store: Option<SettingsStore>,
+        active_files: ActiveFileRegistry,
+    ) -> Self {
         let mut inner = RuntimeInner {
             tx: None,
             recording_generation: 0,
             recording_desired: false,
             settings,
+            active_files,
             lol_url,
             active_game: None,
             osu_title_events: Vec::new(),
@@ -1129,8 +1190,9 @@ impl RuntimeState {
         lol_url: Option<String>,
         active_game: Option<&DetectedGame>,
         decodable_codecs: &[service::Codec],
+        active_files: ActiveFileRegistry,
     ) -> Result<service::ServiceOptions, String> {
-        let mut opts = settings.to_service_options(lol_url)?;
+        let mut opts = settings.to_service_options_with_registry(lol_url, active_files)?;
         opts.decodable_codecs = decodable_codecs.to_vec();
         if let Some(game) = active_game {
             opts.capture_source = service::CaptureSource::WindowHandle {
@@ -1152,6 +1214,7 @@ impl RuntimeState {
             inner.lol_url.clone(),
             inner.active_game.as_ref(),
             &inner.decodable_codecs,
+            inner.active_files.clone(),
         )
     }
 
@@ -1230,6 +1293,7 @@ impl RuntimeState {
                 inner.lol_url.clone(),
                 active_game,
                 &inner.decodable_codecs,
+                inner.active_files.clone(),
             )?;
         }
         Ok(PreparedRuntimeRestart { settings })
@@ -1258,6 +1322,7 @@ impl RuntimeState {
                 inner.lol_url.clone(),
                 active_game,
                 &inner.decodable_codecs,
+                inner.active_files.clone(),
             )?;
             options.recover_abandoned_recordings = false;
             Some(options)
@@ -1390,6 +1455,19 @@ impl RuntimeState {
         Ok((self.settings().cloud, 1))
     }
 
+    /// Read the exact durable settings/account revision used by Cloud record
+    /// compare-and-swap adapters. Keeping this behind the same serialization
+    /// lock as Cloud writes prevents an adapter from pairing a record snapshot
+    /// with a concurrently replaced account generation.
+    pub(crate) fn cloud_settings_snapshot(&self) -> Result<SettingsSnapshot, String> {
+        let _save_guard = Self::lock_cloud_settings_save()?;
+        self.2
+            .as_ref()
+            .ok_or_else(|| "cloud settings snapshot requires a durable settings store".to_string())?
+            .snapshot()
+            .map_err(|error| error.to_string())
+    }
+
     pub(crate) fn with_cloud_settings_exclusive<T>(
         &self,
         operation: impl FnOnce(&crate::settings::CloudSettings, u64) -> Result<T, String>,
@@ -1456,13 +1534,6 @@ impl RuntimeState {
         Ok(inner.settings.clone())
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Task 7's upload adapter will implement UploadRecordPort through this exact CAS"
-        )
-    )]
     pub(crate) fn compare_exchange_cloud_records(
         &self,
         change: CloudRecordCas,
@@ -1483,6 +1554,82 @@ impl RuntimeState {
         let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
         inner.settings.cloud = after.document.cloud.clone();
         Ok(after)
+    }
+
+    /// Reconcile every exact Windows-path alias produced by a successful local
+    /// rename in one whole-settings transaction. Unrelated Cloud records and
+    /// settings fields are retained from the same revision.
+    pub(crate) fn reconcile_cloud_record_path(
+        &self,
+        old_path: &str,
+        new_path: &str,
+    ) -> Result<bool, String> {
+        if old_path == new_path {
+            return Ok(false);
+        }
+        let _save_guard = Self::lock_cloud_settings_save()?;
+        let Some(store) = self.2.as_ref() else {
+            return Err("cloud path reconciliation requires a durable settings store".into());
+        };
+        let before = store.snapshot().map_err(|error| error.to_string())?;
+        let mut matches = before
+            .document
+            .cloud
+            .uploads
+            .iter()
+            .filter(|(_, record)| cloud_paths_equivalent(&record.path, old_path))
+            .map(|(key, record)| (key.clone(), record.clone()))
+            .collect::<Vec<_>>();
+        if matches.is_empty() {
+            return Ok(false);
+        }
+        if matches.len() > MAX_CLOUD_RECORD_CAS_SLOTS {
+            return Err(format!(
+                "cloud rename matched {} path aliases; maximum is {MAX_CLOUD_RECORD_CAS_SLOTS}",
+                matches.len()
+            ));
+        }
+        matches.sort_by(|left, right| {
+            left.1
+                .updated_at_unix
+                .cmp(&right.1.updated_at_unix)
+                .then_with(|| left.0.cmp(&right.0))
+        });
+        let (stable_key, mut replacement) = matches
+            .last()
+            .cloned()
+            .expect("non-empty Cloud path matches have a newest record");
+        if stable_key != replacement.local_clip_id {
+            return Err("cloud rename record key does not match its stable local identity".into());
+        }
+        replacement.path = new_path.to_string();
+        replacement.normalize();
+        let change = CloudRecordCas {
+            account: before.account.clone(),
+            account_generation: before.account_generation,
+            kind: CloudRecordCasKind::StatusSync,
+            expected: matches
+                .into_iter()
+                .map(|(key, record)| CloudRecordSlot {
+                    key,
+                    record: Some(record),
+                })
+                .collect(),
+            replacement: Some(CloudRecordSlot {
+                key: stable_key,
+                record: Some(replacement),
+            }),
+        };
+        let after = store
+            .transact(SettingsTransaction {
+                expected_revision: before.revision,
+                expected_account_generation: before.account_generation,
+                change: SettingsChange::CompareExchangeCloudRecords(change),
+            })
+            .map_err(|error| error.to_string())?;
+        let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+        inner.settings.cloud = after.document.cloud;
+        Ok(true)
     }
 
     fn update_cloud_with<F>(
@@ -2164,6 +2311,11 @@ fn shutdown_app<R: Runtime>(
     let shutdown_owner = shutdown_gate.begin(ShutdownReason::Quit)?;
     let update_gate = app.state::<UpdateOperationGate>();
     let updates_quiesced = update_gate.quiesce_and_wait(UPDATE_QUIESCE_TIMEOUT)?;
+    let mut uploads_quiesced =
+        UploadQuiescence::begin(app).map_err(|message| TauriShellError::Action {
+            command: ShellCommand::Quit,
+            message,
+        })?;
     let started = Instant::now();
     let mut shutdown = ShutdownCoordinator::new();
     let mut effect = shutdown.begin(
@@ -2228,6 +2380,7 @@ fn shutdown_app<R: Runtime>(
                     command: ShellCommand::Quit,
                     message,
                 })?;
+                uploads_quiesced.commit_shutdown();
                 shutdown_owner.commit_exit();
                 updates_quiesced.commit_exit();
                 app.exit(0);
@@ -2243,6 +2396,62 @@ fn shutdown_app<R: Runtime>(
                 });
             }
         };
+    }
+}
+
+fn block_on_isolated_runtime<F, T>(future: F) -> Result<T, String>
+where
+    F: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    std::thread::Builder::new()
+        .name("clipline-upload-finalization".into())
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .map_err(|error| format!("create upload finalization runtime: {error}"))?;
+            Ok(runtime.block_on(future))
+        })
+        .map_err(|error| format!("spawn upload finalization thread: {error}"))?
+        .join()
+        .map_err(|_| "upload finalization thread panicked".to_string())?
+}
+
+struct UploadQuiescence {
+    service: Option<UploadService>,
+}
+
+impl UploadQuiescence {
+    fn begin<R: Runtime>(app: &AppHandle<R>) -> Result<Self, String> {
+        let service = app
+            .try_state::<crate::cloud_upload::TauriUploadState>()
+            .map(|uploads| uploads.service().clone());
+        let guard = Self { service };
+        let Some(service) = guard.service.clone() else {
+            return Ok(guard);
+        };
+        service.quiesce();
+        block_on_isolated_runtime(async move {
+            tokio::time::timeout(UPLOAD_FINALIZATION_TIMEOUT, service.wait_idle())
+                .await
+                .map_err(|_| "timed out finalizing active cloud uploads".to_string())
+        })??;
+        Ok(guard)
+    }
+
+    fn commit_shutdown(&mut self) {
+        if let Some(service) = self.service.take() {
+            service.shutdown();
+        }
+    }
+}
+
+impl Drop for UploadQuiescence {
+    fn drop(&mut self) {
+        if let Some(service) = self.service.take() {
+            let _ = service.resume();
+        }
     }
 }
 
@@ -2483,12 +2692,16 @@ struct AppUpdateShutdownError(String);
 struct TauriUpdateShutdown<'a, R: Runtime> {
     app: &'a AppHandle<R>,
     state: &'a RuntimeState,
+    uploads: Option<UploadQuiescence>,
 }
 
 impl<R: Runtime> UpdateShutdown for TauriUpdateShutdown<'_, R> {
     type Error = AppUpdateShutdownError;
 
     fn publish_durable_state(&mut self) -> Result<(), Self::Error> {
+        if self.uploads.is_none() {
+            self.uploads = Some(UploadQuiescence::begin(self.app).map_err(AppUpdateShutdownError)?);
+        }
         self.state
             .publish_durable_settings()
             .map_err(AppUpdateShutdownError)
@@ -2511,6 +2724,9 @@ impl<R: Runtime> UpdateShutdown for TauriUpdateShutdown<'_, R> {
     }
 
     fn request_exit(&mut self) -> Result<(), Self::Error> {
+        if let Some(uploads) = self.uploads.as_mut() {
+            uploads.commit_shutdown();
+        }
         self.app.exit(0);
         Ok(())
     }
@@ -2588,7 +2804,11 @@ async fn install_update_inner<R: Runtime>(
         .begin(ShutdownReason::InstallUpdate)
         .map_err(|error| error.to_string())?;
     let mut launcher = WindowsInstallerLauncher;
-    let mut shutdown = TauriUpdateShutdown { app, state };
+    let mut shutdown = TauriUpdateShutdown {
+        app,
+        state,
+        uploads: None,
+    };
     let receipt = install_verified(&mut launcher, &mut shutdown, verified)
         .map_err(|error| error.to_string())?;
     shutdown_owner.commit_exit();
@@ -3274,13 +3494,17 @@ pub fn run(
     let (ui_event_sink, ui_event_receiver) =
         crate::desktop::tauri_sink::TauriUiEventSink::channel();
     let launched_by_autostart = launch.mode() == LaunchMode::Autostart;
+    let active_files = ActiveFileRegistry::new();
+    let runtime_state = RuntimeState::with_store_and_registry(
+        settings.clone(),
+        lol_url,
+        settings_store,
+        active_files.clone(),
+    );
 
     tauri::Builder::default()
-        .manage(RuntimeState::with_store(
-            settings.clone(),
-            lol_url,
-            settings_store,
-        ))
+        .manage(runtime_state)
+        .manage(active_files)
         .manage(desktop_state)
         .manage(crate::desktop::ProducerGenerations::default())
         .manage(ui_event_sink)
@@ -3313,6 +3537,7 @@ pub fn run(
             extract_window_icon,
             memory_status,
             frontend_ready,
+            acknowledge_desktop_notice,
             start_microphone_test,
             stop_microphone_test,
             get_autostart_status,
@@ -3359,6 +3584,11 @@ pub fn run(
             crate::library::storage_status
         ])
         .setup(move |app| {
+            let upload_state = crate::cloud_upload::TauriUploadState::build(
+                app.handle().clone(),
+                app.state::<ActiveFileRegistry>().inner().clone(),
+            )?;
+            app.manage(upload_state);
             crate::desktop::tauri_sink::spawn_event_pump(
                 app.handle().clone(),
                 ui_event_receiver,
@@ -3617,6 +3847,11 @@ pub fn run(
             }
             tauri::RunEvent::Exit => {
                 log_diagnostic("run event: exit");
+                if let Some(uploads) =
+                    app.try_state::<crate::cloud_upload::TauriUploadState>()
+                {
+                    uploads.shutdown();
+                }
                 app.state::<MicTestState>().stop();
                 app.state::<RuntimeState>()
                     .send(Cmd::Stop { announce: false });
@@ -3936,8 +4171,7 @@ fn tray_icon() -> Image<'static> {
 mod tests {
     use super::*;
     use crate::settings::{
-        CloudRecordCasKind, CloudRecordSlot, CloudUploadRecord, GameRecordingMode,
-        ReplayStorageMode, ReplayStorageSettings,
+        CloudUploadRecord, GameRecordingMode, ReplayStorageMode, ReplayStorageSettings,
     };
     use clipline_test_utils::TestDir;
     use std::sync::Arc;
@@ -4210,6 +4444,162 @@ mod tests {
         assert_eq!(persisted.revision.get(), seeded.revision.get() + 1);
         assert_eq!(result, persisted);
         assert_eq!(state.settings(), persisted.document);
+    }
+
+    #[test]
+    fn independent_upload_cas_survives_unrelated_settings_revisions() {
+        let dir = TestDir::new("clipline-app", "independent-cloud-record-cas");
+        let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));
+        let initial = store.snapshot().unwrap();
+        let first = durable_upload_record("local-a", 1, r"D:\Videos\Clipline\first.mp4", "queued");
+        let second =
+            durable_upload_record("local-b", 2, r"D:\Videos\Clipline\second.mp4", "queued");
+        let mut document = initial.document.clone();
+        document.cloud.host_url = "https://clips.example.com".into();
+        document.cloud.connected_user_id = Some("user-a".into());
+        document.cloud.credential_target = Some("credential-a".into());
+        document
+            .cloud
+            .uploads
+            .insert("local-a".into(), first.clone());
+        document
+            .cloud
+            .uploads
+            .insert("local-b".into(), second.clone());
+        let seeded = store.replace_document(&initial, document).unwrap();
+        let state = RuntimeState::with_store(seeded.document.clone(), None, store.clone());
+
+        let mut first_uploading = first.clone();
+        first_uploading.upload_status = "uploading".into();
+        first_uploading.updated_at_unix += 1;
+        state
+            .compare_exchange_cloud_records(CloudRecordCas {
+                account: seeded.account.clone(),
+                account_generation: seeded.account_generation,
+                kind: CloudRecordCasKind::Advance {
+                    upload_generation: 1,
+                },
+                expected: vec![CloudRecordSlot {
+                    key: "local-a".into(),
+                    record: Some(first),
+                }],
+                replacement: Some(CloudRecordSlot {
+                    key: "local-a".into(),
+                    record: Some(first_uploading.clone()),
+                }),
+            })
+            .unwrap();
+        state
+            .publish_durable_settings()
+            .expect("an unrelated settings publication advances the global revision");
+
+        let mut second_uploading = second.clone();
+        second_uploading.upload_status = "uploading".into();
+        second_uploading.updated_at_unix += 1;
+        state
+            .compare_exchange_cloud_records(CloudRecordCas {
+                account: seeded.account,
+                account_generation: seeded.account_generation,
+                kind: CloudRecordCasKind::Advance {
+                    upload_generation: 2,
+                },
+                expected: vec![CloudRecordSlot {
+                    key: "local-b".into(),
+                    record: Some(second),
+                }],
+                replacement: Some(CloudRecordSlot {
+                    key: "local-b".into(),
+                    record: Some(second_uploading.clone()),
+                }),
+            })
+            .unwrap();
+
+        let persisted = store.snapshot().unwrap();
+        assert_eq!(persisted.document.cloud.uploads["local-a"], first_uploading);
+        assert_eq!(
+            persisted.document.cloud.uploads["local-b"],
+            second_uploading
+        );
+        assert_eq!(state.settings(), persisted.document);
+    }
+
+    #[test]
+    fn cloud_record_path_reconciliation_is_one_exact_transaction() {
+        let dir = TestDir::new("clipline-app", "settings-store-cloud-rename-cas");
+        let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));
+        let initial = store.snapshot().unwrap();
+        let old_path = r"D:\Videos\Clipline\Session.mp4";
+        let legacy = durable_upload_record("legacy", 3, old_path, "failed");
+        let mut current =
+            durable_upload_record("current", 4, r"d:/videos/clipline/session.MP4", "queued");
+        current.updated_at_unix = legacy.updated_at_unix + 1;
+        let unrelated = durable_upload_record(
+            "unrelated",
+            5,
+            r"D:\Videos\Clipline\Other.mp4",
+            "uploaded_private",
+        );
+        let mut document = initial.document.clone();
+        document.fps = 120;
+        document.osu.client_id = Some("61835".into());
+        document.cloud.uploads.insert("legacy".into(), legacy);
+        document
+            .cloud
+            .uploads
+            .insert("current".into(), current.clone());
+        document
+            .cloud
+            .uploads
+            .insert("unrelated".into(), unrelated.clone());
+        let seeded = store.replace_document(&initial, document).unwrap();
+        let state = RuntimeState::with_store(seeded.document.clone(), None, store.clone());
+        let new_path = r"D:\Videos\Clipline\Ranked win.mp4";
+
+        assert!(state
+            .reconcile_cloud_record_path(r"\\?\d:\videos\clipline\SESSION.mp4", new_path)
+            .unwrap());
+
+        let persisted = store.snapshot().unwrap();
+        assert_eq!(persisted.revision.get(), seeded.revision.get() + 1);
+        assert_eq!(persisted.document.cloud.uploads.len(), 2);
+        assert!(!persisted.document.cloud.uploads.contains_key("legacy"));
+        assert_eq!(persisted.document.cloud.uploads["current"].path, new_path);
+        assert_eq!(persisted.document.cloud.uploads["unrelated"], unrelated);
+        assert_eq!(persisted.document.fps, seeded.document.fps);
+        assert_eq!(persisted.document.osu, seeded.document.osu);
+        assert_eq!(persisted.document.media_dir, seeded.document.media_dir);
+        assert_eq!(state.settings(), persisted.document);
+    }
+
+    #[test]
+    fn unmatched_cloud_record_path_reconciliation_is_byte_identical() {
+        let dir = TestDir::new("clipline-app", "settings-store-cloud-rename-no-match");
+        let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));
+        let initial = store.snapshot().unwrap();
+        let state = RuntimeState::with_store(initial.document.clone(), None, store.clone());
+        state.publish_durable_settings().unwrap();
+        let before = store.snapshot().unwrap();
+        let primary_before = std::fs::read(store.profile().settings_path()).unwrap();
+        let backup_path = store
+            .profile()
+            .settings_path()
+            .with_file_name("settings.json.bak");
+        let backup_before = std::fs::read(&backup_path).ok();
+
+        assert!(!state
+            .reconcile_cloud_record_path(
+                r"D:\Videos\Clipline\Missing.mp4",
+                r"D:\Videos\Clipline\Renamed.mp4",
+            )
+            .unwrap());
+
+        assert_eq!(store.snapshot().unwrap(), before);
+        assert_eq!(state.settings(), before.document);
+        assert_eq!(
+            std::fs::read(store.profile().settings_path()).unwrap(),
+            primary_before
+        );
+        assert_eq!(std::fs::read(backup_path).ok(), backup_before);
     }
 
     #[test]
@@ -4525,6 +4915,22 @@ mod tests {
     }
 
     #[test]
+    fn isolated_runtime_wait_is_safe_inside_a_tokio_runtime() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let value = runtime.block_on(async {
+            block_on_isolated_runtime(async { 42_u8 })
+                .expect("dedicated wait thread must not nest block_on in the caller runtime")
+        });
+
+        assert_eq!(value, 42);
+    }
+
+    #[test]
     fn stale_stopped_status_does_not_clear_newer_recording_sender() {
         let (old_tx, _old_rx) = mpsc::channel();
         let state = RuntimeState::with_sender(old_tx, AppSettings::default(), None);
@@ -4785,6 +5191,7 @@ mod tests {
             recording_generation: 1,
             recording_desired: true,
             settings,
+            active_files: ActiveFileRegistry::new(),
             lol_url: None,
             active_game: None,
             osu_title_events: Vec::new(),
@@ -4813,6 +5220,7 @@ mod tests {
             recording_generation: 4,
             recording_desired: true,
             settings,
+            active_files: ActiveFileRegistry::new(),
             lol_url: None,
             active_game: Some(detected_game("custom-game", "Game", 42)),
             osu_title_events: Vec::new(),
@@ -5068,6 +5476,7 @@ mod tests {
             recording_generation: 1,
             recording_desired: true,
             settings: invalid_disk_replay_settings(),
+            active_files: ActiveFileRegistry::new(),
             lol_url: None,
             active_game: None,
             osu_title_events: Vec::new(),
@@ -5101,6 +5510,7 @@ mod tests {
             recording_generation: 1,
             recording_desired: true,
             settings: AppSettings::default(),
+            active_files: ActiveFileRegistry::new(),
             lol_url: None,
             active_game: None,
             osu_title_events: Vec::new(),
@@ -5235,6 +5645,7 @@ mod tests {
             recording_generation: 1,
             recording_desired: true,
             settings: invalid_disk_replay_settings(),
+            active_files: ActiveFileRegistry::new(),
             lol_url: None,
             active_game: Some(DetectedGame {
                 identity: crate::game_identity::GameIdentity::custom("custom-game"),
@@ -5273,6 +5684,7 @@ mod tests {
             recording_generation: 7,
             recording_desired: true,
             settings: invalid_disk_replay_settings(),
+            active_files: ActiveFileRegistry::new(),
             lol_url: None,
             active_game: None,
             osu_title_events: Vec::new(),
@@ -5450,6 +5862,7 @@ mod tests {
             recording_generation: 0,
             recording_desired: false,
             settings: AppSettings::default(),
+            active_files: ActiveFileRegistry::new(),
             lol_url: None,
             active_game: None,
             osu_title_events: Vec::new(),
@@ -6180,6 +6593,7 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
             recording_generation: 0,
             recording_desired: false,
             settings: AppSettings::default(),
+            active_files: ActiveFileRegistry::new(),
             lol_url: None,
             active_game: Some(DetectedGame {
                 identity: crate::game_identity::GameIdentity::custom(
@@ -6225,6 +6639,7 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
             recording_generation: 0,
             recording_desired: false,
             settings: AppSettings::default(),
+            active_files: ActiveFileRegistry::new(),
             lol_url: Some("http://mock".into()),
             active_game: Some(DetectedGame {
                 identity: crate::game_identity::GameIdentity::built_in_plugin(

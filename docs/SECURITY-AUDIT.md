@@ -5,7 +5,7 @@
 | **Date** | 2026-06-21 |
 | **Version audited** | 0.1.5 (nightly) |
 | **Scope** | Full workspace — Tauri shell (`apps/clipline-app`), all six `crates/*`, the frontend (`ui/`), build/CI config |
-| **Out of scope** | `clipline-cloud-api` (external git dependency, separate repo — see Informational notes) |
+| **Out of scope** | The separately deployed Clipline Cloud server; the desktop's first-party protocol, transport, cache, and upload clients are in this workspace. |
 | **Reviewers** | Two independent passes — **Claude** (full workspace, incl. Windows-gated code) and **Codex** (cross-platform crates + tooling verification). See *Reviewer scope & reconciliation*. |
 
 ## Methodology
@@ -321,10 +321,11 @@ this enables path-hijacking or temp-file races. Test-only, no production impact.
   (login, OS-credential storage in `cloud.rs`, clip upload in `cloud_upload.rs`) is opt-in and
   user-initiated, so it is *technically* consistent — but the prominent "no account / local-only"
   messaging should be reconciled so it does not read as contradictory. *(Claude)*
-- **`clipline-cloud-api` is an external git dependency** (`apps/clipline-app/Cargo.toml:18`),
-  pinned to an immutable rev (good practice). It owns the actual cloud TLS, host validation
-  (`validate_cloud_host`), and token transport — none of which is in this tree, so it is
-  **trust-delegated and unaudited here**. A separate audit of that repo is recommended. *(Claude)*
+- **Cloud desktop transport is now first-party.** The former external `clipline-cloud-api`
+  dependency was removed during the Slint Library/Cloud migration. The bounded rustls protocol,
+  redirect policy, local-only plain-HTTP validation, cache, and upload clients now live in
+  `clipline-library` and are covered by repository-security and transport tests. The separately
+  deployed Cloud server remains outside this workspace's audit scope.
 - **Dev-only unmaintained advisory.** `cargo audit` reports `async-std` as unmaintained, pulled in
   via `httpmock` (a dev-dependency of `clipline-lol`). No production vulnerability. Consider
   replacing `httpmock` eventually. *(Codex)*
@@ -386,4 +387,4 @@ this enables path-hijacking or temp-file races. Test-only, no production impact.
 4. **Validate public MP4/buffer config (#6, #7)** — reject zero timescales, bound sample sizes,
    replace `as` narrowing with `try_from`.
 5. Tighten FFmpeg path resolution (#8) and the NV12 bounds (#9); harden CI; reconcile the privacy
-   claims; and arrange a follow-up audit of `clipline-cloud-api`.
+   claims; and separately audit the deployed Clipline Cloud server.

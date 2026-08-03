@@ -38,13 +38,30 @@ pub mod validation {
 use crate::service::{
     AudioOptions, CaptureRegion, CaptureSource, RecordingMode, ReplayStorageOptions, ServiceOptions,
 };
+use clipline_library::ActiveFileRegistry;
 
 pub trait AppSettingsServiceExt {
+    #[cfg(test)]
     fn to_service_options(&self, lol_url: Option<String>) -> Result<ServiceOptions, String>;
+
+    fn to_service_options_with_registry(
+        &self,
+        lol_url: Option<String>,
+        active_files: ActiveFileRegistry,
+    ) -> Result<ServiceOptions, String>;
 }
 
 impl AppSettingsServiceExt for AppSettings {
+    #[cfg(test)]
     fn to_service_options(&self, lol_url: Option<String>) -> Result<ServiceOptions, String> {
+        self.to_service_options_with_registry(lol_url, ActiveFileRegistry::new())
+    }
+
+    fn to_service_options_with_registry(
+        &self,
+        lol_url: Option<String>,
+        active_files: ActiveFileRegistry,
+    ) -> Result<ServiceOptions, String> {
         self.validate()?;
         Ok(ServiceOptions {
             capture_source: match self.capture_mode {
@@ -63,6 +80,7 @@ impl AppSettingsServiceExt for AppSettings {
             capture_backend: self.capture_backend,
             active_game: None,
             media_dir: self.media_dir_path()?,
+            active_files,
             recover_abandoned_recordings: true,
             lol_url,
             replay_window_s: self.replay_window_s,

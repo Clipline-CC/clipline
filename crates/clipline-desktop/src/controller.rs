@@ -471,6 +471,9 @@ fn apply_cloud_progress<S>(
     update: CloudUploadUpdateKind,
     progress: crate::CloudUploadProgress,
 ) -> Result<CloudProgressOutcome, ControllerError> {
+    progress
+        .validate_terminal_signal()
+        .map_err(ControllerError::InvalidCloudProgress)?;
     match snapshot
         .uploads
         .binary_search_by(|upload| upload_order(upload, &account, &progress.local_clip_id))
@@ -523,7 +526,7 @@ fn apply_cloud_progress<S>(
                     .uploads
                     .iter()
                     .enumerate()
-                    .filter(|(_, upload)| upload_is_terminal(&upload.progress.upload_status))
+                    .filter(|(_, upload)| upload.progress.is_terminal())
                     .min_by_key(|(_, upload)| upload.generation)
                     .map(|(index, _)| index)
                     .ok_or(ControllerError::UploadsFull {
@@ -557,6 +560,7 @@ fn same_cloud_state(
     current.local_clip_id == next.local_clip_id
         && current.path == next.path
         && current.upload_status == next.upload_status
+        && current.terminal == next.terminal
         && current.remote_clip_id == next.remote_clip_id
         && current.remote_url == next.remote_url
         && current.error == next.error
@@ -571,10 +575,6 @@ fn upload_order(
         .account
         .cmp(account)
         .then_with(|| upload.progress.local_clip_id.as_str().cmp(local_clip_id))
-}
-
-fn upload_is_terminal(status: &str) -> bool {
-    matches!(status, "failed" | "uploaded_private" | "uploaded_public")
 }
 
 fn microphone_event_is_stale(snapshot: &MicrophoneSnapshot, generation: Generation) -> bool {
@@ -639,6 +639,15 @@ fn validate_snapshot<S>(snapshot: &DesktopSnapshot<S>) -> Result<(), ControllerE
     }
     if snapshot.uploads.len() > MAX_ACTIVE_UPLOADS {
         return Err(ControllerError::InvalidSnapshot("too many uploads"));
+    }
+    if snapshot
+        .uploads
+        .iter()
+        .any(|upload| upload.progress.validate_terminal_signal().is_err())
+    {
+        return Err(ControllerError::InvalidSnapshot(
+            "upload terminal signal is inconsistent with its status",
+        ));
     }
     if snapshot
         .current_cloud_account

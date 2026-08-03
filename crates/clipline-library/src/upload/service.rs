@@ -628,6 +628,12 @@ pub trait UploadRecordPort: Send + Sync {
         expected: &UploadRecordCursor,
         replacement: UploadRecord,
     ) -> Result<UploadRecordCursor, UploadRecordError>;
+
+    /// Atomically removes the exact expected record. Implementations must
+    /// validate the token's account generation and the complete expected
+    /// cursor inside the same whole-settings commit. A missing or changed
+    /// record is `Superseded`, never a successful no-op.
+    fn remove_exact(&self, expected: &UploadRecordCursor) -> Result<(), UploadRecordError>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -757,6 +763,7 @@ struct ActiveJob {
 #[derive(Debug, Default)]
 struct ActiveJobs {
     accepting: bool,
+    terminated: bool,
     jobs: HashMap<JobKey, ActiveJob>,
 }
 
@@ -1015,10 +1022,39 @@ impl UploadService {
         }
     }
 
+    /// Temporarily stop admission and cancel every active generation.
+    ///
+    /// This is reversible so a failed updater or aborted shell shutdown can
+    /// return the still-running process to normal operation.
+    pub fn quiesce(&self) {
+        let Ok(mut active) = self.inner.active.lock() else {
+            return;
+        };
+        active.accepting = false;
+        for job in active.jobs.values() {
+            job.cancellation.cancel();
+        }
+    }
+
+    /// Resume admission after a reversible quiesce. Returns `false` after
+    /// irreversible shutdown or when the active-job lock is poisoned.
+    pub fn resume(&self) -> bool {
+        let Ok(mut active) = self.inner.active.lock() else {
+            return false;
+        };
+        if active.terminated {
+            return false;
+        }
+        active.accepting = true;
+        true
+    }
+
+    /// Permanently stop admission and cancel every active generation.
     pub fn shutdown(&self) {
         let Ok(mut active) = self.inner.active.lock() else {
             return;
         };
+        active.terminated = true;
         active.accepting = false;
         for job in active.jobs.values() {
             job.cancellation.cancel();
@@ -1075,6 +1111,35 @@ impl UploadService {
             self.inner.publish_state(&next.record, None);
         }
         Ok(next)
+    }
+
+    /// Remove a status record against the exact cursor that produced the
+    /// remote result. This deliberately emits no progress event: callers use
+    /// it for the second confirmed-not-found observation, where removing the
+    /// durable marker is the complete state transition.
+    pub fn remove_status_sync(
+        &self,
+        expected: &UploadRecordCursor,
+    ) -> Result<(), UploadRecordError> {
+        validate_upload_record(&expected.record)?;
+        let owner = UploadAccountOwner::new(
+            expected.record.token.account_key.clone(),
+            expected.record.token.account_generation,
+        );
+        if !self.inner.accounts.is_current(&owner) {
+            return Err(UploadRecordError::new(
+                UploadRecordErrorKind::AccountChanged,
+                "cloud account changed while status removal was in flight",
+            ));
+        }
+        self.inner.records.remove_exact(expected)?;
+        if !self.inner.accounts.is_current(&owner) {
+            return Err(UploadRecordError::new(
+                UploadRecordErrorKind::AccountChanged,
+                "cloud account changed while status removal was committing",
+            ));
+        }
+        Ok(())
     }
 
     pub fn status_cursor(

@@ -33,6 +33,7 @@ stable; the baseline commit preserves exact historical locations.
 | `command:extract_window_icon` | `app.rs`; return bounded icon data for a selected window. | M8 games | Size/error test and manual icon check. | `not_started` |
 | `command:memory_status` | `app.rs`; cached in-app process-tree PWS diagnostic, not benchmark truth. | M5 diagnostics | Cross-check against external sampler; label scope. | `not_started` |
 | `command:frontend_ready` | Returns the versioned authoritative desktop snapshot plus its last reduced event sequence; legacy fields remain additive. | M5 bootstrap snapshot | Startup race and stale-revision tests. | `implemented` |
+| `command:acknowledge_desktop_notice` | Acknowledges one exact decimal-string notice ID only for the current foreground lifecycle revision; stale/background windows cannot consume durable feedback. | M7 cloud controller | Tauri lifecycle-race, exact-ID, UI presentation, and Slint attachment-fence tests. | `implemented` |
 | `command:start_microphone_test` | `app.rs`; start native microphone monitor stream. | M8 capture settings | Start/idempotence/device-error tests. | `not_started` |
 | `command:stop_microphone_test` | `app.rs`; synchronously stop microphone monitor. | M8 capture settings | Stop/background-entry tests. | `not_started` |
 | `command:get_autostart_status` | `app.rs`; report configured per-user launch state. | M6 Windows shell | Registry adapter test and installed smoke test. | `in_progress` |
@@ -51,8 +52,8 @@ stable; the baseline commit preserves exact historical locations.
 | `command:cloud_status` | `cloud.rs`; registered legacy status endpoint, currently unused by JS. | M7 cloud controller | Explicit preserve/remove decision test. | `not_started` |
 | `command:cloud_connect` | `cloud.rs`; validate endpoint/consent and store credentials. | M8 cloud settings | HTTPS/HTTP-consent/credential tests. | `not_started` |
 | `command:cloud_disconnect` | `cloud.rs`; clear account credentials and state. | M8 cloud settings | Account-replacement and cache-state test. | `not_started` |
-| `command:upload_clip_to_cloud` | `cloud.rs`; lease local clip and start upload. | M7 cloud controller | Lease/progress/cancel fixture. | `not_started` |
-| `command:sync_cloud_clip_status` | `cloud.rs`; reconcile local and authoritative remote state. | M7 cloud controller | Windows path identity and stale-result tests. | `not_started` |
+| `command:upload_clip_to_cloud` | Thin Tauri adapter starts the shared bounded upload service while retaining the original clip's process-wide file lease. | M7 cloud controller | Lease/progress/cancel, account-replacement, exact-CAS, and adapter fixtures. | `implemented` |
+| `command:sync_cloud_clip_status` | Shared status cursor plus exact account/record CAS reconciles local and authoritative remote state, including two-observation 404 removal. | M7 cloud controller | Windows path identity, two-step removal, and delayed stale-result tests. | `implemented` |
 | `command:list_cloud_clips` | `cloud.rs`; paged authoritative remote listing. | M7 cloud controller | Pagination/generation fixture. | `not_started` |
 | `command:cloud_clip_thumbnail` | Shared `clipline-library/cloud/{cache,http}.rs`; Tauri remains a thin asset-scope/JSON adapter for the bounded cached remote thumbnail. | M7 cloud controller | Cache/quota/cancellation test. | `not_started` |
 | `command:cache_cloud_clip_media` | Shared `clipline-library/cloud/{cache,http}.rs`; Tauri adapts the account-fenced download and scoped media lease. | M7 cloud controller | Cache limit, partial download, stale-open tests. | `not_started` |

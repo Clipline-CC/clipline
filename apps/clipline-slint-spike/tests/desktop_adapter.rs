@@ -20,6 +20,7 @@ fn upload(generation: u64, id: &str) -> UiEvent {
             local_clip_id: id.into(),
             path: format!(r"C:\{id}.mp4"),
             upload_status: "uploading".into(),
+            terminal: false,
             received_size_bytes: generation,
             file_size_bytes: 100,
             remote_clip_id: None,
@@ -69,8 +70,60 @@ fn projection_is_revisioned_and_bounds_the_visible_upload_model() {
     assert_eq!(projection.revision, snapshot.revision);
     assert_eq!(projection.recorder_label, "RECORDING · H.264");
     assert_eq!(projection.notice, "warning");
+    assert_eq!(projection.notice_id, Some(snapshot.notices[0].id));
     assert_eq!(projection.uploads.len(), MAX_ACTIVE_UPLOADS);
     assert_eq!(projection.uploads[0].local_clip_id, "clip-00");
+}
+
+#[test]
+fn exact_notice_acknowledgement_is_attachment_and_revision_fenced() {
+    let mut controller = DesktopController::new((), vec!["warning".into()]).unwrap();
+    let gate = AttachmentGate::default();
+    let snapshot = controller.snapshot();
+    let notice_id = snapshot.notices[0].id;
+    let first = gate.attach(snapshot.revision.get()).unwrap();
+
+    assert!(
+        !clipline_slint_spike::desktop::acknowledge_presented_notice(
+            &mut controller,
+            &gate,
+            first,
+            snapshot.revision,
+            notice_id + 1,
+        )
+    );
+    assert_eq!(controller.snapshot().notices.len(), 1);
+
+    gate.detach(first).unwrap();
+    let second = gate.attach(snapshot.revision.get()).unwrap();
+    assert!(
+        !clipline_slint_spike::desktop::acknowledge_presented_notice(
+            &mut controller,
+            &gate,
+            first,
+            snapshot.revision,
+            notice_id,
+        )
+    );
+    assert_eq!(controller.snapshot().notices.len(), 1);
+
+    assert!(clipline_slint_spike::desktop::acknowledge_presented_notice(
+        &mut controller,
+        &gate,
+        second,
+        snapshot.revision,
+        notice_id,
+    ));
+    assert!(controller.snapshot().notices.is_empty());
+    assert!(
+        !clipline_slint_spike::desktop::acknowledge_presented_notice(
+            &mut controller,
+            &gate,
+            second,
+            snapshot.revision,
+            notice_id,
+        )
+    );
 }
 
 #[test]

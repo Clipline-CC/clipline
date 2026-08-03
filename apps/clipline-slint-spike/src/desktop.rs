@@ -7,8 +7,9 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use clipline_desktop::{
-    ui_event_channel, ApplyEventOutcome, DesktopController, DesktopSnapshot, Revision, UiEvent,
-    UiEventPublishOutcome, UiEventReceiver, UiEventSendError, UiEventSender, MAX_ACTIVE_UPLOADS,
+    ui_event_channel, ApplyEventOutcome, DesktopController, DesktopSnapshot, Revision, UiAction,
+    UiEvent, UiEventPublishOutcome, UiEventReceiver, UiEventSendError, UiEventSender,
+    MAX_ACTIVE_UPLOADS,
 };
 
 use crate::{CliplineSpike, DesktopUploadItem, SpikeTray};
@@ -25,6 +26,7 @@ pub struct DesktopProjection {
     pub revision: Revision,
     pub recorder_label: String,
     pub notice: String,
+    pub notice_id: Option<u64>,
     pub uploads: Vec<DesktopUploadProjection>,
 }
 
@@ -45,10 +47,9 @@ impl DesktopProjection {
         } else {
             "STOPPED".to_owned()
         };
-        let notice = snapshot
-            .notices
-            .last()
-            .map_or_else(String::new, |notice| notice.message.clone());
+        let pending_notice = snapshot.notices.last();
+        let notice = pending_notice.map_or_else(String::new, |notice| notice.message.clone());
+        let notice_id = pending_notice.map(|notice| notice.id);
         let uploads = snapshot
             .uploads
             .iter()
@@ -69,6 +70,7 @@ impl DesktopProjection {
             revision: snapshot.revision,
             recorder_label,
             notice,
+            notice_id,
             uploads,
         }
     }
@@ -155,6 +157,36 @@ impl AttachmentGate {
     }
 }
 
+/// Acknowledge only the exact notice that was successfully projected into the
+/// current live attachment at the controller revision that carried it.
+///
+/// A detached/replaced window or a delayed projection cannot consume a notice
+/// intended for the next foreground window.
+#[must_use]
+pub fn acknowledge_presented_notice<S>(
+    controller: &mut DesktopController<S>,
+    gate: &AttachmentGate,
+    attachment: DesktopAttachment,
+    presented_revision: Revision,
+    notice_id: u64,
+) -> bool
+where
+    S: Clone + PartialEq,
+{
+    if !gate.is_current(attachment, presented_revision.get())
+        || controller.snapshot().revision != presented_revision
+    {
+        return false;
+    }
+    let Ok(outcome) = controller.dispatch(UiAction::AcknowledgeNotice { notice_id }) else {
+        return false;
+    };
+    if outcome.changed {
+        gate.post_revision(outcome.revision.get());
+    }
+    outcome.changed
+}
+
 struct DesktopRuntimeState {
     controller: DesktopController<()>,
     attachment: Option<(DesktopAttachment, slint::Weak<CliplineSpike>)>,
@@ -225,7 +257,24 @@ impl SlintDesktopAdapter {
             state.attachment = Some((attachment, window));
             (attachment, projection)
         };
+        let presented_revision = projection.revision;
+        let notice_id = projection.notice_id;
         apply_projection(&component, projection);
+        if let Some(notice_id) = notice_id {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            if state.attachment.as_ref().map(|current| current.0) == Some(attachment) {
+                let _ = acknowledge_presented_notice(
+                    &mut state.controller,
+                    &self.gate,
+                    attachment,
+                    presented_revision,
+                    notice_id,
+                );
+            }
+        }
         Ok(attachment)
     }
 
@@ -301,6 +350,7 @@ fn spawn_consumer(
                 let revision = projection.revision.get();
                 let gate = gate.clone();
                 let tray = tray.clone();
+                let state = Arc::clone(&state);
                 if slint::invoke_from_event_loop(move || {
                     if !gate.is_latest(revision) {
                         return;
@@ -313,7 +363,24 @@ fn spawn_consumer(
                             return;
                         }
                         if let Some(window) = weak.upgrade() {
+                            let notice_id = projection.notice_id;
+                            let presented_revision = projection.revision;
                             apply_projection(&window, projection);
+                            if let Some(notice_id) = notice_id {
+                                let mut state =
+                                    state.lock().unwrap_or_else(|poison| poison.into_inner());
+                                if state.attachment.as_ref().map(|current| current.0)
+                                    == Some(attachment)
+                                {
+                                    let _ = acknowledge_presented_notice(
+                                        &mut state.controller,
+                                        &gate,
+                                        attachment,
+                                        presented_revision,
+                                        notice_id,
+                                    );
+                                }
+                            }
                         }
                     }
                 })

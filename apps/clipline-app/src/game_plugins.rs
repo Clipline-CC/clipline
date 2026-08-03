@@ -10,6 +10,7 @@ use std::sync::{mpsc::Receiver, OnceLock};
 use std::time::Instant;
 
 use clipline_capture::windows::CapturableWindow;
+#[cfg(test)]
 use clipline_events::GameId;
 use serde::{Deserialize, Serialize};
 
@@ -18,7 +19,9 @@ use crate::settings::{
     GamePluginReviewSettings, GamePluginSettings, GameRecordingMode, GameSettings,
 };
 
-pub use crate::game_identity::{LEAGUE_OF_LEGENDS_ID, OSU_ID};
+#[cfg(test)]
+pub use crate::game_identity::LEAGUE_OF_LEGENDS_ID;
+pub use crate::game_identity::OSU_ID;
 pub const LEAGUE_LIVE_CLIENT_EVENT_SOURCE: &str = "league_live_client";
 pub const GAME_PROFILE_SCHEMA_VERSION: u32 = 1;
 
@@ -412,6 +415,7 @@ pub fn catalog() -> Vec<GamePluginInfo> {
     catalog
 }
 
+#[cfg(test)]
 pub fn plugin_id_for_game_id(game_id: GameId) -> &'static str {
     match game_id {
         GameId::LeagueOfLegends => LEAGUE_OF_LEGENDS_ID,
@@ -421,6 +425,7 @@ pub fn plugin_id_for_game_id(game_id: GameId) -> &'static str {
     }
 }
 
+#[cfg(test)]
 pub fn display_name_for_game_id(game_id: GameId) -> &'static str {
     match game_id {
         GameId::LeagueOfLegends => "League of Legends",

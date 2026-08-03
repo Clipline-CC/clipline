@@ -28,9 +28,14 @@ use clipline_capture::{
     even_dimensions, PipelineError, Recorder, RelativeClock, ReplayStorageConfig,
 };
 use clipline_events::{is_review_event, ClipAudioTrack, EventKind, MarkerLog, PlayerSummary};
+use clipline_library::{
+    ActiveFileRegistry, LocalLibraryRepository, StandardRepositoryFileSystem,
+    ACTIVE_UPLOAD_MUTATION_ERROR,
+};
 use clipline_storage::{
-    clip_ownership_marker_path, enforce_quota_with_protection, ensure_clip_owned,
-    recover_recording_files, remove_clip_ownership_marker, storage_status, StorageStatus,
+    clip_ownership_marker_path, enforce_quota_with_deletion_authority, ensure_clip_owned,
+    recover_recording_files, remove_clip_ownership_marker, storage_status, QuotaDeletionOutcome,
+    StorageStatus,
 };
 use clipline_storage::{session_label, SessionTracker};
 
@@ -421,6 +426,9 @@ pub struct ServiceOptions {
     pub active_game: Option<ActiveGame>,
     /// Root folder for saved media.
     pub media_dir: PathBuf,
+    /// Process-owned file-activity registry shared with upload jobs and every
+    /// local Library mutation. Clones retain the same ownership state.
+    pub active_files: ActiveFileRegistry,
     /// Whether this run should recover leftover `.mp4.recording` files.
     /// Internal recorder restarts disable this to avoid stealing the previous
     /// recorder thread's active full-session temp file while it is shutting down.
@@ -457,6 +465,7 @@ impl Default for ServiceOptions {
             capture_backend: CaptureBackend::Auto,
             active_game: None,
             media_dir: default_clips_dir(),
+            active_files: ActiveFileRegistry::new(),
             recover_abandoned_recordings: true,
             lol_url: None,
             replay_window_s: 60.0,
@@ -2108,12 +2117,7 @@ fn emit_saved_clip(
     meta: SavedClipMeta,
     opts: &ServiceOptions,
 ) {
-    let report = match enforce_quota_with_protection(
-        clips_dir,
-        opts.disk_quota_bytes,
-        Some(path),
-        crate::cloud_upload::is_active_upload_source,
-    ) {
+    let report = match enforce_saved_clip_quota(clips_dir, path, opts) {
         Ok(report) => report,
         Err(e) => {
             warn_user(events, format!("storage cleanup: {e}"));
@@ -2146,6 +2150,42 @@ fn emit_saved_clip(
         storage_quota_bytes: report.status.quota_bytes,
         storage_over_quota: report.status.is_over_quota(),
     });
+}
+
+fn enforce_saved_clip_quota(
+    clips_dir: &Path,
+    protected_path: &Path,
+    opts: &ServiceOptions,
+) -> std::io::Result<clipline_storage::GcReport> {
+    let repository = LocalLibraryRepository::with_seams(
+        clips_dir,
+        std::sync::Arc::new(StandardRepositoryFileSystem),
+        std::sync::Arc::new(opts.active_files.clone()),
+    )
+    .map_err(|error| std::io::Error::other(error.to_string()))?;
+
+    enforce_quota_with_deletion_authority(
+        clips_dir,
+        opts.disk_quota_bytes,
+        Some(protected_path),
+        |candidate| {
+            repository
+                .validate_clip_path(candidate.to_string_lossy().as_ref())
+                .is_ok_and(|clip| opts.active_files.is_identity_active(clip.file_identity()))
+        },
+        |candidate| {
+            let clip = repository
+                .validate_clip_path(candidate.to_string_lossy().as_ref())
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            match repository.delete(&clip) {
+                Ok(()) => Ok(QuotaDeletionOutcome::Deleted),
+                Err(error) if error.to_string() == ACTIVE_UPLOAD_MUTATION_ERROR => {
+                    Ok(QuotaDeletionOutcome::Protected)
+                }
+                Err(error) => Err(std::io::Error::other(error.to_string())),
+            }
+        },
+    )
 }
 
 fn save(
@@ -2385,8 +2425,59 @@ fn is_within_temp(dir: &Path, temp_dir: &Path) -> bool {
 mod tests {
     use super::*;
     use clipline_capture::{MockCapture, MockEncoder};
+    use clipline_library::{
+        local_clip_id_for_source, CloudAccountGeneration, CloudAccountKey, DurableUploadToken,
+        UploadGeneration,
+    };
     use clipline_test_utils::TestDir;
     use std::collections::VecDeque;
+
+    #[test]
+    fn save_time_quota_uses_shared_registry_as_deletion_authority() {
+        let directory = TestDir::new("clipline-service", "shared-quota-registry");
+        let root = directory.path();
+        let uploading = root.join("a-uploading.mp4");
+        let deletable = root.join("b-deletable.mp4");
+        let just_saved = root.join("z-just-saved.mp4");
+        for path in [&uploading, &deletable, &just_saved] {
+            std::fs::write(path, [0_u8; 10]).unwrap();
+            ensure_clip_owned(path).unwrap();
+        }
+
+        let active_files = ActiveFileRegistry::new();
+        let repository = LocalLibraryRepository::with_seams(
+            root,
+            std::sync::Arc::new(StandardRepositoryFileSystem),
+            std::sync::Arc::new(active_files.clone()),
+        )
+        .unwrap();
+        let source = repository
+            .validate_clip_path(uploading.to_string_lossy().as_ref())
+            .unwrap();
+        let token = DurableUploadToken {
+            account_key: CloudAccountKey::new("account-a").unwrap(),
+            account_generation: CloudAccountGeneration::new(1),
+            upload_generation: UploadGeneration::new(1),
+            local_clip_id: local_clip_id_for_source(source.file_identity()),
+            source_path: source.comparison_identity().clone(),
+        };
+        let lease = active_files.acquire_upload(&source, token).unwrap();
+        let opts = ServiceOptions {
+            media_dir: root.to_path_buf(),
+            active_files,
+            // Two retained 10-byte MP4s plus their 2-byte ownership markers.
+            disk_quota_bytes: Some(24),
+            ..ServiceOptions::default()
+        };
+
+        let report = enforce_saved_clip_quota(root, &just_saved, &opts).unwrap();
+
+        assert_eq!(report.deleted_clips, 1);
+        assert!(uploading.exists());
+        assert!(!deletable.exists());
+        assert!(just_saved.exists());
+        drop(lease);
+    }
 
     struct TimeoutSource;
 

@@ -380,7 +380,7 @@ fn parity_ledger_covers_the_shipping_frontend_boundary() {
     let commands = registered_commands(&app_rs);
     assert_eq!(
         commands.len(),
-        61,
+        62,
         "review new/removed production commands and update the ledger baseline"
     );
     assert_tokens(

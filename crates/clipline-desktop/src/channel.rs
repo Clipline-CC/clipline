@@ -48,6 +48,8 @@ pub enum UiEventSendError {
     },
     #[error("cloud account owner generation does not match its event")]
     InvalidAccountGeneration,
+    #[error("invalid cloud upload progress: {0}")]
+    InvalidCloudProgress(&'static str),
     #[error("UI event sequence is exhausted")]
     SequenceExhausted,
 }
@@ -297,6 +299,11 @@ fn generation_domain(event: &UiEvent) -> Option<(GenerationDomain, Generation)> 
 }
 
 fn validate_generation(state: &ChannelState, event: &UiEvent) -> Result<(), UiEventSendError> {
+    if let UiEvent::CloudUploadProgress { progress, .. } = event {
+        progress
+            .validate_terminal_signal()
+            .map_err(UiEventSendError::InvalidCloudProgress)?;
+    }
     if let UiEvent::WindowLifecycle { snapshot } = event {
         if let Some((current, mode)) = state.lifecycle {
             if snapshot.revision < current

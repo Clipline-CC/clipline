@@ -70,6 +70,21 @@ impl FakeRecords {
             .unwrap()
             .clone()
     }
+
+    fn current_optional(
+        &self,
+        token: &clipline_library::DurableUploadToken,
+    ) -> Option<UploadRecordCursor> {
+        self.records
+            .lock()
+            .unwrap()
+            .get(&(
+                token.account_key.as_str().to_owned(),
+                token.account_generation.get(),
+                token.local_clip_id.as_str().to_owned(),
+            ))
+            .cloned()
+    }
 }
 
 impl UploadRecordPort for FakeRecords {
@@ -160,6 +175,20 @@ impl UploadRecordPort for FakeRecords {
         records.insert(key, cursor.clone());
         self.writes.fetch_add(1, Ordering::Relaxed);
         Ok(cursor)
+    }
+
+    fn remove_exact(&self, expected: &UploadRecordCursor) -> Result<(), UploadRecordError> {
+        let mut records = self.records.lock().unwrap();
+        let key = record_key(&expected.record);
+        if records.get(&key) != Some(expected) {
+            return Err(UploadRecordError::new(
+                UploadRecordErrorKind::Superseded,
+                "record changed",
+            ));
+        }
+        records.remove(&key);
+        self.writes.fetch_add(1, Ordering::Relaxed);
+        Ok(())
     }
 }
 
@@ -739,6 +768,40 @@ async fn dropping_the_caller_does_not_cancel_window_independent_work() {
 }
 
 #[tokio::test]
+async fn reversible_quiesce_cancels_current_work_and_allows_a_later_upload() {
+    let harness = Harness::new("reversible-quiesce");
+    harness.preparation.block.store(true, Ordering::Release);
+    let first = harness.service.start(harness.request(false)).unwrap();
+    harness.preparation.wait_entered().await;
+
+    harness.service.quiesce();
+    assert!(matches!(
+        harness.service.start(harness.request(false)).unwrap_err(),
+        UploadStartError::ShuttingDown
+    ));
+    assert_eq!(first.wait().await.outcome, UploadJobOutcome::Canceled);
+    harness.service.wait_idle().await;
+
+    harness.preparation.unblock();
+    assert!(harness.service.resume());
+    let second = harness.service.start(harness.request(false)).unwrap();
+    assert_eq!(second.wait().await.outcome, UploadJobOutcome::Completed);
+}
+
+#[tokio::test]
+async fn irreversible_shutdown_cannot_be_resumed() {
+    let harness = Harness::new("irreversible-shutdown");
+
+    harness.service.shutdown();
+
+    assert!(!harness.service.resume());
+    assert!(matches!(
+        harness.service.start(harness.request(false)).unwrap_err(),
+        UploadStartError::ShuttingDown
+    ));
+}
+
+#[tokio::test]
 async fn remote_identity_is_a_durable_barrier_before_transport_continues() {
     let harness = Harness::new("remote-id-barrier");
     harness.transport.block.store(true, Ordering::Release);
@@ -800,6 +863,38 @@ async fn status_sync_rejects_oversized_state_before_cas_or_event() {
     assert_eq!(error.kind(), UploadRecordErrorKind::Persistence);
     assert_eq!(harness.records.current(&token), expected);
     assert_eq!(*harness.events.events.lock().unwrap(), before_events);
+}
+
+#[tokio::test]
+async fn status_sync_can_replace_first_not_found_marker_then_remove_it_exactly() {
+    let harness = Harness::new("status-sync-remove");
+    let handle = harness.service.start(harness.request(false)).unwrap();
+    let token = handle.token().clone();
+    assert_eq!(handle.wait().await.outcome, UploadJobOutcome::Completed);
+    let completed = harness.records.current(&token);
+
+    let mut first_not_found = completed.record.clone();
+    first_not_found.error = Some("remote clip not found once".into());
+    let marker = harness
+        .service
+        .commit_status_sync(&completed, first_not_found)
+        .unwrap();
+    assert_eq!(harness.records.current(&token), marker);
+    let events_after_marker = harness.events.events.lock().unwrap().clone();
+    let account_checks_before_remove = harness.accounts.checks.load(Ordering::Acquire);
+
+    harness.service.remove_status_sync(&marker).unwrap();
+    assert_eq!(
+        harness.accounts.checks.load(Ordering::Acquire),
+        account_checks_before_remove + 2
+    );
+    assert_eq!(harness.records.current_optional(&token), None);
+    assert_eq!(*harness.events.events.lock().unwrap(), events_after_marker);
+
+    let error = harness.service.remove_status_sync(&marker).unwrap_err();
+    assert_eq!(error.kind(), UploadRecordErrorKind::Superseded);
+    assert_eq!(harness.records.current_optional(&token), None);
+    assert_eq!(*harness.events.events.lock().unwrap(), events_after_marker);
 }
 
 #[tokio::test]

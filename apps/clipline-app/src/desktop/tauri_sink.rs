@@ -1,6 +1,6 @@
 use clipline_desktop::{
-    ui_event_channel, ApplyEventOutcome, RecorderEvent, UiEvent, UiEventReceiver, UiEventSendError,
-    UiEventSender, UiEventSink,
+    ui_event_channel, ApplyEventOutcome, DesktopSnapshot, RecorderEvent, UiEvent, UiEventReceiver,
+    UiEventSendError, UiEventSender, UiEventSink, WindowLifecycleSnapshot,
 };
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
@@ -15,6 +15,44 @@ pub const DESKTOP_EVENT_SEQUENCE_EVENT: &str = "desktop-event-sequence";
 struct DesktopEventSequence {
     event_sequence: u64,
     snapshot_revision: clipline_desktop::Revision,
+    window_lifecycle: WindowLifecycleSnapshot,
+    lifecycle_revision: String,
+    notices: Vec<DesktopNoticePresentation>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct DesktopNoticePresentation {
+    /// Decimal text keeps the full `u64` identity exact across JavaScript IPC.
+    pub id: String,
+    pub message: String,
+}
+
+pub fn pending_notice_presentations<S>(
+    snapshot: &DesktopSnapshot<S>,
+) -> Vec<DesktopNoticePresentation> {
+    snapshot
+        .notices
+        .iter()
+        .map(|notice| DesktopNoticePresentation {
+            id: notice.id.to_string(),
+            message: notice.message.clone(),
+        })
+        .collect()
+}
+
+impl DesktopEventSequence {
+    fn from_snapshot(
+        event_sequence: u64,
+        snapshot: &DesktopSnapshot<crate::settings::AppSettings>,
+    ) -> Self {
+        Self {
+            event_sequence,
+            snapshot_revision: snapshot.revision,
+            window_lifecycle: snapshot.lifecycle,
+            lifecycle_revision: snapshot.lifecycle.revision.get().to_string(),
+            notices: pending_notice_presentations(snapshot),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -48,7 +86,8 @@ pub fn spawn_event_pump<R: Runtime>(
                     let state = app.state::<DesktopState>();
                     match state.apply_sequenced(update.sequence, update.event.clone()) {
                         Ok(ApplyEventOutcome::Applied { .. }) => {
-                            emit_sequence(&app, update.sequence, state.snapshot().revision);
+                            let snapshot = state.snapshot();
+                            emit_sequence(&app, update.sequence, &snapshot);
                             for emission in tauri_emissions(&update.event) {
                                 if let Err(error) = app.emit(emission.name, emission.payload) {
                                     tracing::error!(
@@ -60,7 +99,8 @@ pub fn spawn_event_pump<R: Runtime>(
                             }
                         }
                         Ok(ApplyEventOutcome::Unchanged | ApplyEventOutcome::Stale) => {
-                            emit_sequence(&app, update.sequence, state.snapshot().revision);
+                            let snapshot = state.snapshot();
+                            emit_sequence(&app, update.sequence, &snapshot);
                         }
                         Err(error) => tracing::error!(
                             event = "desktop_event_apply_failed",
@@ -79,14 +119,11 @@ pub fn spawn_event_pump<R: Runtime>(
 fn emit_sequence<R: Runtime>(
     app: &AppHandle<R>,
     sequence: u64,
-    snapshot_revision: clipline_desktop::Revision,
+    snapshot: &DesktopSnapshot<crate::settings::AppSettings>,
 ) {
     if let Err(error) = app.emit(
         DESKTOP_EVENT_SEQUENCE_EVENT,
-        DesktopEventSequence {
-            event_sequence: sequence,
-            snapshot_revision,
-        },
+        DesktopEventSequence::from_snapshot(sequence, snapshot),
     ) {
         tracing::error!(
             event = "tauri_ui_sequence_emit_failed",
@@ -139,10 +176,36 @@ fn tauri_emissions(event: &UiEvent) -> Vec<TauriEmission> {
 
 #[cfg(test)]
 mod tests {
-    use clipline_desktop::{GameDetection, Generation, RecorderEvent, UiEvent};
+    use clipline_desktop::{
+        GameDetection, Generation, RecorderEvent, Revision, UiEvent, WindowLifecycleMode,
+        WindowLifecycleSnapshot,
+    };
     use serde_json::json;
 
-    use super::tauri_emissions;
+    use super::{tauri_emissions, DesktopEventSequence};
+    use crate::desktop::DesktopState;
+    use crate::settings::AppSettings;
+
+    #[test]
+    fn sequence_payload_carries_exact_pending_notice_ids_and_lifecycle() {
+        let state = DesktopState::new(AppSettings::default(), vec!["warning".into()]).unwrap();
+        let foreground =
+            WindowLifecycleSnapshot::new(Revision::new(7), WindowLifecycleMode::Foreground);
+        state
+            .apply_event(UiEvent::WindowLifecycle {
+                snapshot: foreground,
+            })
+            .unwrap();
+        let snapshot = state.snapshot();
+        let payload = DesktopEventSequence::from_snapshot(9, &snapshot);
+
+        assert_eq!(payload.event_sequence, 9);
+        assert_eq!(payload.window_lifecycle, foreground);
+        assert_eq!(payload.lifecycle_revision, "7");
+        assert_eq!(payload.notices.len(), 1);
+        assert_eq!(payload.notices[0].id, snapshot.notices[0].id.to_string());
+        assert_eq!(payload.notices[0].message, "warning");
+    }
 
     #[test]
     fn recorder_status_and_error_keep_legacy_event_json() {

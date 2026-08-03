@@ -76,6 +76,7 @@ fn cloud_bytes(account: CloudAccountOwner, generation: u64, id: &str, received: 
             local_clip_id: id.to_owned(),
             path: format!(r"C:\{id}.mp4"),
             upload_status: "uploading".to_owned(),
+            terminal: false,
             received_size_bytes: received,
             file_size_bytes: 100,
             remote_clip_id: None,
@@ -102,6 +103,7 @@ fn cloud_state(
             local_clip_id: id.to_owned(),
             path: format!(r"C:\{id}.mp4"),
             upload_status: status.to_owned(),
+            terminal: false,
             received_size_bytes: received,
             file_size_bytes: 100,
             remote_clip_id: None,
@@ -588,4 +590,116 @@ fn completed_uploads_are_evicted_oldest_first_under_capacity_pressure() {
         .uploads
         .iter()
         .any(|upload| upload.progress.local_clip_id == "new-upload"));
+}
+
+#[test]
+fn every_terminal_upload_phase_is_evictable_under_capacity_pressure() {
+    for (status, explicit_terminal) in [
+        ("canceled", false),
+        ("failed", false),
+        ("uploaded_private", false),
+        ("uploaded_public", false),
+        ("uploaded_processing", true),
+    ] {
+        let mut controller = DesktopController::new((), Vec::new()).unwrap();
+        controller
+            .apply_event(account_changed(owner("account-a", 1)))
+            .unwrap();
+        for index in 0..MAX_ACTIVE_UPLOADS {
+            let mut event = cloud_with_status(
+                index as u64 + 1,
+                &format!("terminal-{index:02}"),
+                100,
+                status,
+            );
+            let UiEvent::CloudUploadProgress { progress, .. } = &mut event else {
+                unreachable!();
+            };
+            progress.terminal = explicit_terminal;
+            controller.apply_event(event).unwrap();
+        }
+
+        controller
+            .apply_event(cloud_with_status(100, "new-upload", 0, "uploading"))
+            .unwrap();
+        let snapshot = controller.snapshot();
+        assert_eq!(snapshot.uploads.len(), MAX_ACTIVE_UPLOADS);
+        assert!(!snapshot
+            .uploads
+            .iter()
+            .any(|upload| upload.progress.local_clip_id == "terminal-00"));
+    }
+}
+
+#[test]
+fn uploaded_processing_requires_the_explicit_terminal_signal_for_eviction() {
+    let mut controller = DesktopController::new((), Vec::new()).unwrap();
+    controller
+        .apply_event(account_changed(owner("account-a", 1)))
+        .unwrap();
+    for index in 0..MAX_ACTIVE_UPLOADS {
+        controller
+            .apply_event(cloud_with_status(
+                index as u64 + 1,
+                &format!("verifying-{index:02}"),
+                100,
+                "uploaded_processing",
+            ))
+            .unwrap();
+    }
+
+    let before = controller.snapshot();
+    assert_eq!(
+        controller.apply_event(cloud_with_status(100, "overflow", 0, "uploading")),
+        Err(ControllerError::UploadsFull {
+            capacity: MAX_ACTIVE_UPLOADS
+        })
+    );
+    assert_eq!(controller.snapshot(), before);
+
+    let mut abandoned = cloud_with_status(1, "verifying-00", 100, "uploaded_processing");
+    let UiEvent::CloudUploadProgress { progress, .. } = &mut abandoned else {
+        unreachable!();
+    };
+    progress.terminal = true;
+    assert!(matches!(
+        controller.apply_event(abandoned),
+        Ok(ApplyEventOutcome::Applied { .. })
+    ));
+    controller
+        .apply_event(cloud_with_status(100, "replacement", 0, "uploading"))
+        .unwrap();
+    let snapshot = controller.snapshot();
+    assert_eq!(snapshot.uploads.len(), MAX_ACTIVE_UPLOADS);
+    assert!(!snapshot
+        .uploads
+        .iter()
+        .any(|upload| upload.progress.local_clip_id == "verifying-00"));
+    assert!(snapshot
+        .uploads
+        .iter()
+        .any(|upload| upload.progress.local_clip_id == "replacement"));
+}
+
+#[test]
+fn invalid_terminal_signal_is_rejected_without_mutating_the_snapshot() {
+    let mut controller = DesktopController::new((), Vec::new()).unwrap();
+    let account = owner("account-a", 1);
+    controller
+        .apply_event(account_changed(account.clone()))
+        .unwrap();
+    let mut event = cloud_state(account, 1, "clip", 0, "uploading", None);
+    let UiEvent::CloudUploadProgress { progress, .. } = &mut event else {
+        unreachable!();
+    };
+    progress.terminal = true;
+
+    let before = controller.snapshot();
+    assert_eq!(
+        controller.apply_event(event),
+        Err(ControllerError::InvalidCloudProgress(
+            "terminal signal is inconsistent with upload status"
+        ))
+    );
+    assert_eq!(controller.snapshot(), before);
 }

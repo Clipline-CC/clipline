@@ -4,6 +4,45 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-03): Slint replacement Milestone 7, Task 7 shipping cutover
+
+Cloud upload, remote status reconciliation, upload persistence, and foreground feedback now use
+the framework-neutral `clipline-library` and `clipline-desktop` services in the shipping Tauri app.
+The old app-local upload/status transport and the AGPL `clipline-cloud-api` packages are gone from
+the application manifest and lockfile. The shared rustls client owns the bounded two-worker,
+64 MiB-part, three-attempt upload path, while Tauri is limited to account/settings, credential,
+event, and repository adapters.
+
+The recorder, upload service, local rename/delete paths, quota collection, and post-upload local
+deletion now share one process-wide `ActiveFileRegistry`. An upload leases the original validated
+clip before preparation and retains that identity through status persistence, cleanup, and the
+optional exact-identity deletion permit. Window destruction does not cancel durable work; account
+replacement does. Duplicate admissions are keyed by exact account generation plus stable local
+clip identity.
+
+Upload records use whole-settings compare-and-swap on the exact account generation and complete
+expected record slots. Unrelated settings saves and independent uploads may advance the global
+settings revision without superseding each other. Durable generation allocation survives restart
+and includes Windows-equivalent legacy path aliases. Remote 404 removal requires two observations
+against the same exact cursor; delayed account or record results fail closed. Successful local
+renames reconcile every exact path alias in one transaction.
+
+Desktop progress carries exact account ownership. Byte-only updates coalesce without rebuilding
+the catalog; identity, status, terminal, and notice transitions remain reserved-slot barriers.
+Tauri and Slint adapters preserve bounded notices across window destruction and acknowledge only
+an exact notice ID under the current foreground lifecycle/attachment fence. Task 8 must make the
+Slint catalog projection drain every pending notice in order rather than projecting only the most
+recent one.
+
+Quit and updater handoff use reversible upload quiescence: active generations are canceled and
+waited on using a dedicated Tokio runtime thread, avoiding nested-runtime `block_on`. Any failed
+pre-exit step resumes upload admission; only the actual process-exit boundary irreversibly seals
+the service. Full workspace tests and warning-denied Clippy, plus standalone Slint all-target tests
+and warning-denied Clippy, are green.
+
+Next: Task 8, build the bounded Local/Cloud catalog controller and rebuildable 60-row projection,
+including ordered notice draining and the existing selection/filter/page identity contracts.
+
 ## Checkpoint (2026-08-02): Slint replacement Milestone 7, Task 7 foundation
 
 Task 7 now has the permissively licensed Cloud protocol and bounded rustls control client needed

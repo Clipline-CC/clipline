@@ -16,12 +16,12 @@ use std::time::{Duration, Instant};
 
 use clipline_capture::{Codec, EncoderBackend};
 use clipline_events::{is_review_event, ClipMarker, ClipMarkers, ClipPlay};
-pub use clipline_library::{ClipGame, DeletedClipsReport, RenamedClipInfo};
 use clipline_library::{
-    ClipPathIdentity, CompatibilityClipProjection, CompatibilityLocalClipScan,
+    ActiveFileRegistry, CompatibilityClipProjection, CompatibilityLocalClipScan,
     KnownGameIdentityResolver, LocalLibraryRepository, LocalLibraryScanner,
-    Mp4LegacyAudioTrackProbe, PlatformEffect, StandardRepositoryFileSystem,
+    Mp4LegacyAudioTrackProbe, PlatformEffect, StandardRepositoryFileSystem, ValidatedClipPath,
 };
+pub use clipline_library::{DeletedClipsReport, RenamedClipInfo};
 use clipline_mp4::{
     media_video_codecs_file, remux_with_mixed_audio_track_file,
     remux_with_selected_audio_tracks_file, trim_keyframe_aligned_file, MediaTrackCounts,
@@ -352,16 +352,16 @@ fn allow_local_media_asset_from_canonical_root<R: Runtime>(
 }
 
 #[tauri::command]
-pub fn delete_clip(path: String, settings: tauri::State<StorageSettings>) -> Result<(), String> {
-    let repository = mutation_repository(&settings.clips_dir()?)?;
+pub fn delete_clip(
+    path: String,
+    settings: tauri::State<StorageSettings>,
+    active_files: tauri::State<ActiveFileRegistry>,
+) -> Result<(), String> {
+    let repository = mutation_repository(&settings.clips_dir()?, active_files.inner())?;
     let clip = repository
         .validate_clip_path(&path)
         .map_err(|error| error.to_string())?;
     repository.delete(&clip).map_err(|error| error.to_string())
-}
-
-pub(crate) fn clip_sidecar_paths(target: &Path) -> [PathBuf; 4] {
-    clipline_library::clip_sidecar_paths(target).into_array()
 }
 
 /// Delete many clips in one round trip. Root resolution stays in the adapter;
@@ -371,10 +371,12 @@ pub(crate) fn clip_sidecar_paths(target: &Path) -> [PathBuf; 4] {
 pub async fn delete_clips(
     paths: Vec<String>,
     settings: tauri::State<'_, StorageSettings>,
+    active_files: tauri::State<'_, ActiveFileRegistry>,
 ) -> Result<DeletedClipsReport, String> {
     let root = settings.clips_dir()?;
+    let active_files = active_files.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        mutation_repository(&root)?
+        mutation_repository(&root, &active_files)?
             .delete_many(&paths)
             .map_err(|error| error.to_string())
     })
@@ -387,11 +389,13 @@ pub async fn rename_clip(
     path: String,
     name: String,
     settings: tauri::State<'_, StorageSettings>,
+    active_files: tauri::State<'_, ActiveFileRegistry>,
     _state: tauri::State<'_, crate::app::RuntimeState>,
 ) -> Result<RenamedClipInfo, String> {
     let root = settings.clips_dir()?;
+    let active_files = active_files.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let repository = mutation_repository(&root)?;
+        let repository = mutation_repository(&root, &active_files)?;
         let clip = repository
             .validate_clip_path(&path)
             .map_err(|error| error.to_string())?;
@@ -409,12 +413,14 @@ pub async fn rename_clip_file<R: Runtime>(
     path: String,
     name: String,
     settings: tauri::State<'_, StorageSettings>,
+    active_files: tauri::State<'_, ActiveFileRegistry>,
     state: tauri::State<'_, crate::app::RuntimeState>,
 ) -> Result<RenamedClipInfo, String> {
     let root = settings.clips_dir()?;
     let task_path = path.clone();
+    let active_files = active_files.inner().clone();
     let (renamed, canonical_scope_root) = tauri::async_runtime::spawn_blocking(move || {
-        let repository = mutation_repository(&root)?;
+        let repository = mutation_repository(&root, &active_files)?;
         let clip = repository
             .validate_clip_path(&task_path)
             .map_err(|error| error.to_string())?;
@@ -435,11 +441,14 @@ pub async fn rename_clip_file<R: Runtime>(
     Ok(renamed)
 }
 
-fn mutation_repository(root: &Path) -> Result<LocalLibraryRepository, String> {
+fn mutation_repository(
+    root: &Path,
+    active_files: &ActiveFileRegistry,
+) -> Result<LocalLibraryRepository, String> {
     LocalLibraryRepository::with_seams(
         root,
         Arc::new(StandardRepositoryFileSystem),
-        Arc::new(crate::cloud_upload::UploadMutationLease),
+        Arc::new(active_files.clone()),
     )
     .map_err(|error| error.to_string())
 }
@@ -1514,6 +1523,17 @@ pub(crate) fn validate_clip_path(
         .map_err(|error| error.to_string())
 }
 
+pub(crate) fn validate_upload_source(
+    settings: &StorageSettings,
+    active_files: &ActiveFileRegistry,
+    path: &str,
+) -> Result<ValidatedClipPath, String> {
+    let repository = mutation_repository(&settings.clips_dir()?, active_files)?;
+    repository
+        .validate_clip_path(path)
+        .map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 pub fn reveal_clip(path: String, settings: tauri::State<StorageSettings>) -> Result<(), String> {
     let repository =
@@ -1573,34 +1593,9 @@ pub fn open_media_folder(settings: tauri::State<StorageSettings>) -> Result<(), 
     }
 }
 
-pub(crate) fn clip_title_for_path(path: &Path) -> String {
-    clipline_library::compatibility_clip_title(path)
-}
-
-pub(crate) fn clip_kind_for_path(path: &Path) -> String {
-    clipline_library::compatibility_clip_kind(path)
-}
-
 fn update_cloud_record_paths(state: &crate::app::RuntimeState, old_path: &str, new_path: &str) {
-    if old_path == new_path {
-        return;
-    }
-    if let Err(error) = state.update_cloud(|cloud| {
-        rewrite_cloud_record_paths(cloud, old_path, new_path);
-    }) {
+    if let Err(error) = state.reconcile_cloud_record_path(old_path, new_path) {
         tracing::warn!(event = "renamed_clip_cloud_record_update_failed", error = %error);
-    }
-}
-
-fn rewrite_cloud_record_paths(
-    cloud: &mut crate::settings::CloudSettings,
-    old_path: &str,
-    new_path: &str,
-) {
-    for record in cloud.uploads.values_mut() {
-        if ClipPathIdentity::same(&record.path, old_path) {
-            record.path = new_path.to_string();
-        }
     }
 }
 
@@ -1754,10 +1749,13 @@ fn export_title_stem(title: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
     use std::io::Cursor;
 
     use clipline_events::{ClipAudioTrack, ClipPlay, EventKind, GameEvent, GameId, PlayerSummary};
+    use clipline_library::{
+        local_clip_id_for_source, CloudAccountGeneration, CloudAccountKey, DurableUploadToken,
+        UploadGeneration, ACTIVE_UPLOAD_MUTATION_ERROR,
+    };
     use clipline_mp4::{
         AudioTrackConfig, FragSample, HybridMp4Writer, TrackConfig, VideoTrackConfig,
     };
@@ -1765,40 +1763,34 @@ mod tests {
     use shiguredo_opus::{Encoder, EncoderConfig};
 
     #[test]
-    fn cloud_rename_reconciliation_matches_windows_path_aliases() {
-        let record = crate::settings::CloudUploadRecord {
-            local_clip_id: "local-1".into(),
-            client_clip_id: None,
-            upload_generation: None,
-            path: r"C:\Clips\Session_1.mp4".into(),
-            remote_clip_id: None,
-            remote_url: None,
-            visibility: "private".into(),
-            upload_status: "uploading".into(),
-            error: None,
-            updated_at_unix: 1,
-        };
-        let untouched = crate::settings::CloudUploadRecord {
-            local_clip_id: "local-2".into(),
-            path: r"C:\Other\Session_1.mp4".into(),
-            ..record.clone()
-        };
-        let mut cloud = crate::settings::CloudSettings {
-            uploads: BTreeMap::from([
-                (record.local_clip_id.clone(), record),
-                (untouched.local_clip_id.clone(), untouched),
-            ]),
-            ..crate::settings::CloudSettings::default()
-        };
+    fn shipping_mutation_repository_observes_process_upload_lease() {
+        let directory = TestDir::new("clipline-app-library", "shared-active-file-registry");
+        let root = directory.path().join("media");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("clip.mp4");
+        std::fs::write(&path, b"clip bytes").unwrap();
 
-        rewrite_cloud_record_paths(
-            &mut cloud,
-            "c:/clips/session_1.MP4",
-            r"C:\Clips\Ranked win.mp4",
-        );
+        let active_files = ActiveFileRegistry::new();
+        let repository = mutation_repository(&root, &active_files).unwrap();
+        let clip = repository
+            .validate_clip_path(path.to_string_lossy().as_ref())
+            .unwrap();
+        let token = DurableUploadToken {
+            account_key: CloudAccountKey::new("account-a").unwrap(),
+            account_generation: CloudAccountGeneration::new(1),
+            upload_generation: UploadGeneration::new(1),
+            local_clip_id: local_clip_id_for_source(clip.file_identity()),
+            source_path: clip.comparison_identity().clone(),
+        };
+        let lease = active_files.acquire_upload(&clip, token).unwrap();
 
-        assert_eq!(cloud.uploads["local-1"].path, r"C:\Clips\Ranked win.mp4");
-        assert_eq!(cloud.uploads["local-2"].path, r"C:\Other\Session_1.mp4");
+        let error = repository.delete(&clip).unwrap_err();
+        assert_eq!(error.to_string(), ACTIVE_UPLOAD_MUTATION_ERROR);
+        assert!(path.exists());
+
+        drop(lease);
+        repository.delete(&clip).unwrap();
+        assert!(!path.exists());
     }
 
     fn marker(t_s: f64) -> ClipMarker {

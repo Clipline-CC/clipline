@@ -82,6 +82,7 @@ fn cloud_bytes(
             path: format!(r"C:\{local_clip_id}.mp4"),
             local_clip_id,
             upload_status: "uploading".to_owned(),
+            terminal: false,
             received_size_bytes: received,
             file_size_bytes: 100,
             remote_clip_id: None,
@@ -108,6 +109,7 @@ fn cloud_state(
             path: format!(r"C:\{local_clip_id}.mp4"),
             local_clip_id,
             upload_status: status.to_owned(),
+            terminal: false,
             received_size_bytes: 0,
             file_size_bytes: 100,
             remote_clip_id: None,
@@ -203,6 +205,65 @@ fn cloud_state_and_account_changes_are_durable_barriers() {
         .unwrap();
 
     assert_eq!(receiver.len(), 5);
+}
+
+#[test]
+fn explicit_terminal_upload_state_remains_a_durable_barrier() {
+    let (sender, receiver) = ui_event_channel();
+    let account = owner("account-a", 1);
+    sender
+        .try_publish(account_changed(account.clone()))
+        .unwrap();
+    let mut terminal = cloud_state(
+        account.clone(),
+        1,
+        "clip",
+        "uploaded_processing",
+        Some("preserved"),
+    );
+    let UiEvent::CloudUploadProgress { progress, .. } = &mut terminal else {
+        unreachable!();
+    };
+    progress.terminal = true;
+    sender.try_publish(terminal).unwrap();
+    sender
+        .try_publish(cloud_bytes(account, 1, "clip", 100))
+        .unwrap();
+
+    assert_eq!(receiver.len(), 3);
+    let terminal = receiver.try_recv().unwrap();
+    assert!(matches!(
+        terminal.event,
+        UiEvent::CloudAccountChanged { .. }
+    ));
+    let terminal = receiver.try_recv().unwrap();
+    let UiEvent::CloudUploadProgress { progress, .. } = terminal.event else {
+        panic!("expected terminal upload event");
+    };
+    assert!(progress.terminal);
+}
+
+#[test]
+fn invalid_terminal_upload_state_is_rejected_before_it_reaches_the_queue() {
+    let (sender, receiver) = ui_event_channel();
+    let account = owner("account-a", 1);
+    sender
+        .try_publish(account_changed(account.clone()))
+        .unwrap();
+    receiver.try_recv().unwrap();
+    let mut invalid = cloud_state(account, 1, "clip", "uploading", None);
+    let UiEvent::CloudUploadProgress { progress, .. } = &mut invalid else {
+        unreachable!();
+    };
+    progress.terminal = true;
+
+    assert_eq!(
+        sender.try_publish(invalid),
+        Err(UiEventSendError::InvalidCloudProgress(
+            "terminal signal is inconsistent with upload status"
+        ))
+    );
+    assert!(receiver.is_empty());
 }
 
 #[test]

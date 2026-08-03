@@ -117,6 +117,58 @@ fn poster_extraction_and_native_decode_have_one_bounded_owner_each() {
 }
 
 #[test]
+fn cloud_upload_transport_has_one_permissively_licensed_owner() {
+    let root = workspace_root();
+    let app_manifest =
+        fs::read_to_string(root.join("apps/clipline-app/Cargo.toml")).expect("read app manifest");
+    let lock = fs::read_to_string(root.join("Cargo.lock")).expect("read workspace lockfile");
+    assert!(
+        !app_manifest.contains("clipline-cloud-api"),
+        "shipping app must use the shared permissive Cloud protocol"
+    );
+    assert!(
+        !lock.contains("name = \"clipline-cloud-api\"")
+            && !lock.contains("name = \"clipline-cloud-api-types\""),
+        "AGPL Cloud client packages must be absent from the shipping dependency graph"
+    );
+
+    let shared = fs::read_to_string(root.join("crates/clipline-library/src/upload/transport.rs"))
+        .expect("read shared upload transport");
+    for contract in [
+        "MAX_CONCURRENT_UPLOADS",
+        "MAX_UPLOAD_PART_BYTES",
+        "UPLOAD_PUT_MAX_ATTEMPTS",
+        "UploadCancellation",
+        "ReqwestUploadTransport",
+    ] {
+        assert!(
+            shared.contains(contract),
+            "shared upload transport lost {contract}"
+        );
+    }
+
+    let app_adapter =
+        fs::read_to_string(root.join("apps/clipline-app/src/cloud_upload.rs")).unwrap_or_default();
+    for duplicate in [
+        "CloudClient",
+        "CreateUploadResponse",
+        "DirectPartUploadUrlResponse",
+        "ReaderStream",
+        "MAX_UPLOAD_PART_BYTES",
+        "UPLOAD_PERMITS",
+    ] {
+        assert!(
+            !app_adapter.contains(duplicate),
+            "Tauri upload adapter duplicated shared transport symbol {duplicate}"
+        );
+    }
+    assert!(
+        !app_adapter.contains("compare_exchange_cloud_records_at"),
+        "upload record transitions must fence exact account/record slots, not the unrelated global settings revision"
+    );
+}
+
+#[test]
 fn neutral_shell_contract_has_no_framework_or_platform_escape_hatches() {
     let root = workspace_root();
     let source_root = root.join("crates/clipline-shell/src");

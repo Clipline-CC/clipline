@@ -188,6 +188,7 @@ struct FakeTransport {
     profile: Mutex<Option<Result<CloudProfileTransport, PortError>>>,
     avatars: Mutex<VecDeque<Result<AvatarTransportResult, PortError>>>,
     after_list: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+    after_profile: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
 }
 
 impl FakeTransport {
@@ -203,6 +204,7 @@ impl FakeTransport {
             profile: Mutex::new(None),
             avatars: Mutex::new(VecDeque::new()),
             after_list: Mutex::new(None),
+            after_profile: Mutex::new(None),
         }
     }
 }
@@ -233,6 +235,9 @@ impl CloudTransport for FakeTransport {
         _token: &'a CloudWorkToken,
     ) -> CloudTransportFuture<'a, CloudProfileTransport> {
         let result = self.profile.lock().unwrap().take().unwrap();
+        if let Some(after) = self.after_profile.lock().unwrap().take() {
+            after();
+        }
         Box::pin(async move { result })
     }
 
@@ -613,6 +618,38 @@ fn profile_refresh_is_account_fenced_and_browser_effects_are_typed() {
     assert!(service
         .open_clip_effect(clip.token, &fence, "../escape")
         .is_err());
+}
+
+#[test]
+fn delayed_profile_response_cannot_mutate_a_replaced_account() {
+    let initial = sample_account();
+    let account = Arc::new(FakeAccount::with(initial.clone()));
+    let transport = Arc::new(FakeTransport::new(|_| unreachable!()));
+    *transport.profile.lock().unwrap() = Some(Ok(CloudProfileTransport {
+        user_id: "user-1".into(),
+        username: "stale-name".into(),
+        display_name: Some("Stale profile".into()),
+    }));
+    let mut replacement = initial.clone();
+    replacement.snapshot.account_key = key("https://other.example|user-2|credential-2");
+    replacement.snapshot.generation = CloudAccountGeneration::new(8);
+    replacement.snapshot.user_id = Some("user-2".into());
+    replacement.snapshot.username = Some("current-name".into());
+    replacement.snapshot.display_name = Some("Current profile".into());
+    let account_for_hook = Arc::clone(&account);
+    let replacement_for_hook = replacement.clone();
+    *transport.after_profile.lock().unwrap() = Some(Box::new(move || {
+        account_for_hook.replace(replacement_for_hook.clone());
+    }));
+    let fence = FakeFence::default();
+    let token = work_token(&initial);
+    fence.set(token.clone());
+
+    let error = block_on(service(account.clone(), transport).profile(token, &fence)).unwrap_err();
+
+    assert_eq!(error, CloudServiceError::AccountChanged);
+    assert!(account.patches.lock().unwrap().is_empty());
+    assert_eq!(account.snapshot().unwrap(), replacement);
 }
 
 #[test]

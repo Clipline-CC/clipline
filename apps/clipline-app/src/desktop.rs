@@ -5,7 +5,7 @@ use std::sync::Mutex;
 
 use clipline_desktop::{
     ApplyEventOutcome, ControllerError, DesktopController, DesktopSnapshot, DispatchOutcome,
-    UiAction, UiEvent,
+    UiAction, UiEvent, WindowLifecycleMode, WindowLifecycleSnapshot,
 };
 
 use crate::settings::AppSettings;
@@ -28,17 +28,12 @@ pub struct DesktopBootstrap {
 #[derive(Default)]
 pub struct ProducerGenerations {
     game_detection: AtomicU64,
-    cloud_upload: AtomicU64,
     enrichment: AtomicU64,
 }
 
 impl ProducerGenerations {
     pub fn next_game_detection(&self) -> Result<clipline_desktop::Generation, String> {
         next_generation(&self.game_detection, "game detection")
-    }
-
-    pub fn next_cloud_upload(&self) -> Result<clipline_desktop::Generation, String> {
-        next_generation(&self.cloud_upload, "cloud upload")
     }
 
     pub fn next_enrichment(&self) -> Result<clipline_desktop::Generation, String> {
@@ -127,6 +122,30 @@ impl DesktopState {
             .map_err(|error| error.to_string())
     }
 
+    /// Remove a notice only when the caller presents the exact foreground
+    /// lifecycle snapshot that the controller currently owns.
+    pub fn acknowledge_notice_if_lifecycle(
+        &self,
+        notice_id: u64,
+        expected_lifecycle: WindowLifecycleSnapshot,
+    ) -> Result<bool, String> {
+        if expected_lifecycle.mode != WindowLifecycleMode::Foreground {
+            return Ok(false);
+        }
+        let mut inner = self
+            .0
+            .lock()
+            .map_err(|_| "desktop state lock poisoned".to_owned())?;
+        if inner.controller.snapshot().lifecycle != expected_lifecycle {
+            return Ok(false);
+        }
+        inner
+            .controller
+            .dispatch(UiAction::AcknowledgeNotice { notice_id })
+            .map(|outcome| outcome.changed)
+            .map_err(|error| error.to_string())
+    }
+
     pub fn replace_settings(&self, settings: AppSettings) -> Result<bool, String> {
         self.0
             .lock()
@@ -164,7 +183,6 @@ mod tests {
         let generations = ProducerGenerations::default();
         assert_eq!(generations.next_game_detection().unwrap().get(), 1);
         assert_eq!(generations.next_game_detection().unwrap().get(), 2);
-        assert_eq!(generations.next_cloud_upload().unwrap().get(), 1);
         assert_eq!(generations.next_enrichment().unwrap().get(), 1);
     }
 
@@ -232,5 +250,47 @@ mod tests {
             rebuilt.snapshot.latest_saved.as_ref().unwrap().path,
             r"C:\clip.mp4"
         );
+    }
+
+    #[test]
+    fn notice_acknowledgement_requires_the_exact_foreground_lifecycle() {
+        let state = DesktopState::new(AppSettings::default(), vec!["warning".into()]).unwrap();
+        let foreground = WindowLifecycleSnapshot::new(
+            clipline_desktop::Revision::new(4),
+            WindowLifecycleMode::Foreground,
+        );
+        state
+            .apply_event(UiEvent::WindowLifecycle {
+                snapshot: foreground,
+            })
+            .unwrap();
+        let notice_id = state.snapshot().notices[0].id;
+
+        assert!(!state
+            .acknowledge_notice_if_lifecycle(
+                notice_id,
+                WindowLifecycleSnapshot::new(
+                    clipline_desktop::Revision::new(3),
+                    WindowLifecycleMode::Foreground,
+                ),
+            )
+            .unwrap());
+        assert!(!state
+            .acknowledge_notice_if_lifecycle(
+                notice_id,
+                WindowLifecycleSnapshot::new(
+                    clipline_desktop::Revision::new(4),
+                    WindowLifecycleMode::Tray,
+                ),
+            )
+            .unwrap());
+        assert_eq!(state.snapshot().notices.len(), 1);
+        assert!(state
+            .acknowledge_notice_if_lifecycle(notice_id, foreground)
+            .unwrap());
+        assert!(state.snapshot().notices.is_empty());
+        assert!(!state
+            .acknowledge_notice_if_lifecycle(notice_id, foreground)
+            .unwrap());
     }
 }

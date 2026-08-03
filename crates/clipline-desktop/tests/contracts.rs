@@ -140,6 +140,7 @@ fn ui_events_carry_generations_for_stale_completion_domains() {
         local_clip_id: "local-1".to_owned(),
         path: r"C:\clip.mp4".to_owned(),
         upload_status: "uploading".to_owned(),
+        terminal: false,
         received_size_bytes: 5,
         file_size_bytes: 10,
         remote_clip_id: None,
@@ -154,6 +155,30 @@ fn ui_events_carry_generations_for_stale_completion_domains() {
         notice: None,
     };
     assert_eq!(event.generation(), Some(Generation::new(4)));
+}
+
+#[test]
+fn cloud_terminal_signal_is_backward_compatible_and_only_serialized_when_set() {
+    let legacy = json!({
+        "local_clip_id": "local-1",
+        "path": r"C:\clip.mp4",
+        "upload_status": "uploading",
+        "received_size_bytes": 5,
+        "file_size_bytes": 10,
+        "remote_clip_id": null,
+        "error": null
+    });
+    let progress: CloudUploadProgress = serde_json::from_value(legacy.clone()).unwrap();
+    assert!(!progress.terminal);
+    assert_eq!(serde_json::to_value(&progress).unwrap(), legacy);
+
+    let mut abandoned = progress;
+    abandoned.upload_status = "uploaded_processing".into();
+    abandoned.terminal = true;
+    assert_eq!(
+        serde_json::to_value(abandoned).unwrap()["terminal"],
+        json!(true)
+    );
 }
 
 #[test]

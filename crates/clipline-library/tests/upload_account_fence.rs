@@ -73,6 +73,10 @@ impl Records {
         records.insert(key(&expected.record), next.clone());
         next
     }
+
+    fn snapshot(&self) -> HashMap<(String, u64, String), UploadRecordCursor> {
+        self.0.lock().unwrap().clone()
+    }
 }
 
 impl UploadRecordPort for Records {
@@ -158,6 +162,19 @@ impl UploadRecordPort for Records {
         };
         records.insert(record_key, cursor.clone());
         Ok(cursor)
+    }
+
+    fn remove_exact(&self, expected: &UploadRecordCursor) -> Result<(), UploadRecordError> {
+        let mut records = self.0.lock().unwrap();
+        let record_key = key(&expected.record);
+        if records.get(&record_key) != Some(expected) {
+            return Err(UploadRecordError::new(
+                UploadRecordErrorKind::Superseded,
+                "stale upload record",
+            ));
+        }
+        records.remove(&record_key);
+        Ok(())
     }
 }
 
@@ -483,4 +500,47 @@ async fn status_sync_checks_account_before_record_cas() {
         .unwrap_err();
     assert_eq!(error.kind(), UploadRecordErrorKind::AccountChanged);
     assert_eq!(harness.records.current(&token), before);
+}
+
+#[tokio::test]
+async fn delayed_status_removal_cannot_remove_a_newer_record_or_emit() {
+    let harness = Harness::new("stale-status-remove");
+    harness.transport.delay_a.store(false, Ordering::Release);
+    let handle = harness
+        .service
+        .start(harness.request("account-a", 1))
+        .unwrap();
+    let token = handle.token().clone();
+    assert_eq!(handle.wait().await.outcome, UploadJobOutcome::Completed);
+    let stale = harness.records.current(&token);
+    let current = harness.records.force_advance(&stale, "newer status result");
+    let before_records = harness.records.snapshot();
+    let before_events = harness.events.0.lock().unwrap().clone();
+
+    let error = harness.service.remove_status_sync(&stale).unwrap_err();
+    assert_eq!(error.kind(), UploadRecordErrorKind::Superseded);
+    assert_eq!(harness.records.current(&token), current);
+    assert_eq!(harness.records.snapshot(), before_records);
+    assert_eq!(*harness.events.0.lock().unwrap(), before_events);
+}
+
+#[tokio::test]
+async fn status_removal_checks_account_before_exact_cas_and_emits_nothing() {
+    let harness = Harness::new("status-remove-account-change");
+    harness.transport.delay_a.store(false, Ordering::Release);
+    let handle = harness
+        .service
+        .start(harness.request("account-a", 1))
+        .unwrap();
+    let token = handle.token().clone();
+    assert_eq!(handle.wait().await.outcome, UploadJobOutcome::Completed);
+    let expected = harness.records.current(&token);
+    let before_records = harness.records.snapshot();
+    let before_events = harness.events.0.lock().unwrap().clone();
+    harness.accounts.set(owner("account-b", 2));
+
+    let error = harness.service.remove_status_sync(&expected).unwrap_err();
+    assert_eq!(error.kind(), UploadRecordErrorKind::AccountChanged);
+    assert_eq!(harness.records.snapshot(), before_records);
+    assert_eq!(*harness.events.0.lock().unwrap(), before_events);
 }

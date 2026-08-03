@@ -111,6 +111,56 @@ let desktopEventSequence = 0;
 let desktopSnapshotReady = false;
 let desktopSnapshotRefreshPromise = null;
 let desktopSnapshotRefreshAgain = false;
+const desktopPresentedNoticeIds = new Set();
+const desktopNoticeAcksInFlight = new Set();
+
+function rememberPresentedDesktopNotice(noticeId) {
+  desktopPresentedNoticeIds.add(noticeId);
+  while (desktopPresentedNoticeIds.size > 128) {
+    const oldest = desktopPresentedNoticeIds.values().next().value;
+    if (desktopNoticeAcksInFlight.has(oldest)) break;
+    desktopPresentedNoticeIds.delete(oldest);
+  }
+}
+
+function presentDesktopNotices(notices, lifecycle, lifecycleRevision) {
+  if (lifecycle?.mode !== "foreground") return;
+  const revision = String(lifecycleRevision || "");
+  if (!/^\d+$/.test(revision)) return;
+  const pending = (Array.isArray(notices) ? notices : []).filter((notice) =>
+    /^\d+$/.test(String(notice?.id || ""))
+      && String(notice?.message || "").trim()
+  );
+  const newlyPresented = pending.filter((notice) =>
+    !desktopPresentedNoticeIds.has(String(notice.id))
+  );
+  if (newlyPresented.length) {
+    // Keep the existing legacy error surface and exact message formatting.
+    $("error").textContent = pending
+      .map((notice) => String(notice.message).trim())
+      .join(" ");
+    for (const notice of newlyPresented) {
+      rememberPresentedDesktopNotice(String(notice.id));
+    }
+  }
+  for (const notice of pending) {
+    const noticeId = String(notice.id);
+    if (desktopNoticeAcksInFlight.has(noticeId)) continue;
+    desktopNoticeAcksInFlight.add(noticeId);
+    invoke("acknowledge_desktop_notice", {
+      noticeId: notice.id,
+      lifecycleRevision: revision,
+    }).then((acknowledged) => {
+      // The controller lifecycle may have lagged a concurrent tray transition.
+      // A rejected acknowledgement was not actually presented in a current
+      // foreground, so allow the next foreground snapshot to present it.
+      if (!acknowledged) desktopPresentedNoticeIds.delete(noticeId);
+    }).catch((error) => {
+      desktopPresentedNoticeIds.delete(noticeId);
+      console.warn("desktop notice acknowledgement failed:", error);
+    }).finally(() => desktopNoticeAcksInFlight.delete(noticeId));
+  }
+}
 
 function applyDesktopSnapshot(response) {
   const sequence = Number(response?.desktop_event_sequence);
@@ -126,12 +176,19 @@ function applyDesktopSnapshot(response) {
   for (const upload of snapshot.uploads || []) {
     if (upload?.progress) upsertCloudProgress(upload.progress);
   }
-  const notices = (snapshot.notices || [])
-    .map((notice) => String(notice?.message || "").trim())
-    .filter(Boolean);
+  const notices = Array.isArray(response?.desktop_notices)
+    ? response.desktop_notices
+    : [];
   const legacyWarnings = Array.isArray(response.warnings) ? response.warnings : [];
-  const messages = notices.length ? notices : legacyWarnings;
-  if (messages.length) $("error").textContent = messages.join(" ");
+  if (notices.length) {
+    presentDesktopNotices(
+      notices,
+      snapshot.lifecycle,
+      response.desktop_lifecycle_revision,
+    );
+  } else if (legacyWarnings.length) {
+    $("error").textContent = legacyWarnings.join(" ");
+  }
 
   desktopEventSequence = sequence;
   desktopSnapshotReady = true;
@@ -161,8 +218,14 @@ async function requestDesktopSnapshotRefresh() {
 }
 
 var desktopSequenceListenerReady = listen("desktop-event-sequence", (event) => {
-  const sequence = Number(event?.payload?.event_sequence);
+  const payload = event?.payload || {};
+  const sequence = Number(payload.event_sequence);
   if (!Number.isSafeInteger(sequence) || sequence <= desktopEventSequence) return;
+  presentDesktopNotices(
+    payload.notices || [],
+    payload.window_lifecycle,
+    payload.lifecycle_revision,
+  );
   const missedUpdate = desktopSnapshotReady && sequence !== desktopEventSequence + 1;
   desktopEventSequence = sequence;
   if (missedUpdate) {

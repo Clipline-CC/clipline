@@ -424,7 +424,8 @@ fn frontend_reports_webview_readiness_to_native_shell() {
     assert!(
         js.contains("invoke(\"frontend_ready\")")
             && js.contains("Array.isArray(response.warnings)")
-            && js.contains("messages.join(\" \")"),
+            && js.contains("legacyWarnings.join(\" \")")
+            && js.contains("presentDesktopNotices("),
         "main.js must report readiness and render queued startup diagnostics"
     );
 }
@@ -4027,6 +4028,30 @@ fn app_notice_toasts_auto_clear() {
 }
 
 #[test]
+fn desktop_notices_are_presented_and_acknowledged_by_exact_id() {
+    let js = main_js();
+    let present = js_function_body(&js, "presentDesktopNotices");
+    assert!(
+        present.contains("lifecycle?.mode !== \"foreground\"")
+            && present.contains("notice.id")
+            && present.contains("notice.message")
+            && present.contains("acknowledge_desktop_notice")
+            && present.contains("noticeId: notice.id")
+            && present.contains("lifecycleRevision")
+            && present.contains("if (!acknowledged) desktopPresentedNoticeIds.delete(noticeId)")
+            && present.contains("desktopPresentedNoticeIds.delete(noticeId)"),
+        "desktop notices must retain their exact ID and foreground lifecycle fence through presentation acknowledgement"
+    );
+    assert!(
+        js.contains("response.desktop_lifecycle_revision")
+            && js.contains("payload.notices || []")
+            && js.contains("payload.window_lifecycle")
+            && js.contains("payload.lifecycle_revision"),
+        "both bootstrap and sequenced lifecycle updates must present pending desktop notices"
+    );
+}
+
+#[test]
 fn ui_is_split_into_markup_styles_and_logic() {
     let html = index_html();
 
@@ -4177,7 +4202,7 @@ fn gallery_supports_multi_select_bulk_actions() {
 
     assert!(
         library.contains("pub async fn delete_clips")
-            && library.contains("mutation_repository(&root)?")
+            && library.contains("mutation_repository(&root, &active_files)?")
             && library.contains(".delete_many(&paths)")
             && library.contains("DeletedClipsReport"),
         "library.rs must keep the exact batch command/report while delegating deletion to the shared repository"
@@ -4322,6 +4347,7 @@ fn returning_to_no_preview_selection_clears_stale_audio_status() {
 #[test]
 fn rename_adapters_preserve_validation_order_asset_scope_and_alias_reconciliation() {
     let library = library_rs();
+    let app = app_rs();
     let rename_title = library
         .split("pub async fn rename_clip(")
         .nth(1)
@@ -4367,13 +4393,17 @@ fn rename_adapters_preserve_validation_order_asset_scope_and_alias_reconciliatio
     }
 
     let reconciliation = library
-        .split("fn rewrite_cloud_record_paths")
+        .split("fn update_cloud_record_paths")
         .nth(1)
         .and_then(|rest| rest.split("fn filter_review_markers").next())
-        .expect("cloud path reconciliation helper exists");
+        .expect("cloud path reconciliation adapter exists");
     assert!(
-        reconciliation.contains("ClipPathIdentity::same(&record.path, old_path)"),
-        "Cloud records must reconcile legacy Windows path aliases, not only exact strings"
+        reconciliation.contains("state.reconcile_cloud_record_path(old_path, new_path)"),
+        "Cloud record rename must delegate to the exact durable path-reconciliation transaction"
+    );
+    assert!(
+        app.contains("cloud_paths_equivalent(&record.path, old_path)"),
+        "the durable path transaction must reconcile Windows path aliases, not only exact strings"
     );
 }
 

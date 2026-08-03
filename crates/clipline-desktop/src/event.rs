@@ -111,12 +111,49 @@ pub struct CloudUploadProgress {
     pub local_clip_id: String,
     pub path: String,
     pub upload_status: String,
+    /// Distinguishes terminal records whose compatibility status is also used
+    /// by active verification/deletion phases (notably `uploaded_processing`).
+    /// Older producers omit this field, so unambiguous legacy terminal status
+    /// values remain recognized by [`Self::is_terminal`].
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub terminal: bool,
     pub received_size_bytes: u64,
     pub file_size_bytes: u64,
     pub remote_clip_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_url: Option<String>,
     pub error: Option<String>,
+}
+
+impl CloudUploadProgress {
+    #[must_use]
+    pub fn is_terminal(&self) -> bool {
+        self.terminal
+            || matches!(
+                self.upload_status.as_str(),
+                "canceled" | "failed" | "uploaded_private" | "uploaded_public"
+            )
+    }
+
+    pub(crate) fn validate_terminal_signal(&self) -> Result<(), &'static str> {
+        if self.terminal
+            && !matches!(
+                self.upload_status.as_str(),
+                "canceled"
+                    | "failed"
+                    | "uploaded_processing"
+                    | "uploaded_private"
+                    | "uploaded_public"
+            )
+        {
+            return Err("terminal signal is inconsistent with upload status");
+        }
+        Ok(())
+    }
+}
+
+const fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// Byte-only updates are coalescable and may only change byte counters.
