@@ -5,6 +5,7 @@ pub mod cpu_frame;
 pub mod desktop;
 pub mod model;
 pub mod options;
+pub mod poster;
 pub mod settings;
 pub mod shell;
 
@@ -34,6 +35,7 @@ pub fn create_window() -> Result<CliplineSpike, slint::PlatformError> {
                 duration: model::format_clock(row.duration_ticks).into(),
                 kind: kind.into(),
                 kind_color,
+                poster_image: slint::Image::default(),
                 poster_a: color(
                     (34 + seed * 7 % 72) as u8,
                     (23 + seed * 11 % 58) as u8,

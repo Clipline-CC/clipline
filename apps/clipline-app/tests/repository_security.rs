@@ -61,6 +61,62 @@ fn neutral_library_contract_has_no_framework_or_platform_escape_hatches() {
 }
 
 #[test]
+fn poster_extraction_and_native_decode_have_one_bounded_owner_each() {
+    let root = workspace_root();
+    let neutral = fs::read_to_string(root.join("crates/clipline-library/src/poster.rs"))
+        .expect("read neutral poster service");
+    let neutral_manifest =
+        fs::read_to_string(root.join("crates/clipline-library/Cargo.toml")).unwrap();
+    assert!(neutral_manifest.contains(
+        "image = { version = \"0.25\", default-features = false, features = [\"jpeg\"] }"
+    ));
+    for contract in [
+        "MAX_POSTER_ENCODED_BYTES",
+        "MAX_POSTER_STDERR_BYTES",
+        "POSTER_EXTRACTION_TIMEOUT",
+        "MAX_CONCURRENT_POSTER_EXTRACTIONS",
+        "DirectoryAuthority",
+        "create_new_regular_file",
+        "replace_file_if_identities",
+        "rename_file_noreplace_if_identity",
+    ] {
+        assert!(neutral.contains(contract), "poster service lost {contract}");
+    }
+
+    let app_adapter =
+        fs::read_to_string(root.join("apps/clipline-app/src/poster.rs")).expect("read adapter");
+    for duplicate in [
+        "std::process::Command",
+        "PosterTemp",
+        "read_bounded",
+        "Semaphore",
+    ] {
+        assert!(
+            !app_adapter.contains(duplicate),
+            "Tauri poster adapter duplicated shared service symbol {duplicate}"
+        );
+    }
+    assert!(app_adapter.contains("PosterService::standard"));
+
+    let spike_manifest =
+        fs::read_to_string(root.join("apps/clipline-slint-spike/Cargo.toml")).unwrap();
+    assert!(spike_manifest.contains(
+        "image = { version = \"0.25\", default-features = false, features = [\"jpeg\"] }"
+    ));
+    let spike = fs::read_to_string(root.join("apps/clipline-slint-spike/src/poster.rs"))
+        .expect("read Slint poster adapter");
+    for forbidden in ["Image::load_from_path", "base64", "data:"] {
+        assert!(
+            !spike.contains(forbidden),
+            "native poster adapter contains forbidden {forbidden}"
+        );
+    }
+    assert!(spike.contains("SharedPixelBuffer<Rgb8Pixel>"));
+    assert!(spike.contains("accept_decoded_with"));
+    assert!(spike.contains("Image::from_rgb8"));
+}
+
+#[test]
 fn neutral_shell_contract_has_no_framework_or_platform_escape_hatches() {
     let root = workspace_root();
     let source_root = root.join("crates/clipline-shell/src");

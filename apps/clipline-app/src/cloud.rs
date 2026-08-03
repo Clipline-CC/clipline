@@ -3502,7 +3502,7 @@ mod tests {
         let markers = clip.with_extension("markers.json");
         let metadata = clip.with_extension("clipline.json");
         let pending_osu = clip.with_extension("osu-enrichment.json");
-        let poster = crate::poster::poster_path(&clip);
+        let poster = clipline_library::poster_path(&clip);
         std::fs::write(&clip, b"mp4").unwrap();
         std::fs::write(&markers, b"{}").unwrap();
         std::fs::write(&metadata, b"{}").unwrap();

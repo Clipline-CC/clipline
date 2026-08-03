@@ -798,10 +798,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "clipline-buffer"
+version = "0.1.0"
+
+[[package]]
+name = "clipline-capture"
+version = "0.1.0"
+dependencies = [
+ "clipline-buffer",
+ "clipline-mp4",
+ "shiguredo_opus",
+ "thiserror 2.0.19",
+ "windows",
+ "windows-core",
+]
+
+[[package]]
 name = "clipline-desktop"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "clipline-events"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "clipline-library"
+version = "0.1.0"
+dependencies = [
+ "clipline-capture",
+ "clipline-events",
+ "clipline-mp4",
+ "clipline-shell",
+ "image",
+ "serde",
+ "serde_json",
  "thiserror 2.0.19",
 ]
 
@@ -838,6 +875,7 @@ dependencies = [
 name = "clipline-shell"
 version = "0.1.0"
 dependencies = [
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "thiserror 2.0.19",
@@ -849,11 +887,13 @@ name = "clipline-slint-spike"
 version = "0.1.0"
 dependencies = [
  "clipline-desktop",
+ "clipline-library",
  "clipline-mp4",
  "clipline-playback",
  "clipline-settings",
  "clipline-shell",
  "clipline-test-utils",
+ "image",
  "raw-window-handle",
  "serde",
  "serde_json",

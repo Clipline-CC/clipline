@@ -5,9 +5,11 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+clipline-capture = { path = "../clipline-capture" }
 clipline-events = { path = "../clipline-events" }
 clipline-mp4 = { path = "../clipline-mp4" }
 clipline-shell = { path = "../clipline-shell" }
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

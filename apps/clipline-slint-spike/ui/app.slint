@@ -6,6 +6,7 @@ export struct LibraryItem {
     duration: string,
     kind: string,
     kind-color: color,
+    poster-image: image,
     poster-a: color,
     poster-b: color,
 }
@@ -251,7 +252,14 @@ export component CliplineSpike inherits Window {
                     width: 56px;
                     height: 16px;
                     border-radius: 3px;
+                    clip: true;
                     background: @linear-gradient(90deg, row.poster-a, row.poster-b);
+                    Image {
+                        width: parent.width;
+                        height: parent.height;
+                        source: row.poster-image;
+                        image-fit: cover;
+                    }
                     Rectangle { x: 5px + Math.mod(index * 11, 34) * 1px; y: 3px; width: 7px; height: 10px; background: #ffffff28; }
                 }
                 Text { x: 72px; y: 1px; width: parent.width - 330px; height: 13px; text: row.title; color: #eee4d8; font-size: 10.5px; font-weight: 650; overflow: elide; }

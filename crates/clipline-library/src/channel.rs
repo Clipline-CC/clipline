@@ -5,7 +5,7 @@ use std::time::Duration;
 use thiserror::Error;
 
 use crate::{
-    CatalogResult, ClipPathIdentity, CloudWorkToken, DurableUploadToken, GenerationError,
+    CatalogResult, CloudWorkToken, DurableUploadToken, GenerationError, PosterWorkToken,
     WindowWorkToken,
 };
 
@@ -14,6 +14,7 @@ pub const CATALOG_RESULT_CAPACITY: usize = 128;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExpectedResultOwner {
     Window(WindowWorkToken),
+    Poster(PosterWorkToken),
     Cloud(CloudWorkToken),
     Upload(DurableUploadToken),
 }
@@ -73,7 +74,7 @@ impl From<crate::PayloadBoundsError> for ResultPortError {
 enum CoalesceKey {
     LocalPage(WindowWorkToken),
     CloudPage(CloudWorkToken),
-    Poster(WindowWorkToken, ClipPathIdentity),
+    Poster(PosterWorkToken),
     UploadBytes(DurableUploadToken),
 }
 
@@ -81,9 +82,7 @@ fn coalesce_key(result: &CatalogResult) -> Option<CoalesceKey> {
     match result {
         CatalogResult::LocalPage { token, .. } => Some(CoalesceKey::LocalPage(*token)),
         CatalogResult::CloudPage { token, .. } => Some(CoalesceKey::CloudPage(token.clone())),
-        CatalogResult::Poster { token, poster } => {
-            Some(CoalesceKey::Poster(*token, poster.path.clone()))
-        }
+        CatalogResult::Poster { token, .. } => Some(CoalesceKey::Poster(token.clone())),
         CatalogResult::UploadByteProgress { token, .. } => {
             Some(CoalesceKey::UploadBytes(token.clone()))
         }
@@ -100,11 +99,14 @@ fn validate_owner(
     match (result, expected) {
         (
             CatalogResult::LocalPage { token, .. }
-            | CatalogResult::Poster { token, .. }
             | CatalogResult::MutationCompleted { token, .. }
             | CatalogResult::ForegroundFeedback { token, .. },
             ExpectedResultOwner::Window(expected),
         ) => (*token == *expected)
+            .then_some(())
+            .ok_or(ResultPortError::Stale),
+        (CatalogResult::Poster { token, .. }, ExpectedResultOwner::Poster(expected)) => (token
+            == expected)
             .then_some(())
             .ok_or(ResultPortError::Stale),
         (CatalogResult::CloudPage { token, .. }, ExpectedResultOwner::Cloud(expected)) => {

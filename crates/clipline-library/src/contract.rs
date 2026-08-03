@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    ClipPathIdentity, MarkerSidecarSummary, MAX_CATALOG_IDENTITY_BYTES,
+    ClipPathIdentity, MarkerSidecarSummary, PosterWorkToken, MAX_CATALOG_IDENTITY_BYTES,
     MAX_CLIP_DETAIL_AUDIO_TRACKS, MAX_CLIP_DETAIL_FIELD_BYTES, MAX_CLIP_DETAIL_MARKERS,
     MAX_CLIP_SIDECAR_PLAYS,
 };
@@ -82,6 +82,7 @@ checked_generation!(ForegroundGeneration, "foreground_generation");
 checked_generation!(CloudAccountGeneration, "cloud_account_generation");
 checked_generation!(WindowAttachmentGeneration, "window_attachment_generation");
 checked_generation!(UploadGeneration, "upload_generation");
+checked_generation!(PosterGeneration, "poster_generation");
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum IdentityError {
@@ -564,7 +565,7 @@ pub enum CatalogResult {
         page: CatalogPage<CloudLibraryItem>,
     },
     Poster {
-        token: WindowWorkToken,
+        token: PosterWorkToken,
         poster: PosterResult,
     },
     UploadByteProgress {
@@ -612,11 +613,18 @@ impl CatalogResult {
                 }
                 Ok(())
             }
-            Self::Poster { poster, .. } => match &poster.status {
-                PosterStatus::Queued | PosterStatus::Missing => Ok(()),
-                PosterStatus::Ready { path } => check_string("poster.ready_path", path),
-                PosterStatus::Failed { message } => check_string("poster.message", message),
-            },
+            Self::Poster { token, poster } => {
+                if poster.path != token.path {
+                    return Err(PayloadBoundsError::Invalid {
+                        field: "poster.path_mismatch",
+                    });
+                }
+                match &poster.status {
+                    PosterStatus::Queued | PosterStatus::Missing => Ok(()),
+                    PosterStatus::Ready { path } => check_string("poster.ready_path", path),
+                    PosterStatus::Failed { message } => check_string("poster.message", message),
+                }
+            }
             Self::UploadByteProgress { token, progress }
             | Self::UploadCompleted {
                 token,

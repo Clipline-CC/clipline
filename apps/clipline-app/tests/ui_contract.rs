@@ -2072,7 +2072,7 @@ fn library_refresh_uses_the_shared_canonical_root_before_scoping_clips() {
         .find("pub async fn list_clips<R: Runtime>")
         .expect("list_clips command");
     let list_end = library[list_start..]
-        .find("\n/// Only two heavyweight ffmpeg poster children")
+        .find("\nfn poster_failure_kind")
         .map(|offset| list_start + offset)
         .expect("poster service follows list_clips");
     let list = &library[list_start..list_end];

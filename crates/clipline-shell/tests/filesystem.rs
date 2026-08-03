@@ -1,9 +1,14 @@
+use std::ffi::OsStr;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
 use clipline_shell::FileMutationFence;
-use clipline_shell::{file_identity, open_regular_file_nofollow, replace_file_if_identities};
+use clipline_shell::{
+    file_identity, open_regular_file_nofollow, opened_file_identity, replace_file_if_identities,
+    DirectoryAuthority,
+};
 
 struct TestDirectory(PathBuf);
 
@@ -81,6 +86,129 @@ fn identity_checked_replace_preserves_a_target_changed_after_validation() {
 
     assert_eq!(std::fs::read(&target).unwrap(), b"foreign");
     assert_eq!(std::fs::read(&replacement).unwrap(), b"new");
+}
+
+#[test]
+fn directory_authority_bounds_child_names_and_lifecycle_operations() {
+    let directory = TestDirectory::new("directory-authority");
+    let authority = DirectoryAuthority::open(directory.path()).unwrap();
+    assert_eq!(authority.display_path(), directory.path());
+    assert_eq!(
+        authority.identity(),
+        file_identity(directory.path()).unwrap()
+    );
+
+    for rejected in ["", ".", "..", "../escape", "nested/escape"] {
+        assert_eq!(
+            authority
+                .create_new_regular_file(OsStr::new(rejected))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+    }
+
+    let mut temporary = authority
+        .create_new_regular_file(OsStr::new("poster.tmp"))
+        .unwrap();
+    temporary.write_all(b"poster").unwrap();
+    temporary.sync_all().unwrap();
+    let identity = opened_file_identity(&temporary).unwrap();
+    drop(temporary);
+
+    assert_eq!(
+        authority
+            .regular_file_identity(OsStr::new("poster.tmp"))
+            .unwrap(),
+        Some(identity)
+    );
+    authority
+        .rename_file_noreplace_if_identity(
+            OsStr::new("poster.tmp"),
+            OsStr::new("poster.jpg"),
+            identity,
+        )
+        .unwrap();
+    assert_eq!(
+        std::fs::read(directory.path().join("poster.jpg")).unwrap(),
+        b"poster"
+    );
+    authority
+        .remove_file_if_identity(OsStr::new("poster.jpg"), identity)
+        .unwrap();
+    assert_eq!(
+        authority
+            .regular_file_identity(OsStr::new("poster.jpg"))
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
+fn directory_authority_replaces_only_the_selected_target_identity() {
+    let directory = TestDirectory::new("directory-authority-replace");
+    let target = directory.path().join("poster.jpg");
+    let replacement = directory.path().join("poster.tmp");
+    std::fs::write(&target, b"old").unwrap();
+    std::fs::write(&replacement, b"new").unwrap();
+    let authority = DirectoryAuthority::open(directory.path()).unwrap();
+    let target_identity = file_identity(&target).unwrap();
+    let replacement_identity = file_identity(&replacement).unwrap();
+
+    authority
+        .replace_file_if_identities(
+            OsStr::new("poster.tmp"),
+            replacement_identity,
+            OsStr::new("poster.jpg"),
+            target_identity,
+        )
+        .unwrap();
+
+    assert_eq!(std::fs::read(target).unwrap(), b"new");
+    assert!(!replacement.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn directory_authority_uses_the_selected_parent_after_its_display_path_is_replaced() {
+    let directory = TestDirectory::new("directory-authority-parent-swap");
+    let target = directory.path().join("poster.jpg");
+    std::fs::write(&target, b"selected-old").unwrap();
+    let target_identity = file_identity(&target).unwrap();
+    let authority = DirectoryAuthority::open(directory.path()).unwrap();
+    let selected = directory.path().with_extension("selected");
+
+    std::fs::rename(directory.path(), &selected).unwrap();
+    std::fs::create_dir(directory.path()).unwrap();
+    let foreign_target = directory.path().join("poster.jpg");
+    std::fs::write(&foreign_target, b"foreign").unwrap();
+
+    let mut replacement = authority
+        .create_new_regular_file(OsStr::new("poster.tmp"))
+        .unwrap();
+    replacement.write_all(b"selected-new").unwrap();
+    replacement.sync_all().unwrap();
+    let replacement_identity = opened_file_identity(&replacement).unwrap();
+    drop(replacement);
+    authority
+        .replace_file_if_identities(
+            OsStr::new("poster.tmp"),
+            replacement_identity,
+            OsStr::new("poster.jpg"),
+            target_identity,
+        )
+        .unwrap();
+
+    assert_eq!(
+        std::fs::read(selected.join("poster.jpg")).unwrap(),
+        b"selected-new"
+    );
+    assert_eq!(std::fs::read(&foreign_target).unwrap(), b"foreign");
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+
+    drop(authority);
+    std::fs::remove_dir_all(directory.path()).unwrap();
+    std::fs::rename(selected, directory.path()).unwrap();
 }
 
 #[test]

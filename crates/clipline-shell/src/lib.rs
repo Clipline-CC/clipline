@@ -267,6 +267,162 @@ pub fn open_directory_nofollow(path: &std::path::Path) -> std::io::Result<std::f
     }
 }
 
+/// Retained authority for creating, inspecting, and mutating regular-file children of one
+/// selected directory.
+///
+/// Child operations accept exactly one normal path component and remain bound to the opened
+/// directory identity. Unix uses descriptor-relative filesystem operations. Windows retains a
+/// directory handle opened without `FILE_SHARE_DELETE`, which pins the selected directory while
+/// the existing path-based child fallback runs. Replacing an ancestor component is outside the
+/// current Windows wrapper's authority ceiling; supporting that requires NT handle-relative open.
+#[derive(Debug)]
+pub struct DirectoryAuthority {
+    display_path: std::path::PathBuf,
+    directory: std::fs::File,
+    identity: FileIdentity,
+}
+
+impl DirectoryAuthority {
+    /// Open and retain one no-follow directory authority.
+    pub fn open(path: &std::path::Path) -> std::io::Result<Self> {
+        let directory = open_directory_nofollow(path)?;
+        let identity = opened_file_identity(&directory)?;
+        Ok(Self {
+            display_path: path.to_path_buf(),
+            directory,
+            identity,
+        })
+    }
+
+    /// Stable identity of the selected directory.
+    #[must_use]
+    pub const fn identity(&self) -> FileIdentity {
+        self.identity
+    }
+
+    /// Original display path used to open the authority.
+    #[must_use]
+    pub fn display_path(&self) -> &std::path::Path {
+        &self.display_path
+    }
+
+    /// Exclusively create one regular-file child under the selected directory.
+    pub fn create_new_regular_file(
+        &self,
+        name: &std::ffi::OsStr,
+    ) -> std::io::Result<std::fs::File> {
+        validate_child_name(name)?;
+        require_directory_authority(self)?;
+        create_new_regular_file_in_directory(&self.directory, &self.display_path, name)
+    }
+
+    /// Return the stable identity of one existing regular-file child, or `None` when absent.
+    pub fn regular_file_identity(
+        &self,
+        name: &std::ffi::OsStr,
+    ) -> std::io::Result<Option<FileIdentity>> {
+        validate_child_name(name)?;
+        require_directory_authority(self)?;
+        regular_file_identity_in_directory_if_present(&self.directory, &self.display_path, name)
+    }
+
+    /// Move one selected child to an unused sibling name under this authority.
+    pub fn rename_file_noreplace_if_identity(
+        &self,
+        from: &std::ffi::OsStr,
+        to: &std::ffi::OsStr,
+        source_identity: FileIdentity,
+    ) -> Result<(), FileMutationError> {
+        validate_child_name(from).map_err(FileMutationError::unchanged)?;
+        validate_child_name(to).map_err(FileMutationError::unchanged)?;
+        if from == to {
+            return Err(FileMutationError::unchanged(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "source and target child names must differ",
+            )));
+        }
+        require_directory_authority(self).map_err(FileMutationError::unchanged)?;
+        rename_file_in_directory_noreplace_if_identity(
+            &self.directory,
+            &self.display_path,
+            from,
+            to,
+            source_identity,
+            self.identity,
+        )
+    }
+
+    /// Remove one selected regular-file child under this authority.
+    pub fn remove_file_if_identity(
+        &self,
+        name: &std::ffi::OsStr,
+        source_identity: FileIdentity,
+    ) -> Result<(), FileMutationError> {
+        validate_child_name(name).map_err(FileMutationError::unchanged)?;
+        require_directory_authority(self).map_err(FileMutationError::unchanged)?;
+        remove_file_in_directory_if_identity(
+            &self.directory,
+            &self.display_path,
+            name,
+            source_identity,
+            self.identity,
+        )
+    }
+
+    /// Publish one synchronized selected child over another selected child.
+    pub fn replace_file_if_identities(
+        &self,
+        replacement: &std::ffi::OsStr,
+        replacement_identity: FileIdentity,
+        target: &std::ffi::OsStr,
+        target_identity: FileIdentity,
+    ) -> Result<(), FileMutationError> {
+        validate_child_name(replacement).map_err(FileMutationError::unchanged)?;
+        validate_child_name(target).map_err(FileMutationError::unchanged)?;
+        if replacement == target {
+            return Err(FileMutationError::unchanged(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "replacement and target child names must differ",
+            )));
+        }
+        require_directory_authority(self).map_err(FileMutationError::unchanged)?;
+        replace_file_if_identities_with_authority(
+            self,
+            replacement,
+            replacement_identity,
+            target,
+            target_identity,
+        )
+    }
+}
+
+fn validate_child_name(name: &std::ffi::OsStr) -> std::io::Result<()> {
+    let path = std::path::Path::new(name);
+    if path.file_name() != Some(name)
+        || !matches!(
+            path.components().next(),
+            Some(std::path::Component::Normal(_))
+        )
+        || path.components().nth(1).is_some()
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "directory child name must be one normal path component",
+        ));
+    }
+    Ok(())
+}
+
+fn require_directory_authority(authority: &DirectoryAuthority) -> std::io::Result<()> {
+    if opened_file_identity(&authority.directory)? != authority.identity {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "selected directory authority changed",
+        ));
+    }
+    Ok(())
+}
+
 /// Atomically replace `to` with the already-synchronized sibling file `from`.
 /// Platform-specific replacement stays behind this safe shell boundary.
 pub fn replace_file(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
@@ -489,7 +645,7 @@ impl FileMutationFence {
                     }
                     Err(rustix::io::Errno::EXIST) => {}
                     Err(error) => {
-                        return Err(FileMutationError::unchanged(std::io::Error::from(error)))
+                        return Err(FileMutationError::unchanged(std::io::Error::from(error)));
                     }
                 }
             }
@@ -845,6 +1001,45 @@ fn open_regular_file_in_directory(
     }
 }
 
+fn create_new_regular_file_in_directory(
+    parent_file: &std::fs::File,
+    parent: &std::path::Path,
+    name: &std::ffi::OsStr,
+) -> std::io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use rustix::fs::{Mode, OFlags};
+
+        let _ = parent;
+        let owned = rustix::fs::openat(
+            parent_file,
+            name,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::RUSR | Mode::WUSR,
+        )
+        .map_err(std::io::Error::from)?;
+        Ok(std::fs::File::from(owned))
+    }
+
+    #[cfg(windows)]
+    {
+        let _ = parent_file;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(parent.join(name))
+    }
+
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = (parent_file, parent, name);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "directory-relative file creation is unavailable on this platform",
+        ))
+    }
+}
+
 fn open_directory_in_directory(
     parent_file: &std::fs::File,
     parent: &std::path::Path,
@@ -955,7 +1150,6 @@ fn regular_file_identity_in_directory_if_present(
     }
 }
 
-#[cfg(unix)]
 fn mutation_fence_in_directory(
     parent_file: &std::fs::File,
     parent: &std::path::Path,
@@ -963,22 +1157,40 @@ fn mutation_fence_in_directory(
     source_identity: FileIdentity,
     parent_identity: FileIdentity,
 ) -> std::io::Result<FileMutationFence> {
-    let file = open_regular_file_in_directory(parent_file, parent, name)?;
-    if opened_file_identity(&file)? != source_identity
-        || opened_file_identity(parent_file)? != parent_identity
+    #[cfg(unix)]
     {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "filesystem object changed while acquiring a relative mutation fence",
-        ));
+        let file = open_regular_file_in_directory(parent_file, parent, name)?;
+        if opened_file_identity(&file)? != source_identity
+            || opened_file_identity(parent_file)? != parent_identity
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "filesystem object changed while acquiring a relative mutation fence",
+            ));
+        }
+        Ok(FileMutationFence {
+            _file: file,
+            current_path: parent.join(name),
+            source_identity,
+            parent: parent_file.try_clone()?,
+            parent_identity,
+        })
     }
-    Ok(FileMutationFence {
-        _file: file,
-        current_path: parent.join(name),
-        source_identity,
-        parent: parent_file.try_clone()?,
-        parent_identity,
-    })
+
+    #[cfg(windows)]
+    {
+        let _ = parent_file;
+        FileMutationFence::acquire(&parent.join(name), source_identity, parent_identity)
+    }
+
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = (parent_file, parent, name, source_identity, parent_identity);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "directory-relative mutation fences are unavailable on this platform",
+        ))
+    }
 }
 
 fn remove_file_in_directory_if_identity(
@@ -1003,8 +1215,15 @@ fn remove_file_in_directory_if_identity(
 
     #[cfg(windows)]
     {
-        let _ = parent_file;
-        remove_file_if_identities(&parent.join(name), source_identity, parent_identity)
+        let mut fence = mutation_fence_in_directory(
+            parent_file,
+            parent,
+            name,
+            source_identity,
+            parent_identity,
+        )
+        .map_err(FileMutationError::unchanged)?;
+        fence.delete()
     }
 
     #[cfg(not(any(windows, unix)))]
@@ -1040,13 +1259,15 @@ fn rename_file_in_directory_noreplace_if_identity(
 
     #[cfg(windows)]
     {
-        let _ = parent_file;
-        rename_file_noreplace_if_identities(
-            &parent.join(from_name),
-            &parent.join(to_name),
+        let mut fence = mutation_fence_in_directory(
+            parent_file,
+            parent,
+            from_name,
             source_identity,
             parent_identity,
         )
+        .map_err(FileMutationError::unchanged)?;
+        fence.rename_noreplace(&parent.join(to_name))
     }
 
     #[cfg(not(any(windows, unix)))]
@@ -1673,7 +1894,7 @@ fn try_exchange_replacement(
     ) {
         Ok(()) => {}
         Err(rustix::io::Errno::INVAL | rustix::io::Errno::NOSYS | rustix::io::Errno::NOTSUP) => {
-            return Ok(None)
+            return Ok(None);
         }
         Err(error) => return Err(FileMutationError::unchanged(std::io::Error::from(error))),
     }
@@ -1760,10 +1981,6 @@ pub fn replace_file_if_identities(
     target: &std::path::Path,
     target_identity: FileIdentity,
 ) -> Result<(), FileMutationError> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static REPLACE_COUNTER: AtomicU64 = AtomicU64::new(0);
-
     let parent = replacement.parent().ok_or_else(|| {
         FileMutationError::unchanged(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -1776,14 +1993,54 @@ pub fn replace_file_if_identities(
             "replacement and target must be distinct siblings",
         )));
     }
-    let parent_file = open_directory_nofollow(parent).map_err(FileMutationError::unchanged)?;
-    let parent_identity =
-        opened_file_identity(&parent_file).map_err(FileMutationError::unchanged)?;
-    let mut replacement_fence =
-        FileMutationFence::acquire(replacement, replacement_identity, parent_identity)
-            .map_err(FileMutationError::unchanged)?;
-    let mut target_fence = FileMutationFence::acquire(target, target_identity, parent_identity)
+    let authority = DirectoryAuthority::open(parent).map_err(FileMutationError::unchanged)?;
+    authority.replace_file_if_identities(
+        replacement
+            .file_name()
+            .expect("replacement parent validated"),
+        replacement_identity,
+        target.file_name().expect("target parent validated"),
+        target_identity,
+    )
+}
+
+fn replace_file_if_identities_with_authority(
+    authority: &DirectoryAuthority,
+    replacement_name: &std::ffi::OsStr,
+    replacement_identity: FileIdentity,
+    target_name: &std::ffi::OsStr,
+    target_identity: FileIdentity,
+) -> Result<(), FileMutationError> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static REPLACE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let parent = authority.display_path.as_path();
+    let parent_file = authority
+        .directory
+        .try_clone()
         .map_err(FileMutationError::unchanged)?;
+    let parent_identity = authority.identity;
+    let replacement_path = parent.join(replacement_name);
+    let replacement = replacement_path.as_path();
+    let target_path = parent.join(target_name);
+    let target = target_path.as_path();
+    let mut replacement_fence = mutation_fence_in_directory(
+        &parent_file,
+        parent,
+        replacement_name,
+        replacement_identity,
+        parent_identity,
+    )
+    .map_err(FileMutationError::unchanged)?;
+    let mut target_fence = mutation_fence_in_directory(
+        &parent_file,
+        parent,
+        target_name,
+        target_identity,
+        parent_identity,
+    )
+    .map_err(FileMutationError::unchanged)?;
 
     #[cfg(any(
         target_os = "android",
@@ -1918,9 +2175,9 @@ pub fn replace_file_if_identities(
                     journal_identity,
                     parent_identity,
                 );
-                Err(FileMutationError::unchanged(std::io::Error::other(format!(
-                    "publish replacement: {error}; selected target restored"
-                ))))
+                Err(FileMutationError::unchanged(std::io::Error::other(
+                    format!("publish replacement: {error}; selected target restored"),
+                )))
             }
             Ok(()) => Err(FileMutationError::target_or_unknown(
                 std::io::Error::other(format!(
@@ -1932,7 +2189,11 @@ pub fn replace_file_if_identities(
                 std::io::Error::other(format!(
                     "publish replacement: {error}; rollback failed: {rollback}; selected target remains at {backup:?}; recovery journal is {journal_path:?}"
                 )),
-                if error.may_have_moved() { target } else { &backup },
+                if error.may_have_moved() {
+                    target
+                } else {
+                    &backup
+                },
             )),
         };
     }

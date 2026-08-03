@@ -4,10 +4,10 @@ use clipline_library::{
     CatalogAction, CatalogPage, CatalogRevision, CatalogSource, ClipGame, ClipPathIdentity,
     CloudAccountGeneration, CloudAccountKey, CloudAccountSnapshot, CloudLibraryItem,
     CloudWorkToken, DurableUploadToken, ForegroundGeneration, GenerationError, LocalClipId,
-    LocalClipItem, MutationFailure, MutationReport, PayloadBoundsError, PresentationRow,
-    RequestGeneration, UploadGeneration, UploadSummary, WindowAttachmentGeneration,
-    WindowWorkToken, MAX_CATALOG_IDENTITY_BYTES, MAX_CATALOG_PAGE_ROWS, MAX_CLOUD_INDEX_ROWS,
-    MAX_DECODED_PAGE_IMAGES, MAX_LOCAL_INDEX_ROWS, MAX_MUTATION_PATH_BYTES,
+    LocalClipItem, MutationFailure, MutationReport, PayloadBoundsError, PosterGeneration,
+    PresentationRow, RequestGeneration, UploadGeneration, UploadSummary,
+    WindowAttachmentGeneration, WindowWorkToken, MAX_CATALOG_IDENTITY_BYTES, MAX_CATALOG_PAGE_ROWS,
+    MAX_CLOUD_INDEX_ROWS, MAX_DECODED_PAGE_IMAGES, MAX_LOCAL_INDEX_ROWS, MAX_MUTATION_PATH_BYTES,
     MAX_POSTER_RESULT_ENTRIES, MAX_UPLOAD_SUMMARIES,
 };
 
@@ -69,6 +69,7 @@ fn all_contract_generations_fail_instead_of_wrapping() {
     assert_exhausts!(CloudAccountGeneration, "cloud_account_generation");
     assert_exhausts!(WindowAttachmentGeneration, "window_attachment_generation");
     assert_exhausts!(UploadGeneration, "upload_generation");
+    assert_exhausts!(PosterGeneration, "poster_generation");
 }
 
 #[test]

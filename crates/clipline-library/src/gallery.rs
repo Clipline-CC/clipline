@@ -402,6 +402,18 @@ impl<K, V> DeterministicLru<K, V> {
 
 impl<K: PartialEq, V> DeterministicLru<K, V> {
     #[must_use]
+    pub fn peek<Q>(&self, key: &Q) -> Option<&V>
+    where
+        K: Borrow<Q>,
+        Q: PartialEq + ?Sized,
+    {
+        self.entries
+            .iter()
+            .find(|(candidate, _)| candidate.borrow() == key)
+            .map(|(_, value)| value)
+    }
+
+    #[must_use]
     pub fn get<Q>(&mut self, key: &Q) -> Option<&V>
     where
         K: Borrow<Q>,
@@ -443,6 +455,18 @@ impl<K: PartialEq, V> DeterministicLru<K, V> {
             }
         }
         evicted
+    }
+
+    pub fn remove<Q>(&mut self, key: &Q) -> Option<V>
+    where
+        K: Borrow<Q>,
+        Q: PartialEq + ?Sized,
+    {
+        let position = self
+            .entries
+            .iter()
+            .position(|(candidate, _)| candidate.borrow() == key)?;
+        self.entries.remove(position).map(|(_, value)| value)
     }
 }
 

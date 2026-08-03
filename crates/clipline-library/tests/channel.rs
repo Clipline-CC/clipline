@@ -2,9 +2,10 @@ use clipline_library::{
     catalog_result_channel, CatalogPage, CatalogResult, CatalogResultPublishOutcome,
     CatalogRevision, CatalogSource, ClipPathIdentity, CloudAccountGeneration, CloudAccountKey,
     CloudLibraryItem, CloudWorkToken, DurableUploadToken, ExpectedResultOwner,
-    ForegroundGeneration, LocalClipId, LocalClipItem, MutationReport, PosterResult, PosterStatus,
-    RequestGeneration, ResultPortError, UploadGeneration, UploadSummary,
-    WindowAttachmentGeneration, WindowWorkToken, CATALOG_RESULT_CAPACITY,
+    ForegroundGeneration, LocalClipId, LocalClipItem, MutationReport, PosterGeneration,
+    PosterResult, PosterStatus, PosterWorkToken, RequestGeneration, ResultPortError,
+    UploadGeneration, UploadSummary, WindowAttachmentGeneration, WindowWorkToken,
+    CATALOG_RESULT_CAPACITY,
 };
 
 fn window(request: u64) -> WindowWorkToken {
@@ -122,10 +123,15 @@ fn coalescable_results_replace_only_the_same_exact_key_before_a_barrier() {
 #[test]
 fn poster_replacement_is_scoped_to_token_and_path() {
     let (sender, receiver) = catalog_result_channel();
-    let token = window(4);
+    let window = window(4);
     let path = ClipPathIdentity::from_text(r"C:\Clips\One.mp4").unwrap();
+    let token = PosterWorkToken {
+        window,
+        poster: PosterGeneration::new(1),
+        path: path.clone(),
+    };
     let poster = |status| CatalogResult::Poster {
-        token,
+        token: token.clone(),
         poster: PosterResult {
             path: path.clone(),
             status,
@@ -134,7 +140,7 @@ fn poster_replacement_is_scoped_to_token_and_path() {
     sender
         .try_send(
             poster(PosterStatus::Queued),
-            ExpectedResultOwner::Window(token),
+            ExpectedResultOwner::Poster(token.clone()),
         )
         .unwrap();
     assert_eq!(
@@ -142,7 +148,7 @@ fn poster_replacement_is_scoped_to_token_and_path() {
             poster(PosterStatus::Ready {
                 path: r"C:\Cache\One.jpg".into(),
             }),
-            ExpectedResultOwner::Window(token),
+            ExpectedResultOwner::Poster(token),
         ),
         Ok(CatalogResultPublishOutcome::Replaced)
     );

@@ -6,7 +6,7 @@
 mod naming;
 use naming::is_reserved_windows_file_name;
 
-use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
+use std::collections::{hash_map::DefaultHasher, HashSet};
 use std::hash::{Hash, Hasher};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -222,111 +222,6 @@ pub async fn list_clips<R: Runtime>(
     Ok(scan)
 }
 
-/// Only two heavyweight ffmpeg poster children may exist at once.
-const MAX_CONCURRENT_POSTER_EXTRACTIONS: usize = 2;
-type PosterExtractionResult = Result<PathBuf, String>;
-
-struct PosterExtractionFlight {
-    result: tokio::sync::watch::Sender<Option<PosterExtractionResult>>,
-}
-
-struct PosterExtractionCoordinator {
-    permits: Arc<tokio::sync::Semaphore>,
-    flights: tokio::sync::Mutex<HashMap<PathBuf, Arc<PosterExtractionFlight>>>,
-}
-
-impl PosterExtractionCoordinator {
-    fn new(max_concurrent: usize) -> Self {
-        assert!(
-            max_concurrent > 0,
-            "poster extraction concurrency must be non-zero"
-        );
-        Self {
-            permits: Arc::new(tokio::sync::Semaphore::new(max_concurrent)),
-            flights: tokio::sync::Mutex::new(HashMap::new()),
-        }
-    }
-
-    /// Run one blocking extraction per canonical clip path. The worker is
-    /// detached from any individual command future so a cancelled caller
-    /// cannot strand followers or release its concurrency permit while ffmpeg
-    /// is still alive.
-    async fn run(
-        self: &Arc<Self>,
-        canonical_clip: PathBuf,
-        work: impl FnOnce() -> PosterExtractionResult + Send + 'static,
-    ) -> PosterExtractionResult {
-        let (mut result, leader) = {
-            let mut flights = self.flights.lock().await;
-            if let Some(flight) = flights.get(&canonical_clip) {
-                (flight.result.subscribe(), None)
-            } else {
-                let (result_tx, result_rx) = tokio::sync::watch::channel(None);
-                let flight = Arc::new(PosterExtractionFlight { result: result_tx });
-                flights.insert(canonical_clip.clone(), Arc::clone(&flight));
-                (result_rx, Some(flight))
-            }
-        };
-
-        if let Some(flight) = leader {
-            let coordinator = Arc::clone(self);
-            tauri::async_runtime::spawn(async move {
-                let completed = coordinator.run_worker(work).await;
-                flight.result.send_replace(Some(completed));
-
-                let mut flights = coordinator.flights.lock().await;
-                if flights
-                    .get(&canonical_clip)
-                    .is_some_and(|current| Arc::ptr_eq(current, &flight))
-                {
-                    flights.remove(&canonical_clip);
-                }
-            });
-        }
-
-        loop {
-            if let Some(completed) = result.borrow().clone() {
-                return completed;
-            }
-            result
-                .changed()
-                .await
-                .map_err(|_| "poster extraction ended without a result".to_string())?;
-        }
-    }
-
-    async fn run_worker(
-        &self,
-        work: impl FnOnce() -> PosterExtractionResult + Send + 'static,
-    ) -> PosterExtractionResult {
-        let _permit = Arc::clone(&self.permits)
-            .acquire_owned()
-            .await
-            .map_err(|_| "poster extraction coordinator closed".to_string())?;
-        tauri::async_runtime::spawn_blocking(work)
-            .await
-            .map_err(|error| format!("clip poster task: {error}"))?
-    }
-
-    #[cfg(test)]
-    async fn joined_callers(&self, canonical_clip: &Path) -> usize {
-        self.flights
-            .lock()
-            .await
-            .get(canonical_clip)
-            .map_or(0, |flight| flight.result.receiver_count())
-    }
-}
-
-fn poster_extraction_coordinator() -> Arc<PosterExtractionCoordinator> {
-    static COORDINATOR: OnceLock<Arc<PosterExtractionCoordinator>> = OnceLock::new();
-    Arc::clone(COORDINATOR.get_or_init(|| {
-        Arc::new(PosterExtractionCoordinator::new(
-            MAX_CONCURRENT_POSTER_EXTRACTIONS,
-        ))
-    }))
-}
-
 fn poster_failure_kind(error: &str) -> &'static str {
     if error
         .trim()
@@ -375,18 +270,13 @@ pub async fn clip_poster<R: Runtime>(
 ) -> Result<String, String> {
     let scope_root = settings.clips_dir()?;
     let target = validate_clip_path(&settings, &path)?;
-    let poster = if let Some(poster) = crate::poster::cached_poster(&target) {
-        poster
-    } else {
-        let canonical_clip = target.clone();
-        poster_extraction_coordinator()
-            .run(canonical_clip, move || {
-                let seek_s = poster_seek_seconds(&target);
-                crate::poster::ensure_poster(&target, seek_s)
-            })
-            .await
-            .inspect_err(|error| log_poster_failure_once(error))?
-    };
+    let poster = tauri::async_runtime::spawn_blocking(move || {
+        let seek_s = clipline_library::poster_seek_seconds(&target);
+        crate::poster::ensure_poster(&target, seek_s)
+    })
+    .await
+    .map_err(|error| format!("clip poster task: {error}"))?
+    .inspect_err(|error| log_poster_failure_once(error))?;
     allow_local_poster_asset(&app, &scope_root, &poster)?;
     Ok(poster.display().to_string())
 }
@@ -459,34 +349,6 @@ fn allow_local_media_asset_from_canonical_root<R: Runtime>(
     app.asset_protocol_scope()
         .allow_file(&canonical_asset)
         .map_err(|e| format!("scope media asset {canonical_asset:?} for playback: {e}"))
-}
-
-/// The frame to grab a poster from: prefer a local-player review event, then
-/// the first review event, else a little into the clip to skip black opening.
-fn poster_seek_seconds(clip: &Path) -> f64 {
-    let Some(markers) = util::read_markers_raw(clip) else {
-        return 1.0;
-    };
-    let markers = filter_review_markers(markers);
-    let duration_ok = markers.duration_s.is_finite() && markers.duration_s > 0.0;
-    if let Some(first) = markers
-        .markers
-        .iter()
-        .find(|marker| marker.event.involves_local_player)
-        .or_else(|| markers.markers.first())
-    {
-        let t = first.t_s.max(0.0);
-        return if duration_ok {
-            t.min((markers.duration_s - 0.2).max(0.0))
-        } else {
-            t
-        };
-    }
-    if duration_ok {
-        (markers.duration_s * 0.15).min(5.0)
-    } else {
-        1.0
-    }
 }
 
 #[tauri::command]
@@ -3257,145 +3119,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(poster_seek_seconds(&clip), 8.0);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn poster_extraction_is_single_flight_per_canonical_path() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::Arc;
-
-        let coordinator = Arc::new(PosterExtractionCoordinator::new(
-            MAX_CONCURRENT_POSTER_EXTRACTIONS,
-        ));
-        let dir = TestDir::new("clipline-library", "poster-single-flight");
-        let clip = dir.path().join("clip.mp4");
-        touch_mp4(&clip);
-        let key = clip.canonicalize().unwrap();
-        let expected_poster = crate::poster::poster_path(&key);
-        let calls = Arc::new(AtomicUsize::new(0));
-        let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
-
-        let leader = {
-            let coordinator = Arc::clone(&coordinator);
-            let key = key.clone();
-            let expected_poster = expected_poster.clone();
-            let calls = Arc::clone(&calls);
-            let release = Arc::clone(&release);
-            tokio::spawn(async move {
-                coordinator
-                    .run(key, move || {
-                        calls.fetch_add(1, Ordering::SeqCst);
-                        let (lock, ready) = &*release;
-                        let mut released = lock.lock().expect("release lock");
-                        while !*released {
-                            released = ready.wait(released).expect("release wait");
-                        }
-                        Ok(expected_poster)
-                    })
-                    .await
-            })
-        };
-
-        let leader_started = tokio::time::timeout(Duration::from_secs(2), async {
-            while calls.load(Ordering::SeqCst) != 1 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await;
-        if leader_started.is_err() {
-            let (lock, ready) = &*release;
-            *lock.lock().expect("release lock") = true;
-            ready.notify_all();
-        }
-        leader_started.expect("leader starts");
-
-        let follower = {
-            let coordinator = Arc::clone(&coordinator);
-            let key = key.clone();
-            let calls = Arc::clone(&calls);
-            tokio::spawn(async move {
-                coordinator
-                    .run(key, move || {
-                        calls.fetch_add(1, Ordering::SeqCst);
-                        Ok(PathBuf::from("unexpected-second-poster.jpg"))
-                    })
-                    .await
-            })
-        };
-
-        let joined = tokio::time::timeout(Duration::from_secs(2), async {
-            while coordinator.joined_callers(&key).await != 2 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await;
-
-        let (lock, ready) = &*release;
-        *lock.lock().expect("release lock") = true;
-        ready.notify_all();
-        joined.expect("follower joins the in-flight extraction");
-
-        let leader_result = leader.await.unwrap().unwrap();
-        let follower_result = follower.await.unwrap().unwrap();
-        assert_eq!(leader_result, follower_result);
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
-    async fn poster_extraction_runs_at_most_two_unique_paths_concurrently() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::Arc;
-
-        let coordinator = Arc::new(PosterExtractionCoordinator::new(
-            MAX_CONCURRENT_POSTER_EXTRACTIONS,
-        ));
-        let active = Arc::new(AtomicUsize::new(0));
-        let peak = Arc::new(AtomicUsize::new(0));
-        let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
-        let mut tasks = Vec::new();
-
-        for index in 0..6 {
-            let coordinator = Arc::clone(&coordinator);
-            let active = Arc::clone(&active);
-            let peak = Arc::clone(&peak);
-            let release = Arc::clone(&release);
-            tasks.push(tokio::spawn(async move {
-                coordinator
-                    .run(
-                        PathBuf::from(format!(r"C:\clips\clip-{index}.mp4")),
-                        move || {
-                            let now = active.fetch_add(1, Ordering::SeqCst) + 1;
-                            peak.fetch_max(now, Ordering::SeqCst);
-                            let (lock, ready) = &*release;
-                            let mut released = lock.lock().expect("release lock");
-                            while !*released {
-                                released = ready.wait(released).expect("release wait");
-                            }
-                            active.fetch_sub(1, Ordering::SeqCst);
-                            Ok(PathBuf::from(format!(r"C:\clips\clip-{index}.poster.jpg")))
-                        },
-                    )
-                    .await
-            }));
-        }
-
-        let started = tokio::time::timeout(Duration::from_secs(2), async {
-            while active.load(Ordering::SeqCst) != MAX_CONCURRENT_POSTER_EXTRACTIONS {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await;
-
-        let (lock, ready) = &*release;
-        *lock.lock().expect("release lock") = true;
-        ready.notify_all();
-        started.expect("two poster jobs start");
-        assert_eq!(peak.load(Ordering::SeqCst), 2);
-        for task in tasks {
-            task.await.unwrap().unwrap();
-        }
-        assert_eq!(peak.load(Ordering::SeqCst), 2);
+        assert_eq!(clipline_library::poster_seek_seconds(&clip), 8.0);
     }
 
     fn touch_mp4(path: &Path) {

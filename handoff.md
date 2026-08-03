@@ -4,6 +4,51 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-02): Slint replacement Milestone 7, Task 5
+
+Plan: `docs/superpowers/plans/2026-08-02-slint-library-cloud.md`. Poster extraction is now one
+framework-neutral service in `crates/clipline-library`; the shipping Tauri module is a thin
+compatibility adapter and its duplicate command/process/temp implementation is gone. The service
+keeps the existing 480-pixel FFmpeg command but owns a 30-second kill/reap deadline, concurrent
+bounded stdout/stderr draining (4 MiB/64 KiB), canonical-path single flight, a panic-safe
+process-wide two-child permit, successful-locator caching, and retryable failed flights. FFmpeg
+remains an external LGPL process. New and cached artifacts must pass bounded dimension, pixel,
+RGB-byte, allocation, and full JPEG decode checks before becoming durable cache hits.
+
+Filesystem publication is bound to exact selected authority throughout. The service validates the
+source both against its selected identity and as a child of a retained `DirectoryAuthority` before
+FFmpeg, after FFmpeg, and after publication. Poster temps are exclusive children of that authority;
+target inspection, no-replace create publication, stale-target replacement, cleanup, and rollback
+use retained-directory plus exact file identities. Unix operations are descriptor-relative;
+Windows retains a no-follow parent handle without delete sharing. Deterministic regressions swap a
+selected parent for a foreign directory both before authority selection and immediately before
+publication, proving an existing foreign poster is never replaced or deleted.
+
+The neutral poster viewport controller accepts at most 60 rows, retains at most 32 combined
+queued/decoding/current image leases even across page replacement, and keeps exactly 120 ready or
+negative cache entries with a 30-second retry. Path, attachment, foreground, page, and poster
+generations are all exact fences; generation exhaustion is transactional; old weak-window work
+cannot detach a replacement window. The Slint adapter opens the exact generated sibling no-follow,
+limits encoded bytes and decoded dimensions before allocation, decodes only JPEG into a sendable
+`SharedPixelBuffer<Rgb8Pixel>`, closes the file, and constructs `slint::Image` only on the UI thread
+after the final controller check. `image` 0.25 is pinned with defaults disabled and JPEG only in
+both direct manifests. Its newly resolved dependencies were reviewed as permissive
+MIT/Apache/BSD/Zlib/Unlicense combinations; local `cargo audit`/`cargo deny` are unavailable, while
+the repository's pinned RustSec workflow remains the authoritative vulnerability gate.
+
+Validation is green under CI-mode full-workspace all-target tests, warning-denied workspace
+Clippy, complete Slint all-target tests and warning-denied Clippy, all shell targets, real poster
+child/overflow/timeout/cache/identity tests, controller/channel/contract tests, and strict Linux
+cross-target check/Clippy for `clipline-library`. The Slint Linux cross-target build reaches its
+existing `yeslogic-fontconfig-sys` pkg-config/sysroot requirement and cannot be completed from the
+Windows host; native Windows Slint gates are green. Independent controller and final poster-service
+re-audits are GO with no P0/P1. Full shell/model wiring, live weak-component event-loop execution,
+and dispatch-failure teardown remain explicitly deferred to Task 9; crash-abandoned poster-temp
+janitor policy remains a recorded nonblocking follow-up.
+
+Next: Task 6, extract account-fenced Cloud list/profile/thumbnail/media-cache services while
+preserving the shipping Tauri JSON and cache behavior.
+
 ## Checkpoint (2026-08-02): Slint replacement Milestone 7, Task 4
 
 Plan: `docs/superpowers/plans/2026-08-02-slint-library-cloud.md`. The complete local Library
