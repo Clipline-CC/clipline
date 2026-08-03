@@ -484,6 +484,9 @@ impl Drop for Permit {
     }
 }
 
+// Cache adapters may be rebuilt after credential rotation while an older
+// adapter's playback lease is still alive. Sharing accounting by canonical
+// root prevents the replacement adapter from evicting that protected file.
 fn runtime_for_root(root: &Path) -> Arc<RuntimeState> {
     type RuntimeRegistry = Vec<(PathBuf, Weak<RuntimeState>)>;
     static RUNTIMES: OnceLock<Mutex<RuntimeRegistry>> = OnceLock::new();

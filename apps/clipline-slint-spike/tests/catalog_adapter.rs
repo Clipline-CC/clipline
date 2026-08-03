@@ -9,10 +9,11 @@ use clipline_library::{
     CatalogItemIdentity, CatalogLoadState, CatalogMenuProjection, CatalogOperationOwner,
     CatalogProjectionInput, CatalogProjectionSource, CatalogResult, CatalogRevision,
     CatalogUploadProjection, ClipPathIdentity, CloudAccountGeneration, CloudAccountKey,
+    CloudThumbnailDescriptor, CloudThumbnailOwner, CloudThumbnailRequest, CloudWorkToken,
     DurableUploadToken, ExpectedResultOwner, ForegroundGeneration, GalleryPresentation,
     LocalClipFilter, LocalClipId, LocalClipItem, LocalDay, LocalDayResolver, LocalGalleryOptions,
-    LocalIndexCompletion, LocalPageIndex, MarkerSidecarSummary, PresentationError,
-    RequestGeneration, SystemProjectionReservation, UploadGeneration, UploadSummary,
+    LocalIndexCompletion, LocalPageIndex, MarkerSidecarSummary, PosterStatus, PresentationError,
+    RemoteClipId, RequestGeneration, SystemProjectionReservation, UploadGeneration, UploadSummary,
     WindowAttachmentGeneration, WindowWorkToken, CATALOG_RESULT_CAPACITY,
 };
 use clipline_slint_spike::catalog::{
@@ -72,6 +73,30 @@ fn projection_with_menu() -> Result<clipline_library::CatalogProjection, Present
         },
         &Days,
         &SystemProjectionReservation,
+    )
+}
+
+fn cloud_thumbnail_effect(
+    window: WindowWorkToken,
+    request: u64,
+) -> (CatalogEffect, CloudThumbnailOwner) {
+    let token = CloudWorkToken {
+        window,
+        account_key: CloudAccountKey::new("account-a").unwrap(),
+        account_generation: CloudAccountGeneration::new(8),
+    };
+    let item = CatalogItemIdentity::Cloud {
+        account_key: token.account_key.clone(),
+        account_generation: token.account_generation,
+        remote_clip_id: RemoteClipId::new(format!("remote-{request}")).unwrap(),
+    };
+    let descriptor = CloudThumbnailDescriptor::new(item, request).unwrap();
+    let owner = CloudThumbnailOwner::new(token, descriptor).unwrap();
+    (
+        CatalogEffect::LoadCloudThumbnail {
+            request: CloudThumbnailRequest::new(owner.clone()).unwrap(),
+        },
+        owner,
     )
 }
 
@@ -282,8 +307,21 @@ fn bounded_executor_maps_worker_failure_to_the_exact_operation_owner() {
         }
         other => panic!("expected operation failure, got {other:?}"),
     }
+
+    let (thumbnail, thumbnail_owner) = cloud_thumbnail_effect(token, 44);
+    executor.try_submit(thumbnail).unwrap();
+    let result = receiver.wait_recv(Duration::from_secs(2)).unwrap().unwrap();
+    assert!(matches!(
+        result,
+        CatalogResult::CloudThumbnail {
+            owner,
+            status: PosterStatus::Failed { message },
+        } if owner == thumbnail_owner
+            && message.len() == clipline_library::MAX_CATALOG_STRING_BYTES
+            && message.is_char_boundary(message.len())
+    ));
     executor.shutdown().unwrap();
-    assert_eq!(wake.0.load(Ordering::SeqCst), 1);
+    assert_eq!(wake.0.load(Ordering::SeqCst), 2);
 }
 
 struct PanickingHandler;
@@ -468,4 +506,17 @@ fn admission_rejection_maps_only_owned_operations_to_exact_failures() {
         } if actual == token && actual_revision == revision
     ));
     assert!(rejected_effect_result(&CatalogEffect::CloseReview { token }, "full").is_none());
+
+    let (effect, owner) = cloud_thumbnail_effect(token, 9);
+    let completion = rejected_effect_result(&effect, "executor queue is full").unwrap();
+    assert!(matches!(
+        completion,
+        clipline_slint_spike::catalog::OwnedCatalogResult {
+            result: CatalogResult::CloudThumbnail {
+                owner: actual,
+                status: PosterStatus::Failed { message },
+            },
+            expected: ExpectedResultOwner::CloudThumbnail(expected),
+        } if actual == owner && expected == owner && message == "executor queue is full"
+    ));
 }

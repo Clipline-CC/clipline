@@ -926,6 +926,7 @@ dependencies = [
  "raw-window-handle",
  "serde",
  "serde_json",
+ "sha2",
  "slint",
  "slint-build",
  "thiserror 2.0.19",

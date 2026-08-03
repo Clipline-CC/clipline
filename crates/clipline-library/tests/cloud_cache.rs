@@ -697,6 +697,50 @@ fn protected_media_blocks_eviction_until_the_lease_drops() {
 }
 
 #[test]
+fn independently_opened_cache_shares_playback_protection_for_the_same_root() {
+    let dir = TestDir::new("clipline-library", "cloud-shared-root-protection");
+    let account = account("account-a", 1, "3333333333333334");
+    let space = Arc::new(FixedSpace::ample());
+    let first = open_cache(
+        dir.path(),
+        Arc::new(FakeDownload::new(b"media-payload")),
+        space.clone(),
+        Arc::new(AccountGate(Mutex::new(account.clone()))),
+    );
+    let cached = first
+        .get(
+            request(&account, "remote", CloudAssetKind::Media),
+            &CloudCancellation::default(),
+        )
+        .unwrap()
+        .unwrap();
+    let path = cached.path().to_path_buf();
+    let lease = first
+        .accept_media(&account, cached, &CloudCancellation::default())
+        .unwrap();
+
+    let second = open_cache(
+        dir.path(),
+        Arc::new(FakeDownload::new(b"replacement-transport")),
+        space.clone(),
+        Arc::new(AccountGate(Mutex::new(account))),
+    );
+    space.set(CLOUD_CACHE_FREE_SPACE_FLOOR_BYTES - 1);
+    assert!(matches!(
+        second.prune(0),
+        Err(CloudCacheError::InsufficientSpace { .. })
+    ));
+    assert!(
+        path.exists(),
+        "a cache reopened for credential rotation evicted live playback media"
+    );
+
+    drop(lease);
+    second.prune(0).unwrap();
+    assert!(!path.exists());
+}
+
+#[test]
 fn foreign_files_and_nested_directories_are_not_cache_owned() {
     let dir = TestDir::new("clipline-library", "cloud-foreign-files");
     let account = account("account-a", 1, "4444444444444444");

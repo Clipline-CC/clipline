@@ -298,9 +298,10 @@ mod windows_runtime {
     use clipline_library::{
         catalog_result_channel, ActiveFileRegistry, CatalogDialogTextField, CatalogEffect,
         CatalogItemIdentity, CatalogResultReceiver, CatalogResultSender, CatalogSource,
-        CatalogUploadVisibility, CloudCatalogOwner, ForegroundGeneration, LocalClipFilter,
-        LocalClipGrouping, LocalClipSort, PlaybackSourceLease, RequestGeneration,
-        ValidatedClipPath, WindowAttachmentGeneration, WindowWorkToken, CATALOG_RESULT_CAPACITY,
+        CatalogUploadVisibility, CloudCatalogOwner, CloudReviewMediaOwner, ForegroundGeneration,
+        LocalClipFilter, LocalClipGrouping, LocalClipSort, PlaybackSourceLease,
+        PreparedCloudReviewMedia, RequestGeneration, ResolvedLocalClip, ValidatedClipPath,
+        WindowAttachmentGeneration, WindowWorkToken, CATALOG_RESULT_CAPACITY,
     };
     use clipline_playback::windows::{WindowsD3D11Publisher, WindowsVideoHost};
     use clipline_settings::LibraryConfig;
@@ -319,7 +320,7 @@ mod windows_runtime {
         CatalogUiIntent, LocalCatalogEffectHandler, SlintCatalogController, SystemCatalogReveal,
         SystemDayResolver,
     };
-    use crate::cloud::{CatalogCloudLifetime, NativeCloudRuntime};
+    use crate::cloud::{CatalogCloudLifetime, NativeCloudMediaRegistry, NativeCloudRuntime};
     use crate::controller::PlaybackController;
     use crate::desktop::{DesktopAttachment, SlintDesktopAdapter};
     use crate::live::{
@@ -410,7 +411,8 @@ mod windows_runtime {
         catalog_sender: CatalogResultSender,
         catalog_results: CatalogResultReceiver,
         review_bridge: Arc<LiveReviewBridge>,
-        pending_review_open: Option<CatalogEffect>,
+        cloud_media: Option<NativeCloudMediaRegistry>,
+        pending_review_open: Option<DeferredReviewOpen>,
         live_start_scheduled: Option<AttachmentToken>,
         window: Option<WindowResources>,
         options: SpikeOptions,
@@ -424,7 +426,55 @@ mod windows_runtime {
 
     impl Drop for SlintShell {
         fn drop(&mut self) {
+            if let Some(resources) = self.window.as_mut() {
+                self.review_bridge
+                    .revoke(resources.catalog_attachment, resources.catalog_foreground);
+                if let Some(session) = resources.session.take() {
+                    let _ = session.shutdown();
+                }
+                if let Some(mut host) = resources.host.take() {
+                    let _ = host.close();
+                }
+            }
             let _ = self.catalog_cloud.shutdown();
+        }
+    }
+
+    enum DeferredReviewOpen {
+        Local {
+            token: WindowWorkToken,
+            target: ResolvedLocalClip,
+        },
+        Cloud {
+            owner: CloudReviewMediaOwner,
+            media: PreparedCloudReviewMedia,
+        },
+    }
+
+    impl DeferredReviewOpen {
+        fn token(&self) -> WindowWorkToken {
+            match self {
+                Self::Local { token, .. } => *token,
+                Self::Cloud { owner, .. } => owner.token.window,
+            }
+        }
+
+        fn into_effect(self) -> CatalogEffect {
+            match self {
+                Self::Local { token, target } => CatalogEffect::OpenLocalReview { token, target },
+                Self::Cloud { owner, media } => {
+                    CatalogEffect::OpenPreparedCloudReview { owner, media }
+                }
+            }
+        }
+
+        fn release_cloud(self, registry: Option<&NativeCloudMediaRegistry>) -> Result<(), String> {
+            let Self::Cloud { media, .. } = self else {
+                return Ok(());
+            };
+            registry
+                .ok_or_else(|| "native Cloud media registry is unavailable".to_owned())?
+                .release_media(media.lease_id)
         }
     }
 
@@ -473,6 +523,39 @@ mod windows_runtime {
                 .is_some_and(|binding| {
                     binding.attachment == attachment && binding.foreground == foreground
                 })
+        }
+
+        fn open_prepared_cloud(
+            &self,
+            owner: &CloudReviewMediaOwner,
+            prepared: &PreparedCloudReviewMedia,
+            registry: &NativeCloudMediaRegistry,
+        ) -> Result<(), String> {
+            owner.validate_bounds().map_err(|error| error.to_string())?;
+            prepared
+                .validate_bounds()
+                .map_err(|error| error.to_string())?;
+            let binding = self.0.lock().unwrap_or_else(|poison| poison.into_inner());
+            let binding = binding
+                .as_ref()
+                .filter(|binding| {
+                    binding.attachment == owner.token.window.attachment
+                        && binding.foreground == owner.token.window.foreground
+                })
+                .ok_or_else(|| "native review session belongs to a stale window".to_owned())?;
+            let lease = registry.take_media(owner, prepared)?;
+            let request = LiveMediaRequestToken::new(owner.token.window.request.get())
+                .map_err(|error| error.to_string())?;
+            match binding
+                .port
+                .open(request, ValidatedLiveMediaSource::cached_cloud(lease))
+                .map_err(|error| error.to_string())?
+            {
+                crate::live::LiveMediaOpenOutcome::Accepted { .. } => Ok(()),
+                crate::live::LiveMediaOpenOutcome::Stale => {
+                    Err("native Cloud review open was superseded".to_owned())
+                }
+            }
         }
     }
 
@@ -583,6 +666,7 @@ mod windows_runtime {
             || Arc::clone(&local_catalog_handler),
             |cloud| cloud.effect_handler(Arc::clone(&local_catalog_handler)),
         );
+        let cloud_media = cloud.as_ref().map(NativeCloudRuntime::media_registry);
         let (catalog_sender, catalog_results) = catalog_result_channel();
         let catalog_executor = CatalogEffectExecutor::start(
             catalog_handler,
@@ -627,6 +711,7 @@ mod windows_runtime {
             catalog_sender,
             catalog_results,
             review_bridge,
+            cloud_media,
             pending_review_open: None,
             live_start_scheduled: None,
             window: None,
@@ -885,78 +970,220 @@ mod windows_runtime {
         runtime: &Rc<RefCell<SlintShell>>,
         effects: Vec<CatalogEffect>,
     ) -> Result<(), String> {
-        for effect in effects {
-            match effect {
-                CatalogEffect::CloseReview { token } => stop_review_session(runtime, token)?,
-                CatalogEffect::ReleaseCloudReviewMedia { .. } => {}
-                effect @ CatalogEffect::OpenLocalReview { token, .. }
-                    if !runtime
-                        .borrow()
-                        .review_bridge
-                        .is_attached(token.attachment, token.foreground) =>
-                {
-                    let attachment = {
-                        let mut runtime_ref = runtime.borrow_mut();
-                        if let Some(resources) = runtime_ref.window.as_ref() {
-                            resources.window.set_review_visible(true);
-                        }
-                        runtime_ref.pending_review_open = Some(effect);
+        let mut effects = effects.into_iter();
+        while let Some(effect) = effects.next() {
+            if let Err(error) = route_catalog_effect(runtime, effect) {
+                // Controller batches can place exact release/cancel effects
+                // after an Open. Never strand those bounded resources merely
+                // because the earlier Open failed; preserve the first error
+                // after attempting every remaining cleanup edge.
+                for cleanup in effects.filter(is_review_cleanup_effect) {
+                    let _ = route_catalog_effect(runtime, cleanup);
+                }
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    fn is_review_cleanup_effect(effect: &CatalogEffect) -> bool {
+        matches!(
+            effect,
+            CatalogEffect::CloseReview { .. }
+                | CatalogEffect::CancelCloudReviewMedia { .. }
+                | CatalogEffect::ReleaseCloudReviewMedia { .. }
+        )
+    }
+
+    fn route_catalog_effect(
+        runtime: &Rc<RefCell<SlintShell>>,
+        effect: CatalogEffect,
+    ) -> Result<(), String> {
+        match effect {
+            CatalogEffect::CloseReview { token } => stop_review_session(runtime, token)?,
+            CatalogEffect::ReleaseCloudReviewMedia { lease_id } => {
+                if let Some(registry) = runtime.borrow().cloud_media.as_ref() {
+                    registry.release_media(lease_id)?;
+                }
+            }
+            CatalogEffect::CancelCloudReviewMedia { owner } => {
+                if let Some(registry) = runtime.borrow().cloud_media.as_ref() {
+                    registry.cancel_media(&owner)?;
+                }
+            }
+            CatalogEffect::OpenPreparedCloudReview { owner, media } => {
+                let token = owner.token.window;
+                let (current, attached, bridge, registry, attachment) = {
+                    let runtime_ref = runtime.borrow();
+                    let current = runtime_ref.window.as_ref().is_some_and(|resources| {
+                        resources.catalog_attachment == token.attachment
+                            && resources.catalog_foreground == token.foreground
+                    });
+                    (
+                        current,
+                        runtime_ref
+                            .review_bridge
+                            .is_attached(token.attachment, token.foreground),
+                        Arc::clone(&runtime_ref.review_bridge),
+                        runtime_ref.cloud_media.clone(),
                         runtime_ref
                             .window
                             .as_ref()
-                            .map(|resources| resources.attachment)
-                    };
+                            .map(|resources| resources.attachment),
+                    )
+                };
+                let registry = registry
+                    .ok_or_else(|| "native Cloud media registry is unavailable".to_owned())?;
+                if !current {
+                    registry.release_media(media.lease_id)?;
+                    return Ok(());
+                }
+                if !attached {
+                    let deferred =
+                        defer_review_open(runtime, DeferredReviewOpen::Cloud { owner, media })?;
+                    if deferred {
+                        if let Some(attachment) = attachment {
+                            schedule_live_start(Rc::downgrade(runtime), attachment, 0);
+                        }
+                    }
+                    return Ok(());
+                }
+                if let Some(resources) = runtime.borrow().window.as_ref() {
+                    resources.window.set_review_visible(true);
+                }
+                if let Err(error) = bridge.open_prepared_cloud(&owner, &media, &registry) {
+                    rollback_failed_review_open(runtime)?;
+                    return Err(error);
+                }
+            }
+            effect @ CatalogEffect::OpenLocalReview { token, .. }
+                if !runtime
+                    .borrow()
+                    .review_bridge
+                    .is_attached(token.attachment, token.foreground) =>
+            {
+                let attachment = {
+                    let runtime_ref = runtime.borrow();
+                    runtime_ref
+                        .window
+                        .as_ref()
+                        .map(|resources| resources.attachment)
+                };
+                let CatalogEffect::OpenLocalReview { token, target } = effect else {
+                    unreachable!("guarded local review effect changed variant")
+                };
+                if defer_review_open(runtime, DeferredReviewOpen::Local { token, target })? {
                     if let Some(attachment) = attachment {
                         schedule_live_start(Rc::downgrade(runtime), attachment, 0);
                     }
                 }
-                CatalogEffect::RefreshLocal { .. }
-                | CatalogEffect::RefreshCloud { .. }
-                | CatalogEffect::LoadClipDetail { .. }
-                | CatalogEffect::OpenLocalReview { .. }
-                | CatalogEffect::RenameTitle { .. }
-                | CatalogEffect::RenameFile { .. }
-                | CatalogEffect::Delete { .. }
-                | CatalogEffect::Reveal { .. } => {
-                    if matches!(&effect, CatalogEffect::OpenLocalReview { .. }) {
-                        if let Some(resources) = runtime.borrow().window.as_ref() {
-                            resources.window.set_review_visible(true);
-                        }
-                    }
-                    let rejected = {
-                        let runtime_ref = runtime.borrow();
-                        let executor = runtime_ref
-                            .catalog_cloud
-                            .executor()
-                            .ok_or_else(|| "catalog executor is shut down".to_owned())?;
-                        executor.try_submit(effect).err()
-                    };
-                    if let Some(rejected) = rejected {
-                        if let Some(completion) = crate::catalog::rejected_effect_result(
-                            &rejected,
-                            "catalog executor queue is full",
-                        ) {
-                            let followups = runtime
-                                .borrow_mut()
-                                .catalog
-                                .accept(completion.result)
-                                .map_err(|error| error.to_string())?;
-                            publish_catalog_window(runtime)?;
-                            route_catalog_effects(runtime, followups)?;
-                        }
+            }
+            CatalogEffect::RefreshLocal { .. }
+            | CatalogEffect::RefreshCloud { .. }
+            | CatalogEffect::LoadClipDetail { .. }
+            | CatalogEffect::LoadCloudThumbnail { .. }
+            | CatalogEffect::PrepareCloudReviewMedia { .. }
+            | CatalogEffect::OpenLocalReview { .. }
+            | CatalogEffect::RenameTitle { .. }
+            | CatalogEffect::RenameFile { .. }
+            | CatalogEffect::Delete { .. }
+            | CatalogEffect::Reveal { .. } => {
+                if matches!(&effect, CatalogEffect::OpenLocalReview { .. }) {
+                    if let Some(resources) = runtime.borrow().window.as_ref() {
+                        resources.window.set_review_visible(true);
                     }
                 }
-                unsupported => {
+                let rejected = {
                     let runtime_ref = runtime.borrow();
-                    if let Some(resources) = runtime_ref.window.as_ref() {
-                        resources.window.set_status_text(
-                            format!("Catalog action is not connected yet: {unsupported:?}").into(),
-                        );
+                    let executor = runtime_ref
+                        .catalog_cloud
+                        .executor()
+                        .ok_or_else(|| "catalog executor is shut down".to_owned())?;
+                    executor.try_submit(effect).err()
+                };
+                if let Some(rejected) = rejected {
+                    if let Some(completion) = crate::catalog::rejected_effect_result(
+                        &rejected,
+                        "catalog executor queue is full",
+                    ) {
+                        let followups = runtime
+                            .borrow_mut()
+                            .catalog
+                            .accept(completion.result)
+                            .map_err(|error| error.to_string())?;
+                        publish_catalog_window(runtime)?;
+                        route_catalog_effects(runtime, followups)?;
+                    } else if matches!(&*rejected, CatalogEffect::OpenLocalReview { .. }) {
+                        rollback_failed_review_open(runtime)?;
+                        return Err("catalog executor queue is full".to_owned());
                     }
+                }
+            }
+            unsupported => {
+                let runtime_ref = runtime.borrow();
+                if let Some(resources) = runtime_ref.window.as_ref() {
+                    resources.window.set_status_text(
+                        format!("Catalog action is not connected yet: {unsupported:?}").into(),
+                    );
                 }
             }
         }
         Ok(())
+    }
+
+    fn defer_review_open(
+        runtime: &Rc<RefCell<SlintShell>>,
+        deferred: DeferredReviewOpen,
+    ) -> Result<bool, String> {
+        let token = deferred.token();
+        let (previous, registry) = {
+            let mut runtime_ref = runtime.borrow_mut();
+            let Some(resources) = runtime_ref.window.as_ref() else {
+                deferred.release_cloud(runtime_ref.cloud_media.as_ref())?;
+                return Ok(false);
+            };
+            if resources.catalog_attachment != token.attachment
+                || resources.catalog_foreground != token.foreground
+            {
+                deferred.release_cloud(runtime_ref.cloud_media.as_ref())?;
+                return Ok(false);
+            }
+            resources.window.set_review_visible(true);
+            let previous = runtime_ref.pending_review_open.replace(deferred);
+            (previous, runtime_ref.cloud_media.clone())
+        };
+        if let Some(previous) = previous {
+            previous.release_cloud(registry.as_ref())?;
+        }
+        Ok(true)
+    }
+
+    fn release_pending_review_open(runtime: &Rc<RefCell<SlintShell>>) -> Result<(), String> {
+        let (pending, registry) = {
+            let mut runtime_ref = runtime.borrow_mut();
+            (
+                runtime_ref.pending_review_open.take(),
+                runtime_ref.cloud_media.clone(),
+            )
+        };
+        pending.map_or(Ok(()), |pending| pending.release_cloud(registry.as_ref()))
+    }
+
+    fn rollback_failed_review_open(runtime: &Rc<RefCell<SlintShell>>) -> Result<(), String> {
+        let effects = {
+            let mut runtime_ref = runtime.borrow_mut();
+            let revision = runtime_ref
+                .window
+                .as_ref()
+                .map(|resources| resources.catalog_revision)
+                .ok_or_else(|| "review rollback belongs to a missing window".to_owned())?;
+            runtime_ref
+                .catalog
+                .dispatch(revision, CatalogUiIntent::CloseActive)
+                .map_err(|error| error.to_string())?
+        };
+        publish_catalog_window(runtime)?;
+        route_catalog_effects(runtime, effects)
     }
 
     fn dispatch_command(
@@ -1489,6 +1716,8 @@ mod windows_runtime {
                 }
             }
             if let Err(error) = start_live(&runtime, attachment, attempt) {
+                let _ = release_pending_review_open(&runtime);
+                let _ = rollback_failed_review_open(&runtime);
                 report_shell_error(&runtime, &error);
             }
         });
@@ -1605,7 +1834,7 @@ mod windows_runtime {
             runtime_ref.pending_review_open.take()
         };
         if let Some(effect) = pending_review {
-            route_catalog_effects(runtime, vec![effect])?;
+            route_catalog_effects(runtime, vec![effect.into_effect()])?;
         }
         if dynamic {
             window_component
@@ -1654,7 +1883,7 @@ mod windows_runtime {
         runtime: &Rc<RefCell<SlintShell>>,
         token: WindowWorkToken,
     ) -> Result<(), String> {
-        let (session, host) = {
+        let (session, host, pending, registry) = {
             let mut runtime_ref = runtime.borrow_mut();
             let Some(resources) = runtime_ref.window.as_ref() else {
                 return Ok(());
@@ -1666,7 +1895,8 @@ mod windows_runtime {
             }
             let catalog_attachment = resources.catalog_attachment;
             let catalog_foreground = resources.catalog_foreground;
-            runtime_ref.pending_review_open = None;
+            let pending = runtime_ref.pending_review_open.take();
+            let registry = runtime_ref.cloud_media.clone();
             runtime_ref
                 .review_bridge
                 .revoke(catalog_attachment, catalog_foreground);
@@ -1675,9 +1905,19 @@ mod windows_runtime {
                 .as_mut()
                 .expect("review window was validated without yielding");
             resources.window.set_review_visible(false);
-            (resources.session.take(), resources.host.take())
+            (
+                resources.session.take(),
+                resources.host.take(),
+                pending,
+                registry,
+            )
         };
         let mut first_error = None;
+        if let Some(pending) = pending {
+            if let Err(error) = pending.release_cloud(registry.as_ref()) {
+                remember_first_error(&mut first_error, error);
+            }
+        }
         if let Some(session) = session {
             match session.shutdown() {
                 Ok(report) => runtime.borrow_mut().latest_session = Some(report),
@@ -1720,14 +1960,15 @@ mod windows_runtime {
                 .expect("window was validated without yielding the UI thread");
             resources.window.set_playing(false);
         }
-        let catalog_effects = {
+        let (catalog_effects, pending_review, cloud_media) = {
             let mut runtime_ref = runtime.borrow_mut();
             let (catalog_attachment, catalog_foreground) = runtime_ref
                 .window
                 .as_ref()
                 .map(|resources| (resources.catalog_attachment, resources.catalog_foreground))
                 .ok_or_else(|| "catalog detach requested without a window".to_owned())?;
-            runtime_ref.pending_review_open = None;
+            let pending_review = runtime_ref.pending_review_open.take();
+            let cloud_media = runtime_ref.cloud_media.clone();
             runtime_ref.live_start_scheduled = None;
             runtime_ref
                 .review_bridge
@@ -1735,11 +1976,15 @@ mod windows_runtime {
             if let Some(cloud) = runtime_ref.catalog_cloud.cloud() {
                 cloud.detach();
             }
-            runtime_ref
+            let effects = runtime_ref
                 .catalog
                 .detach()
-                .map_err(|error| error.to_string())?
+                .map_err(|error| error.to_string())?;
+            (effects, pending_review, cloud_media)
         };
+        if let Some(pending_review) = pending_review {
+            pending_review.release_cloud(cloud_media.as_ref())?;
+        }
         route_catalog_effects(runtime, catalog_effects)?;
         let poster_token = runtime
             .borrow()

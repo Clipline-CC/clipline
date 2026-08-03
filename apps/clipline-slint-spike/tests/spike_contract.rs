@@ -187,6 +187,12 @@ fn spike_is_exactly_pinned_small_and_non_distributed() {
         "Rc::downgrade",
         "CloseRequestResponse::KeepWindowShown",
         "100 real Slint create/drop cycles",
+        "pending_review_open: Option<DeferredReviewOpen>",
+        "CatalogEffect::CancelCloudReviewMedia { owner }",
+        "CatalogEffect::OpenPreparedCloudReview { owner, media }",
+        "CatalogEffect::ReleaseCloudReviewMedia { lease_id }",
+        "effects.filter(is_review_cleanup_effect)",
+        "ValidatedLiveMediaSource::cached_cloud(lease)",
     ] {
         assert!(
             shell.contains(shell_contract),
@@ -195,6 +201,17 @@ fn spike_is_exactly_pinned_small_and_non_distributed() {
     }
     assert!(!shell.contains("CloseRequestResponse::HideWindow"));
     assert!(shell.contains("stop_observed"));
+    let shell_drop = shell
+        .split("impl Drop for SlintShell")
+        .nth(1)
+        .and_then(|tail| tail.split("enum DeferredReviewOpen").next())
+        .expect("SlintShell Drop body");
+    let session_shutdown = shell_drop.find("session.shutdown()").unwrap();
+    let cloud_shutdown = shell_drop.find("catalog_cloud.shutdown()").unwrap();
+    assert!(
+        session_shutdown < cloud_shutdown,
+        "exceptional shell drop must join playback before Cloud cache/runtime shutdown"
+    );
     let live = read(root.join("apps/clipline-slint-spike/src/live.rs"));
     assert!(
         !live.contains("stop_path"),

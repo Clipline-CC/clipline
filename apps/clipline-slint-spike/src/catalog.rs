@@ -163,10 +163,11 @@ impl CatalogEffectExecutor {
 
     /// Non-blocking callback boundary. A rejected effect is returned intact so
     /// the UI-thread controller can accept its exact `OperationFailed` owner.
-    /// Resource-release effects (`CloseReview` and
-    /// `ReleaseCloudReviewMedia`) have no operation owner and must be executed
-    /// through the shell's guaranteed inline release path; callers must never
-    /// discard them when this queue is full.
+    /// Review lifecycle effects (`CloseReview`, `CancelCloudReviewMedia`,
+    /// `OpenPreparedCloudReview`, and `ReleaseCloudReviewMedia`) have no
+    /// operation owner and must be executed through the shell's guaranteed
+    /// inline path; callers must never enqueue or discard them when this queue
+    /// is full.
     pub fn try_submit(&self, effect: CatalogEffect) -> Result<(), Box<CatalogEffect>> {
         let Some(sender) = self.sender.as_ref() else {
             return Err(Box::new(effect));
@@ -217,16 +218,13 @@ fn worker_loop(
             return;
         };
         let fallback_owner = effect.operation_owner().ok().flatten();
+        let failure_effect = effect.clone();
         let completion = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             handler.execute(effect)
         })) {
             Ok(Ok(completion)) => completion,
-            Ok(Err(message)) => fallback_owner
-                .clone()
-                .map(|owner| operation_failure(owner, message)),
-            Err(_) => fallback_owner
-                .clone()
-                .map(|owner| operation_failure(owner, "catalog effect handler panicked".into())),
+            Ok(Err(message)) => rejected_effect_result(&failure_effect, message),
+            Err(_) => rejected_effect_result(&failure_effect, "catalog effect handler panicked"),
         };
         if let Some(completion) = completion {
             publish_completion(
@@ -298,11 +296,23 @@ pub fn rejected_effect_result(
     effect: &CatalogEffect,
     message: impl Into<String>,
 ) -> Option<OwnedCatalogResult> {
+    let message = bounded_utf8(message.into(), MAX_FOREGROUND_MESSAGE_BYTES);
+    if let CatalogEffect::LoadCloudThumbnail { request } = effect {
+        let message = bounded_utf8(message, MAX_CATALOG_STRING_BYTES);
+        let owner = request.owner.clone();
+        return Some(OwnedCatalogResult {
+            result: CatalogResult::CloudThumbnail {
+                owner: owner.clone(),
+                status: clipline_library::PosterStatus::Failed { message },
+            },
+            expected: ExpectedResultOwner::CloudThumbnail(owner),
+        });
+    }
     effect
         .operation_owner()
         .ok()
         .flatten()
-        .map(|owner| operation_failure(owner, message.into()))
+        .map(|owner| operation_failure(owner, message))
 }
 
 fn operation_failure(owner: CatalogOperationOwner, message: String) -> OwnedCatalogResult {

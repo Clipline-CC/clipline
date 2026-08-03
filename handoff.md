@@ -4,6 +4,44 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-03): Slint replacement Milestone 7, Task 9 native Cloud media
+
+The Slint candidate now owns the complete account-fenced cache-to-player path for Cloud review
+media. One process-owned Windows cache provider derives the exact durable account fence, reads the
+Credential Manager secret before reuse, fingerprints it without retaining plaintext, and rebuilds
+its rustls download/cache client when the credential rotates. Credential read and slot publication
+are serialized so an older concurrent read cannot overwrite a client installed for a newer secret.
+Page refreshes, at most 60 keyed
+thumbnail requests, and one review-media request have independent cancellation lanes; completing
+work removes its exact lane entry so page churn cannot exhaust later requests.
+
+Successful media preparation converts the transient cache pin into a non-cloneable playback lease
+and parks it in a four-entry process registry. The shell transfers that lease only after exact
+window/foreground, account, remote identity, lease-id, and canonical-path checks, then constructs
+`ValidatedLiveMediaSource::cached_cloud` directly. The native player retains the lease through
+Ready/Paused and releases it on Replace/Close. Wrong-owner cancellation is inert, duplicate release
+is idempotent, stale results release their incoming lease, and normal or exceptional shutdown joins
+playback before clearing the registry and stopping the Cloud runtime.
+
+Review lifecycle effects now use the shell's guaranteed inline path rather than the bounded worker
+queue. Opens may defer only while the exact window's dynamic live session is starting; replacement,
+window drop, startup failure, and queue rejection release or roll back the exact controller state.
+If an Open fails mid-batch, all remaining Close/Cancel/Release edges are still attempted before the
+first error is surfaced.
+Thumbnail handler errors, panics, and admission failures publish an exact owner-fenced bounded
+failure instead of leaving the controller pending. Separately opened `CloudCache` instances over
+one canonical root share protection accounting; a regression proves credential rotation cannot
+let the replacement instance evict media protected by an older live playback lease.
+
+Validation is green on this tree: CI-mode workspace tests, warning-denied workspace Clippy,
+standalone Slint all-target tests and warning-denied Clippy, the cross-instance cache-protection
+and credential-rotation race regressions, and `git diff --check`. A Fable medium independent audit
+returned GO with no P0/P1; both of its non-blocking hardening findings were fixed before commit.
+
+Next: add the bounded native Cloud thumbnail decoder/retention owner (two workers, queue 32, at most
+32 decoded images), then finish profile/share/upload/status wiring and the remaining Task 9 surface
+contract before the large-library and lifecycle gates.
+
 ## Checkpoint (2026-08-03): Slint replacement Milestone 7, Task 9 Cloud asset ownership
 
 The framework-neutral ownership seams needed by native Cloud thumbnails and review media are now
