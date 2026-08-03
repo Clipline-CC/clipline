@@ -4,6 +4,25 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-02): Nightly 0.1.44
+
+Plan: `docs/superpowers/plans/2026-08-02-nightly-0.1.44.md`.
+
+Nightly 0.1.44 publishes **#133**, the support-report-driven multitrack audio mixing and diagnostic
+redaction reliability release.
+
+User-visible since 0.1.43: cloud uploads and normal Copy exports can combine output and microphone
+tracks whose starts are offset by less than one Opus packet without producing overlapping or
+backward MP4 timestamps. Mixing now uses one continuous 48 kHz timeline, consumes each track's own
+pre-skip, preserves long gaps without manufacturing silence packets, and rejects corrupt MP4 versus
+decoded Opus duration mismatches beyond the supported one-tick quantization tolerance. Support
+reports also preserve valid JSONL after redacting JSON-escaped Windows paths.
+
+PR #133 is merged to `develop` as `d149b50` with green Ubuntu, Windows, and Greptile checks; both
+Codex review threads were answered and resolved before merge. Microsoft's current official Fixed
+Version download remains 150.0.4078.83, matching the staged standalone runtime, and its required
+review date was refreshed for this release.
+
 ## Checkpoint (2026-08-02): valid redacted support JSON
 
 Plan: `docs/superpowers/plans/2026-08-02-support-log-json-redaction.md` (`4adecf7`).
