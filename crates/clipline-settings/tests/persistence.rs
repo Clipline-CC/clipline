@@ -160,6 +160,7 @@ fn account_generation_changes_only_with_account_identity() {
             SettingsChange::UpsertCloudRecord {
                 account: connected.account.clone(),
                 key: "clip-1".into(),
+                expected: None,
                 record,
             },
         ))
@@ -182,12 +183,94 @@ fn cloud_record_rejects_the_wrong_account_without_mutation() {
                     credential_target: None,
                 },
                 key: "clip-1".into(),
+                expected: CloudUploadRecord {
+                    local_clip_id: "clip-1".into(),
+                    path: "clip.mp4".into(),
+                    remote_clip_id: None,
+                    remote_url: None,
+                    visibility: "private".into(),
+                    upload_status: "queued".into(),
+                    error: None,
+                    updated_at_unix: 1,
+                },
             },
         ))
         .unwrap_err();
     assert_eq!(error, SettingsTransactionError::AccountChanged);
     assert_eq!(store.snapshot().unwrap(), snapshot);
     assert!(!store.profile().settings_path().exists());
+}
+
+#[test]
+fn cloud_record_compare_and_swap_rejects_delayed_upload_or_sync_results() {
+    let dir = TestDir::new("clipline-settings", "cloud-record-cas");
+    let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));
+    let initial = store.snapshot().unwrap();
+    let record = |status: &str, updated_at_unix| CloudUploadRecord {
+        local_clip_id: "clip-1".into(),
+        path: dir.path().join("clip.mp4").display().to_string(),
+        remote_clip_id: None,
+        remote_url: None,
+        visibility: "private".into(),
+        upload_status: status.into(),
+        error: None,
+        updated_at_unix,
+    };
+    let queued = record("queued", 1);
+    let queued_snapshot = store
+        .transact(transaction(
+            &initial,
+            SettingsChange::UpsertCloudRecord {
+                account: initial.account.clone(),
+                key: "clip-1".into(),
+                expected: None,
+                record: queued.clone(),
+            },
+        ))
+        .unwrap();
+    let uploading = record("uploading", 2);
+    let current = store
+        .transact(transaction(
+            &queued_snapshot,
+            SettingsChange::UpsertCloudRecord {
+                account: queued_snapshot.account.clone(),
+                key: "clip-1".into(),
+                expected: Some(queued.clone()),
+                record: uploading.clone(),
+            },
+        ))
+        .unwrap();
+
+    let stale_write = store
+        .transact(transaction(
+            &current,
+            SettingsChange::UpsertCloudRecord {
+                account: current.account.clone(),
+                key: "clip-1".into(),
+                expected: Some(queued),
+                record: record("failed", 3),
+            },
+        ))
+        .unwrap_err();
+    assert_eq!(stale_write, SettingsTransactionError::StaleCloudRecord);
+    assert_eq!(store.snapshot().unwrap(), current);
+
+    let stale_remove = store
+        .transact(transaction(
+            &current,
+            SettingsChange::RemoveCloudRecord {
+                account: current.account.clone(),
+                key: "clip-1".into(),
+                expected: record("queued", 1),
+            },
+        ))
+        .unwrap_err();
+    assert_eq!(stale_remove, SettingsTransactionError::StaleCloudRecord);
+    assert_eq!(store.snapshot().unwrap(), current);
+    assert_eq!(
+        store.snapshot().unwrap().document.cloud.uploads["clip-1"],
+        uploading
+    );
 }
 
 #[test]

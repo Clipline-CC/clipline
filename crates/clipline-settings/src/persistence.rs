@@ -696,11 +696,13 @@ pub enum SettingsChange {
     UpsertCloudRecord {
         account: CloudAccountIdentity,
         key: String,
+        expected: Option<CloudUploadRecord>,
         record: CloudUploadRecord,
     },
     RemoveCloudRecord {
         account: CloudAccountIdentity,
         key: String,
+        expected: CloudUploadRecord,
     },
     ReplaceOsuProfile(OsuApiSettings),
 }
@@ -726,6 +728,8 @@ pub enum SettingsTransactionError {
     },
     #[error("cloud account changed while the settings operation was in flight")]
     AccountChanged,
+    #[error("cloud upload record changed while the settings operation was in flight")]
+    StaleCloudRecord,
     #[error("settings revision is exhausted")]
     RevisionExhausted,
     #[error("cloud account generation is exhausted")]
@@ -1000,16 +1004,27 @@ fn apply_change(
         SettingsChange::UpsertCloudRecord {
             account,
             key,
+            expected,
             record,
         } => {
             if &account != current_account {
                 return Err(SettingsTransactionError::AccountChanged);
             }
+            if document.cloud.uploads.get(&key) != expected.as_ref() {
+                return Err(SettingsTransactionError::StaleCloudRecord);
+            }
             document.cloud.uploads.insert(key, record);
         }
-        SettingsChange::RemoveCloudRecord { account, key } => {
+        SettingsChange::RemoveCloudRecord {
+            account,
+            key,
+            expected,
+        } => {
             if &account != current_account {
                 return Err(SettingsTransactionError::AccountChanged);
+            }
+            if document.cloud.uploads.get(&key) != Some(&expected) {
+                return Err(SettingsTransactionError::StaleCloudRecord);
             }
             document.cloud.uploads.remove(&key);
         }
