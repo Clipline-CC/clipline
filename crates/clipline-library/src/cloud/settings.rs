@@ -4,7 +4,8 @@ use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 
 use clipline_settings::{
-    CloudProfileCas, SettingsSnapshot, SettingsStore, SettingsTransactionError,
+    CloudAccountPublicationOwner, CloudProfileCas, SettingsSnapshot, SettingsStore,
+    SettingsTransactionError,
 };
 
 use crate::{
@@ -14,6 +15,10 @@ use crate::{
 
 use super::ports::{CloudAccountPort, CloudProfilePatch, PortError};
 use super::CloudServiceAccount;
+use super::{
+    cache::{AccountPublicationGuard, CloudCacheError},
+    cache_identity::{CloudAccountFence, CloudCacheNamespace},
+};
 
 /// Convert one exact durable settings snapshot into the neutral Cloud account
 /// value consumed by catalog/profile services.
@@ -97,6 +102,113 @@ pub fn cloud_service_account_from_snapshot(
         credential_target: cloud.credential_target.clone(),
         local_paths_by_clip_id,
     })
+}
+
+/// Derive the exact cache publication fence from one bounded durable snapshot.
+pub fn cloud_cache_account_fence_from_snapshot(
+    snapshot: &SettingsSnapshot,
+) -> Result<CloudAccountFence, PortError> {
+    let account = cloud_service_account_from_snapshot(snapshot)?;
+    cloud_cache_account_fence_from_service_account(&account)
+}
+
+/// Derive the shipping-compatible cache namespace from a bounded neutral
+/// service account.
+///
+/// Stable namespace identity prefers user id, then the legacy username, then
+/// credential target. The account key is re-derived and compared so a caller
+/// cannot combine a forged key with otherwise valid account fields.
+pub fn cloud_cache_account_fence_from_service_account(
+    account: &CloudServiceAccount,
+) -> Result<CloudAccountFence, PortError> {
+    let snapshot = &account.snapshot;
+    validate_catalog_text("cloud host URL", &snapshot.host_url)?;
+    validate_optional_catalog_text("cloud username", snapshot.username.as_deref())?;
+    validate_optional_catalog_text("cloud user id", snapshot.user_id.as_deref())?;
+    validate_optional_catalog_text(
+        "cloud credential target",
+        account.credential_target.as_deref(),
+    )?;
+    let derived_key = account_key(&CloudAccountFields {
+        host_url: snapshot.host_url.clone(),
+        connected_user_id: snapshot.user_id.clone().unwrap_or_default(),
+        credential_target: account.credential_target.clone().unwrap_or_default(),
+    })
+    .map_err(|error| PortError::new(error.to_string()))?;
+    if derived_key != snapshot.account_key {
+        return Err(PortError::new(
+            "cloud service account key does not match its durable fields",
+        ));
+    }
+    let stable_account = snapshot
+        .user_id
+        .as_deref()
+        .or(snapshot.username.as_deref())
+        .or(account.credential_target.as_deref())
+        .ok_or_else(|| PortError::new("cloud cache account identity is unavailable"))?;
+    let cache_namespace = CloudCacheNamespace::derive(&snapshot.host_url, stable_account)
+        .map_err(|error| PortError::new(error.to_string()))?;
+    Ok(CloudAccountFence {
+        account_key: derived_key,
+        account_generation: snapshot.generation,
+        cache_namespace,
+    })
+}
+
+/// Settings-backed final-publication gate shared by native shells.
+#[derive(Clone)]
+pub struct SettingsAccountPublicationGuard {
+    store: SettingsStore,
+}
+
+impl SettingsAccountPublicationGuard {
+    #[must_use]
+    pub fn new(store: SettingsStore) -> Self {
+        Self { store }
+    }
+
+    fn expected_owner(
+        &self,
+        requested: &CloudAccountFence,
+    ) -> Result<CloudAccountPublicationOwner, CloudCacheError> {
+        let snapshot = run_settings_io(|| self.store.snapshot().map_err(cache_settings_error))?;
+        let current = cloud_cache_account_fence_from_snapshot(&snapshot)
+            .map_err(|error| CloudCacheError::Internal(error.to_string()))?;
+        if &current != requested {
+            return Err(CloudCacheError::StaleAccount);
+        }
+        Ok(CloudAccountPublicationOwner::from_snapshot(&snapshot))
+    }
+}
+
+impl AccountPublicationGuard for SettingsAccountPublicationGuard {
+    fn is_current(&self, account: &CloudAccountFence) -> bool {
+        let Ok(owner) = self.expected_owner(account) else {
+            return false;
+        };
+        run_settings_io(|| {
+            matches!(
+                self.store
+                    .publish_if_cloud_account_current(&owner, || Ok::<(), ()>(())),
+                Ok(Ok(()))
+            )
+        })
+    }
+
+    fn publish_if_current(
+        &self,
+        account: &CloudAccountFence,
+        publication: &mut dyn FnMut() -> Result<(), CloudCacheError>,
+    ) -> Result<(), CloudCacheError> {
+        let owner = self.expected_owner(account)?;
+        match run_settings_io(|| {
+            self.store
+                .publish_if_cloud_account_current(&owner, publication)
+        }) {
+            Ok(result) => result,
+            Err(error) => Err(cache_settings_error(error)),
+        }
+    }
 }
 
 /// [`SettingsStore`]-backed account/profile adapter shared by native shells.
@@ -184,6 +296,15 @@ fn settings_error(error: SettingsTransactionError) -> PortError {
         | SettingsTransactionError::StaleAccountGeneration { .. }
         | SettingsTransactionError::AccountGenerationExhausted => PortError::account_changed(),
         other => PortError::new(other.to_string()),
+    }
+}
+
+fn cache_settings_error(error: SettingsTransactionError) -> CloudCacheError {
+    match error {
+        SettingsTransactionError::AccountChanged
+        | SettingsTransactionError::StaleAccountGeneration { .. }
+        | SettingsTransactionError::AccountGenerationExhausted => CloudCacheError::StaleAccount,
+        other => CloudCacheError::Internal(other.to_string()),
     }
 }
 

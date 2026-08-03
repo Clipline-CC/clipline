@@ -411,6 +411,65 @@ impl CloudThumbnailRequest {
     }
 }
 
+/// Read-only, page-bounded ownership manifest for the native thumbnail image
+/// owner. It contains no cache paths or mutable Cloud page rows; every entry
+/// is fenced to the same accepted account, window, foreground, request, and
+/// server-side asset version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CloudThumbnailManifest {
+    token: CloudWorkToken,
+    page: CloudPageNumber,
+    owners: Vec<CloudThumbnailOwner>,
+}
+
+impl CloudThumbnailManifest {
+    pub fn new(
+        token: CloudWorkToken,
+        page: CloudPageNumber,
+        owners: Vec<CloudThumbnailOwner>,
+    ) -> Result<Self, PayloadBoundsError> {
+        let manifest = Self {
+            token,
+            page,
+            owners,
+        };
+        manifest.validate_bounds()?;
+        Ok(manifest)
+    }
+
+    #[must_use]
+    pub const fn token(&self) -> &CloudWorkToken {
+        &self.token
+    }
+
+    #[must_use]
+    pub const fn page(&self) -> CloudPageNumber {
+        self.page
+    }
+
+    #[must_use]
+    pub fn owners(&self) -> &[CloudThumbnailOwner] {
+        &self.owners
+    }
+
+    pub fn validate_bounds(&self) -> Result<(), PayloadBoundsError> {
+        check_len(
+            "cloud_thumbnail_manifest.owners",
+            self.owners.len(),
+            MAX_CATALOG_PAGE_ROWS,
+        )?;
+        for owner in &self.owners {
+            owner.validate_bounds()?;
+            if owner.token != self.token {
+                return Err(PayloadBoundsError::Invalid {
+                    field: "cloud_thumbnail_manifest.owner",
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Versioned cache request for one accepted Cloud media row.
 ///
 /// The asset version and expected byte size are copied from the exact row the
@@ -1781,6 +1840,9 @@ pub enum CatalogEffect {
     PrepareCloudReviewMedia {
         request: CloudReviewMediaRequest,
     },
+    CancelCloudReviewMedia {
+        owner: CloudReviewMediaOwner,
+    },
     LoadCloudThumbnail {
         request: CloudThumbnailRequest,
     },
@@ -1896,6 +1958,7 @@ impl CatalogEffect {
                     .collect(),
             }),
             Self::OpenLocalReview { .. }
+            | Self::CancelCloudReviewMedia { .. }
             | Self::LoadCloudThumbnail { .. }
             | Self::OpenPreparedCloudReview { .. }
             | Self::ReleaseCloudReviewMedia { .. }
@@ -1936,6 +1999,7 @@ impl CatalogEffect {
                 target.validate_bounds()
             }
             Self::PrepareCloudReviewMedia { request } => request.validate_bounds(),
+            Self::CancelCloudReviewMedia { owner } => owner.validate_bounds(),
             Self::LoadCloudThumbnail { request } => request.validate_bounds(),
             Self::OpenPreparedCloudReview { owner, media } => {
                 owner.validate_bounds()?;

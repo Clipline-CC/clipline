@@ -4,6 +4,38 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-03): Slint replacement Milestone 7, Task 9 Cloud asset ownership
+
+The framework-neutral ownership seams needed by native Cloud thumbnails and review media are now
+complete. Settings stores opened independently for one profile share an exact commit context for
+the durable Cloud account, process-authoritative account generation, cache-namespace identity, and
+primary-file state. Final cache publication holds that same gate, so account replacement cannot
+cross the validation-to-rename boundary. Account and legacy username-only namespace switch-away /
+switch-back ABA both advance the generation and reject stale publication.
+
+`CloudCancellation` now linearizes cancellation with warm-cache touch/pin, download publication,
+single-flight result pinning, media-lease acceptance, and corrupt-thumbnail invalidation. Exact
+thumbnail invalidation consumes only its own transient pin and identity-matched asset/marker pair;
+a foreign replacement survives. Tests cover cancellation before publication, cancellation during
+publication, canceled media acceptance, canceled invalidation, another consumer's pin, stale
+accounts, exact removal, and foreign replacement.
+
+The catalog controller now emits exact `CancelCloudReviewMedia` effects before every replacement,
+close, detach, source/account switch, or owned failure clears pending work. Its read-only Cloud
+thumbnail manifest retains at most 60 ordered, versioned owners and is unavailable outside the
+current attached Cloud page. Windows free-space discovery moved behind the shared safe
+`clipline-shell` wrapper; the shipping Tauri cache callsite remains compatible with the stronger
+media-acceptance cancellation contract.
+
+Validation is green on the final tree: CI-mode `cargo test --workspace`, warning-denied workspace
+Clippy, standalone Slint all-target tests and warning-denied Clippy, plus focused settings/cache/
+controller/filesystem race suites. A Fable medium independent audit returned GO with no P0/P1;
+the legacy namespace ABA regression above was added afterward as an extra fail-closed hardening.
+
+Next: consume these seams in the process-owned native Cloud cache provider, split page/thumbnail/
+media cancellation lanes, transfer real bounded media leases into `LiveReviewBridge`, and retain at
+most 32 decoded Cloud thumbnail images per window.
+
 ## Checkpoint (2026-08-03): Slint replacement Milestone 7, Task 9 native Cloud refresh
 
 The Slint candidate now owns one process-lifetime, two-worker Tokio Cloud runtime beside the

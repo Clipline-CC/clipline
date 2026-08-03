@@ -5,6 +5,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
 use clipline_shell::FileMutationFence;
+#[cfg(windows)]
+use clipline_shell::windows::filesystem::available_space_bytes;
 use clipline_shell::{
     file_identity, open_regular_file_nofollow, opened_file_identity, replace_file_if_identities,
     DirectoryAuthority,
@@ -35,6 +37,17 @@ impl Drop for TestDirectory {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
+}
+
+#[cfg(windows)]
+#[test]
+fn available_space_uses_the_existing_directory_volume() {
+    let directory = TestDirectory::new("available-space");
+
+    let available = available_space_bytes(directory.path()).unwrap();
+
+    assert!(available > 0);
+    assert!(available_space_bytes(&directory.path().join("missing")).is_err());
 }
 
 #[test]

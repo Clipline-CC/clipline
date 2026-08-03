@@ -8,12 +8,12 @@ use std::path::{Path, PathBuf};
 use windows::core::{Error as WindowsError, PCWSTR};
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Storage::FileSystem::{
-    FileDispositionInfo, FileRenameInfo, GetFileInformationByHandle, MoveFileExW,
-    SetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ATTRIBUTE_DIRECTORY,
-    FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_RENAME_INFO_0,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES,
-    MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    FileDispositionInfo, FileRenameInfo, GetDiskFreeSpaceExW, GetFileInformationByHandle,
+    MoveFileExW, SetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, DELETE,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_INFO,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+    FILE_RENAME_INFO, FILE_RENAME_INFO_0, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    FILE_WRITE_ATTRIBUTES, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
 };
 
 use crate::{FileIdentity, FileMutationError};
@@ -23,6 +23,19 @@ fn wide_null(path: &Path) -> Vec<u16> {
         .encode_wide()
         .chain(std::iter::once(0))
         .collect()
+}
+
+/// Return bytes available to the current process on the volume containing an
+/// existing directory. Callers retain responsibility for their own reserve
+/// floor and quota policy.
+pub fn available_space_bytes(path: &Path) -> std::io::Result<u64> {
+    let path = wide_null(path);
+    let mut available = 0_u64;
+    unsafe {
+        GetDiskFreeSpaceExW(PCWSTR(path.as_ptr()), Some(&mut available), None, None)
+            .map_err(io_error)?;
+    }
+    Ok(available)
 }
 
 pub fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {

@@ -434,7 +434,7 @@ pub async fn cache_cloud_clip_media(
     .ok_or_else(|| "cloud clip media is not available".to_string())?;
     allow_cloud_cache_asset(&app, cached.path())?;
     let lease = cache
-        .accept_media(&account, cached)
+        .accept_media(&account, cached, &CloudCancellation::default())
         .map_err(|error| error.to_string())?;
     let path = lease.path().to_path_buf();
     let mut clip = cached_cloud_clip_from_path(&path, &request)?;

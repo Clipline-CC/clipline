@@ -76,18 +76,44 @@ pub trait CancellationProbe: Send + Sync {
     fn is_cancelled(&self) -> bool;
 }
 
+#[derive(Debug, Default)]
+struct CloudCancellationState {
+    canceled: AtomicBool,
+    publication: Mutex<()>,
+}
+
 #[derive(Debug, Clone, Default)]
-pub struct CloudCancellation(Arc<AtomicBool>);
+pub struct CloudCancellation(Arc<CloudCancellationState>);
 
 impl CloudCancellation {
     pub fn cancel(&self) {
-        self.0.store(true, Ordering::Release);
+        let _publication = self
+            .0
+            .publication
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.0.canceled.store(true, Ordering::Release);
+    }
+
+    fn run_if_current<T>(
+        &self,
+        operation: impl FnOnce() -> Result<T, CloudCacheError>,
+    ) -> Result<T, CloudCacheError> {
+        let _publication = self
+            .0
+            .publication
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.is_cancelled() {
+            return Err(CloudCacheError::Canceled);
+        }
+        operation()
     }
 }
 
 impl CancellationProbe for CloudCancellation {
     fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Acquire)
+        self.0.canceled.load(Ordering::Acquire)
     }
 }
 
@@ -226,7 +252,7 @@ impl Flight {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         loop {
             if let Some(result) = slot.as_ref() {
-                return result.clone();
+                return cancellation.run_if_current(|| result.clone());
             }
             if cancellation.is_cancelled() {
                 return Err(CloudCacheError::Canceled);
@@ -545,6 +571,9 @@ impl CloudCache {
 
         if !leader {
             let result = flight.wait(cancellation)?;
+            if cancellation.is_cancelled() {
+                return Err(CloudCacheError::Canceled);
+            }
             if !self.account_guard.is_current(&request.account) {
                 return Err(CloudCacheError::StaleAccount);
             }
@@ -555,7 +584,12 @@ impl CloudCache {
             self.get_as_leader(&request, cancellation)
         }))
         .unwrap_or_else(|_| Err(CloudCacheError::Internal("download worker panicked".into())));
-        flight.publish(result.clone());
+        // Cloning a successful result acquires another transient cache pin.
+        // Linearize that acquisition with cancellation just like the original
+        // cache hit/publication, so cancel() returning means no follower pin
+        // can appear afterward.
+        let shared_result = cancellation.run_if_current(|| result.clone());
+        flight.publish(shared_result);
         let mut flights = self
             .runtime
             .flights
@@ -567,6 +601,9 @@ impl CloudCache {
         {
             flights.remove(&key);
         }
+        if cancellation.is_cancelled() {
+            return Err(CloudCacheError::Canceled);
+        }
         if !self.account_guard.is_current(&request.account) {
             return Err(CloudCacheError::StaleAccount);
         }
@@ -577,6 +614,7 @@ impl CloudCache {
         &self,
         current: &CloudAccountFence,
         mut cached: CachedCloudAsset,
+        cancellation: &CloudCancellation,
     ) -> Result<CloudMediaLease, CloudCacheError> {
         if cached.metadata.asset.kind() != CloudAssetKind::Media {
             return Err(CloudCacheError::InvalidAsset(
@@ -589,37 +627,114 @@ impl CloudCache {
         let authority = self.namespace_authority(current)?;
         let key = cached.pin.key.clone();
         let runtime = Arc::clone(&cached.pin.runtime);
-        self.account_guard.publish_if_current(current, &mut || {
-            let name = cached.metadata.asset.file_name();
-            let current_identity = authority
-                .regular_file_identity(&name)
-                .map_err(|error| CloudCacheError::Io(error.to_string()))?
-                .ok_or_else(|| CloudCacheError::InvalidAsset("cached media disappeared".into()))?;
-            if current_identity != cached.metadata.identity {
-                return Err(CloudCacheError::InvalidAsset(
-                    "cached media identity changed before Open".into(),
-                ));
-            }
-            let mut accounting = runtime
-                .accounting
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let counts = accounting.protection.get_mut(&key).ok_or_else(|| {
-                CloudCacheError::Internal("transient cache protection disappeared".into())
-            })?;
-            if counts.transient == 0 {
-                return Err(CloudCacheError::Internal(
-                    "transient cache protection was already released".into(),
-                ));
-            }
-            counts.transient -= 1;
-            counts.playback = counts.playback.saturating_add(1);
-            Ok(())
+        cancellation.run_if_current(|| {
+            self.account_guard.publish_if_current(current, &mut || {
+                let name = cached.metadata.asset.file_name();
+                let current_identity = authority
+                    .regular_file_identity(&name)
+                    .map_err(|error| CloudCacheError::Io(error.to_string()))?
+                    .ok_or_else(|| {
+                        CloudCacheError::InvalidAsset("cached media disappeared".into())
+                    })?;
+                if current_identity != cached.metadata.identity {
+                    return Err(CloudCacheError::InvalidAsset(
+                        "cached media identity changed before Open".into(),
+                    ));
+                }
+                let mut accounting = runtime
+                    .accounting
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let counts = accounting.protection.get_mut(&key).ok_or_else(|| {
+                    CloudCacheError::Internal("transient cache protection disappeared".into())
+                })?;
+                if counts.transient == 0 {
+                    return Err(CloudCacheError::Internal(
+                        "transient cache protection was already released".into(),
+                    ));
+                }
+                counts.transient -= 1;
+                counts.playback = counts.playback.saturating_add(1);
+                Ok(())
+            })
         })?;
         cached.pin.armed = false;
         Ok(CloudMediaLease {
             metadata: cached.metadata.clone(),
             _protection: PlaybackProtection { runtime, key },
+        })
+    }
+
+    /// Remove one thumbnail that passed the cache marker checks but failed the
+    /// bounded image decoder. The transient pin is consumed only after the
+    /// exact cached identity is removed, so a foreign replacement at the same
+    /// path is preserved and another caller's pin prevents invalidation.
+    pub fn invalidate_thumbnail(
+        &self,
+        current: &CloudAccountFence,
+        mut cached: CachedCloudAsset,
+        cancellation: &CloudCancellation,
+    ) -> Result<(), CloudCacheError> {
+        if cached.metadata.asset.kind() != CloudAssetKind::Thumbnail {
+            return Err(CloudCacheError::InvalidAsset(
+                "only cached Cloud thumbnails can be invalidated after decode".into(),
+            ));
+        }
+        if &cached.metadata.account != current {
+            return Err(CloudCacheError::StaleAccount);
+        }
+        let authority = self.namespace_authority(current)?;
+        let asset_name = cached.metadata.asset.file_name();
+        let marker_name = cached.metadata.asset.marker_name();
+        if cached.metadata.path != authority.display_path().join(&asset_name) {
+            return Err(CloudCacheError::InvalidAsset(
+                "cached thumbnail path does not match its account namespace".into(),
+            ));
+        }
+        cancellation.run_if_current(|| {
+            self.account_guard.publish_if_current(current, &mut || {
+                let mut accounting = self
+                    .runtime
+                    .accounting
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let counts = accounting.protection.get(&cached.pin.key).ok_or_else(|| {
+                    CloudCacheError::Internal(
+                        "cached thumbnail transient protection disappeared".into(),
+                    )
+                })?;
+                if counts.transient != 1 || counts.playback != 0 {
+                    return Err(CloudCacheError::InvalidAsset(
+                        "cached thumbnail is still protected by another consumer".into(),
+                    ));
+                }
+                let marker_identity = authority
+                    .regular_file_identity(&marker_name)
+                    .map_err(|error| CloudCacheError::Io(error.to_string()))?;
+                authority
+                    .remove_file_if_identity(&asset_name, cached.metadata.identity)
+                    .map_err(|error| {
+                        CloudCacheError::Io(format!(
+                            "remove decoder-rejected Cloud thumbnail: {error}"
+                        ))
+                    })?;
+
+                // The exact asset is gone, so consume this method's transient pin
+                // even if marker cleanup reports an error. Leaving the logical pin
+                // armed would retain a protection entry for a nonexistent file.
+                accounting.protection.remove(&cached.pin.key);
+                cached.pin.armed = false;
+                if let Some(marker_identity) = marker_identity {
+                    authority
+                        .remove_file_if_identity(&marker_name, marker_identity)
+                        .map_err(|error| {
+                            CloudCacheError::Io(format!(
+                                "remove decoder-rejected Cloud thumbnail marker: {error}"
+                            ))
+                        })?;
+                }
+                Ok(())
+            })
         })
     }
 
@@ -641,7 +756,7 @@ impl CloudCache {
         cancellation: &CloudCancellation,
     ) -> Result<Option<CachedCloudAsset>, CloudCacheError> {
         let authority = self.namespace_authority(&request.account)?;
-        if let Some(hit) = self.cache_hit(&authority, request)? {
+        if let Some(hit) = self.cache_hit(&authority, request, cancellation)? {
             return Ok(Some(hit));
         }
         let _permit = PermitPool::global().acquire(cancellation)?;
@@ -673,22 +788,25 @@ impl CloudCache {
         &self,
         authority: &Arc<DirectoryAuthority>,
         request: &CloudAssetRequest,
+        cancellation: &CloudCancellation,
     ) -> Result<Option<CachedCloudAsset>, CloudCacheError> {
         let mut hit = None;
-        self.account_guard
-            .publish_if_current(&request.account, &mut || {
-                let mut accounting = self
-                    .runtime
-                    .accounting
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let Some(completed) = completed_asset(authority, request)? else {
-                    return Ok(());
-                };
-                touch_completed(&completed)?;
-                hit = Some(self.pin_completed(&mut accounting, request, completed));
-                Ok(())
-            })?;
+        cancellation.run_if_current(|| {
+            self.account_guard
+                .publish_if_current(&request.account, &mut || {
+                    let mut accounting = self
+                        .runtime
+                        .accounting
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let Some(completed) = completed_asset(authority, request)? else {
+                        return Ok(());
+                    };
+                    touch_completed(&completed)?;
+                    hit = Some(self.pin_completed(&mut accounting, request, completed));
+                    Ok(())
+                })
+        })?;
         Ok(hit)
     }
 
@@ -771,37 +889,41 @@ impl CloudCache {
         drop(file);
 
         let mut published: Option<CachedCloudAsset> = None;
-        self.account_guard
-            .publish_if_current(&request.account, &mut || {
-                let mut accounting = self
-                    .runtime
-                    .accounting
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let completed = if let Some(existing) = completed_asset(&authority, request)? {
-                    existing
-                } else {
-                    self.prune_locked(&mut accounting, written, 0)?;
-                    remove_invalid_pair_if_present(
-                        &authority,
-                        &request.asset,
-                        &accounting.protection,
-                    )?;
-                    publish_temp_pair(
-                        &authority,
-                        &request.asset,
-                        &mut temp,
-                        written,
-                        request.expected_size_bytes,
-                    )?;
-                    completed_asset(&authority, request)?.ok_or_else(|| {
-                        CloudCacheError::Internal("published cache pair did not validate".into())
-                    })?
-                };
-                touch_completed(&completed)?;
-                published = Some(self.pin_completed(&mut accounting, request, completed));
-                Ok(())
-            })?;
+        cancellation.run_if_current(|| {
+            self.account_guard
+                .publish_if_current(&request.account, &mut || {
+                    let mut accounting = self
+                        .runtime
+                        .accounting
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let completed = if let Some(existing) = completed_asset(&authority, request)? {
+                        existing
+                    } else {
+                        self.prune_locked(&mut accounting, written, 0)?;
+                        remove_invalid_pair_if_present(
+                            &authority,
+                            &request.asset,
+                            &accounting.protection,
+                        )?;
+                        publish_temp_pair(
+                            &authority,
+                            &request.asset,
+                            &mut temp,
+                            written,
+                            request.expected_size_bytes,
+                        )?;
+                        completed_asset(&authority, request)?.ok_or_else(|| {
+                            CloudCacheError::Internal(
+                                "published cache pair did not validate".into(),
+                            )
+                        })?
+                    };
+                    touch_completed(&completed)?;
+                    published = Some(self.pin_completed(&mut accounting, request, completed));
+                    Ok(())
+                })
+        })?;
         published.ok_or(CloudCacheError::StaleAccount).map(Some)
     }
 

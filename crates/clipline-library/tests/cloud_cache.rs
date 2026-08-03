@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime};
@@ -304,6 +304,136 @@ fn same_account_generation_and_asset_is_single_flight() {
 }
 
 #[test]
+fn invalidated_thumbnail_is_removed_by_identity_and_downloaded_again() {
+    let dir = TestDir::new("clipline-library", "cloud-thumbnail-invalidate");
+    let account = account("account-a", 1, "aaaabbbbccccdddd");
+    let download = Arc::new(FakeDownload::new(b"corrupt jpeg"));
+    let cache = open_cache(
+        dir.path(),
+        download.clone(),
+        Arc::new(FixedSpace::ample()),
+        Arc::new(AccountGate(Mutex::new(account.clone()))),
+    );
+    let request = request(&account, "remote-1", CloudAssetKind::Thumbnail);
+    let first = cache
+        .get(request.clone(), &CloudCancellation::default())
+        .unwrap()
+        .unwrap();
+    let path = first.path().to_path_buf();
+    let marker = path.with_file_name(request.asset.marker_name());
+
+    cache
+        .invalidate_thumbnail(&account, first, &CloudCancellation::default())
+        .unwrap();
+
+    assert!(!path.exists());
+    assert!(!marker.exists());
+    let replacement = cache
+        .get(request, &CloudCancellation::default())
+        .unwrap()
+        .unwrap();
+    assert_eq!(replacement.path(), path);
+    assert_eq!(download.calls.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn thumbnail_invalidation_is_account_identity_and_pin_fenced() {
+    let dir = TestDir::new("clipline-library", "cloud-thumbnail-invalidate-fences");
+    let current = account("account-a", 1, "1111222233334444");
+    let cache = open_cache(
+        dir.path(),
+        Arc::new(FakeDownload::new(b"corrupt jpeg")),
+        Arc::new(FixedSpace::ample()),
+        Arc::new(AccountGate(Mutex::new(current.clone()))),
+    );
+    let asset = cache
+        .get(
+            request(&current, "remote-1", CloudAssetKind::Thumbnail),
+            &CloudCancellation::default(),
+        )
+        .unwrap()
+        .unwrap();
+    let path = asset.path().to_path_buf();
+    let retained = asset.clone();
+
+    let error = cache
+        .invalidate_thumbnail(&current, asset, &CloudCancellation::default())
+        .unwrap_err();
+    assert!(matches!(error, CloudCacheError::InvalidAsset(_)));
+    assert!(path.exists());
+
+    let stale = account("account-a", 2, "1111222233334444");
+    let error = cache
+        .invalidate_thumbnail(&stale, retained.clone(), &CloudCancellation::default())
+        .unwrap_err();
+    assert_eq!(error, CloudCacheError::StaleAccount);
+    assert!(path.exists());
+
+    cache
+        .invalidate_thumbnail(&current, retained, &CloudCancellation::default())
+        .unwrap();
+    assert!(!path.exists());
+}
+
+#[test]
+fn thumbnail_invalidation_preserves_a_foreign_replacement() {
+    let dir = TestDir::new("clipline-library", "cloud-thumbnail-invalidate-replacement");
+    let current = account("account-a", 1, "1111222233335555");
+    let cache = open_cache(
+        dir.path(),
+        Arc::new(FakeDownload::new(b"corrupt jpeg")),
+        Arc::new(FixedSpace::ample()),
+        Arc::new(AccountGate(Mutex::new(current.clone()))),
+    );
+    let cached = cache
+        .get(
+            request(&current, "remote-1", CloudAssetKind::Thumbnail),
+            &CloudCancellation::default(),
+        )
+        .unwrap()
+        .unwrap();
+    let path = cached.path().to_path_buf();
+    std::fs::remove_file(&path).unwrap();
+    std::fs::write(&path, b"foreign replacement").unwrap();
+
+    assert!(matches!(
+        cache.invalidate_thumbnail(&current, cached, &CloudCancellation::default()),
+        Err(CloudCacheError::Io(_))
+    ));
+    assert_eq!(std::fs::read(path).unwrap(), b"foreign replacement");
+}
+
+#[test]
+fn canceled_thumbnail_invalidation_preserves_the_exact_cache_pair() {
+    let dir = TestDir::new("clipline-library", "cloud-thumbnail-invalidate-canceled");
+    let current = account("account-a", 1, "1111222233336666");
+    let cache = open_cache(
+        dir.path(),
+        Arc::new(FakeDownload::new(b"corrupt jpeg")),
+        Arc::new(FixedSpace::ample()),
+        Arc::new(AccountGate(Mutex::new(current.clone()))),
+    );
+    let asset_request = request(&current, "remote-1", CloudAssetKind::Thumbnail);
+    let cached = cache
+        .get(asset_request.clone(), &CloudCancellation::default())
+        .unwrap()
+        .unwrap();
+    let path = cached.path().to_path_buf();
+    let marker = path.with_file_name(asset_request.asset.marker_name());
+    let cancellation = CloudCancellation::default();
+    cancellation.cancel();
+
+    assert_eq!(
+        cache
+            .invalidate_thumbnail(&current, cached, &cancellation)
+            .unwrap_err(),
+        CloudCacheError::Canceled
+    );
+    assert!(path.exists());
+    assert!(marker.exists());
+}
+
+#[test]
 fn hard_download_limit_is_shared_across_cache_adapters() {
     let dir = TestDir::new("clipline-library", "cloud-hard-limit");
     let account = account("account-a", 1, "bbbbbbbbbbbbbbbb");
@@ -470,10 +600,39 @@ fn media_lease_is_acquired_only_on_accept_and_released_on_drop() {
         .unwrap()
         .unwrap();
     assert_eq!(cache.playback_lease_count(), 0);
-    let lease = cache.accept_media(&account, cached).unwrap();
+    let lease = cache
+        .accept_media(&account, cached, &CloudCancellation::default())
+        .unwrap();
     assert!(lease.path().exists());
     assert_eq!(cache.playback_lease_count(), 1);
     drop(lease);
+    assert_eq!(cache.playback_lease_count(), 0);
+}
+
+#[test]
+fn cancellation_before_media_acceptance_creates_no_playback_lease() {
+    let dir = TestDir::new("clipline-library", "cloud-media-accept-canceled");
+    let account = account("account-a", 1, "1111111111112222");
+    let cache = open_cache(
+        dir.path(),
+        Arc::new(FakeDownload::new(b"media")),
+        Arc::new(FixedSpace::ample()),
+        Arc::new(AccountGate(Mutex::new(account.clone()))),
+    );
+    let cached = cache
+        .get(
+            request(&account, "remote", CloudAssetKind::Media),
+            &CloudCancellation::default(),
+        )
+        .unwrap()
+        .unwrap();
+    let cancellation = CloudCancellation::default();
+    cancellation.cancel();
+
+    assert!(matches!(
+        cache.accept_media(&account, cached, &cancellation),
+        Err(CloudCacheError::Canceled)
+    ));
     assert_eq!(cache.playback_lease_count(), 0);
 }
 
@@ -523,7 +682,9 @@ fn protected_media_blocks_eviction_until_the_lease_drops() {
         .unwrap()
         .unwrap();
     let path = cached.path().to_path_buf();
-    let lease = cache.accept_media(&account, cached).unwrap();
+    let lease = cache
+        .accept_media(&account, cached, &CloudCancellation::default())
+        .unwrap();
     space.set(CLOUD_CACHE_FREE_SPACE_FLOOR_BYTES - 1);
     assert!(matches!(
         cache.prune(0),
@@ -755,6 +916,36 @@ fn active_owned_temp_is_protected_from_age_cleanup() {
 }
 
 #[test]
+fn cancellation_before_publication_removes_the_owned_temp_and_publishes_nothing() {
+    let dir = TestDir::new("clipline-library", "cloud-cancel-before-publish");
+    let account = account("account-a", 1, "9999999999999998");
+    let download = Arc::new(BlockingDownload::new());
+    let cache = open_cache(
+        dir.path(),
+        download.clone(),
+        Arc::new(FixedSpace::ample()),
+        Arc::new(AccountGate(Mutex::new(account.clone()))),
+    );
+    let cancellation = CloudCancellation::default();
+    let worker = {
+        let cache = Arc::clone(&cache);
+        let cancellation = cancellation.clone();
+        let request = request(&account, "remote", CloudAssetKind::Thumbnail);
+        thread::spawn(move || cache.get(request, &cancellation))
+    };
+    download.wait_until_entered();
+    cancellation.cancel();
+    download.release();
+
+    assert_eq!(
+        worker.join().unwrap().unwrap_err(),
+        CloudCacheError::Canceled
+    );
+    let namespace = dir.path().join(account.cache_namespace.as_str());
+    assert_eq!(std::fs::read_dir(namespace).unwrap().count(), 0);
+}
+
+#[test]
 fn published_asset_is_pinned_before_account_guard_releases() {
     let dir = TestDir::new("clipline-library", "cloud-publish-pin");
     let account = account("account-a", 1, "aaaaaaaaaaaaaaa1");
@@ -793,6 +984,60 @@ fn published_asset_is_pinned_before_account_guard_releases() {
     );
     gate.release();
     worker.join().unwrap().unwrap();
+}
+
+#[test]
+fn cancellation_racing_publication_is_linearized_after_the_cache_pair() {
+    let dir = TestDir::new("clipline-library", "cloud-cancel-publication-race");
+    let account = account("account-a", 1, "aaaaaaaaaaaaaaa2");
+    let gate = Arc::new(AfterPublicationGate {
+        account: account.clone(),
+        calls: AtomicUsize::new(0),
+        entered: (Mutex::new(false), Condvar::new()),
+        release: (Mutex::new(false), Condvar::new()),
+    });
+    let cache = open_cache(
+        dir.path(),
+        Arc::new(FakeDownload::new(b"payload")),
+        Arc::new(FixedSpace::ample()),
+        gate.clone(),
+    );
+    let cancellation = CloudCancellation::default();
+    let worker = {
+        let cache = Arc::clone(&cache);
+        let cancellation = cancellation.clone();
+        let request = request(&account, "remote", CloudAssetKind::Thumbnail);
+        thread::spawn(move || cache.get(request, &cancellation))
+    };
+    gate.wait_until_publication_returns();
+
+    let cancel_returned = Arc::new(AtomicBool::new(false));
+    let cancel_worker = {
+        let cancellation = cancellation.clone();
+        let cancel_returned = Arc::clone(&cancel_returned);
+        thread::spawn(move || {
+            cancellation.cancel();
+            cancel_returned.store(true, Ordering::Release);
+        })
+    };
+    thread::sleep(Duration::from_millis(30));
+    assert!(
+        !cancel_returned.load(Ordering::Acquire),
+        "cancel returned before the in-progress publication linearized"
+    );
+
+    gate.release();
+    cancel_worker.join().unwrap();
+    assert!(cancel_returned.load(Ordering::Acquire));
+    assert_eq!(
+        worker.join().unwrap().unwrap_err(),
+        CloudCacheError::Canceled
+    );
+
+    let asset = request(&account, "remote", CloudAssetKind::Thumbnail).asset;
+    let namespace = dir.path().join(account.cache_namespace.as_str());
+    assert!(namespace.join(asset.file_name()).exists());
+    assert!(namespace.join(asset.marker_name()).exists());
 }
 
 #[test]

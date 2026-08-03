@@ -104,6 +104,10 @@ fn controller() -> CatalogController {
     CatalogController::new(Arc::new(TestDays)).unwrap()
 }
 
+fn fresh_controller() -> CatalogController {
+    controller()
+}
+
 fn local_item(index: usize) -> LocalClipItem {
     LocalClipItem {
         path: format!(r"C:\Clips\Clip-{index:05}.mp4"),
@@ -285,6 +289,20 @@ fn seed_cloud(controller: &mut CatalogController, account: &str) -> CatalogItemI
         account_key: owner.account_key,
         account_generation: owner.account_generation,
         remote_clip_id: RemoteClipId::new("remote-a").unwrap(),
+    }
+}
+
+fn prepare_cloud_review(
+    controller: &mut CatalogController,
+    item: CatalogItemIdentity,
+) -> CloudReviewMediaOwner {
+    match only_effect(
+        controller
+            .dispatch(CatalogAction::OpenItem { item })
+            .unwrap(),
+    ) {
+        CatalogEffect::PrepareCloudReviewMedia { request } => request.owner,
+        other => panic!("expected Cloud media preparation, got {other:?}"),
     }
 }
 
@@ -1062,6 +1080,166 @@ fn accepted_cloud_page_issues_versioned_bounded_thumbnail_work_and_rejects_stale
 }
 
 #[test]
+fn cloud_thumbnail_manifest_is_current_bounded_source_scoped_and_reowned_on_reopen() {
+    let mut controller = controller();
+    seed_local(&mut controller, vec![local_item(0)]);
+    let owner = cloud_owner("account-a", 12);
+    controller.set_cloud_owner(Some(owner.clone())).unwrap();
+    let (token, revision, page) = only_cloud_refresh(
+        controller
+            .dispatch(CatalogAction::SetSource {
+                source: CatalogSource::Cloud,
+            })
+            .unwrap(),
+    );
+    let items: Vec<_> = (0..MAX_CLOUD_THUMBNAIL_REQUESTS_PER_UPDATE)
+        .map(|index| {
+            let mut item = cloud_item(&format!("manifest-{index}"));
+            item.updated_at_unix = 20_000 + index as u64;
+            item
+        })
+        .collect();
+    controller
+        .accept(CatalogResult::CloudPage(
+            CloudListPageCompletion::page(token.clone(), revision, page, items.clone(), Vec::new())
+                .unwrap(),
+        ))
+        .unwrap();
+    let manifest = controller.cloud_thumbnail_manifest().unwrap();
+    assert_eq!(manifest.token(), &token);
+    assert_eq!(manifest.page(), page);
+    assert_eq!(
+        manifest.owners().len(),
+        MAX_CLOUD_THUMBNAIL_REQUESTS_PER_UPDATE
+    );
+    assert!(manifest.owners().iter().enumerate().all(|(index, entry)| {
+        entry.token == token
+            && entry.descriptor.item.matches_cloud_catalog_owner(&owner)
+            && entry.descriptor.version == 20_000 + index as u64
+    }));
+
+    let stale = CloudListPageCompletion::page(
+        CloudWorkToken {
+            window: stale_window(token.window),
+            ..token.clone()
+        },
+        revision,
+        page,
+        vec![cloud_item("stale")],
+        Vec::new(),
+    )
+    .unwrap();
+    assert!(controller
+        .accept(CatalogResult::CloudPage(stale))
+        .unwrap()
+        .is_empty());
+    assert!(Arc::ptr_eq(
+        &manifest,
+        &controller.cloud_thumbnail_manifest().unwrap()
+    ));
+
+    controller
+        .dispatch(CatalogAction::SetSource {
+            source: CatalogSource::Local,
+        })
+        .unwrap();
+    assert!(controller.cloud_thumbnail_manifest().is_none());
+    let (token, revision, page) = only_cloud_refresh(
+        controller
+            .dispatch(CatalogAction::SetSource {
+                source: CatalogSource::Cloud,
+            })
+            .unwrap(),
+    );
+    controller
+        .accept(CatalogResult::CloudPage(
+            CloudListPageCompletion::page(token, revision, page, items, Vec::new()).unwrap(),
+        ))
+        .unwrap();
+    let before_reopen = controller.cloud_thumbnail_manifest().unwrap();
+    controller.detach().unwrap();
+    assert!(controller.cloud_thumbnail_manifest().is_none());
+    let effects = controller
+        .attach(
+            WindowAttachmentGeneration::new(2),
+            ForegroundGeneration::new(202),
+        )
+        .unwrap();
+    assert_eq!(effects.len(), MAX_CLOUD_THUMBNAIL_REQUESTS_PER_UPDATE);
+    assert!(effects.len() <= MAX_CATALOG_EFFECTS_PER_UPDATE);
+    let reopened = controller.cloud_thumbnail_manifest().unwrap();
+    assert_eq!(reopened.page(), before_reopen.page());
+    assert_eq!(reopened.owners().len(), before_reopen.owners().len());
+    assert!(reopened.owners().iter().all(|entry| {
+        entry.token.window.attachment == WindowAttachmentGeneration::new(2)
+            && entry.token.window.foreground == ForegroundGeneration::new(202)
+            && entry.descriptor.item.matches_cloud_catalog_owner(&owner)
+    }));
+}
+
+#[test]
+fn cloud_window_replacement_maximum_includes_cancel_thumbnails_and_review_reprepare() {
+    let mut controller = controller();
+    seed_local(&mut controller, vec![local_item(0)]);
+    let owner = cloud_owner("account-a", 13);
+    controller.set_cloud_owner(Some(owner)).unwrap();
+    let (token, revision, page) = only_cloud_refresh(
+        controller
+            .dispatch(CatalogAction::SetSource {
+                source: CatalogSource::Cloud,
+            })
+            .unwrap(),
+    );
+    let items = (0..MAX_CLOUD_THUMBNAIL_REQUESTS_PER_UPDATE)
+        .map(|index| cloud_item(&format!("maximum-{index}")))
+        .collect();
+    controller
+        .accept(CatalogResult::CloudPage(
+            CloudListPageCompletion::page(token, revision, page, items, Vec::new()).unwrap(),
+        ))
+        .unwrap();
+    let item = controller.state().projection.rows[0].identity.clone();
+    let owner = prepare_cloud_review(&mut controller, item.clone());
+    controller
+        .accept(CatalogResult::CloudReviewMediaPrepared {
+            owner,
+            media: PreparedCloudReviewMedia::new(
+                r"C:\Cache\maximum.mp4",
+                CloudMediaLeaseId::new(501).unwrap(),
+            )
+            .unwrap(),
+        })
+        .unwrap();
+    let pending = prepare_cloud_review(&mut controller, item.clone());
+
+    let effects = controller
+        .attach(
+            WindowAttachmentGeneration::new(9),
+            ForegroundGeneration::new(209),
+        )
+        .unwrap();
+    assert_eq!(effects.len(), MAX_CLOUD_THUMBNAIL_REQUESTS_PER_UPDATE + 2);
+    assert!(effects.len() <= MAX_CATALOG_EFFECTS_PER_UPDATE);
+    assert!(matches!(
+        effects.first(),
+        Some(CatalogEffect::CancelCloudReviewMedia { owner }) if owner == &pending
+    ));
+    assert_eq!(
+        effects
+            .iter()
+            .filter(|effect| matches!(effect, CatalogEffect::LoadCloudThumbnail { .. }))
+            .count(),
+        MAX_CLOUD_THUMBNAIL_REQUESTS_PER_UPDATE
+    );
+    assert!(matches!(
+        effects.last(),
+        Some(CatalogEffect::PrepareCloudReviewMedia { request })
+            if request.owner.item == item
+                && request.owner.token.window.attachment == WindowAttachmentGeneration::new(9)
+    ));
+}
+
+#[test]
 fn exact_refresh_failures_clear_only_the_owned_lane_and_launch_only_the_latest_dirty_target() {
     let mut controller = controller();
     let first = only_effect(
@@ -1483,6 +1661,96 @@ fn cloud_review_preparation_releases_stale_leases_and_retains_exact_lease_until_
         ] if *lease_id == exact_media.lease_id
     ));
     assert!(controller.state().active.is_none());
+}
+
+#[test]
+fn cloud_review_prepare_is_promptly_canceled_once_by_every_superseding_lifecycle_edge() {
+    let mut controller = fresh_controller();
+    let item = seed_cloud(&mut controller, "account-a");
+    let first = prepare_cloud_review(&mut controller, item.clone());
+    let replacement = controller
+        .dispatch(CatalogAction::OpenItem { item: item.clone() })
+        .unwrap();
+    let replacement_owner = match replacement.as_slice() {
+        [CatalogEffect::CancelCloudReviewMedia { owner: canceled }, CatalogEffect::PrepareCloudReviewMedia { request }]
+            if canceled == &first =>
+        {
+            request.owner.clone()
+        }
+        other => panic!("expected exact cancel then replacement prepare, got {other:?}"),
+    };
+    assert_ne!(replacement_owner, first);
+    let checkpoint = controller.state().clone();
+    assert!(controller
+        .accept(CatalogResult::OperationFailed {
+            owner: CatalogOperationOwner::CloudReviewMedia { owner: first },
+            message: "stale preparation failed".into(),
+        })
+        .unwrap()
+        .is_empty());
+    assert_eq!(controller.state(), &checkpoint);
+    assert_eq!(
+        controller.dispatch(CatalogAction::CloseActive).unwrap(),
+        vec![CatalogEffect::CancelCloudReviewMedia {
+            owner: replacement_owner,
+        }]
+    );
+    assert!(controller
+        .dispatch(CatalogAction::CloseActive)
+        .unwrap()
+        .is_empty());
+
+    let mut controller = fresh_controller();
+    let item = seed_cloud(&mut controller, "account-a");
+    let owner = prepare_cloud_review(&mut controller, item);
+    assert_eq!(
+        controller.detach().unwrap(),
+        vec![CatalogEffect::CancelCloudReviewMedia {
+            owner: owner.clone(),
+        }]
+    );
+    assert!(controller.detach().unwrap().is_empty());
+
+    let mut controller = fresh_controller();
+    let item = seed_cloud(&mut controller, "account-a");
+    let owner = prepare_cloud_review(&mut controller, item);
+    assert_eq!(
+        controller
+            .dispatch(CatalogAction::SetSource {
+                source: CatalogSource::Local,
+            })
+            .unwrap(),
+        vec![CatalogEffect::CancelCloudReviewMedia { owner }]
+    );
+
+    let mut controller = fresh_controller();
+    let item = seed_cloud(&mut controller, "account-a");
+    let owner = prepare_cloud_review(&mut controller, item);
+    let account_switch = controller
+        .set_cloud_owner(Some(cloud_owner("account-b", 2)))
+        .unwrap();
+    assert!(matches!(
+        account_switch.as_slice(),
+        [
+            CatalogEffect::CancelCloudReviewMedia { owner: canceled },
+            CatalogEffect::RefreshCloud { .. },
+        ] if canceled == &owner
+    ));
+
+    let mut controller = fresh_controller();
+    let item = seed_cloud(&mut controller, "account-a");
+    let owner = prepare_cloud_review(&mut controller, item);
+    let failure = CatalogResult::OperationFailed {
+        owner: CatalogOperationOwner::CloudReviewMedia {
+            owner: owner.clone(),
+        },
+        message: "preparation failed".into(),
+    };
+    assert_eq!(
+        controller.accept(failure.clone()).unwrap(),
+        vec![CatalogEffect::CancelCloudReviewMedia { owner }]
+    );
+    assert!(controller.accept(failure).unwrap().is_empty());
 }
 
 #[test]

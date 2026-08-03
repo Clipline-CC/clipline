@@ -39,10 +39,11 @@ pub use persistence::{
     audio_preview_cache_dir, cloud_paths_equivalent, icon_cache_dir, normalize_media_dir,
     normalize_replay_cache_dir, quota_bytes_from_gb, replay_cache_quota_bytes_from_gb,
     settings_path, share_export_cache_dir, AccountGeneration, CloudAccountIdentity,
-    CloudAccountStore, CloudProfileCas, CloudRecordCas, CloudRecordCasKind, CloudRecordSlot,
-    LibraryConfig, SettingsChange, SettingsLoadSource, SettingsPathResolver, SettingsProfile,
-    SettingsProfileError, SettingsRevision, SettingsSnapshot, SettingsStore, SettingsTransaction,
-    SettingsTransactionError, MAX_CLOUD_RECORD_CAS_SLOTS,
+    CloudAccountPublicationOwner, CloudAccountStore, CloudProfileCas, CloudRecordCas,
+    CloudRecordCasKind, CloudRecordSlot, LibraryConfig, SettingsChange, SettingsLoadSource,
+    SettingsPathResolver, SettingsProfile, SettingsProfileError, SettingsRevision,
+    SettingsSnapshot, SettingsStore, SettingsTransaction, SettingsTransactionError,
+    MAX_CLOUD_RECORD_CAS_SLOTS,
 };
 #[allow(unused_imports)]
 pub use types::{

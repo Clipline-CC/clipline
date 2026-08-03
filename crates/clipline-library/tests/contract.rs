@@ -6,17 +6,17 @@ use clipline_library::{
     CatalogUploadVisibility, ClipDetailRequest, ClipGame, ClipPathIdentity, CloudAccountGeneration,
     CloudAccountKey, CloudAccountSnapshot, CloudCatalogOwner, CloudLibraryItem,
     CloudListPageCompletion, CloudMediaLeaseId, CloudNextPage, CloudPageNumber, CloudPageOutcome,
-    CloudReviewMediaOwner, CloudReviewMediaRequest, CloudThumbnailDescriptor, CloudThumbnailOwner,
-    CloudThumbnailRequest, CloudWorkToken, DurableUploadToken, ForegroundGeneration,
-    GenerationError, LocalClipFilter, LocalClipGrouping, LocalClipId, LocalClipItem, LocalClipSort,
-    LocalIndexCompletion, LocalPageIndex, MutationFailure, MutationReport, PayloadBoundsError,
-    PosterGeneration, PosterStatus, PreparedCloudReviewMedia, PresentationRow, RemoteClipId,
-    RequestGeneration, ResolvedLocalClip, UploadGeneration, UploadSummary,
-    WindowAttachmentGeneration, WindowWorkToken, MAX_CATALOG_IDENTITY_BYTES, MAX_CATALOG_PAGE_ROWS,
-    MAX_CLOUD_INDEX_ROWS, MAX_CLOUD_SERVER_PAGE, MAX_DECODED_PAGE_IMAGES,
-    MAX_LOCAL_INDEX_PAYLOAD_BYTES, MAX_LOCAL_INDEX_ROWS, MAX_MUTATION_ITEMS,
-    MAX_MUTATION_PATH_BYTES, MAX_POSTER_RESULT_ENTRIES, MAX_UPLOAD_DESCRIPTION_UTF16,
-    MAX_UPLOAD_SUMMARIES, MAX_UPLOAD_TITLE_UTF16,
+    CloudReviewMediaOwner, CloudReviewMediaRequest, CloudThumbnailDescriptor,
+    CloudThumbnailManifest, CloudThumbnailOwner, CloudThumbnailRequest, CloudWorkToken,
+    DurableUploadToken, ForegroundGeneration, GenerationError, LocalClipFilter, LocalClipGrouping,
+    LocalClipId, LocalClipItem, LocalClipSort, LocalIndexCompletion, LocalPageIndex,
+    MutationFailure, MutationReport, PayloadBoundsError, PosterGeneration, PosterStatus,
+    PreparedCloudReviewMedia, PresentationRow, RemoteClipId, RequestGeneration, ResolvedLocalClip,
+    UploadGeneration, UploadSummary, WindowAttachmentGeneration, WindowWorkToken,
+    MAX_CATALOG_IDENTITY_BYTES, MAX_CATALOG_PAGE_ROWS, MAX_CLOUD_INDEX_ROWS, MAX_CLOUD_SERVER_PAGE,
+    MAX_DECODED_PAGE_IMAGES, MAX_LOCAL_INDEX_PAYLOAD_BYTES, MAX_LOCAL_INDEX_ROWS,
+    MAX_MUTATION_ITEMS, MAX_MUTATION_PATH_BYTES, MAX_POSTER_RESULT_ENTRIES,
+    MAX_UPLOAD_DESCRIPTION_UTF16, MAX_UPLOAD_SUMMARIES, MAX_UPLOAD_TITLE_UTF16,
 };
 
 #[test]
@@ -967,6 +967,15 @@ fn cloud_review_media_requires_exact_account_window_item_and_lease() {
             owner: owner.clone(),
         }))
     );
+    let cancel = CatalogEffect::CancelCloudReviewMedia {
+        owner: owner.clone(),
+    };
+    assert_eq!(cancel.validate_bounds(), Ok(()));
+    assert_eq!(cancel.operation_owner(), Ok(None));
+    assert_eq!(
+        serde_json::to_value(cancel).unwrap()["kind"],
+        "cancel_cloud_review_media"
+    );
 
     let lease_id = CloudMediaLeaseId::new(41).unwrap();
     let media = PreparedCloudReviewMedia::new(r"C:\Cache\remote-review.mp4", lease_id).unwrap();
@@ -1075,6 +1084,42 @@ fn cloud_thumbnail_contract_pins_the_exact_account_window_item_and_version() {
     assert_eq!(effect.validate_bounds(), Ok(()));
     assert_eq!(effect.operation_owner(), Ok(None));
     assert_eq!(request.owner.descriptor.version, 123_456);
+    let manifest = CloudThumbnailManifest::new(
+        token.clone(),
+        CloudPageNumber::new(3).unwrap(),
+        vec![owner.clone()],
+    )
+    .unwrap();
+    assert_eq!(manifest.token(), &token);
+    assert_eq!(manifest.page(), CloudPageNumber::new(3).unwrap());
+    assert_eq!(manifest.owners(), std::slice::from_ref(&owner));
+    assert_eq!(manifest.validate_bounds(), Ok(()));
+    assert!(matches!(
+        CloudThumbnailManifest::new(
+            token.clone(),
+            CloudPageNumber::new(3).unwrap(),
+            vec![owner.clone(); MAX_CATALOG_PAGE_ROWS + 1],
+        ),
+        Err(PayloadBoundsError::TooLarge {
+            field: "cloud_thumbnail_manifest.owners",
+            actual,
+            maximum: MAX_CATALOG_PAGE_ROWS,
+        }) if actual == MAX_CATALOG_PAGE_ROWS + 1
+    ));
+    let mut wrong_window_token = token.clone();
+    wrong_window_token.window.request = RequestGeneration::new(999);
+    let wrong_window_owner =
+        CloudThumbnailOwner::new(wrong_window_token, descriptor.clone()).unwrap();
+    assert_eq!(
+        CloudThumbnailManifest::new(
+            token.clone(),
+            CloudPageNumber::new(3).unwrap(),
+            vec![wrong_window_owner],
+        ),
+        Err(PayloadBoundsError::Invalid {
+            field: "cloud_thumbnail_manifest.owner",
+        })
+    );
 
     let result = CatalogResult::CloudThumbnail {
         owner: owner.clone(),

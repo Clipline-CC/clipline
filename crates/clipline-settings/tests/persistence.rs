@@ -1,11 +1,12 @@
-use std::sync::{Arc, Barrier};
+use std::sync::{mpsc, Arc, Barrier};
+use std::time::Duration;
 
 use clipline_settings::cloud::{cloud_credential_target, CloudUploadRecord};
 use clipline_settings::osu::osu_credential_target;
 use clipline_settings::{
-    AccountGeneration, CloudAccountIdentity, CloudProfileCas, CloudRecordCas, CloudRecordCasKind,
-    CloudRecordSlot, SettingsChange, SettingsProfile, SettingsStore, SettingsTransaction,
-    SettingsTransactionError,
+    AccountGeneration, CloudAccountIdentity, CloudAccountPublicationOwner, CloudProfileCas,
+    CloudRecordCas, CloudRecordCasKind, CloudRecordSlot, SettingsChange, SettingsProfile,
+    SettingsStore, SettingsTransaction, SettingsTransactionError,
 };
 use clipline_test_utils::TestDir;
 
@@ -1333,6 +1334,250 @@ fn validation_and_precommit_failures_preserve_all_observable_state() {
     assert_eq!(file_bytes(primary_path), primary);
     assert!(before_directory.is_dir());
     assert!(std::fs::metadata(&backup_path).unwrap().is_dir());
+}
+
+fn connected_publication_account(
+    snapshot: &clipline_settings::SettingsSnapshot,
+    host: &str,
+    user: &str,
+) -> clipline_settings::CloudSettings {
+    let mut cloud = snapshot.document.cloud.clone();
+    cloud.host_url = host.into();
+    cloud.connected_user_id = Some(user.into());
+    cloud.connected_username = Some(format!("{user}-name"));
+    cloud.credential_target = Some(cloud_credential_target(host, user));
+    cloud
+}
+
+#[test]
+fn cloud_publication_owner_checks_every_fence_before_invoking_once() {
+    let dir = TestDir::new("clipline-settings", "cloud-publication-fences");
+    let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));
+    let initial = store.snapshot().unwrap();
+    let connected = store
+        .transact(transaction(
+            &initial,
+            SettingsChange::ReplaceCloudSettings(connected_publication_account(
+                &initial,
+                "https://a.example",
+                "user-a",
+            )),
+        ))
+        .unwrap();
+    let owner = CloudAccountPublicationOwner::from_snapshot(&connected);
+
+    let mut publications = 0;
+    store
+        .publish_if_cloud_account_current(&owner, || {
+            publications += 1;
+            Ok::<_, &'static str>(())
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(publications, 1);
+
+    let mut stale_identity = owner.clone();
+    stale_identity.account.host_url = "https://wrong.example".into();
+    let mut stale_generation = owner.clone();
+    stale_generation.account_generation = AccountGeneration::INITIAL;
+    let mut stale_namespace_source = owner.clone();
+    stale_namespace_source.stable_account = Some("wrong-user".into());
+    for stale in [stale_identity, stale_generation, stale_namespace_source] {
+        let result = store.publish_if_cloud_account_current(&stale, || {
+            publications += 1;
+            Ok::<_, &'static str>(())
+        });
+        assert!(matches!(
+            result,
+            Err(SettingsTransactionError::AccountChanged
+                | SettingsTransactionError::StaleAccountGeneration { .. })
+        ));
+    }
+    assert_eq!(publications, 1);
+}
+
+#[test]
+fn cloud_publication_tolerates_unrelated_revisions_and_propagates_closure_errors() {
+    let dir = TestDir::new("clipline-settings", "cloud-publication-unrelated");
+    let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));
+    let initial = store.snapshot().unwrap();
+    let connected = store
+        .transact(transaction(
+            &initial,
+            SettingsChange::ReplaceCloudSettings(connected_publication_account(
+                &initial,
+                "https://a.example",
+                "user-a",
+            )),
+        ))
+        .unwrap();
+    let owner = CloudAccountPublicationOwner::from_snapshot(&connected);
+    store
+        .transact(transaction(
+            &connected,
+            SettingsChange::SetMediaRoot(dir.path().join("unrelated").display().to_string()),
+        ))
+        .unwrap();
+
+    let result = store
+        .publish_if_cloud_account_current(&owner, || Err::<(), _>("publication failed"))
+        .unwrap();
+    assert_eq!(result, Err("publication failed"));
+}
+
+#[test]
+fn cloud_publication_rejects_switch_away_and_back_aba() {
+    let dir = TestDir::new("clipline-settings", "cloud-publication-aba");
+    let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));
+    let initial = store.snapshot().unwrap();
+    let account_a = connected_publication_account(&initial, "https://a.example", "user-a");
+    let connected_a = store
+        .transact(transaction(
+            &initial,
+            SettingsChange::ReplaceCloudSettings(account_a.clone()),
+        ))
+        .unwrap();
+    let stale_owner = CloudAccountPublicationOwner::from_snapshot(&connected_a);
+    let account_b = connected_publication_account(&connected_a, "https://b.example", "user-b");
+    let connected_b = store
+        .transact(transaction(
+            &connected_a,
+            SettingsChange::ReplaceCloudSettings(account_b),
+        ))
+        .unwrap();
+    let reconnected_a = store
+        .transact(transaction(
+            &connected_b,
+            SettingsChange::ReplaceCloudSettings(account_a),
+        ))
+        .unwrap();
+    assert_eq!(reconnected_a.account, stale_owner.account);
+    assert!(reconnected_a.account_generation > stale_owner.account_generation);
+
+    let mut invoked = false;
+    let error = store
+        .publish_if_cloud_account_current(&stale_owner, || {
+            invoked = true;
+            Ok::<_, &'static str>(())
+        })
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        SettingsTransactionError::StaleAccountGeneration { .. }
+    ));
+    assert!(!invoked);
+}
+
+#[test]
+fn cloud_publication_rejects_legacy_username_namespace_aba() {
+    let dir = TestDir::new("clipline-settings", "cloud-publication-legacy-username-aba");
+    let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));
+    let initial = store.snapshot().unwrap();
+    let mut legacy_a = initial.document.cloud.clone();
+    legacy_a.host_url = "https://legacy.example".into();
+    legacy_a.connected_user_id = None;
+    legacy_a.connected_username = Some("legacy-a".into());
+    legacy_a.credential_target = Some(cloud_credential_target(
+        &legacy_a.host_url,
+        "stable-credential-owner",
+    ));
+    let connected_a = store
+        .transact(transaction(
+            &initial,
+            SettingsChange::ReplaceCloudSettings(legacy_a.clone()),
+        ))
+        .unwrap();
+    let stale_owner = CloudAccountPublicationOwner::from_snapshot(&connected_a);
+
+    let mut legacy_b = legacy_a.clone();
+    legacy_b.connected_username = Some("legacy-b".into());
+    let connected_b = store
+        .transact(transaction(
+            &connected_a,
+            SettingsChange::ReplaceCloudSettings(legacy_b),
+        ))
+        .unwrap();
+    let restored_a = store
+        .transact(transaction(
+            &connected_b,
+            SettingsChange::ReplaceCloudSettings(legacy_a),
+        ))
+        .unwrap();
+
+    assert_eq!(restored_a.account, stale_owner.account);
+    assert_eq!(
+        CloudAccountPublicationOwner::from_snapshot(&restored_a).stable_account,
+        stale_owner.stable_account
+    );
+    assert!(restored_a.account_generation > stale_owner.account_generation);
+    let mut invoked = false;
+    assert!(matches!(
+        store.publish_if_cloud_account_current(&stale_owner, || {
+            invoked = true;
+            Ok::<_, &'static str>(())
+        }),
+        Err(SettingsTransactionError::StaleAccountGeneration { .. })
+    ));
+    assert!(!invoked);
+}
+
+#[test]
+fn cloud_publication_blocks_an_independently_opened_account_replacement() {
+    let dir = TestDir::new("clipline-settings", "cloud-publication-linearized");
+    let profile = SettingsProfile::isolated(dir.path());
+    let publishing_store = SettingsStore::open(profile.clone());
+    let initial = publishing_store.snapshot().unwrap();
+    let connected = publishing_store
+        .transact(transaction(
+            &initial,
+            SettingsChange::ReplaceCloudSettings(connected_publication_account(
+                &initial,
+                "https://a.example",
+                "user-a",
+            )),
+        ))
+        .unwrap();
+    let replacement_store = SettingsStore::open(profile);
+    let replacement_snapshot = replacement_store.snapshot().unwrap();
+    let owner = CloudAccountPublicationOwner::from_snapshot(&connected);
+    let (publication_started_tx, publication_started_rx) = mpsc::channel();
+    let (release_publication_tx, release_publication_rx) = mpsc::channel();
+    let publisher = std::thread::spawn(move || {
+        publishing_store
+            .publish_if_cloud_account_current(&owner, || {
+                publication_started_tx.send(()).unwrap();
+                release_publication_rx.recv().unwrap();
+                Ok::<_, &'static str>(())
+            })
+            .unwrap()
+            .unwrap();
+    });
+    publication_started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap();
+
+    let (replacement_done_tx, replacement_done_rx) = mpsc::channel();
+    let replacement = std::thread::spawn(move || {
+        let account_b =
+            connected_publication_account(&replacement_snapshot, "https://b.example", "user-b");
+        let result = replacement_store.transact(transaction(
+            &replacement_snapshot,
+            SettingsChange::ReplaceCloudSettings(account_b),
+        ));
+        replacement_done_tx.send(result).unwrap();
+    });
+    assert!(matches!(
+        replacement_done_rx.recv_timeout(Duration::from_millis(100)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+
+    release_publication_tx.send(()).unwrap();
+    publisher.join().unwrap();
+    replacement_done_rx
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .unwrap();
+    replacement.join().unwrap();
 }
 
 #[test]

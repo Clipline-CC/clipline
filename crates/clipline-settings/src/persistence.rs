@@ -678,6 +678,52 @@ impl CloudAccountIdentity {
     }
 }
 
+/// Exact durable owner of a Cloud cache publication.
+///
+/// `stable_account` preserves the shipping namespace compatibility order:
+/// stable user id, then username for legacy profiles, then credential target.
+/// It is carried separately from [`CloudAccountIdentity`] because legacy
+/// username-only profiles can change their cache namespace without changing
+/// the normal connected-account identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CloudAccountPublicationOwner {
+    pub account: CloudAccountIdentity,
+    pub account_generation: AccountGeneration,
+    pub stable_account: Option<String>,
+}
+
+impl CloudAccountPublicationOwner {
+    #[must_use]
+    pub fn from_snapshot(snapshot: &SettingsSnapshot) -> Self {
+        Self::from_cloud(
+            snapshot.account.clone(),
+            snapshot.account_generation,
+            &snapshot.document.cloud,
+        )
+    }
+
+    fn from_cloud(
+        account: CloudAccountIdentity,
+        account_generation: AccountGeneration,
+        cloud: &CloudSettings,
+    ) -> Self {
+        Self {
+            account,
+            account_generation,
+            stable_account: cloud_publication_stable_account(cloud),
+        }
+    }
+}
+
+fn cloud_publication_stable_account(cloud: &CloudSettings) -> Option<String> {
+    cloud
+        .connected_user_id
+        .as_ref()
+        .or(cloud.connected_username.as_ref())
+        .or(cloud.credential_target.as_ref())
+        .cloned()
+}
+
 /// One transaction may reconcile a small, exact set of legacy/path-alias
 /// records. Bounding the vector prevents a malformed adapter from turning a
 /// settings commit into unbounded quadratic work.
@@ -872,10 +918,15 @@ struct StoreState {
     primary: PrimaryState,
 }
 
+struct SharedCommitState {
+    owner: Option<CloudAccountPublicationOwner>,
+    primary: PrimaryState,
+}
+
 struct SettingsStoreInner {
     profile: SettingsProfile,
     startup_warnings: Vec<String>,
-    commit_lock: Arc<Mutex<()>>,
+    commit_lock: Arc<Mutex<SharedCommitState>>,
     state: Mutex<StoreState>,
 }
 
@@ -886,22 +937,51 @@ pub struct SettingsStore {
 
 impl SettingsStore {
     pub fn open(profile: SettingsProfile) -> Self {
-        let mut startup = AppSettings::load_for_startup_from(profile.settings_path());
-        if startup.source == SettingsLoadSource::Defaults {
-            startup.settings.media_dir = profile.default_media_dir().display().to_string();
-        }
-        let account = CloudAccountIdentity::from_settings(&startup.settings.cloud);
-        let primary = read_primary_state(profile.settings_path());
+        let commit_lock = shared_commit_lock(profile.settings_path());
+        let (startup, account, account_generation, primary) = {
+            // Loading under the profile-wide gate prevents a concurrently
+            // committing independently opened store from making this new
+            // store stale between its disk read and owner registration.
+            let mut shared = commit_lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut startup = AppSettings::load_for_startup_from(profile.settings_path());
+            if startup.source == SettingsLoadSource::Defaults {
+                startup.settings.media_dir = profile.default_media_dir().display().to_string();
+            }
+            let account = CloudAccountIdentity::from_settings(&startup.settings.cloud);
+            let stable_account = cloud_publication_stable_account(&startup.settings.cloud);
+            let primary = read_primary_state(profile.settings_path());
+            let account_generation = match shared.owner.as_ref() {
+                Some(owner)
+                    if owner.account == account && owner.stable_account == stable_account =>
+                {
+                    owner.account_generation
+                }
+                Some(owner) => owner
+                    .account_generation
+                    .checked_next()
+                    .expect("process-local Cloud account generation must remain available"),
+                None => AccountGeneration::INITIAL,
+            };
+            shared.owner = Some(CloudAccountPublicationOwner::from_cloud(
+                account.clone(),
+                account_generation,
+                &startup.settings.cloud,
+            ));
+            shared.primary = primary.clone();
+            (startup, account, account_generation, primary)
+        };
         Self {
             inner: Arc::new(SettingsStoreInner {
-                commit_lock: shared_commit_lock(profile.settings_path()),
+                commit_lock,
                 profile,
                 startup_warnings: startup.warnings,
                 state: Mutex::new(StoreState {
                     snapshot: SettingsSnapshot {
                         document: startup.settings,
                         revision: SettingsRevision::INITIAL,
-                        account_generation: AccountGeneration::INITIAL,
+                        account_generation,
                         account,
                     },
                     primary,
@@ -939,7 +1019,7 @@ impl SettingsStore {
         // Clones naturally share this lock through `SettingsStoreInner`; the
         // registry extends that guarantee to separately opened adapters in
         // this process.
-        let _commit_guard = self
+        let mut commit_guard = self
             .inner
             .commit_lock
             .lock()
@@ -949,7 +1029,7 @@ impl SettingsStore {
             .state
             .lock()
             .map_err(|_| SettingsTransactionError::LockPoisoned)?;
-        self.commit_locked(&mut state, transaction)
+        self.commit_locked(&mut commit_guard, &mut state, transaction)
     }
 
     /// Apply one exact Cloud upload-record CAS against the current document
@@ -963,7 +1043,7 @@ impl SettingsStore {
         &self,
         change: CloudRecordCas,
     ) -> Result<SettingsSnapshot, SettingsTransactionError> {
-        let _commit_guard = self
+        let mut commit_guard = self
             .inner
             .commit_lock
             .lock()
@@ -978,7 +1058,7 @@ impl SettingsStore {
             expected_account_generation: state.snapshot.account_generation,
             change: SettingsChange::CompareExchangeCloudRecords(change),
         };
-        self.commit_locked(&mut state, transaction)
+        self.commit_locked(&mut commit_guard, &mut state, transaction)
     }
 
     /// Apply a fetched Cloud profile against the exact durable account owner
@@ -987,7 +1067,7 @@ impl SettingsStore {
         &self,
         change: CloudProfileCas,
     ) -> Result<SettingsSnapshot, SettingsTransactionError> {
-        let _commit_guard = self
+        let mut commit_guard = self
             .inner
             .commit_lock
             .lock()
@@ -1002,11 +1082,59 @@ impl SettingsStore {
             expected_account_generation: state.snapshot.account_generation,
             change: SettingsChange::CompareExchangeCloudProfile(change),
         };
-        self.commit_locked(&mut state, transaction)
+        self.commit_locked(&mut commit_guard, &mut state, transaction)
+    }
+
+    /// Run one publication only while the exact durable Cloud owner remains
+    /// current, holding the same per-profile commit gate used by settings
+    /// replacement and Cloud CAS operations.
+    ///
+    /// The outer result reports lock or stale-owner failures. The inner result
+    /// is returned directly from `publication`, so publication-specific errors
+    /// retain their original type. Unrelated document revisions do not affect
+    /// this check.
+    ///
+    /// # Non-reentrant
+    ///
+    /// `publication` must not call a [`SettingsStore`] mutation or publication
+    /// API for this profile. Those operations acquire the same non-reentrant
+    /// commit gate and would deadlock. Keep the closure bounded to the final
+    /// external cache publication.
+    pub fn publish_if_cloud_account_current<T, E>(
+        &self,
+        expected: &CloudAccountPublicationOwner,
+        publication: impl FnOnce() -> Result<T, E>,
+    ) -> Result<Result<T, E>, SettingsTransactionError> {
+        let shared = self
+            .inner
+            .commit_lock
+            .lock()
+            .map_err(|_| SettingsTransactionError::LockPoisoned)?;
+        if read_primary_state(self.inner.profile.settings_path()) != shared.primary {
+            return Err(SettingsTransactionError::ExternalModification);
+        }
+        let current = shared
+            .owner
+            .as_ref()
+            .expect("opened settings profile must register its Cloud owner");
+        if expected.account != current.account {
+            return Err(SettingsTransactionError::AccountChanged);
+        }
+        if expected.account_generation != current.account_generation {
+            return Err(SettingsTransactionError::StaleAccountGeneration {
+                expected: expected.account_generation,
+                current: current.account_generation,
+            });
+        }
+        if expected.stable_account != current.stable_account {
+            return Err(SettingsTransactionError::AccountChanged);
+        }
+        Ok(publication())
     }
 
     fn commit_locked(
         &self,
+        shared: &mut SharedCommitState,
         state: &mut StoreState,
         transaction: SettingsTransaction,
     ) -> Result<SettingsSnapshot, SettingsTransactionError> {
@@ -1016,39 +1144,55 @@ impl SettingsStore {
                 current: state.snapshot.revision,
             });
         }
-        if transaction.expected_account_generation != state.snapshot.account_generation {
+        let current_owner = shared
+            .owner
+            .as_ref()
+            .expect("opened settings profile must register its Cloud owner");
+        if transaction.expected_account_generation != current_owner.account_generation {
             return Err(SettingsTransactionError::StaleAccountGeneration {
                 expected: transaction.expected_account_generation,
-                current: state.snapshot.account_generation,
+                current: current_owner.account_generation,
             });
+        }
+        if state.snapshot.account != current_owner.account {
+            return Err(SettingsTransactionError::AccountChanged);
+        }
+        let current_primary = read_primary_state(self.inner.profile.settings_path());
+        if current_primary != state.primary || current_primary != shared.primary {
+            return Err(SettingsTransactionError::ExternalModification);
         }
 
         let mut next = state.snapshot.document.clone();
         apply_change(
             &mut next,
             transaction.change,
-            &state.snapshot.account,
-            state.snapshot.account_generation,
+            &current_owner.account,
+            current_owner.account_generation,
         )?;
         let (next, json) = next
             .normalized_json_bytes()
             .map_err(SettingsTransactionError::Validation)?;
         let next_account = CloudAccountIdentity::from_settings(&next.cloud);
+        let next_stable_account = cloud_publication_stable_account(&next.cloud);
         let next_revision = state.snapshot.revision.checked_next()?;
-        let next_account_generation = if next_account == state.snapshot.account {
-            state.snapshot.account_generation
+        let next_account_generation = if next_account == current_owner.account
+            && next_stable_account == current_owner.stable_account
+        {
+            current_owner.account_generation
         } else {
-            state.snapshot.account_generation.checked_next()?
+            current_owner.account_generation.checked_next()?
         };
-
-        let current_primary = read_primary_state(self.inner.profile.settings_path());
-        if current_primary != state.primary {
-            return Err(SettingsTransactionError::ExternalModification);
-        }
         persist_store_transaction(self.inner.profile.settings_path(), &json)
             .map_err(SettingsTransactionError::Persistence)?;
 
-        state.primary = PrimaryState::Bytes(json);
+        let primary = PrimaryState::Bytes(json);
+        shared.primary = primary.clone();
+        shared.owner = Some(CloudAccountPublicationOwner::from_cloud(
+            next_account.clone(),
+            next_account_generation,
+            &next.cloud,
+        ));
+        state.primary = primary;
         state.snapshot = SettingsSnapshot {
             document: next,
             revision: next_revision,
@@ -1071,9 +1215,9 @@ impl SettingsStore {
     }
 }
 
-type SharedCommitLocks = Vec<(PathBuf, Weak<Mutex<()>>)>;
+type SharedCommitLocks = Vec<(PathBuf, Weak<Mutex<SharedCommitState>>)>;
 
-fn shared_commit_lock(path: &Path) -> Arc<Mutex<()>> {
+fn shared_commit_lock(path: &Path) -> Arc<Mutex<SharedCommitState>> {
     static LOCKS: OnceLock<Mutex<SharedCommitLocks>> = OnceLock::new();
     let locks = LOCKS.get_or_init(|| Mutex::new(Vec::new()));
     let mut locks = locks
@@ -1086,7 +1230,10 @@ fn shared_commit_lock(path: &Path) -> Arc<Mutex<()>> {
     {
         return lock;
     }
-    let lock = Arc::new(Mutex::new(()));
+    let lock = Arc::new(Mutex::new(SharedCommitState {
+        owner: None,
+        primary: PrimaryState::Missing,
+    }));
     locks.push((path.to_path_buf(), Arc::downgrade(&lock)));
     lock
 }

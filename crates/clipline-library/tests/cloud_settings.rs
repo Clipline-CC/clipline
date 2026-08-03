@@ -1,6 +1,9 @@
+use clipline_library::cloud::cache::{AccountPublicationGuard, CloudCacheError};
+use clipline_library::cloud::cache_identity::CloudCacheNamespace;
 use clipline_library::cloud::ports::{CloudAccountPort, CloudProfilePatch};
 use clipline_library::cloud::settings::{
-    cloud_service_account_from_snapshot, SettingsCloudAccountPort,
+    cloud_cache_account_fence_from_service_account, cloud_cache_account_fence_from_snapshot,
+    cloud_service_account_from_snapshot, SettingsAccountPublicationGuard, SettingsCloudAccountPort,
 };
 use clipline_library::{
     CloudAccountGeneration, CloudAccountKey, MAX_CATALOG_STRING_BYTES, MAX_CLOUD_INDEX_ROWS,
@@ -411,4 +414,212 @@ async fn settings_port_marks_profile_fsync_as_blocking_on_multithread_tokio() {
         .unwrap();
 
     assert_eq!(updated.snapshot.username.as_deref(), Some("runtime-safe"));
+}
+
+#[test]
+fn cache_fence_derivation_matches_user_username_and_credential_fallbacks() {
+    let settings = connected_settings();
+    let user_fence = cloud_cache_account_fence_from_snapshot(&snapshot(settings.clone())).unwrap();
+    assert_eq!(
+        user_fence.cache_namespace,
+        CloudCacheNamespace::derive("https://cloud.example", "user-1").unwrap()
+    );
+
+    let mut username_only = settings.clone();
+    username_only.cloud.connected_user_id = None;
+    let username_fence =
+        cloud_cache_account_fence_from_snapshot(&snapshot(username_only.clone())).unwrap();
+    assert_eq!(
+        username_fence.cache_namespace,
+        CloudCacheNamespace::derive("https://cloud.example", "clipper").unwrap()
+    );
+
+    username_only.cloud.connected_username = None;
+    let credential = username_only.cloud.credential_target.clone().unwrap();
+    let credential_fence =
+        cloud_cache_account_fence_from_snapshot(&snapshot(username_only)).unwrap();
+    assert_eq!(
+        credential_fence.cache_namespace,
+        CloudCacheNamespace::derive("https://cloud.example", &credential).unwrap()
+    );
+
+    let mut unavailable = settings;
+    unavailable.cloud.connected_user_id = None;
+    unavailable.cloud.connected_username = None;
+    unavailable.cloud.credential_target = None;
+    assert!(cloud_cache_account_fence_from_snapshot(&snapshot(unavailable)).is_err());
+}
+
+#[test]
+fn cache_fence_helper_rejects_unbounded_or_inconsistent_service_accounts() {
+    let mut oversized = connected_settings();
+    oversized.cloud.connected_username = Some("x".repeat(MAX_CATALOG_STRING_BYTES + 1));
+    assert!(cloud_cache_account_fence_from_snapshot(&snapshot(oversized)).is_err());
+
+    let mut service = cloud_service_account_from_snapshot(&snapshot(connected_settings())).unwrap();
+    service.snapshot.account_key = CloudAccountKey::new("forged-account").unwrap();
+    assert!(cloud_cache_account_fence_from_service_account(&service).is_err());
+}
+
+#[test]
+fn settings_publication_guard_compares_key_generation_and_namespace_before_invoking() {
+    let (_directory, store) = connected_store("cache-publication-fences");
+    let guard = SettingsAccountPublicationGuard::new(store.clone());
+    let current = cloud_cache_account_fence_from_snapshot(&store.snapshot().unwrap()).unwrap();
+    assert!(guard.is_current(&current));
+
+    let mut publications = 0;
+    guard
+        .publish_if_current(&current, &mut || {
+            publications += 1;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(publications, 1);
+
+    let mut stale_key = current.clone();
+    stale_key.account_key = CloudAccountKey::new("wrong-account").unwrap();
+    let mut stale_generation = current.clone();
+    stale_generation.account_generation =
+        CloudAccountGeneration::new(stale_generation.account_generation.get() + 1);
+    let mut stale_namespace = current.clone();
+    stale_namespace.cache_namespace =
+        CloudCacheNamespace::derive("https://other.example", "user-1").unwrap();
+    for stale in [stale_key, stale_generation, stale_namespace] {
+        assert!(!guard.is_current(&stale));
+        let error = guard
+            .publish_if_current(&stale, &mut || {
+                publications += 1;
+                Ok(())
+            })
+            .unwrap_err();
+        assert_eq!(error, CloudCacheError::StaleAccount);
+    }
+    assert_eq!(publications, 1);
+}
+
+#[test]
+fn settings_publication_guard_tolerates_unrelated_writes_and_propagates_publication_errors() {
+    let (directory, store) = connected_store("cache-publication-unrelated");
+    let guard = SettingsAccountPublicationGuard::new(store.clone());
+    let before = store.snapshot().unwrap();
+    let current = cloud_cache_account_fence_from_snapshot(&before).unwrap();
+    store
+        .transact(SettingsTransaction {
+            expected_revision: before.revision,
+            expected_account_generation: before.account_generation,
+            change: SettingsChange::SetMediaRoot(
+                directory.path().join("unrelated").display().to_string(),
+            ),
+        })
+        .unwrap();
+    assert!(guard.is_current(&current));
+
+    let expected = CloudCacheError::Download("publication failed".into());
+    let error = guard
+        .publish_if_current(&current, &mut || Err(expected.clone()))
+        .unwrap_err();
+    assert_eq!(error, expected);
+}
+
+#[test]
+fn settings_publication_guard_rejects_switch_away_and_back_aba() {
+    let (_directory, store) = connected_store("cache-publication-aba");
+    let guard = SettingsAccountPublicationGuard::new(store.clone());
+    let account_a = store.snapshot().unwrap();
+    let stale = cloud_cache_account_fence_from_snapshot(&account_a).unwrap();
+
+    let mut account_b = account_a.document.cloud.clone();
+    account_b.host_url = "https://b.example".into();
+    account_b.connected_user_id = Some("user-b".into());
+    account_b.connected_username = Some("other".into());
+    account_b.credential_target = Some(clipline_settings::cloud::cloud_credential_target(
+        &account_b.host_url,
+        "user-b",
+    ));
+    let switched = store
+        .transact(SettingsTransaction {
+            expected_revision: account_a.revision,
+            expected_account_generation: account_a.account_generation,
+            change: SettingsChange::ReplaceCloudSettings(account_b),
+        })
+        .unwrap();
+    let restored = store
+        .transact(SettingsTransaction {
+            expected_revision: switched.revision,
+            expected_account_generation: switched.account_generation,
+            change: SettingsChange::ReplaceCloudSettings(account_a.document.cloud),
+        })
+        .unwrap();
+    let current = cloud_cache_account_fence_from_snapshot(&restored).unwrap();
+    assert_eq!(current.account_key, stale.account_key);
+    assert_eq!(current.cache_namespace, stale.cache_namespace);
+    assert_ne!(current.account_generation, stale.account_generation);
+
+    let mut invoked = false;
+    assert!(!guard.is_current(&stale));
+    let error = guard
+        .publish_if_current(&stale, &mut || {
+            invoked = true;
+            Ok(())
+        })
+        .unwrap_err();
+    assert_eq!(error, CloudCacheError::StaleAccount);
+    assert!(!invoked);
+}
+
+#[test]
+fn settings_publication_guard_rejects_legacy_namespace_aba_with_the_same_account_key() {
+    let (_directory, store) = connected_store("cache-publication-legacy-namespace-aba");
+    let initial = store.snapshot().unwrap();
+    let mut legacy_a = initial.document.cloud.clone();
+    legacy_a.connected_user_id = None;
+    legacy_a.connected_username = Some("legacy-a".into());
+    legacy_a.credential_target = Some(clipline_settings::cloud::cloud_credential_target(
+        &legacy_a.host_url,
+        "stable-credential-owner",
+    ));
+    let connected_a = store
+        .transact(SettingsTransaction {
+            expected_revision: initial.revision,
+            expected_account_generation: initial.account_generation,
+            change: SettingsChange::ReplaceCloudSettings(legacy_a.clone()),
+        })
+        .unwrap();
+    let guard = SettingsAccountPublicationGuard::new(store.clone());
+    let stale = cloud_cache_account_fence_from_snapshot(&connected_a).unwrap();
+
+    let mut legacy_b = legacy_a.clone();
+    legacy_b.connected_username = Some("legacy-b".into());
+    let switched = store
+        .transact(SettingsTransaction {
+            expected_revision: connected_a.revision,
+            expected_account_generation: connected_a.account_generation,
+            change: SettingsChange::ReplaceCloudSettings(legacy_b),
+        })
+        .unwrap();
+    let restored = store
+        .transact(SettingsTransaction {
+            expected_revision: switched.revision,
+            expected_account_generation: switched.account_generation,
+            change: SettingsChange::ReplaceCloudSettings(legacy_a),
+        })
+        .unwrap();
+    let current = cloud_cache_account_fence_from_snapshot(&restored).unwrap();
+
+    assert_eq!(current.account_key, stale.account_key);
+    assert_eq!(current.cache_namespace, stale.cache_namespace);
+    assert_ne!(current.account_generation, stale.account_generation);
+    let mut invoked = false;
+    assert!(!guard.is_current(&stale));
+    assert_eq!(
+        guard
+            .publish_if_current(&stale, &mut || {
+                invoked = true;
+                Ok(())
+            })
+            .unwrap_err(),
+        CloudCacheError::StaleAccount
+    );
+    assert!(!invoked);
 }
