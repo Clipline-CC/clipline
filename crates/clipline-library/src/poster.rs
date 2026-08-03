@@ -14,8 +14,8 @@ use image::{ImageFormat, ImageReader, Limits};
 use thiserror::Error;
 
 use crate::{
-    ClipPathIdentity, DecodedImageWindow, DeterministicLru, GenerationError, MAX_CATALOG_PAGE_ROWS,
-    MAX_DECODED_PAGE_IMAGES, MAX_POSTER_RESULT_ENTRIES, PosterGeneration, WindowWorkToken,
+    ClipPathIdentity, DecodedImageWindow, DeterministicLru, GenerationError, PosterGeneration,
+    WindowWorkToken, MAX_CATALOG_PAGE_ROWS, MAX_DECODED_PAGE_IMAGES, MAX_POSTER_RESULT_ENTRIES,
 };
 
 pub const POSTER_WIDTH: u32 = 480;
@@ -32,6 +32,8 @@ pub const MAX_POSTER_DECODER_ALLOC_BYTES: u64 = 16 * 1024 * 1024;
 static NEXT_POSTER_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
 pub type PosterExtractionResult = Result<PathBuf, String>;
+
+type BoundedReaderHandle = std::thread::JoinHandle<io::Result<BoundedPipeOutput>>;
 
 /// Process-independent extraction seam. Implementations return an owned,
 /// file-backed poster path and must close every child and file handle first.
@@ -517,6 +519,11 @@ enum PosterChildWait {
     TimedOut,
 }
 
+fn kill_and_reap_poster_child(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 struct BoundedPipeOutput {
     bytes: Vec<u8>,
     overflowed: bool,
@@ -537,13 +544,11 @@ fn wait_for_poster_child(child: &mut Child, timeout: Duration) -> io::Result<Pos
             Ok(Some(status)) => return Ok(PosterChildWait::Exited(status)),
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(25)),
             Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                kill_and_reap_poster_child(child);
                 return Ok(PosterChildWait::TimedOut);
             }
             Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                kill_and_reap_poster_child(child);
                 return Err(error);
             }
         }
@@ -565,29 +570,42 @@ fn run_poster_child_with_limits(
     max_stdout_bytes: usize,
     max_stderr_bytes: usize,
 ) -> Result<PosterChildOutput, String> {
+    run_poster_child_with_reader_spawner(
+        command,
+        timeout,
+        max_stdout_bytes,
+        max_stderr_bytes,
+        spawn_bounded_reader,
+    )
+}
+
+fn run_poster_child_with_reader_spawner(
+    command: &mut Command,
+    timeout: Duration,
+    max_stdout_bytes: usize,
+    max_stderr_bytes: usize,
+    mut spawn_reader: impl FnMut(&str, Box<dyn Read + Send>, usize) -> io::Result<BoundedReaderHandle>,
+) -> Result<PosterChildOutput, String> {
     let mut child = command
         .spawn()
         .map_err(|error| format!("spawn ffmpeg poster: {error}"))?;
     let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
-        let _ = child.kill();
-        let _ = child.wait();
+        kill_and_reap_poster_child(&mut child);
         return Err("spawn ffmpeg poster: stdout or stderr pipe unavailable".to_owned());
     };
     let stdout_reader =
-        match spawn_bounded_reader("clipline-poster-stdout", stdout, max_stdout_bytes) {
+        match spawn_reader("clipline-poster-stdout", Box::new(stdout), max_stdout_bytes) {
             Ok(reader) => reader,
             Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                kill_and_reap_poster_child(&mut child);
                 return Err(format!("spawn ffmpeg poster stdout reader: {error}"));
             }
         };
     let stderr_reader =
-        match spawn_bounded_reader("clipline-poster-stderr", stderr, max_stderr_bytes) {
+        match spawn_reader("clipline-poster-stderr", Box::new(stderr), max_stderr_bytes) {
             Ok(reader) => reader,
             Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                kill_and_reap_poster_child(&mut child);
                 let _ = stdout_reader.join();
                 return Err(format!("spawn ffmpeg poster stderr reader: {error}"));
             }
@@ -614,9 +632,9 @@ fn run_poster_child_with_limits(
 
 fn spawn_bounded_reader(
     name: &str,
-    reader: impl Read + Send + 'static,
+    reader: Box<dyn Read + Send>,
     maximum: usize,
-) -> io::Result<std::thread::JoinHandle<io::Result<BoundedPipeOutput>>> {
+) -> io::Result<BoundedReaderHandle> {
     std::thread::Builder::new()
         .name(name.to_owned())
         .spawn(move || read_bounded(reader, maximum))
@@ -664,6 +682,9 @@ fn publish_poster_output(
 }
 
 fn validate_poster_jpeg(bytes: &[u8]) -> Result<(), String> {
+    if !bytes.starts_with(&[0xff, 0xd8]) || !bytes.ends_with(&[0xff, 0xd9]) {
+        return Err("ffmpeg poster did not produce a complete JPEG envelope".to_owned());
+    }
     let reader = ImageReader::with_format(Cursor::new(bytes), ImageFormat::Jpeg);
     let (width, height) = reader
         .into_dimensions()
@@ -730,8 +751,7 @@ impl<'authority> PosterTemp<'authority> {
             name.push(format!(".tmp.{}.{id}", std::process::id()));
             match authority.create_new_regular_file(&name) {
                 Ok(file) => {
-                    let identity = clipline_shell::opened_file_identity(&file)
-                        .map_err(|error| format!("identify poster temp: {error}"))?;
+                    let (file, identity) = identify_reserved_temp(file, authority, &name)?;
                     return Ok(Self {
                         authority,
                         name,
@@ -784,6 +804,37 @@ impl<'authority> PosterTemp<'authority> {
         }
         self.armed = false;
         Ok(self.identity)
+    }
+}
+
+fn identify_reserved_temp(
+    file: File,
+    authority: &clipline_shell::DirectoryAuthority,
+    name: &std::ffi::OsStr,
+) -> Result<(File, clipline_shell::FileIdentity), String> {
+    identify_reserved_temp_with(file, authority, name, clipline_shell::opened_file_identity)
+}
+
+fn identify_reserved_temp_with(
+    file: File,
+    authority: &clipline_shell::DirectoryAuthority,
+    name: &std::ffi::OsStr,
+    identify: impl FnOnce(&File) -> io::Result<clipline_shell::FileIdentity>,
+) -> Result<(File, clipline_shell::FileIdentity), String> {
+    match identify(&file) {
+        Ok(identity) => Ok((file, identity)),
+        Err(error) => {
+            // Keep cleanup identity-fenced even on this early return. A retry
+            // while the exclusively-created handle is still open fixes a
+            // transient identity-query failure without risking deletion of a
+            // replacement at the same path.
+            let cleanup_identity = clipline_shell::opened_file_identity(&file).ok();
+            drop(file);
+            if let Some(identity) = cleanup_identity {
+                let _ = authority.remove_file_if_identity(name, identity);
+            }
+            Err(format!("identify poster temp: {error}"))
+        }
     }
 }
 
@@ -1467,18 +1518,15 @@ mod tests {
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
 
-        assert!(
-            args.windows(2)
-                .any(|pair| pair[0] == "-ss" && pair[1] == "0.000")
-        );
-        assert!(
-            args.windows(2)
-                .any(|pair| pair[0] == "-vf" && pair[1] == "scale=480:-2:flags=bicubic")
-        );
-        assert!(
-            args.windows(2)
-                .any(|pair| pair[0] == "-c:v" && pair[1] == "mjpeg")
-        );
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "-ss" && pair[1] == "0.000"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "-vf" && pair[1] == "scale=480:-2:flags=bicubic"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "-c:v" && pair[1] == "mjpeg"));
         assert_eq!(args.last().map(String::as_str), Some("pipe:1"));
         assert!(!args.iter().any(|arg| arg.ends_with(".poster.jpg")));
     }
@@ -1507,6 +1555,19 @@ mod tests {
         std::fs::rename(&replacement, &clip).unwrap();
 
         assert_eq!(cached_poster_for_identity(&clip, selected_identity), None);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn corrupt_jpeg_envelope_never_becomes_a_fresh_durable_cache_hit() {
+        let directory = test_directory("corrupt-cache-hit");
+        let clip = directory.join("clip.mp4");
+        let poster = poster_path(&clip);
+        std::fs::write(&clip, b"clip").unwrap();
+        std::fs::write(&poster, b"\xff\xd8corrupt entropy\xff\xd9").unwrap();
+
+        assert_eq!(cached_poster(&clip), None);
+
         std::fs::remove_dir_all(directory).unwrap();
     }
 
@@ -1561,6 +1622,93 @@ mod tests {
     }
 
     #[test]
+    fn poster_child_enforces_production_stdout_and_stderr_limits() {
+        let emitted = MAX_POSTER_ENCODED_BYTES + 8 * 1024;
+        let mut command = Command::new(std::env::current_exe().expect("locate test executable"));
+        command
+            .args([
+                "--ignored",
+                "--exact",
+                "poster::tests::poster_pipe_fixture_fills_both_streams",
+                "--nocapture",
+            ])
+            .env("CLIPLINE_POSTER_FIXTURE_BYTES", emitted.to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let output = run_poster_child(&mut command, Duration::from_secs(15))
+            .expect("production limits must drain the child without deadlock");
+        assert!(output.status.success());
+        assert_eq!(output.stdout.bytes.len(), MAX_POSTER_ENCODED_BYTES);
+        assert!(output.stdout.overflowed);
+        assert_eq!(output.stderr.bytes.len(), MAX_POSTER_STDERR_BYTES);
+        assert!(output.stderr.overflowed);
+    }
+
+    #[test]
+    fn stdout_reader_spawn_failure_kills_and_reaps_the_child() {
+        let mut command = Command::new(std::env::current_exe().expect("locate test executable"));
+        command
+            .args([
+                "--ignored",
+                "--exact",
+                "poster::tests::poster_timeout_fixture_sleeps",
+                "--nocapture",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let started = Instant::now();
+
+        let error = match run_poster_child_with_reader_spawner(
+            &mut command,
+            Duration::from_secs(10),
+            1024,
+            512,
+            |name, reader, maximum| {
+                if name == "clipline-poster-stdout" {
+                    return Err(io::Error::other("injected reader spawn failure"));
+                }
+                spawn_bounded_reader(name, reader, maximum)
+            },
+        ) {
+            Ok(_) => panic!("injected stdout reader spawn failure must fail"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("stdout reader"));
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn full_poster_child_timeout_path_kills_joins_and_returns() {
+        let mut command = Command::new(std::env::current_exe().expect("locate test executable"));
+        command
+            .args([
+                "--ignored",
+                "--exact",
+                "poster::tests::poster_timeout_fixture_sleeps",
+                "--nocapture",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let error = match run_poster_child_with_limits(
+            &mut command,
+            Duration::from_millis(50),
+            1024,
+            512,
+        ) {
+            Ok(_) => panic!("timeout fixture must time out"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("timed out"));
+    }
+
+    #[test]
     fn owned_temps_are_unique_and_drop_cleans_each_exact_file() {
         let directory = test_directory("owned-temp");
         let poster = directory.join("clip.poster.jpg");
@@ -1576,6 +1724,25 @@ mod tests {
         assert!(second_path.exists());
         drop(second);
         assert!(!second_path.exists());
+        drop(authority);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn temp_identity_failure_retries_identity_and_cleans_the_exact_reservation() {
+        let directory = test_directory("temp-identity-failure");
+        let authority = clipline_shell::DirectoryAuthority::open(&directory).unwrap();
+        let name = OsString::from("clip.poster.jpg.tmp.injected");
+        let path = directory.join(&name);
+        let file = authority.create_new_regular_file(&name).unwrap();
+
+        let error = identify_reserved_temp_with(file, &authority, &name, |_| {
+            Err(io::Error::other("injected identity failure"))
+        })
+        .unwrap_err();
+
+        assert!(error.contains("identify poster temp"));
+        assert!(!path.exists());
         drop(authority);
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -1653,6 +1820,37 @@ mod tests {
         std::fs::remove_dir_all(directory).unwrap();
     }
 
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn injected_ffmpeg_pipeline_rejects_corrupt_output_then_publishes_valid_jpeg() {
+        let directory = test_directory("injected-ffmpeg-pipeline");
+        let clip = directory.join("clip.mp4");
+        let payload = directory.join("poster-payload.bin");
+        std::fs::write(&clip, b"clip").unwrap();
+        std::fs::write(&payload, b"not a jpeg").unwrap();
+        let fake_ffmpeg = fake_ffmpeg_script(&directory, &payload);
+        let located = fake_ffmpeg.clone();
+        let extractor = FfmpegPosterExtractor::new(Arc::new(move || Some(located.clone())));
+        let canonical = clip.canonicalize().unwrap();
+
+        let error = extractor.extract(&canonical, 1.0).unwrap_err();
+        assert!(error.contains("JPEG"));
+        assert!(!poster_path(&canonical).exists());
+        assert!(std::fs::read_dir(&directory).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains(".tmp.")));
+
+        let jpeg = test_jpeg();
+        std::fs::write(&payload, &jpeg).unwrap();
+        let poster = extractor.extract(&canonical, 1.0).unwrap();
+        assert_eq!(std::fs::read(poster).unwrap(), jpeg);
+        assert_eq!(extractor.successful_path.get(), Some(&fake_ffmpeg));
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn poster_publication_stays_with_a_renamed_selected_parent() {
@@ -1710,7 +1908,11 @@ mod tests {
     #[test]
     #[ignore = "subprocess-only pipe fixture"]
     fn poster_pipe_fixture_fills_both_streams() {
-        let bytes = vec![b'x'; 256 * 1024];
+        let emitted = std::env::var("CLIPLINE_POSTER_FIXTURE_BYTES")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(256 * 1024);
+        let bytes = vec![b'x'; emitted];
         let mut stdout = io::stdout().lock();
         stdout.write_all(&bytes).unwrap();
         stdout.flush().unwrap();
@@ -1718,6 +1920,32 @@ mod tests {
         let mut stderr = io::stderr().lock();
         stderr.write_all(&bytes).unwrap();
         stderr.flush().unwrap();
+    }
+
+    #[cfg(any(unix, windows))]
+    fn fake_ffmpeg_script(directory: &Path, payload: &Path) -> PathBuf {
+        #[cfg(windows)]
+        {
+            let script = directory.join("fake-ffmpeg.cmd");
+            let payload = payload.to_string_lossy().replace('\'', "''");
+            let body = format!(
+                "@echo off\r\npowershell.exe -NoProfile -NonInteractive -Command \"$b=[IO.File]::ReadAllBytes('{payload}');$o=[Console]::OpenStandardOutput();$o.Write($b,0,$b.Length)\"\r\n"
+            );
+            std::fs::write(&script, body).unwrap();
+            script
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let script = directory.join("fake-ffmpeg");
+            let payload = payload.to_string_lossy().replace('\'', "'\\''");
+            std::fs::write(&script, format!("#!/bin/sh\nexec cat -- '{payload}'\n")).unwrap();
+            let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+            permissions.set_mode(0o700);
+            std::fs::set_permissions(&script, permissions).unwrap();
+            script
+        }
     }
 
     fn test_directory(case: &str) -> PathBuf {
