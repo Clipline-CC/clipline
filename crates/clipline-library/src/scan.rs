@@ -7,7 +7,7 @@ use std::time::UNIX_EPOCH;
 
 use serde::Deserialize;
 
-use clipline_shell::open_regular_file_nofollow;
+use clipline_shell::{open_regular_file_nofollow, opened_file_identity, FileIdentity};
 use serde::Serialize;
 
 use clipline_events::{ClipMarkers, GameId};
@@ -167,6 +167,7 @@ impl ClipProjection for CompactClipProjection<'_> {
             duration_s,
             marker_count: marker_summary.review_marker_count,
             game,
+            file_identity: Some(source.file_identity()),
             marker_summary,
         };
         let mut projected = ClipProjectionOutput::new(output);
@@ -246,6 +247,7 @@ pub struct ClipScanSource {
     size_bytes: u64,
     modified_unix: u64,
     session_game: Option<ClipGame>,
+    file_identity: FileIdentity,
 }
 
 impl ClipScanSource {
@@ -292,6 +294,11 @@ impl ClipScanSource {
     #[must_use]
     pub const fn session_game(&self) -> Option<&ClipGame> {
         self.session_game.as_ref()
+    }
+
+    #[must_use]
+    pub const fn file_identity(&self) -> FileIdentity {
+        self.file_identity
     }
 }
 
@@ -520,6 +527,17 @@ impl LocalLibraryScanner {
             ));
             return;
         };
+        let file_identity = match open_regular_file_nofollow(&canonical_path)
+            .and_then(|file| opened_file_identity(&file))
+        {
+            Ok(identity) => identity,
+            Err(error) => {
+                warnings.push(format!(
+                    "Skipped Library clip {display_path:?} because its stable identity could not be read: {error}"
+                ));
+                return;
+            }
+        };
         let name = canonical_path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -540,6 +558,7 @@ impl LocalLibraryScanner {
             session_game,
             size_bytes: metadata.len(),
             modified_unix,
+            file_identity,
         });
     }
 
@@ -560,6 +579,7 @@ impl LocalLibraryScanner {
             size_bytes: candidate.size_bytes,
             modified_unix: candidate.modified_unix,
             session_game: candidate.session_game,
+            file_identity: candidate.file_identity,
         }
     }
 }
@@ -574,6 +594,7 @@ struct ClipCandidate {
     session_game: Option<ClipGame>,
     size_bytes: u64,
     modified_unix: u64,
+    file_identity: FileIdentity,
 }
 
 impl PartialEq for ClipCandidate {

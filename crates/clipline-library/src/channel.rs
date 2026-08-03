@@ -55,6 +55,13 @@ pub enum ResultPortError {
     Disconnected,
 }
 
+#[derive(Debug)]
+pub struct RejectedCatalogResult {
+    pub error: ResultPortError,
+    pub result: CatalogResult,
+    pub expected: ExpectedResultOwner,
+}
+
 impl From<GenerationError> for ResultPortError {
     fn from(_: GenerationError) -> Self {
         Self::GenerationExhausted
@@ -286,17 +293,51 @@ impl CatalogResultSender {
         result: CatalogResult,
         expected: ExpectedResultOwner,
     ) -> Result<CatalogResultPublishOutcome, ResultPortError> {
-        validate_owner(&result, &expected)?;
-        result.validate_bounds()?;
+        self.try_send_recoverable(result, expected)
+            .map_err(|rejected| rejected.error)
+    }
+
+    /// Non-blocking publication that returns ownership of a rejected payload.
+    ///
+    /// Fixed worker pools use this form to retain one bounded completion while
+    /// the UI drains a full result queue. The ordinary `try_send` convenience
+    /// remains fail-fast for producers that can recreate or discard progress.
+    pub fn try_send_recoverable(
+        &self,
+        result: CatalogResult,
+        expected: ExpectedResultOwner,
+    ) -> Result<CatalogResultPublishOutcome, Box<RejectedCatalogResult>> {
+        self.try_send_inner(result, expected)
+    }
+
+    fn try_send_inner(
+        &self,
+        result: CatalogResult,
+        expected: ExpectedResultOwner,
+    ) -> Result<CatalogResultPublishOutcome, Box<RejectedCatalogResult>> {
+        macro_rules! reject {
+            ($error:expr) => {
+                return Err(Box::new(RejectedCatalogResult {
+                    error: $error,
+                    result,
+                    expected,
+                }))
+            };
+        }
+        if let Err(error) = validate_owner(&result, &expected) {
+            reject!(error);
+        }
+        if let Err(error) = result.validate_bounds() {
+            reject!(ResultPortError::from(error));
+        }
         let result_bytes = result.estimated_byte_size();
         let key = coalesce_key(&result);
-        let mut state = self
-            .shared
-            .state
-            .lock()
-            .map_err(|_| ResultPortError::Disconnected)?;
+        let mut state = match self.shared.state.lock() {
+            Ok(state) => state,
+            Err(_) => reject!(ResultPortError::Disconnected),
+        };
         if !state.receiver_connected {
-            return Err(ResultPortError::Disconnected);
+            reject!(ResultPortError::Disconnected);
         }
 
         let replacement = key.as_ref().and_then(|key| {
@@ -311,7 +352,7 @@ impl CatalogResultSender {
                 })
         });
         if replacement.is_none() && state.queue.len() >= CATALOG_RESULT_CAPACITY {
-            return Err(ResultPortError::Full {
+            reject!(ResultPortError::Full {
                 capacity: CATALOG_RESULT_CAPACITY,
             });
         }
@@ -324,7 +365,7 @@ impl CatalogResultSender {
             .saturating_sub(replaced_bytes)
             .saturating_add(result_bytes);
         if projected_bytes > CATALOG_RESULT_BYTE_CAPACITY {
-            return Err(ResultPortError::ByteCapacity {
+            reject!(ResultPortError::ByteCapacity {
                 capacity: CATALOG_RESULT_BYTE_CAPACITY,
             });
         }

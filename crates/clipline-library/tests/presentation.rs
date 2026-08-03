@@ -73,6 +73,7 @@ fn local_clip(index: usize) -> LocalClipItem {
             id: "test-game".into(),
             name: "Test Game".into(),
         }),
+        file_identity: None,
         marker_summary: MarkerSidecarSummary::default(),
     }
 }
@@ -569,6 +570,8 @@ fn projection_retains_exactly_one_menu_dialog_and_sixteen_or_fewer_exact_uploads
             },
         ],
         delete_local_after_upload: true,
+        cancel_upload_token: None,
+        progress: None,
     };
     let upload_summary = UploadSummary {
         local_clip_id: "local-7".into(),
@@ -871,6 +874,8 @@ fn cloud_projection_rejects_selection_wrong_source_and_wrong_account_owners() {
         visibility: None,
         audio_tracks: Vec::new(),
         delete_local_after_upload: false,
+        cancel_upload_token: None,
+        progress: None,
     };
     assert!(matches!(
         build(&[], None, None, Some(&wrong_dialog)),

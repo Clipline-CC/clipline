@@ -19,10 +19,10 @@ use std::sync::{
 };
 
 use clipline_library::{
-    CatalogAction, CatalogCloudPreferences, CatalogController, CatalogEffect, CatalogItemIdentity,
-    CatalogLoadState, CatalogOperationOwner, CatalogResult, CatalogRevision, CatalogSource,
-    CatalogUploadVisibility, ClipDetail, ClipDetailRequest, ClipDetailResult, ClipPathIdentity,
-    CloudAccountGeneration, CloudAccountKey, CloudCatalogOwner, CloudLibraryItem,
+    CatalogAction, CatalogCloudPreferences, CatalogController, CatalogDialogKind, CatalogEffect,
+    CatalogItemIdentity, CatalogLoadState, CatalogOperationOwner, CatalogResult, CatalogRevision,
+    CatalogSource, CatalogUploadVisibility, ClipDetail, ClipDetailRequest, ClipDetailResult,
+    ClipPathIdentity, CloudAccountGeneration, CloudAccountKey, CloudCatalogOwner, CloudLibraryItem,
     CloudListPageCompletion, CloudMediaLeaseId, CloudPageNumber, CloudReviewMediaOwner,
     CloudThumbnailDescriptor, CloudThumbnailOwner, CloudWorkToken, DeletedClipsReport,
     DurableUploadToken, ForegroundGeneration, LocalClipGrouping, LocalClipId, LocalClipItem,
@@ -116,6 +116,7 @@ fn local_item(index: usize) -> LocalClipItem {
         duration_s: Some(7.0),
         marker_count: 0,
         game: None,
+        file_identity: None,
         marker_summary: Default::default(),
     }
 }
@@ -123,6 +124,36 @@ fn local_item(index: usize) -> LocalClipItem {
 fn local_identity(index: usize) -> CatalogItemIdentity {
     CatalogItemIdentity::Local {
         path: ClipPathIdentity::from_text(&local_item(index).path).unwrap(),
+    }
+}
+
+#[test]
+fn local_mutation_effect_carries_the_scanned_file_identity() {
+    let directory = clipline_test_utils::TestDir::new("catalog-controller", "file-identity");
+    let path = directory.path().join("one.mp4");
+    std::fs::write(&path, b"one").unwrap();
+    let opened = clipline_shell::open_regular_file_nofollow(&path).unwrap();
+    let file_identity = clipline_shell::opened_file_identity(&opened).unwrap();
+    drop(opened);
+
+    let mut item = local_item(0);
+    item.path = path.display().to_string();
+    item.name = "one.mp4".into();
+    item.file_identity = Some(file_identity);
+    let identity = CatalogItemIdentity::Local {
+        path: item.path_identity().unwrap(),
+    };
+    let mut controller = controller();
+    seed_local(&mut controller, vec![item]);
+    controller
+        .dispatch(CatalogAction::OpenRenameTitle { item: identity })
+        .unwrap();
+    let effect = only_effect(controller.dispatch(CatalogAction::ConfirmDialog).unwrap());
+    match effect {
+        CatalogEffect::RenameTitle { target, .. } => {
+            assert_eq!(target.expected_file_identity, Some(file_identity));
+        }
+        other => panic!("expected rename-title effect, got {other:?}"),
     }
 }
 
@@ -1675,6 +1706,14 @@ fn delete_report_is_exact_atomic_preserves_failures_and_requests_one_refresh() {
     assert_eq!(controller.state().local_items.as_slice(), &[local_item(1)]);
     assert_eq!(controller.state().selected.as_slice(), &[local_identity(1)]);
     assert!(controller.state().active.is_none());
+    let dialog = controller.state().dialog.as_ref().unwrap();
+    assert_eq!(dialog.kind, CatalogDialogKind::PartialDelete);
+    assert!(dialog.message.contains("Deleted 2 of 3"));
+    assert!(dialog.message.contains("1 could not be deleted"));
+    assert!(controller
+        .dispatch(CatalogAction::ConfirmDialog)
+        .unwrap()
+        .is_empty());
     assert!(controller.state().dialog.is_none());
 }
 
@@ -1789,9 +1828,30 @@ fn upload_projection_retains_exact_tokens_updates_badges_and_maps_cancel_by_inde
     controller
         .accept(CatalogResult::UploadByteProgress {
             token: replacement.clone(),
-            progress: upload_summary(1, "uploading-new"),
+            progress: upload_summary(1, "uploading"),
         })
         .unwrap();
+    controller
+        .dispatch(CatalogAction::OpenContext {
+            item: local_identity(1),
+        })
+        .unwrap();
+    assert!(controller
+        .dispatch(CatalogAction::OpenCancelUpload {
+            token: replacement.clone(),
+        })
+        .unwrap()
+        .is_empty());
+    let dialog = controller.state().dialog.as_ref().unwrap();
+    assert_eq!(dialog.kind, CatalogDialogKind::CancelUpload);
+    assert_eq!(dialog.cancel_upload_token.as_ref(), Some(&replacement));
+    assert_eq!(dialog.progress.as_deref(), Some("uploading — 50%"));
+    assert_eq!(
+        only_effect(controller.dispatch(CatalogAction::ConfirmDialog).unwrap()),
+        CatalogEffect::CancelUpload {
+            token: replacement.clone()
+        }
+    );
     let cancel = controller
         .state()
         .projection

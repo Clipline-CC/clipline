@@ -62,6 +62,7 @@ fn local_item(index: usize, size_mb: f64) -> LocalClipItem {
         duration_s: Some(1.0),
         marker_count: 0,
         game: None,
+        file_identity: None,
         marker_summary: Default::default(),
     }
 }
@@ -154,6 +155,7 @@ fn large_local_index(token: WindowWorkToken, revision: u64) -> CatalogResult {
                 id: field.clone(),
                 name: field.clone(),
             }),
+            file_identity: None,
             marker_summary: Default::default(),
         })
         .collect();
@@ -715,6 +717,7 @@ fn inconsistent_pages_and_invalid_numeric_items_fail_closed() {
         duration_s: Some(-1.0),
         marker_count: 0,
         game: None,
+        file_identity: None,
         marker_summary: Default::default(),
     };
     let result = CatalogResult::LocalIndex(LocalIndexCompletion {

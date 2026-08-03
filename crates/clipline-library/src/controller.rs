@@ -12,12 +12,13 @@ use crate::{
     CatalogUploadVisibility, CatalogWarning, ClipDetailRequest, ClipPathIdentity,
     CloudCatalogOwner, CloudLibraryItem, CloudNextPage, CloudPageNumber, CloudPageOutcome,
     CloudReviewMediaOwner, CloudReviewMediaRequest, CloudThumbnailDescriptor, CloudThumbnailOwner,
-    CloudThumbnailRequest, CloudWorkToken, ForegroundGeneration, GalleryPresentation,
-    GenerationError, LocalClipItem, LocalDayResolver, LocalGalleryOptions, LocalPageIndex,
-    PayloadBoundsError, PosterStatus, PreparedCloudReviewMedia, PresentationError,
+    CloudThumbnailRequest, CloudWorkToken, DurableUploadToken, ForegroundGeneration,
+    GalleryPresentation, GenerationError, LocalClipItem, LocalDayResolver, LocalGalleryOptions,
+    LocalPageIndex, PayloadBoundsError, PosterStatus, PreparedCloudReviewMedia, PresentationError,
     ProjectionReservation, RemoteClipId, RequestGeneration, ResolvedLocalClip,
     SystemProjectionReservation, WindowAttachmentGeneration, WindowWorkToken,
-    MAX_CATALOG_PAGE_ROWS, MAX_LOCAL_INDEX_ROWS, MAX_POSTER_RESULT_ENTRIES, MAX_UPLOAD_SUMMARIES,
+    MAX_CATALOG_PAGE_ROWS, MAX_CATALOG_STRING_BYTES, MAX_LOCAL_INDEX_ROWS,
+    MAX_POSTER_RESULT_ENTRIES, MAX_UPLOAD_SUMMARIES,
 };
 
 /// One update may issue one thumbnail request for every accepted Cloud page
@@ -827,6 +828,9 @@ impl CatalogController {
                 });
                 state.revision = state.revision.checked_next()?;
             }
+            CatalogAction::OpenCancelUpload { token } => {
+                open_cancel_upload_dialog(state, token)?;
+            }
             CatalogAction::SetDialogText { field, value } => {
                 let mut dialog = clone_dialog_for_update(state, self.reservation.as_ref())?;
                 match field {
@@ -1050,6 +1054,8 @@ impl CatalogController {
                     visibility: Some(state.cloud_preferences.default_visibility),
                     audio_tracks,
                     delete_local_after_upload: state.cloud_preferences.delete_local_after_upload,
+                    cancel_upload_token: None,
+                    progress: None,
                 }));
                 state.dialog_delete_targets = None;
                 state.pending_detail = None;
@@ -1147,34 +1153,11 @@ impl CatalogController {
                 state.revision = state.revision.checked_next()?;
                 Ok(true)
             }
-            CatalogResult::UploadByteProgress { token, progress }
-            | CatalogResult::UploadCompleted {
-                token,
-                result: progress,
-            } => {
-                let entry = CatalogUploadProjection::new(token, progress)?;
-                let mut uploads = reserve_clone(
-                    self.reservation.as_ref(),
-                    "controller.uploads",
-                    state.uploads.as_slice(),
-                    1,
-                )?;
-                if let Some(existing) = uploads.iter_mut().find(|item| item.token == entry.token) {
-                    *existing = entry;
-                } else if let Some(existing) = uploads
-                    .iter_mut()
-                    .find(|item| item.token.source_path == entry.token.source_path)
-                {
-                    *existing = entry;
-                } else {
-                    if uploads.len() >= MAX_UPLOAD_SUMMARIES {
-                        uploads.remove(0);
-                    }
-                    uploads.push(entry);
-                }
-                state.uploads = Arc::new(uploads);
-                state.revision = state.revision.checked_next()?;
-                Ok(true)
+            CatalogResult::UploadByteProgress { token, progress } => {
+                apply_upload_result(state, token, progress, false, self.reservation.as_ref())
+            }
+            CatalogResult::UploadCompleted { token, result } => {
+                apply_upload_result(state, token, result, true, self.reservation.as_ref())
             }
             CatalogResult::RenameCompleted { token, result } => {
                 let Some(pending) = state.pending_mutation.as_ref() else {
@@ -1234,7 +1217,7 @@ impl CatalogController {
                     self.reservation.as_ref(),
                 )?;
                 state.pending_mutation = None;
-                state.dialog = None;
+                state.dialog = partial_delete_dialog(targets.as_slice(), &report)?;
                 state.dialog_delete_targets = None;
                 state.revision = state.revision.checked_next()?;
                 if active_deleted {
@@ -1610,7 +1593,11 @@ fn resolve_local(
             field: "identity.unresolved",
         })?;
     let item = &state.local_items[state.local_lookup[index].1];
-    Ok(ResolvedLocalClip::new(path.clone(), item.path.clone())?)
+    Ok(ResolvedLocalClip::with_file_identity(
+        path.clone(),
+        item.path.clone(),
+        item.file_identity,
+    )?)
 }
 
 fn resolve_local_item<'a>(
@@ -1860,6 +1847,8 @@ fn open_local_text_dialog(
         visibility: None,
         audio_tracks: Vec::new(),
         delete_local_after_upload: false,
+        cancel_upload_token: None,
+        progress: None,
     }));
     state.dialog_delete_targets = None;
     state.menu = None;
@@ -1897,11 +1886,155 @@ fn open_delete_dialog(
         visibility: None,
         audio_tracks: Vec::new(),
         delete_local_after_upload: false,
+        cancel_upload_token: None,
+        progress: None,
     }));
     state.dialog_delete_targets = Some(Arc::new(items));
     state.menu = None;
     state.revision = state.revision.checked_next()?;
     Ok(())
+}
+
+fn open_cancel_upload_dialog(
+    state: &mut CatalogControllerState,
+    token: DurableUploadToken,
+) -> Result<(), CatalogControllerError> {
+    let upload = state
+        .uploads
+        .iter()
+        .find(|upload| upload.token == token)
+        .ok_or(CatalogControllerError::Invalid {
+            field: "upload.cancel_token",
+        })?;
+    let target = CatalogItemIdentity::Local {
+        path: token.source_path.clone(),
+    };
+    require_local_identity(state, &target)?;
+    state.dialog = Some(Arc::new(CatalogDialogProjection {
+        kind: CatalogDialogKind::CancelUpload,
+        target,
+        title: "Cancel upload".to_owned(),
+        message: "Stop uploading this clip? The local clip will be kept.".to_owned(),
+        confirm_label: "Cancel upload".to_owned(),
+        destructive: true,
+        text_value: None,
+        description: None,
+        visibility: None,
+        audio_tracks: Vec::new(),
+        delete_local_after_upload: false,
+        cancel_upload_token: Some(token),
+        progress: Some(format_upload_progress(&upload.summary)),
+    }));
+    state.dialog_delete_targets = None;
+    state.menu = None;
+    state.revision = state.revision.checked_next()?;
+    Ok(())
+}
+
+fn partial_delete_dialog(
+    targets: &[ClipPathIdentity],
+    report: &crate::DeletedClipsReport,
+) -> Result<Option<Arc<CatalogDialogProjection>>, CatalogControllerError> {
+    let Some((failed_path, _)) = report.failed.first() else {
+        return Ok(None);
+    };
+    let failed_identity =
+        ClipPathIdentity::from_text(failed_path).ok_or(CatalogControllerError::Invalid {
+            field: "delete.failed_identity",
+        })?;
+    if !targets.contains(&failed_identity) {
+        return Err(CatalogControllerError::Invalid {
+            field: "delete.failed_target",
+        });
+    }
+    let message = format!(
+        "Deleted {} of {} clips. {} could not be deleted and remain in the Library.",
+        report.deleted.len(),
+        report.deleted.len().saturating_add(report.failed.len()),
+        report.failed.len(),
+    );
+    if message.len() > MAX_CATALOG_STRING_BYTES {
+        return Err(CatalogControllerError::Invalid {
+            field: "delete.partial_report",
+        });
+    }
+    Ok(Some(Arc::new(CatalogDialogProjection {
+        kind: CatalogDialogKind::PartialDelete,
+        target: CatalogItemIdentity::Local {
+            path: failed_identity,
+        },
+        title: "Some clips were not deleted".to_owned(),
+        message,
+        confirm_label: "Close".to_owned(),
+        destructive: false,
+        text_value: None,
+        description: None,
+        visibility: None,
+        audio_tracks: Vec::new(),
+        delete_local_after_upload: false,
+        cancel_upload_token: None,
+        progress: None,
+    })))
+}
+
+fn format_upload_progress(summary: &crate::UploadSummary) -> String {
+    if summary.file_size_bytes == 0 {
+        return summary.upload_status.clone();
+    }
+    let percent = summary
+        .received_size_bytes
+        .min(summary.file_size_bytes)
+        .saturating_mul(100)
+        / summary.file_size_bytes;
+    format!("{} — {percent}%", summary.upload_status)
+}
+
+fn apply_upload_result(
+    state: &mut CatalogControllerState,
+    token: DurableUploadToken,
+    summary: crate::UploadSummary,
+    completed: bool,
+    reservation: &dyn ProjectionReservation,
+) -> Result<bool, CatalogControllerError> {
+    let progress = format_upload_progress(&summary);
+    let entry = CatalogUploadProjection::new(token, summary)?;
+    let mut uploads = reserve_clone(
+        reservation,
+        "controller.uploads",
+        state.uploads.as_slice(),
+        1,
+    )?;
+    if let Some(existing) = uploads.iter_mut().find(|item| item.token == entry.token) {
+        *existing = entry.clone();
+    } else if let Some(existing) = uploads
+        .iter_mut()
+        .find(|item| item.token.source_path == entry.token.source_path)
+    {
+        *existing = entry.clone();
+    } else {
+        if uploads.len() >= MAX_UPLOAD_SUMMARIES {
+            uploads.remove(0);
+        }
+        uploads.push(entry.clone());
+    }
+    if let Some(dialog) = state.dialog.as_ref().filter(|dialog| {
+        dialog.kind == CatalogDialogKind::CancelUpload
+            && dialog
+                .cancel_upload_token
+                .as_ref()
+                .is_some_and(|pending| pending.source_path == entry.token.source_path)
+    }) {
+        if completed || dialog.cancel_upload_token.as_ref() != Some(&entry.token) {
+            state.dialog = None;
+        } else {
+            let mut updated = dialog.as_ref().clone();
+            updated.progress = Some(progress);
+            state.dialog = Some(Arc::new(updated));
+        }
+    }
+    state.uploads = Arc::new(uploads);
+    state.revision = state.revision.checked_next()?;
+    Ok(true)
 }
 
 fn clone_dialog_for_update(
@@ -1934,6 +2067,8 @@ fn clone_dialog_for_update(
         visibility: dialog.visibility,
         audio_tracks,
         delete_local_after_upload: dialog.delete_local_after_upload,
+        cancel_upload_token: dialog.cancel_upload_token.clone(),
+        progress: dialog.progress.clone(),
     })
 }
 
@@ -2045,9 +2180,18 @@ fn confirm_dialog(
             state.dialog_delete_targets = None;
         }
         CatalogDialogKind::CancelUpload => {
-            return Err(CatalogControllerError::Invalid {
-                field: "dialog.cancel_upload_token",
-            });
+            let token = dialog
+                .cancel_upload_token
+                .ok_or(CatalogControllerError::Invalid {
+                    field: "dialog.cancel_upload_token",
+                })?;
+            effects.push(CatalogEffect::CancelUpload { token });
+            state.dialog = None;
+            state.dialog_delete_targets = None;
+        }
+        CatalogDialogKind::PartialDelete => {
+            state.dialog = None;
+            state.dialog_delete_targets = None;
         }
     }
     state.revision = state.revision.checked_next()?;

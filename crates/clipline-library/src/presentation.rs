@@ -123,6 +123,7 @@ pub enum CatalogDialogKind {
     Delete,
     Upload,
     CancelUpload,
+    PartialDelete,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -138,6 +139,8 @@ pub struct CatalogDialogProjection {
     pub visibility: Option<CatalogUploadVisibility>,
     pub audio_tracks: Vec<CatalogDialogAudioTrackProjection>,
     pub delete_local_after_upload: bool,
+    pub cancel_upload_token: Option<crate::DurableUploadToken>,
+    pub progress: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -352,6 +355,26 @@ fn validate_projection_input(input: &CatalogProjectionInput<'_>) -> Result<(), P
         check_string("projection.dialog.message", &dialog.message)?;
         check_string("projection.dialog.confirm_label", &dialog.confirm_label)?;
         check_optional_string("projection.dialog.text_value", dialog.text_value.as_deref())?;
+        check_optional_string("projection.dialog.progress", dialog.progress.as_deref())?;
+        match dialog.kind {
+            CatalogDialogKind::CancelUpload if dialog.cancel_upload_token.is_none() => {
+                return Err(PresentationError::Invalid {
+                    field: "projection.dialog.cancel_upload_token",
+                });
+            }
+            CatalogDialogKind::RenameTitle
+            | CatalogDialogKind::RenameFile
+            | CatalogDialogKind::Delete
+            | CatalogDialogKind::Upload
+            | CatalogDialogKind::PartialDelete
+                if dialog.cancel_upload_token.is_some() =>
+            {
+                return Err(PresentationError::Invalid {
+                    field: "projection.dialog.unexpected_upload_token",
+                });
+            }
+            _ => {}
+        }
         if let Some(description) = dialog.description.as_deref() {
             check_count(
                 "projection.dialog.description",
@@ -844,6 +867,8 @@ fn clone_dialog<R: ProjectionReservation + ?Sized>(
         visibility: dialog.visibility,
         audio_tracks,
         delete_local_after_upload: dialog.delete_local_after_upload,
+        cancel_upload_token: dialog.cancel_upload_token.clone(),
+        progress: dialog.progress.clone(),
     }))
 }
 

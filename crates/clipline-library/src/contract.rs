@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use clipline_shell::FileIdentity;
+
 use crate::{
     ClipDetailOwner, ClipDetailRequest, ClipDetailResult, ClipPathIdentity, DeletedClipsReport,
     LocalClipFilter, LocalClipGrouping, LocalClipSort, MarkerSidecarSummary, PosterWorkToken,
@@ -671,6 +673,13 @@ pub struct LocalClipItem {
     pub duration_s: Option<f64>,
     pub marker_count: usize,
     pub game: Option<ClipGame>,
+    /// Stable identity captured while the native scanner held the clip open.
+    ///
+    /// This is intentionally absent from the compatibility JSON row. Paths are
+    /// display/reconciliation values; native mutation effects copy this fence
+    /// and compare it again immediately before filesystem access.
+    #[serde(skip)]
+    pub file_identity: Option<FileIdentity>,
     #[serde(default, skip_serializing_if = "MarkerSidecarSummary::is_empty")]
     pub marker_summary: MarkerSidecarSummary,
 }
@@ -1363,6 +1372,8 @@ pub struct MutationReport {
 pub struct ResolvedLocalClip {
     pub identity: ClipPathIdentity,
     pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_file_identity: Option<FileIdentity>,
 }
 
 impl ResolvedLocalClip {
@@ -1370,9 +1381,18 @@ impl ResolvedLocalClip {
         identity: ClipPathIdentity,
         path: impl Into<String>,
     ) -> Result<Self, PayloadBoundsError> {
+        Self::with_file_identity(identity, path, None)
+    }
+
+    pub fn with_file_identity(
+        identity: ClipPathIdentity,
+        path: impl Into<String>,
+        expected_file_identity: Option<FileIdentity>,
+    ) -> Result<Self, PayloadBoundsError> {
         let target = Self {
             identity,
             path: path.into(),
+            expected_file_identity,
         };
         target.validate_bounds()?;
         Ok(target)
@@ -1398,10 +1418,13 @@ impl<'de> Deserialize<'de> for ResolvedLocalClip {
         struct RawTarget {
             identity: ClipPathIdentity,
             path: String,
+            #[serde(default)]
+            expected_file_identity: Option<FileIdentity>,
         }
 
         let raw = RawTarget::deserialize(deserializer)?;
-        Self::new(raw.identity, raw.path).map_err(serde::de::Error::custom)
+        Self::with_file_identity(raw.identity, raw.path, raw.expected_file_identity)
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -1490,6 +1513,9 @@ pub enum CatalogAction {
     OpenUpload {
         item: CatalogItemIdentity,
     },
+    OpenCancelUpload {
+        token: DurableUploadToken,
+    },
     SetDialogText {
         field: CatalogDialogTextField,
         value: String,
@@ -1573,6 +1599,9 @@ enum CatalogActionDef {
     OpenUpload {
         item: CatalogItemIdentity,
     },
+    OpenCancelUpload {
+        token: DurableUploadToken,
+    },
     SetDialogText {
         field: CatalogDialogTextField,
         value: String,
@@ -1640,6 +1669,7 @@ impl CatalogAction {
             | Self::OpenDelete { .. }
             | Self::OpenDeleteSelection
             | Self::OpenUpload { .. }
+            | Self::OpenCancelUpload { .. }
             | Self::SetUploadVisibility { .. }
             | Self::SetDeleteLocalAfterUpload { .. }
             | Self::ConfirmDialog

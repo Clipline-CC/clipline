@@ -191,6 +191,7 @@ fn dto_json_keeps_shipping_field_names_and_owned_values() {
             id: "lol".into(),
             name: "League of Legends".into(),
         }),
+        file_identity: None,
         marker_summary: Default::default(),
     };
     let local_json = serde_json::to_value(&local).unwrap();
@@ -208,6 +209,7 @@ fn dto_json_keeps_shipping_field_names_and_owned_values() {
     ] {
         assert!(local_json.get(field).is_some(), "missing {field}");
     }
+    assert!(local_json.get("file_identity").is_none());
     assert_eq!(
         local.path_identity().unwrap().as_str(),
         r"windows:c:\clips\one.mp4"
@@ -425,6 +427,7 @@ fn local_index_item(index: usize) -> LocalClipItem {
         duration_s: Some(1.0),
         marker_count: 0,
         game: None,
+        file_identity: None,
         marker_summary: Default::default(),
     }
 }
