@@ -3,8 +3,9 @@ use std::sync::{Arc, Barrier};
 use clipline_settings::cloud::{cloud_credential_target, CloudUploadRecord};
 use clipline_settings::osu::osu_credential_target;
 use clipline_settings::{
-    AccountGeneration, CloudAccountIdentity, CloudRecordCas, CloudRecordCasKind, CloudRecordSlot,
-    SettingsChange, SettingsProfile, SettingsStore, SettingsTransaction, SettingsTransactionError,
+    AccountGeneration, CloudAccountIdentity, CloudProfileCas, CloudRecordCas, CloudRecordCasKind,
+    CloudRecordSlot, SettingsChange, SettingsProfile, SettingsStore, SettingsTransaction,
+    SettingsTransactionError,
 };
 use clipline_test_utils::TestDir;
 
@@ -168,6 +169,191 @@ fn account_generation_changes_only_with_account_identity() {
         ))
         .unwrap();
     assert_eq!(recorded.account_generation, connected.account_generation);
+}
+
+#[test]
+fn cloud_profile_cas_uses_current_revision_and_rejects_a_replacement_login() {
+    let dir = TestDir::new("clipline-settings", "cloud-profile-cas");
+    let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));
+    let initial = store.snapshot().unwrap();
+    let mut account_a = initial.document.cloud.clone();
+    account_a.host_url = "https://a.example".into();
+    account_a.connected_user_id = Some("user-a".into());
+    account_a.credential_target = Some(cloud_credential_target(&account_a.host_url, "user-a"));
+    account_a.upload_generation_sequence = 17;
+    let connected = store
+        .transact(transaction(
+            &initial,
+            SettingsChange::ReplaceCloudSettings(account_a),
+        ))
+        .unwrap();
+    let patch = CloudProfileCas {
+        account: connected.account.clone(),
+        account_generation: connected.account_generation,
+        expected_connected_user_id: "user-a".into(),
+        username: "clipper-a".into(),
+        display_name: Some("Clipper A".into()),
+    };
+
+    let media_root = dir.path().join("unrelated-media").display().to_string();
+    let unrelated = store
+        .transact(transaction(
+            &connected,
+            SettingsChange::SetMediaRoot(media_root.clone()),
+        ))
+        .unwrap();
+    let profiled = store.compare_exchange_cloud_profile(patch).unwrap();
+    assert_eq!(profiled.document.media_dir, media_root);
+    assert_eq!(
+        profiled.document.cloud.connected_user_id.as_deref(),
+        Some("user-a")
+    );
+    assert_eq!(
+        profiled.document.cloud.connected_username.as_deref(),
+        Some("clipper-a")
+    );
+    assert_eq!(
+        profiled.document.cloud.connected_display_name.as_deref(),
+        Some("Clipper A")
+    );
+    assert_eq!(profiled.account_generation, unrelated.account_generation);
+    assert_eq!(profiled.document.cloud.upload_generation_sequence, 17);
+
+    let stale_patch = CloudProfileCas {
+        account: profiled.account.clone(),
+        account_generation: profiled.account_generation,
+        expected_connected_user_id: "user-a".into(),
+        username: "x".repeat(clipline_settings::MAX_CLOUD_UPLOAD_ID_BYTES + 1),
+        display_name: None,
+    };
+    let mut account_b = profiled.document.cloud.clone();
+    account_b.host_url = "https://b.example".into();
+    account_b.connected_user_id = Some("user-b".into());
+    account_b.credential_target = Some(cloud_credential_target(&account_b.host_url, "user-b"));
+    let replacement = store
+        .transact(transaction(
+            &profiled,
+            SettingsChange::ReplaceCloudProfile(account_b),
+        ))
+        .unwrap();
+
+    assert_eq!(
+        store
+            .compare_exchange_cloud_profile(stale_patch)
+            .unwrap_err(),
+        SettingsTransactionError::AccountChanged
+    );
+    assert_eq!(store.snapshot().unwrap(), replacement);
+}
+
+#[test]
+fn cloud_profile_cas_rejects_unbounded_or_empty_profile_text_without_mutation() {
+    let dir = TestDir::new("clipline-settings", "cloud-profile-cas-bounds");
+    let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));
+    let initial = store.snapshot().unwrap();
+    let mut cloud = initial.document.cloud.clone();
+    cloud.host_url = "https://cloud.example".into();
+    cloud.connected_user_id = Some("user-1".into());
+    cloud.credential_target = Some(cloud_credential_target(&cloud.host_url, "user-1"));
+    cloud.upload_generation_sequence = 23;
+    let connected = store
+        .transact(transaction(
+            &initial,
+            SettingsChange::ReplaceCloudSettings(cloud),
+        ))
+        .unwrap();
+    let oversized = "x".repeat(clipline_settings::MAX_CLOUD_UPLOAD_ID_BYTES + 1);
+    let cases = [
+        CloudProfileCas {
+            account: connected.account.clone(),
+            account_generation: connected.account_generation,
+            expected_connected_user_id: "".into(),
+            username: "valid".into(),
+            display_name: None,
+        },
+        CloudProfileCas {
+            account: connected.account.clone(),
+            account_generation: connected.account_generation,
+            expected_connected_user_id: oversized.clone(),
+            username: "valid".into(),
+            display_name: None,
+        },
+        CloudProfileCas {
+            account: connected.account.clone(),
+            account_generation: connected.account_generation,
+            expected_connected_user_id: "user-1".into(),
+            username: " ".into(),
+            display_name: None,
+        },
+        CloudProfileCas {
+            account: connected.account.clone(),
+            account_generation: connected.account_generation,
+            expected_connected_user_id: "user-1".into(),
+            username: oversized.clone(),
+            display_name: None,
+        },
+        CloudProfileCas {
+            account: connected.account.clone(),
+            account_generation: connected.account_generation,
+            expected_connected_user_id: "user-1".into(),
+            username: "valid".into(),
+            display_name: Some("".into()),
+        },
+        CloudProfileCas {
+            account: connected.account.clone(),
+            account_generation: connected.account_generation,
+            expected_connected_user_id: "user-1".into(),
+            username: "valid".into(),
+            display_name: Some(oversized.clone()),
+        },
+    ];
+
+    for (index, change) in cases.into_iter().enumerate() {
+        let error = store.compare_exchange_cloud_profile(change).unwrap_err();
+        if index < 2 {
+            assert_eq!(error, SettingsTransactionError::AccountChanged);
+        } else {
+            assert!(matches!(error, SettingsTransactionError::Validation(_)));
+        }
+        assert_eq!(store.snapshot().unwrap(), connected);
+        assert_eq!(
+            store
+                .snapshot()
+                .unwrap()
+                .document
+                .cloud
+                .upload_generation_sequence,
+            23
+        );
+    }
+
+    // A hand-edited/current account can itself carry an oversized user id.
+    // Once exact owner and user fencing succeeds, the CAS-side bound must
+    // still reject it before profile mutation.
+    let mut oversized_account = connected.document.cloud.clone();
+    oversized_account.connected_user_id = Some(oversized.clone());
+    oversized_account.credential_target = Some("oversized-user-credential".into());
+    let oversized_owner = store
+        .transact(transaction(
+            &connected,
+            SettingsChange::ReplaceCloudSettings(oversized_account),
+        ))
+        .unwrap();
+    let error = store
+        .compare_exchange_cloud_profile(CloudProfileCas {
+            account: oversized_owner.account.clone(),
+            account_generation: oversized_owner.account_generation,
+            expected_connected_user_id: oversized,
+            username: "valid".into(),
+            display_name: None,
+        })
+        .unwrap_err();
+    assert!(matches!(error, SettingsTransactionError::Validation(_)));
+    assert_eq!(store.snapshot().unwrap(), oversized_owner);
+    assert_eq!(
+        oversized_owner.document.cloud.upload_generation_sequence,
+        23
+    );
 }
 
 #[test]

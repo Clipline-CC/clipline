@@ -717,6 +717,20 @@ pub struct CloudRecordCas {
     pub replacement: Option<CloudRecordSlot>,
 }
 
+/// Exact Cloud profile patch produced by a fetched profile response.
+///
+/// Account identity, account generation, and server user id are duplicated
+/// deliberately so the patch can be committed against the current unrelated
+/// document revision without weakening replacement-login fencing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CloudProfileCas {
+    pub account: CloudAccountIdentity,
+    pub account_generation: AccountGeneration,
+    pub expected_connected_user_id: String,
+    pub username: String,
+    pub display_name: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct SettingsSnapshot {
     pub document: AppSettings,
@@ -743,6 +757,7 @@ pub enum SettingsChange {
         key: String,
         expected: CloudUploadRecord,
     },
+    CompareExchangeCloudProfile(CloudProfileCas),
     CompareExchangeCloudRecords(CloudRecordCas),
     ReplaceOsuProfile(OsuApiSettings),
 }
@@ -966,6 +981,30 @@ impl SettingsStore {
         self.commit_locked(&mut state, transaction)
     }
 
+    /// Apply a fetched Cloud profile against the exact durable account owner
+    /// while tolerating unrelated settings revisions.
+    pub fn compare_exchange_cloud_profile(
+        &self,
+        change: CloudProfileCas,
+    ) -> Result<SettingsSnapshot, SettingsTransactionError> {
+        let _commit_guard = self
+            .inner
+            .commit_lock
+            .lock()
+            .map_err(|_| SettingsTransactionError::LockPoisoned)?;
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| SettingsTransactionError::LockPoisoned)?;
+        let transaction = SettingsTransaction {
+            expected_revision: state.snapshot.revision,
+            expected_account_generation: state.snapshot.account_generation,
+            change: SettingsChange::CompareExchangeCloudProfile(change),
+        };
+        self.commit_locked(&mut state, transaction)
+    }
+
     fn commit_locked(
         &self,
         state: &mut StoreState,
@@ -1118,6 +1157,25 @@ fn apply_change(
             }
             document.cloud.uploads.remove(&key);
         }
+        SettingsChange::CompareExchangeCloudProfile(change) => {
+            if change.account != *current_account {
+                return Err(SettingsTransactionError::AccountChanged);
+            }
+            if change.account_generation != current_account_generation {
+                return Err(SettingsTransactionError::StaleAccountGeneration {
+                    expected: change.account_generation,
+                    current: current_account_generation,
+                });
+            }
+            if document.cloud.connected_user_id.as_deref()
+                != Some(change.expected_connected_user_id.as_str())
+            {
+                return Err(SettingsTransactionError::AccountChanged);
+            }
+            validate_cloud_profile_cas(&change)?;
+            document.cloud.connected_username = Some(change.username);
+            document.cloud.connected_display_name = change.display_name;
+        }
         SettingsChange::CompareExchangeCloudRecords(change) => apply_cloud_record_cas(
             &mut document.cloud,
             change,
@@ -1125,6 +1183,31 @@ fn apply_change(
             current_account_generation,
         )?,
         SettingsChange::ReplaceOsuProfile(osu) => document.osu = osu,
+    }
+    Ok(())
+}
+
+fn validate_cloud_profile_cas(change: &CloudProfileCas) -> Result<(), SettingsTransactionError> {
+    validate_cloud_profile_text("expected user id", &change.expected_connected_user_id)?;
+    validate_cloud_profile_text("username", &change.username)?;
+    if let Some(display_name) = change.display_name.as_deref() {
+        validate_cloud_profile_text("display name", display_name)?;
+    }
+    Ok(())
+}
+
+fn validate_cloud_profile_text(field: &str, value: &str) -> Result<(), SettingsTransactionError> {
+    if value.trim().is_empty() {
+        return Err(SettingsTransactionError::Validation(format!(
+            "cloud profile CAS {field} is missing"
+        )));
+    }
+    if value.len() > super::cloud::MAX_CLOUD_UPLOAD_ID_BYTES {
+        return Err(SettingsTransactionError::Validation(format!(
+            "cloud profile CAS {field} is {} bytes; maximum is {}",
+            value.len(),
+            super::cloud::MAX_CLOUD_UPLOAD_ID_BYTES
+        )));
     }
     Ok(())
 }
