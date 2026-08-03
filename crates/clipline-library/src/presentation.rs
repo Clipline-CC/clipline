@@ -4,13 +4,14 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    build_local_gallery, page_info, CatalogItemIdentity, CatalogRevision, CatalogSource,
-    CatalogUploadVisibility, ClipPathIdentity, CloudCatalogOwner, CloudLibraryItem,
-    CloudPageNumber, LocalClipItem, LocalDayResolver, LocalGalleryOptions, LocalPageIndex,
-    PayloadBoundsError, PlayOutcomeSummary, PosterStatus, PresentationPoster, PresentationRow,
-    RemoteClipId, UploadSummary, MAX_CATALOG_PAGE_ROWS, MAX_CATALOG_STRING_BYTES,
-    MAX_CLIP_DETAIL_AUDIO_TRACKS, MAX_CLIP_DETAIL_FIELD_BYTES, MAX_CLIP_DETAIL_MARKERS,
-    MAX_LOCAL_INDEX_ROWS, MAX_POSTER_RESULT_ENTRIES, MAX_UPLOAD_SUMMARIES,
+    build_local_gallery, page_info, CatalogAction, CatalogItemIdentity, CatalogRevision,
+    CatalogSource, CatalogUploadProjection, CatalogUploadVisibility, ClipPathIdentity,
+    CloudCatalogOwner, CloudLibraryItem, CloudPageNumber, CloudThumbnailDescriptor,
+    LocalClipFilter, LocalClipGrouping, LocalClipItem, LocalClipSort, LocalDayResolver,
+    LocalGalleryOptions, LocalPageIndex, PayloadBoundsError, PlayOutcomeSummary, PosterStatus,
+    PresentationPoster, PresentationRow, RemoteClipId, MAX_CATALOG_PAGE_ROWS,
+    MAX_CATALOG_STRING_BYTES, MAX_CLIP_DETAIL_AUDIO_TRACKS, MAX_CLIP_DETAIL_FIELD_BYTES,
+    MAX_CLIP_DETAIL_MARKERS, MAX_LOCAL_INDEX_ROWS, MAX_POSTER_RESULT_ENTRIES, MAX_UPLOAD_SUMMARIES,
 };
 
 pub const MAX_PRESENTATION_ENTRIES: usize = 128;
@@ -90,6 +91,18 @@ pub struct CatalogPageProjection {
     pub range_text: String,
 }
 
+/// Complete bounded control state needed to rebuild a Slint window without a
+/// UI-owned shadow reducer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CatalogControlsProjection {
+    pub query: String,
+    pub local_filter: LocalClipFilter,
+    pub local_sort: LocalClipSort,
+    pub local_grouping: LocalClipGrouping,
+    pub selection_mode: bool,
+    pub local_controls_visible: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CatalogMenuProjection {
     pub target: CatalogItemIdentity,
@@ -161,11 +174,18 @@ pub struct CatalogProjectionInput<'a> {
     /// Sorted, unique, local-only identities. The controller can retain this
     /// as one fallibly allocated vector and the projection uses binary search.
     pub selected: &'a [CatalogItemIdentity],
+    pub selection_mode: bool,
+    /// Current server query. Local projections derive the query from their
+    /// `LocalGalleryOptions`; disconnected Cloud still retains this value.
+    pub cloud_query: &'a str,
     pub active: Option<&'a CatalogItemIdentity>,
     pub posters: &'a BTreeMap<ClipPathIdentity, PosterStatus>,
+    /// Versioned Cloud thumbnail statuses retained by the controller. A row
+    /// only observes the status for its exact accepted server version.
+    pub cloud_posters: &'a BTreeMap<CloudThumbnailDescriptor, PosterStatus>,
     pub menu: Option<&'a CatalogMenuProjection>,
     pub dialog: Option<&'a CatalogDialogProjection>,
-    pub uploads: &'a [UploadSummary],
+    pub uploads: &'a [CatalogUploadProjection],
     pub load_state: CatalogLoadState,
 }
 
@@ -177,10 +197,25 @@ pub struct CatalogProjection {
     pub rows: Vec<PresentationRow>,
     pub groups: Vec<CatalogGroupProjection>,
     pub page: CatalogPageProjection,
+    pub controls: CatalogControlsProjection,
     pub selected_count: usize,
     pub menu: Option<CatalogMenuProjection>,
     pub dialog: Option<CatalogDialogProjection>,
-    pub uploads: Vec<UploadSummary>,
+    pub uploads: Vec<CatalogUploadProjection>,
+}
+
+impl CatalogProjection {
+    /// Resolves one visible bounded upload row into the exact cancel action.
+    /// Callers should additionally fence the containing catalog revision when
+    /// dispatching an index supplied by an asynchronous UI event.
+    #[must_use]
+    pub fn cancel_upload_action(&self, index: usize) -> Option<CatalogAction> {
+        self.uploads
+            .get(index)
+            .map(|upload| CatalogAction::CancelUpload {
+                token: upload.token.clone(),
+            })
+    }
 }
 
 pub fn build_catalog_projection<R: ProjectionReservation + ?Sized>(
@@ -215,6 +250,27 @@ pub fn build_catalog_projection<R: ProjectionReservation + ?Sized>(
     )?;
     uploads.extend(input.uploads.iter().cloned());
 
+    let controls = match input.source {
+        CatalogProjectionSource::Local { options, .. } => CatalogControlsProjection {
+            query: options.query.clone(),
+            local_filter: options.filter,
+            local_sort: options.sort,
+            local_grouping: options.grouping,
+            selection_mode: input.selection_mode,
+            local_controls_visible: true,
+        },
+        CatalogProjectionSource::Cloud { .. } | CatalogProjectionSource::CloudDisconnected => {
+            CatalogControlsProjection {
+                query: input.cloud_query.to_owned(),
+                local_filter: LocalClipFilter::All,
+                local_sort: LocalClipSort::Newest,
+                local_grouping: LocalClipGrouping::None,
+                selection_mode: false,
+                local_controls_visible: false,
+            }
+        }
+    };
+
     Ok(CatalogProjection {
         revision: input.revision,
         source,
@@ -222,6 +278,7 @@ pub fn build_catalog_projection<R: ProjectionReservation + ?Sized>(
         rows,
         groups,
         page,
+        controls,
         selected_count: input.selected.len(),
         menu: input.menu.cloned(),
         dialog: clone_dialog(input.dialog, reservation)?,
@@ -230,6 +287,7 @@ pub fn build_catalog_projection<R: ProjectionReservation + ?Sized>(
 }
 
 fn validate_projection_input(input: &CatalogProjectionInput<'_>) -> Result<(), PresentationError> {
+    check_string("projection.cloud_query", input.cloud_query)?;
     check_count(
         "projection.selected",
         input.selected.len(),
@@ -238,6 +296,11 @@ fn validate_projection_input(input: &CatalogProjectionInput<'_>) -> Result<(), P
     check_count(
         "projection.posters",
         input.posters.len(),
+        MAX_POSTER_RESULT_ENTRIES,
+    )?;
+    check_count(
+        "projection.cloud_posters",
+        input.cloud_posters.len(),
         MAX_POSTER_RESULT_ENTRIES,
     )?;
     check_count(
@@ -262,17 +325,24 @@ fn validate_projection_input(input: &CatalogProjectionInput<'_>) -> Result<(), P
     }
     for upload in input.uploads {
         upload.validate_bounds().map_err(bounds_to_presentation)?;
-        if ClipPathIdentity::from_text(&upload.path).is_none() {
-            return Err(PresentationError::Invalid {
-                field: "projection.upload_path_identity",
-            });
-        }
     }
     for status in input.posters.values() {
         match status {
             PosterStatus::Ready { path } => check_string("projection.poster_path", path)?,
             PosterStatus::Failed { message } => {
                 check_string("projection.poster_error", message)?;
+            }
+            PosterStatus::Queued | PosterStatus::Missing => {}
+        }
+    }
+    for (descriptor, status) in input.cloud_posters {
+        descriptor
+            .validate_bounds()
+            .map_err(bounds_to_presentation)?;
+        match status {
+            PosterStatus::Ready { path } => check_string("projection.cloud_poster_path", path)?,
+            PosterStatus::Failed { message } => {
+                check_string("projection.cloud_poster_error", message)?;
             }
             PosterStatus::Queued | PosterStatus::Missing => {}
         }
@@ -323,7 +393,9 @@ fn validate_projection_input(input: &CatalogProjectionInput<'_>) -> Result<(), P
             CatalogSource::Cloud
         }
     };
-    if matches!(source, CatalogSource::Cloud) && !input.selected.is_empty() {
+    if matches!(source, CatalogSource::Cloud)
+        && (input.selection_mode || !input.selected.is_empty())
+    {
         return Err(PresentationError::Invalid {
             field: "projection.cloud_selection",
         });
@@ -585,7 +657,7 @@ fn project_local_row(
     let matched_upload = input
         .uploads
         .iter()
-        .find(|upload| ClipPathIdentity::from_text(&upload.path).as_ref() == Some(&path));
+        .find(|upload| upload.token.source_path == path);
     let poster = input
         .posters
         .get(&path)
@@ -620,9 +692,9 @@ fn project_local_row(
             .filter(|name| !name.is_empty()),
         marker_badge,
         outcome_badge: (!outcome_badge.is_empty()).then_some(outcome_badge),
-        upload_badge: matched_upload.map(|upload| upload.upload_status.clone()),
+        upload_badge: matched_upload.map(|upload| upload.summary.upload_status.clone()),
         poster,
-        warning: matched_upload.and_then(|upload| upload.error.clone()),
+        warning: matched_upload.and_then(|upload| upload.summary.error.clone()),
     };
     validate_presentation_row(&row)?;
     Ok(row)
@@ -642,6 +714,13 @@ fn project_cloud_row(
         account_generation: owner.account_generation,
         remote_clip_id,
     };
+    let descriptor = CloudThumbnailDescriptor::new(identity.clone(), item.updated_at_unix)
+        .map_err(bounds_to_presentation)?;
+    let poster = input
+        .cloud_posters
+        .get(&descriptor)
+        .map(presentation_poster)
+        .unwrap_or(PresentationPoster::Missing);
     let row = PresentationRow {
         identity: identity.clone(),
         path: item.path.clone(),
@@ -661,7 +740,7 @@ fn project_cloud_row(
         marker_badge: None,
         outcome_badge: None,
         upload_badge: Some(item.upload_status.trim().to_owned()),
-        poster: PresentationPoster::Missing,
+        poster,
         warning: None,
     };
     validate_presentation_row(&row)?;

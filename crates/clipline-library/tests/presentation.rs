@@ -2,17 +2,19 @@ use std::collections::BTreeMap;
 
 use clipline_library::{
     build_catalog_projection, gallery_card_preview, marker_digest, marker_style, AssetAlias,
-    CatalogDialogAudioTrackProjection, CatalogDialogKind, CatalogDialogProjection,
+    CatalogAction, CatalogDialogAudioTrackProjection, CatalogDialogKind, CatalogDialogProjection,
     CatalogItemIdentity, CatalogLoadState, CatalogMenuProjection, CatalogProjectionInput,
-    CatalogProjectionSource, CatalogRevision, CatalogUploadVisibility, ClipGame,
-    CloudAccountGeneration, CloudAccountKey, CloudCatalogOwner, CloudLibraryItem, CloudPageNumber,
+    CatalogProjectionSource, CatalogRevision, CatalogUploadProjection, CatalogUploadVisibility,
+    ClipGame, ClipPathIdentity, CloudAccountGeneration, CloudAccountKey, CloudCatalogOwner,
+    CloudLibraryItem, CloudPageNumber, CloudThumbnailDescriptor, DurableUploadToken,
     GalleryCardConfig, GalleryCardIconConfig, GalleryCardInput, GalleryCardStat,
     GalleryCardTitleFormat, GalleryCardTitlePolicy, GalleryMarker, GalleryPlay,
-    GalleryPresentation, GallerySummaryMode, LocalClipGrouping, LocalClipItem, LocalDay,
-    LocalDayResolver, LocalGalleryOptions, LocalPageIndex, MarkerCategoryPresentation,
+    GalleryPresentation, GallerySummaryMode, LocalClipGrouping, LocalClipId, LocalClipItem,
+    LocalDay, LocalDayResolver, LocalGalleryOptions, LocalPageIndex, MarkerCategoryPresentation,
     MarkerKindPresentation, MarkerPresentation, MarkerSidecarSummary, PlayOutcomeSummary,
-    PlayerCardSummary, PosterStatus, PresentationError, ProjectionReservation,
-    SystemProjectionReservation, UploadSummary, MAX_CATALOG_PAGE_ROWS, MAX_LOCAL_INDEX_ROWS,
+    PlayerCardSummary, PosterStatus, PresentationError, PresentationPoster, ProjectionReservation,
+    RemoteClipId, SystemProjectionReservation, UploadGeneration, UploadSummary,
+    MAX_CATALOG_PAGE_ROWS, MAX_LOCAL_INDEX_ROWS,
 };
 
 struct FailingProjectionReservation {
@@ -96,8 +98,11 @@ fn local_projection(
             },
             gallery: &GalleryPresentation::default(),
             selected: &selected,
+            selection_mode: !selected.is_empty(),
+            cloud_query: "",
             active: None,
             posters: &posters,
+            cloud_posters: &BTreeMap::new(),
             menu: None,
             dialog: None,
             uploads: &[],
@@ -423,8 +428,11 @@ fn group_spans_reference_rows_without_duplicating_item_arrays() {
             },
             gallery: &GalleryPresentation::default(),
             selected: &selected,
+            selection_mode: !selected.is_empty(),
+            cloud_query: "",
             active: None,
             posters: &posters,
+            cloud_posters: &BTreeMap::new(),
             menu: None,
             dialog: None,
             uploads: &[],
@@ -493,8 +501,11 @@ fn compact_local_projection_formats_aggregate_play_outcomes_without_fake_play_ro
             },
             gallery: &presentation,
             selected: &selected,
+            selection_mode: !selected.is_empty(),
+            cloud_query: "",
             active: selected.first(),
             posters: &posters,
+            cloud_posters: &BTreeMap::new(),
             menu: None,
             dialog: None,
             uploads: &[],
@@ -520,7 +531,7 @@ fn compact_local_projection_formats_aggregate_play_outcomes_without_fake_play_ro
 }
 
 #[test]
-fn projection_retains_exactly_one_menu_dialog_and_sixteen_or_fewer_upload_summaries() {
+fn projection_retains_exactly_one_menu_dialog_and_sixteen_or_fewer_exact_uploads() {
     let item = local_clip(7);
     let identity = CatalogItemIdentity::Local {
         path: item.path_identity().unwrap(),
@@ -559,7 +570,7 @@ fn projection_retains_exactly_one_menu_dialog_and_sixteen_or_fewer_upload_summar
         ],
         delete_local_after_upload: true,
     };
-    let upload = UploadSummary {
+    let upload_summary = UploadSummary {
         local_clip_id: "local-7".into(),
         path: item.path.clone(),
         upload_status: "uploading".into(),
@@ -569,6 +580,17 @@ fn projection_retains_exactly_one_menu_dialog_and_sixteen_or_fewer_upload_summar
         remote_url: None,
         error: None,
     };
+    let upload = CatalogUploadProjection::new(
+        DurableUploadToken {
+            account_key: CloudAccountKey::new("account-a").unwrap(),
+            account_generation: CloudAccountGeneration::new(9),
+            upload_generation: UploadGeneration::new(12),
+            local_clip_id: LocalClipId::new("local-7").unwrap(),
+            source_path: ClipPathIdentity::from_text(&item.path).unwrap(),
+        },
+        upload_summary,
+    )
+    .unwrap();
     let options = LocalGalleryOptions {
         grouping: LocalClipGrouping::None,
         ..LocalGalleryOptions::default()
@@ -585,8 +607,11 @@ fn projection_retains_exactly_one_menu_dialog_and_sixteen_or_fewer_upload_summar
         },
         gallery: &gallery,
         selected: &selected,
+        selection_mode: !selected.is_empty(),
+        cloud_query: "cloud query",
         active: None,
         posters: &posters,
+        cloud_posters: &BTreeMap::new(),
         menu: Some(&menu),
         dialog: Some(&dialog),
         uploads: std::slice::from_ref(&upload),
@@ -617,6 +642,13 @@ fn projection_retains_exactly_one_menu_dialog_and_sixteen_or_fewer_upload_summar
     assert_eq!(projection.menu.as_ref(), Some(&menu));
     assert_eq!(projection.dialog.as_ref(), Some(&dialog));
     assert_eq!(projection.uploads.as_slice(), std::slice::from_ref(&upload));
+    assert_eq!(
+        projection.cancel_upload_action(0),
+        Some(CatalogAction::CancelUpload {
+            token: upload.token.clone()
+        })
+    );
+    assert_eq!(projection.cancel_upload_action(1), None);
     assert_eq!(
         projection.rows[0].upload_badge.as_deref(),
         Some("uploading")
@@ -660,6 +692,30 @@ fn cloud_projection_keeps_server_paging_truth_without_inventing_totals() {
         .collect::<Vec<_>>();
     let selected = Vec::new();
     let posters = BTreeMap::new();
+    let first_identity = CatalogItemIdentity::Cloud {
+        account_key: owner.account_key.clone(),
+        account_generation: owner.account_generation,
+        remote_clip_id: RemoteClipId::new("remote-0").unwrap(),
+    };
+    let second_identity = CatalogItemIdentity::Cloud {
+        account_key: owner.account_key.clone(),
+        account_generation: owner.account_generation,
+        remote_clip_id: RemoteClipId::new("remote-1").unwrap(),
+    };
+    let cloud_posters = BTreeMap::from([
+        (
+            CloudThumbnailDescriptor::new(first_identity, 1).unwrap(),
+            PosterStatus::Ready {
+                path: r"C:\Cache\remote-0-1.jpg".into(),
+            },
+        ),
+        (
+            CloudThumbnailDescriptor::new(second_identity, 0).unwrap(),
+            PosterStatus::Failed {
+                message: "stale version".into(),
+            },
+        ),
+    ]);
     let projection = build_catalog_projection(
         &CatalogProjectionInput {
             revision: CatalogRevision::new(2),
@@ -671,8 +727,11 @@ fn cloud_projection_keeps_server_paging_truth_without_inventing_totals() {
             },
             gallery: &GalleryPresentation::default(),
             selected: &selected,
+            selection_mode: !selected.is_empty(),
+            cloud_query: "cloud query",
             active: None,
             posters: &posters,
+            cloud_posters: &cloud_posters,
             menu: None,
             dialog: None,
             uploads: &[],
@@ -685,9 +744,19 @@ fn cloud_projection_keeps_server_paging_truth_without_inventing_totals() {
     assert_eq!(projection.page.page, 3);
     assert_eq!(projection.page.page_count, None);
     assert_eq!(projection.page.total, None);
+    assert_eq!(projection.controls.query, "cloud query");
+    assert!(!projection.controls.local_controls_visible);
+    assert!(!projection.controls.selection_mode);
     assert_eq!(projection.page.range_text, "121–122");
     assert!(projection.page.has_previous);
     assert!(!projection.page.has_next);
+    assert_eq!(
+        projection.rows[0].poster,
+        PresentationPoster::Ready {
+            path: r"C:\Cache\remote-0-1.jpg".into()
+        }
+    );
+    assert_eq!(projection.rows[1].poster, PresentationPoster::Missing);
     assert!(matches!(
         &projection.rows[0].identity,
         CatalogItemIdentity::Cloud { account_generation, .. }
@@ -741,8 +810,11 @@ fn cloud_projection_rejects_selection_wrong_source_and_wrong_account_owners() {
                 },
                 gallery: &gallery,
                 selected,
+                selection_mode: !selected.is_empty(),
+                cloud_query: "cloud query",
                 active,
                 posters: &posters,
+                cloud_posters: &BTreeMap::new(),
                 menu,
                 dialog,
                 uploads: &[],
@@ -834,8 +906,11 @@ fn empty_loading_error_and_disconnected_local_states_keep_an_explicit_zero_range
                 },
                 gallery: &gallery,
                 selected: &selected,
+                selection_mode: !selected.is_empty(),
+                cloud_query: "",
                 active: None,
                 posters: &posters,
+                cloud_posters: &BTreeMap::new(),
                 menu: None,
                 dialog: None,
                 uploads: &[],
@@ -872,8 +947,11 @@ fn an_empty_nonfirst_cloud_page_is_not_projected_as_accepted_data() {
                 },
                 gallery: &GalleryPresentation::default(),
                 selected: &selected,
+                selection_mode: !selected.is_empty(),
+                cloud_query: "cloud query",
                 active: None,
                 posters: &posters,
+                cloud_posters: &BTreeMap::new(),
                 menu: None,
                 dialog: None,
                 uploads: &[],
@@ -898,8 +976,11 @@ fn disconnected_cloud_projection_is_empty_and_rejects_owned_targets() {
             source: CatalogProjectionSource::CloudDisconnected,
             gallery: &GalleryPresentation::default(),
             selected: &selected,
+            selection_mode: !selected.is_empty(),
+            cloud_query: "cloud query",
             active: None,
             posters: &posters,
+            cloud_posters: &BTreeMap::new(),
             menu: None,
             dialog: None,
             uploads: &[],
@@ -930,8 +1011,11 @@ fn disconnected_cloud_projection_is_empty_and_rejects_owned_targets() {
                 source: CatalogProjectionSource::CloudDisconnected,
                 gallery: &GalleryPresentation::default(),
                 selected: &selected,
+                selection_mode: !selected.is_empty(),
+                cloud_query: "cloud query",
                 active: Some(&target),
                 posters: &posters,
+                cloud_posters: &BTreeMap::new(),
                 menu: None,
                 dialog: None,
                 uploads: &[],
@@ -975,8 +1059,11 @@ fn projection_rejects_invalid_bounds_and_injected_reservation_failure_atomically
                 },
                 gallery: &GalleryPresentation::default(),
                 selected: &duplicate_selection,
+                selection_mode: true,
+                cloud_query: "",
                 active: None,
                 posters: &posters,
+                cloud_posters: &BTreeMap::new(),
                 menu: None,
                 dialog: None,
                 uploads: &[],

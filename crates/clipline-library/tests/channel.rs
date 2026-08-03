@@ -3,12 +3,12 @@ use clipline_library::{
     CatalogResultPublishOutcome, CatalogRevision, ClipDetail, ClipDetailRequest, ClipDetailResult,
     ClipPathIdentity, CloudAccountGeneration, CloudAccountKey, CloudLibraryItem,
     CloudListPageCompletion, CloudMediaLeaseId, CloudNextPage, CloudPageNumber, CloudPageOutcome,
-    CloudReviewMediaOwner, CloudWorkToken, DeletedClipsReport, DurableUploadToken,
-    ExpectedResultOwner, ForegroundGeneration, LocalClipId, LocalClipItem, LocalIndexCompletion,
-    PosterGeneration, PosterResult, PosterStatus, PosterWorkToken, PreparedCloudReviewMedia,
-    RemoteClipId, RequestGeneration, ResultPortError, UploadDialogSummary, UploadGeneration,
-    UploadSummary, WindowAttachmentGeneration, WindowWorkToken, CATALOG_RESULT_BYTE_CAPACITY,
-    CATALOG_RESULT_CAPACITY,
+    CloudReviewMediaOwner, CloudThumbnailDescriptor, CloudThumbnailOwner, CloudWorkToken,
+    DeletedClipsReport, DurableUploadToken, ExpectedResultOwner, ForegroundGeneration, LocalClipId,
+    LocalClipItem, LocalIndexCompletion, PosterGeneration, PosterResult, PosterStatus,
+    PosterWorkToken, PreparedCloudReviewMedia, RemoteClipId, RequestGeneration, ResultPortError,
+    UploadDialogSummary, UploadGeneration, UploadSummary, WindowAttachmentGeneration,
+    WindowWorkToken, CATALOG_RESULT_BYTE_CAPACITY, CATALOG_RESULT_CAPACITY,
 };
 
 fn window(request: u64) -> WindowWorkToken {
@@ -113,6 +113,22 @@ fn cloud_page(token: CloudWorkToken, page: u32, item_count: usize) -> CatalogRes
         )
         .unwrap(),
     )
+}
+
+fn cloud_thumbnail_owner(
+    account: &str,
+    account_generation: u64,
+    request: u64,
+    remote_clip_id: &str,
+    version: u64,
+) -> CloudThumbnailOwner {
+    let token = cloud(account, account_generation, request);
+    let item = CatalogItemIdentity::Cloud {
+        account_key: token.account_key.clone(),
+        account_generation: token.account_generation,
+        remote_clip_id: RemoteClipId::new(remote_clip_id).unwrap(),
+    };
+    CloudThumbnailOwner::new(token, CloudThumbnailDescriptor::new(item, version).unwrap()).unwrap()
 }
 
 fn clip_detail(request: &ClipDetailRequest, digest: &str) -> CatalogResult {
@@ -239,6 +255,78 @@ fn poster_replacement_is_scoped_to_token_and_path() {
         Ok(CatalogResultPublishOutcome::Replaced)
     );
     assert_eq!(receiver.len(), 1);
+}
+
+#[test]
+fn cloud_thumbnail_results_coalesce_only_for_the_exact_account_window_item_and_version() {
+    let (sender, receiver) = catalog_result_channel();
+    let exact = cloud_thumbnail_owner("account-a", 3, 5, "remote-a", 44);
+    sender
+        .try_send(
+            CatalogResult::CloudThumbnail {
+                owner: exact.clone(),
+                status: PosterStatus::Queued,
+            },
+            ExpectedResultOwner::CloudThumbnail(exact.clone()),
+        )
+        .unwrap();
+    assert_eq!(
+        sender.try_send(
+            CatalogResult::CloudThumbnail {
+                owner: exact.clone(),
+                status: PosterStatus::Ready {
+                    path: r"C:\Cache\remote-a-44.jpg".into(),
+                },
+            },
+            ExpectedResultOwner::CloudThumbnail(exact.clone()),
+        ),
+        Ok(CatalogResultPublishOutcome::Replaced)
+    );
+
+    let next_version = cloud_thumbnail_owner("account-a", 3, 5, "remote-a", 45);
+    assert_eq!(
+        sender.try_send(
+            CatalogResult::CloudThumbnail {
+                owner: next_version.clone(),
+                status: PosterStatus::Missing,
+            },
+            ExpectedResultOwner::CloudThumbnail(exact.clone()),
+        ),
+        Err(ResultPortError::Stale)
+    );
+    sender
+        .try_send(
+            CatalogResult::CloudThumbnail {
+                owner: next_version.clone(),
+                status: PosterStatus::Missing,
+            },
+            ExpectedResultOwner::CloudThumbnail(next_version),
+        )
+        .unwrap();
+    assert_eq!(receiver.len(), 2, "different versions never coalesce");
+
+    let stale_window = cloud_thumbnail_owner("account-a", 3, 6, "remote-a", 44);
+    assert_eq!(
+        sender.try_send(
+            CatalogResult::CloudThumbnail {
+                owner: stale_window,
+                status: PosterStatus::Missing,
+            },
+            ExpectedResultOwner::CloudThumbnail(exact.clone()),
+        ),
+        Err(ResultPortError::Stale)
+    );
+    let wrong_account = cloud_thumbnail_owner("account-b", 4, 5, "remote-a", 44);
+    assert_eq!(
+        sender.try_send(
+            CatalogResult::CloudThumbnail {
+                owner: wrong_account,
+                status: PosterStatus::Missing,
+            },
+            ExpectedResultOwner::CloudThumbnail(exact),
+        ),
+        Err(ResultPortError::AccountChanged)
+    );
 }
 
 #[test]

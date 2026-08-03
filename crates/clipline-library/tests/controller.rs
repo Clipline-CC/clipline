@@ -19,15 +19,19 @@ use std::sync::{
 };
 
 use clipline_library::{
-    CatalogAction, CatalogController, CatalogEffect, CatalogItemIdentity, CatalogLoadState,
-    CatalogOperationOwner, CatalogResult, CatalogRevision, CatalogSource, ClipDetailRequest,
-    ClipPathIdentity, CloudAccountGeneration, CloudAccountKey, CloudCatalogOwner, CloudLibraryItem,
+    CatalogAction, CatalogCloudPreferences, CatalogController, CatalogEffect, CatalogItemIdentity,
+    CatalogLoadState, CatalogOperationOwner, CatalogResult, CatalogRevision, CatalogSource,
+    CatalogUploadVisibility, ClipDetail, ClipDetailRequest, ClipDetailResult, ClipPathIdentity,
+    CloudAccountGeneration, CloudAccountKey, CloudCatalogOwner, CloudLibraryItem,
     CloudListPageCompletion, CloudMediaLeaseId, CloudPageNumber, CloudReviewMediaOwner,
-    CloudWorkToken, DeletedClipsReport, ForegroundGeneration, LocalClipGrouping, LocalClipItem,
+    CloudThumbnailDescriptor, CloudThumbnailOwner, CloudWorkToken, DeletedClipsReport,
+    DurableUploadToken, ForegroundGeneration, LocalClipGrouping, LocalClipId, LocalClipItem,
     LocalDay, LocalDayResolver, LocalIndexCompletion, LocalPageIndex, PosterGeneration,
     PosterResult, PosterStatus, PosterWorkToken, PreparedCloudReviewMedia, PresentationError,
-    PresentationPoster, ProjectionReservation, RemoteClipId, RenamedClipInfo,
-    WindowAttachmentGeneration, WindowWorkToken, MAX_LOCAL_INDEX_ROWS, MAX_POSTER_RESULT_ENTRIES,
+    PresentationPoster, ProjectionReservation, RemoteClipId, RenamedClipInfo, RequestGeneration,
+    UploadDialogSummary, UploadGeneration, UploadSummary, WindowAttachmentGeneration,
+    WindowWorkToken, MAX_CATALOG_EFFECTS_PER_UPDATE, MAX_CLOUD_THUMBNAIL_REQUESTS_PER_UPDATE,
+    MAX_LOCAL_INDEX_ROWS, MAX_POSTER_RESULT_ENTRIES, MAX_UPLOAD_SUMMARIES,
 };
 
 #[derive(Clone, Copy)]
@@ -143,6 +147,29 @@ fn cloud_item(id: &str) -> CloudLibraryItem {
         duration_ms: Some(1_000),
         file_size_bytes: Some(1_024),
         source_type: Some("replay".into()),
+    }
+}
+
+fn upload_token(index: usize, generation: u64) -> DurableUploadToken {
+    DurableUploadToken {
+        account_key: CloudAccountKey::new("account-a").unwrap(),
+        account_generation: CloudAccountGeneration::new(9),
+        upload_generation: UploadGeneration::new(generation),
+        local_clip_id: LocalClipId::new(format!("local-{index}")).unwrap(),
+        source_path: ClipPathIdentity::from_text(&local_item(index).path).unwrap(),
+    }
+}
+
+fn upload_summary(index: usize, status: &str) -> UploadSummary {
+    UploadSummary {
+        local_clip_id: format!("local-{index}"),
+        path: local_item(index).path,
+        upload_status: status.to_owned(),
+        received_size_bytes: 512,
+        file_size_bytes: 1_024,
+        remote_clip_id: None,
+        remote_url: None,
+        error: None,
     }
 }
 
@@ -870,10 +897,13 @@ fn cloud_completion_accepts_only_the_exact_current_owner_revision_and_request() 
         Vec::new(),
     )
     .unwrap();
-    assert!(controller
-        .accept(CatalogResult::CloudPage(exact))
-        .unwrap()
-        .is_empty());
+    assert!(matches!(
+        controller
+            .accept(CatalogResult::CloudPage(exact))
+            .unwrap()
+            .as_slice(),
+        [CatalogEffect::LoadCloudThumbnail { .. }]
+    ));
     assert_eq!(controller.state().projection.rows.len(), 1);
     assert_eq!(
         controller.state().projection.rows[0].identity,
@@ -883,6 +913,121 @@ fn cloud_completion_accepts_only_the_exact_current_owner_revision_and_request() 
             remote_clip_id: RemoteClipId::new("remote-a").unwrap(),
         }
     );
+}
+
+#[test]
+fn accepted_cloud_page_issues_versioned_bounded_thumbnail_work_and_rejects_stale_results() {
+    let mut controller = controller();
+    seed_local(&mut controller, vec![local_item(0)]);
+    let owner = cloud_owner("account-a", 7);
+    controller.set_cloud_owner(Some(owner)).unwrap();
+    let (token, revision, page) = only_cloud_refresh(
+        controller
+            .dispatch(CatalogAction::SetSource {
+                source: CatalogSource::Cloud,
+            })
+            .unwrap(),
+    );
+    let items = (0..MAX_CLOUD_THUMBNAIL_REQUESTS_PER_UPDATE)
+        .map(|index| {
+            let mut item = cloud_item(&format!("remote-{index}"));
+            item.updated_at_unix = 10_000 + index as u64;
+            item
+        })
+        .collect();
+    let effects = controller
+        .accept(CatalogResult::CloudPage(
+            CloudListPageCompletion::page(token.clone(), revision, page, items, Vec::new())
+                .unwrap(),
+        ))
+        .unwrap();
+    assert_eq!(effects.len(), MAX_CLOUD_THUMBNAIL_REQUESTS_PER_UPDATE);
+    assert!(effects.len() <= MAX_CATALOG_EFFECTS_PER_UPDATE);
+    let first = match &effects[0] {
+        CatalogEffect::LoadCloudThumbnail { request } => {
+            assert_eq!(request.owner.token, token);
+            assert_eq!(request.owner.descriptor.version, 10_000);
+            request.owner.clone()
+        }
+        other => panic!("expected thumbnail effect, got {other:?}"),
+    };
+    assert!(controller
+        .state()
+        .projection
+        .rows
+        .iter()
+        .all(|row| row.poster == PresentationPoster::Queued));
+
+    controller
+        .accept(CatalogResult::CloudThumbnail {
+            owner: first.clone(),
+            status: PosterStatus::Queued,
+        })
+        .unwrap();
+    controller
+        .accept(CatalogResult::CloudThumbnail {
+            owner: first.clone(),
+            status: PosterStatus::Ready {
+                path: r"C:\Cache\cloud-thumb.jpg".into(),
+            },
+        })
+        .unwrap();
+    assert_eq!(
+        controller.state().projection.rows[0].poster,
+        PresentationPoster::Ready {
+            path: r"C:\Cache\cloud-thumb.jpg".into()
+        }
+    );
+
+    let checkpoint = controller.state().clone();
+    let stale_version = CloudThumbnailOwner::new(
+        first.token.clone(),
+        CloudThumbnailDescriptor::new(first.descriptor.item.clone(), 9_999).unwrap(),
+    )
+    .unwrap();
+    assert!(controller
+        .accept(CatalogResult::CloudThumbnail {
+            owner: stale_version,
+            status: PosterStatus::Missing,
+        })
+        .unwrap()
+        .is_empty());
+    assert_eq!(controller.state(), &checkpoint);
+
+    let mut stale_window_token = first.token.clone();
+    stale_window_token.window.request = RequestGeneration::new(999);
+    let stale_window =
+        CloudThumbnailOwner::new(stale_window_token, first.descriptor.clone()).unwrap();
+    assert!(controller
+        .accept(CatalogResult::CloudThumbnail {
+            owner: stale_window,
+            status: PosterStatus::Missing,
+        })
+        .unwrap()
+        .is_empty());
+    assert_eq!(controller.state(), &checkpoint);
+
+    let stale_account_item = CatalogItemIdentity::Cloud {
+        account_key: CloudAccountKey::new("account-b").unwrap(),
+        account_generation: CloudAccountGeneration::new(8),
+        remote_clip_id: RemoteClipId::new("remote-0").unwrap(),
+    };
+    let mut stale_account_token = first.token;
+    stale_account_token.account_key = CloudAccountKey::new("account-b").unwrap();
+    stale_account_token.account_generation = CloudAccountGeneration::new(8);
+    let stale_account = CloudThumbnailOwner::new(
+        stale_account_token,
+        CloudThumbnailDescriptor::new(stale_account_item, 10_000).unwrap(),
+    )
+    .unwrap();
+    assert!(controller
+        .accept(CatalogResult::CloudThumbnail {
+            owner: stale_account,
+            status: PosterStatus::Missing,
+        })
+        .unwrap()
+        .is_empty());
+    assert_eq!(controller.state(), &checkpoint);
 }
 
 #[test]
@@ -1103,6 +1248,58 @@ fn exact_detail_rename_and_delete_failures_clear_only_the_matching_pending_opera
 }
 
 #[test]
+fn upload_detail_uses_the_accepted_title_and_saved_cloud_preferences() {
+    let mut controller = controller();
+    seed_local(&mut controller, vec![local_item(0)]);
+    controller
+        .set_cloud_context(
+            Some(cloud_owner("account-a", 9)),
+            CatalogCloudPreferences {
+                default_visibility: CatalogUploadVisibility::Unlisted,
+                delete_local_after_upload: true,
+            },
+        )
+        .unwrap();
+
+    let effect = only_effect(
+        controller
+            .dispatch(CatalogAction::OpenUpload {
+                item: local_identity(0),
+            })
+            .unwrap(),
+    );
+    let request = match effect {
+        CatalogEffect::LoadClipDetail {
+            request,
+            title,
+            description,
+            ..
+        } => {
+            assert_eq!(title, "Clip 00000");
+            assert!(description.is_empty());
+            request
+        }
+        other => panic!("expected detail effect, got {other:?}"),
+    };
+    let detail = ClipDetail::new(
+        0,
+        Vec::new(),
+        "",
+        Vec::new(),
+        UploadDialogSummary::new("Clip 00000", "", "", "").unwrap(),
+    )
+    .unwrap();
+    controller
+        .accept(CatalogResult::ClipDetail(ClipDetailResult::new(
+            &request, detail,
+        )))
+        .unwrap();
+    let dialog = controller.state().dialog.as_ref().unwrap();
+    assert_eq!(dialog.visibility, Some(CatalogUploadVisibility::Unlisted));
+    assert!(dialog.delete_local_after_upload);
+}
+
+#[test]
 fn cloud_review_preparation_releases_stale_leases_and_retains_exact_lease_until_close() {
     let mut controller = controller();
     let item = seed_cloud(&mut controller, "account-a");
@@ -1112,7 +1309,11 @@ fn cloud_review_preparation_releases_stale_leases_and_retains_exact_lease_until_
             .unwrap(),
     );
     let exact_owner = match prepare {
-        CatalogEffect::PrepareCloudReviewMedia { owner } => owner,
+        CatalogEffect::PrepareCloudReviewMedia { request } => {
+            assert_eq!(request.version, 1);
+            assert_eq!(request.expected_size_bytes, Some(1_024));
+            request.owner
+        }
         other => panic!("expected media preparation, got {other:?}"),
     };
     let stale_owner = CloudReviewMediaOwner::new(
@@ -1186,7 +1387,7 @@ fn prepared_cloud_media_is_released_when_final_projection_publication_fails() {
             .unwrap(),
     );
     let owner = match prepare {
-        CatalogEffect::PrepareCloudReviewMedia { owner } => owner,
+        CatalogEffect::PrepareCloudReviewMedia { request } => request.owner,
         other => panic!("expected Cloud preparation, got {other:?}"),
     };
     let before = controller.state().clone();
@@ -1218,7 +1419,7 @@ fn cloud_review_detach_closes_and_releases_then_reattach_prepares_a_fresh_lease(
             .unwrap(),
     );
     let owner = match prepare {
-        CatalogEffect::PrepareCloudReviewMedia { owner } => owner,
+        CatalogEffect::PrepareCloudReviewMedia { request } => request.owner,
         other => panic!("expected Cloud preparation, got {other:?}"),
     };
     let media =
@@ -1247,8 +1448,13 @@ fn cloud_review_detach_closes_and_releases_then_reattach_prepares_a_fresh_lease(
             )
             .unwrap()
             .as_slice(),
-        [CatalogEffect::PrepareCloudReviewMedia { owner }]
-            if owner.item == item && owner.token.window.attachment == WindowAttachmentGeneration::new(2)
+        [
+            CatalogEffect::LoadCloudThumbnail { request: thumbnail },
+            CatalogEffect::PrepareCloudReviewMedia { request }
+        ]
+            if request.owner.item == item
+                && request.owner.token.window.attachment == WindowAttachmentGeneration::new(2)
+                && thumbnail.owner.token.window.attachment == WindowAttachmentGeneration::new(2)
     ));
 }
 
@@ -1522,4 +1728,77 @@ fn delete_selection_resolves_sorted_off_page_identities_without_using_visible_ro
         ),
         other => panic!("expected delete effect, got {other:?}"),
     }
+}
+
+#[test]
+fn upload_projection_retains_exact_tokens_updates_badges_and_maps_cancel_by_index() {
+    let mut controller = controller();
+    seed_local(
+        &mut controller,
+        (0..=MAX_UPLOAD_SUMMARIES).map(local_item).collect(),
+    );
+
+    for index in 0..=MAX_UPLOAD_SUMMARIES {
+        controller
+            .accept(CatalogResult::UploadByteProgress {
+                token: upload_token(index, index as u64 + 1),
+                progress: upload_summary(index, "uploading"),
+            })
+            .unwrap();
+    }
+
+    let projection = &controller.state().projection;
+    assert_eq!(projection.uploads.len(), MAX_UPLOAD_SUMMARIES);
+    assert_eq!(projection.uploads[0].token, upload_token(1, 2));
+    assert_eq!(
+        projection.cancel_upload_action(0),
+        Some(CatalogAction::CancelUpload {
+            token: upload_token(1, 2)
+        })
+    );
+    assert_eq!(projection.cancel_upload_action(MAX_UPLOAD_SUMMARIES), None);
+    assert_eq!(
+        projection
+            .rows
+            .iter()
+            .find(|row| row.identity == local_identity(1))
+            .and_then(|row| row.upload_badge.as_deref()),
+        Some("uploading")
+    );
+
+    let exact = upload_token(1, 2);
+    controller
+        .accept(CatalogResult::UploadCompleted {
+            token: exact.clone(),
+            result: upload_summary(1, "ready"),
+        })
+        .unwrap();
+    let projection = &controller.state().projection;
+    assert_eq!(projection.uploads[0].token, exact);
+    assert_eq!(projection.uploads[0].summary.upload_status, "ready");
+    assert_eq!(
+        projection
+            .rows
+            .iter()
+            .find(|row| row.identity == local_identity(1))
+            .and_then(|row| row.upload_badge.as_deref()),
+        Some("ready")
+    );
+
+    let replacement = upload_token(1, 99);
+    controller
+        .accept(CatalogResult::UploadByteProgress {
+            token: replacement.clone(),
+            progress: upload_summary(1, "uploading-new"),
+        })
+        .unwrap();
+    let cancel = controller
+        .state()
+        .projection
+        .cancel_upload_action(0)
+        .unwrap();
+    assert_eq!(
+        only_effect(controller.dispatch(cancel).unwrap()),
+        CatalogEffect::CancelUpload { token: replacement }
+    );
 }

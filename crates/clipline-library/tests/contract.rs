@@ -2,19 +2,21 @@ use std::path::PathBuf;
 
 use clipline_library::{
     CatalogAction, CatalogEffect, CatalogItemIdentity, CatalogOperationOwner, CatalogPage,
-    CatalogResult, CatalogRevision, CatalogSource, CatalogUploadOptions, CatalogUploadVisibility,
-    ClipDetailRequest, ClipGame, ClipPathIdentity, CloudAccountGeneration, CloudAccountKey,
-    CloudAccountSnapshot, CloudCatalogOwner, CloudLibraryItem, CloudListPageCompletion,
-    CloudMediaLeaseId, CloudNextPage, CloudPageNumber, CloudPageOutcome, CloudReviewMediaOwner,
-    CloudWorkToken, DurableUploadToken, ForegroundGeneration, GenerationError, LocalClipFilter,
-    LocalClipGrouping, LocalClipId, LocalClipItem, LocalClipSort, LocalIndexCompletion,
-    LocalPageIndex, MutationFailure, MutationReport, PayloadBoundsError, PosterGeneration,
-    PreparedCloudReviewMedia, PresentationRow, RemoteClipId, RequestGeneration, ResolvedLocalClip,
-    UploadGeneration, UploadSummary, WindowAttachmentGeneration, WindowWorkToken,
-    MAX_CATALOG_IDENTITY_BYTES, MAX_CATALOG_PAGE_ROWS, MAX_CLOUD_INDEX_ROWS, MAX_CLOUD_SERVER_PAGE,
-    MAX_DECODED_PAGE_IMAGES, MAX_LOCAL_INDEX_PAYLOAD_BYTES, MAX_LOCAL_INDEX_ROWS,
-    MAX_MUTATION_ITEMS, MAX_MUTATION_PATH_BYTES, MAX_POSTER_RESULT_ENTRIES,
-    MAX_UPLOAD_DESCRIPTION_UTF16, MAX_UPLOAD_SUMMARIES, MAX_UPLOAD_TITLE_UTF16,
+    CatalogResult, CatalogRevision, CatalogSource, CatalogUploadOptions, CatalogUploadProjection,
+    CatalogUploadVisibility, ClipDetailRequest, ClipGame, ClipPathIdentity, CloudAccountGeneration,
+    CloudAccountKey, CloudAccountSnapshot, CloudCatalogOwner, CloudLibraryItem,
+    CloudListPageCompletion, CloudMediaLeaseId, CloudNextPage, CloudPageNumber, CloudPageOutcome,
+    CloudReviewMediaOwner, CloudReviewMediaRequest, CloudThumbnailDescriptor, CloudThumbnailOwner,
+    CloudThumbnailRequest, CloudWorkToken, DurableUploadToken, ForegroundGeneration,
+    GenerationError, LocalClipFilter, LocalClipGrouping, LocalClipId, LocalClipItem, LocalClipSort,
+    LocalIndexCompletion, LocalPageIndex, MutationFailure, MutationReport, PayloadBoundsError,
+    PosterGeneration, PosterStatus, PreparedCloudReviewMedia, PresentationRow, RemoteClipId,
+    RequestGeneration, ResolvedLocalClip, UploadGeneration, UploadSummary,
+    WindowAttachmentGeneration, WindowWorkToken, MAX_CATALOG_IDENTITY_BYTES, MAX_CATALOG_PAGE_ROWS,
+    MAX_CLOUD_INDEX_ROWS, MAX_CLOUD_SERVER_PAGE, MAX_DECODED_PAGE_IMAGES,
+    MAX_LOCAL_INDEX_PAYLOAD_BYTES, MAX_LOCAL_INDEX_ROWS, MAX_MUTATION_ITEMS,
+    MAX_MUTATION_PATH_BYTES, MAX_POSTER_RESULT_ENTRIES, MAX_UPLOAD_DESCRIPTION_UTF16,
+    MAX_UPLOAD_SUMMARIES, MAX_UPLOAD_TITLE_UTF16,
 };
 
 #[test]
@@ -328,6 +330,44 @@ fn page_action_upload_mutation_and_presentation_are_serializable() {
     let round_trip: CatalogPage<PresentationRow> =
         serde_json::from_value(serde_json::to_value(page).unwrap()).unwrap();
     assert_eq!(round_trip.items[0].title, "One");
+}
+
+#[test]
+fn upload_projection_pairs_the_exact_durable_token_with_its_summary() {
+    let token = DurableUploadToken {
+        account_key: CloudAccountKey::new("https://clips.example|user-7").unwrap(),
+        account_generation: CloudAccountGeneration::new(13),
+        upload_generation: UploadGeneration::new(21),
+        local_clip_id: LocalClipId::new("local-1").unwrap(),
+        source_path: ClipPathIdentity::from_text(r"C:\Clips\One.mp4").unwrap(),
+    };
+    let summary = UploadSummary {
+        local_clip_id: "local-1".into(),
+        path: r"C:\Clips\One.mp4".into(),
+        upload_status: "uploading".into(),
+        received_size_bytes: 5,
+        file_size_bytes: 10,
+        remote_clip_id: None,
+        remote_url: None,
+        error: None,
+    };
+
+    let projection = CatalogUploadProjection::new(token.clone(), summary.clone()).unwrap();
+    assert_eq!(projection.token, token);
+    assert_eq!(projection.summary, summary);
+    assert_eq!(
+        serde_json::to_value(&projection).unwrap()["token"]["upload_generation"],
+        21
+    );
+
+    let mut mismatched = projection.summary.clone();
+    mismatched.local_clip_id = "other".into();
+    assert_eq!(
+        CatalogUploadProjection::new(projection.token.clone(), mismatched),
+        Err(PayloadBoundsError::Invalid {
+            field: "upload.local_clip_id_mismatch"
+        })
+    );
 }
 
 #[test]
@@ -699,6 +739,8 @@ fn typed_effects_pin_exact_owners_and_resolved_paths() {
         token: window,
         request: request.clone(),
         target: target.clone(),
+        title: "One".into(),
+        description: String::new(),
     };
     assert_eq!(detail.validate_bounds(), Ok(()));
     let detail_json = serde_json::to_value(detail).unwrap();
@@ -714,6 +756,8 @@ fn typed_effects_pin_exact_owners_and_resolved_paths() {
             token: stale_window,
             request,
             target: target.clone(),
+            title: "One".into(),
+            description: String::new(),
         }
         .validate_bounds(),
         Err(PayloadBoundsError::Invalid {
@@ -826,6 +870,8 @@ fn fallible_effects_derive_exact_typed_operation_owners() {
             token: window,
             request: detail_request.clone(),
             target: target.clone(),
+            title: "One".into(),
+            description: String::new(),
         }
         .operation_owner(),
         Ok(Some(CatalogOperationOwner::ClipDetail {
@@ -883,10 +929,13 @@ fn cloud_review_media_requires_exact_account_window_item_and_lease() {
         CloudCatalogOwner::from_work_token(&cloud)
     );
 
+    let request = CloudReviewMediaRequest::new(owner.clone(), 1_731_234_567, Some(4_096)).unwrap();
     let prepare = CatalogEffect::PrepareCloudReviewMedia {
-        owner: owner.clone(),
+        request: request.clone(),
     };
     assert_eq!(prepare.validate_bounds(), Ok(()));
+    assert_eq!(request.version, 1_731_234_567);
+    assert_eq!(request.expected_size_bytes, Some(4_096));
     assert_eq!(
         prepare.operation_owner(),
         Ok(Some(CatalogOperationOwner::CloudReviewMedia {
@@ -982,6 +1031,65 @@ fn cloud_review_media_requires_exact_account_window_item_and_lease() {
             ..
         })
     ));
+}
+
+#[test]
+fn cloud_thumbnail_contract_pins_the_exact_account_window_item_and_version() {
+    let token = cloud_page_token();
+    let item = CatalogItemIdentity::Cloud {
+        account_key: token.account_key.clone(),
+        account_generation: token.account_generation,
+        remote_clip_id: RemoteClipId::new("remote-thumbnail").unwrap(),
+    };
+    let descriptor = CloudThumbnailDescriptor::new(item.clone(), 123_456).unwrap();
+    let owner = CloudThumbnailOwner::new(token.clone(), descriptor.clone()).unwrap();
+    let request = CloudThumbnailRequest::new(owner.clone()).unwrap();
+    let effect = CatalogEffect::LoadCloudThumbnail {
+        request: request.clone(),
+    };
+    assert_eq!(effect.validate_bounds(), Ok(()));
+    assert_eq!(effect.operation_owner(), Ok(None));
+    assert_eq!(request.owner.descriptor.version, 123_456);
+
+    let result = CatalogResult::CloudThumbnail {
+        owner: owner.clone(),
+        status: PosterStatus::Ready {
+            path: r"C:\Cache\remote-thumbnail-123456.jpg".into(),
+        },
+    };
+    assert_eq!(result.validate_bounds(), Ok(()));
+    assert!(!result.is_barrier());
+    let json = serde_json::to_value(&result).unwrap();
+    assert_eq!(json["kind"], "cloud_thumbnail");
+    assert_eq!(json["owner"]["descriptor"]["version"], 123_456);
+    let round_trip: CatalogResult = serde_json::from_value(json).unwrap();
+    assert_eq!(round_trip, result);
+
+    assert_eq!(
+        CloudThumbnailDescriptor::new(
+            CatalogItemIdentity::Local {
+                path: ClipPathIdentity::from_text(r"C:\Clips\local.mp4").unwrap(),
+            },
+            123_456,
+        ),
+        Err(PayloadBoundsError::Invalid {
+            field: "cloud_thumbnail.item",
+        })
+    );
+    let wrong_item = CatalogItemIdentity::Cloud {
+        account_key: CloudAccountKey::new("replacement").unwrap(),
+        account_generation: token.account_generation,
+        remote_clip_id: RemoteClipId::new("remote-thumbnail").unwrap(),
+    };
+    assert_eq!(
+        CloudThumbnailOwner::new(
+            token,
+            CloudThumbnailDescriptor::new(wrong_item, 123_456).unwrap(),
+        ),
+        Err(PayloadBoundsError::Invalid {
+            field: "cloud_item.owner",
+        })
+    );
 }
 
 #[test]

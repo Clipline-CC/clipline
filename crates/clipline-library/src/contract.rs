@@ -338,6 +338,109 @@ pub struct CloudReviewMediaOwner {
     pub item: CatalogItemIdentity,
 }
 
+/// Stable cache identity for one Cloud thumbnail revision.
+///
+/// The version is copied from the accepted Cloud row's `updated_at_unix`.
+/// Keeping it in the descriptor prevents a cached thumbnail from surviving a
+/// server-side replacement of the same remote clip id.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct CloudThumbnailDescriptor {
+    pub item: CatalogItemIdentity,
+    pub version: u64,
+}
+
+impl CloudThumbnailDescriptor {
+    pub fn new(item: CatalogItemIdentity, version: u64) -> Result<Self, PayloadBoundsError> {
+        let descriptor = Self { item, version };
+        descriptor.validate_bounds()?;
+        Ok(descriptor)
+    }
+
+    pub fn validate_bounds(&self) -> Result<(), PayloadBoundsError> {
+        if self.item.source() != CatalogSource::Cloud {
+            return Err(PayloadBoundsError::Invalid {
+                field: "cloud_thumbnail.item",
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Exact owner executors must echo for a Cloud thumbnail completion.
+///
+/// The stable descriptor fences the account and asset version; the work token
+/// additionally fences the window attachment, foreground, and request.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CloudThumbnailOwner {
+    pub token: CloudWorkToken,
+    pub descriptor: CloudThumbnailDescriptor,
+}
+
+impl CloudThumbnailOwner {
+    pub fn new(
+        token: CloudWorkToken,
+        descriptor: CloudThumbnailDescriptor,
+    ) -> Result<Self, PayloadBoundsError> {
+        let owner = Self { token, descriptor };
+        owner.validate_bounds()?;
+        Ok(owner)
+    }
+
+    pub fn validate_bounds(&self) -> Result<(), PayloadBoundsError> {
+        self.descriptor.validate_bounds()?;
+        validate_cloud_item_owner(&self.descriptor.item, &self.token)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CloudThumbnailRequest {
+    pub owner: CloudThumbnailOwner,
+}
+
+impl CloudThumbnailRequest {
+    pub fn new(owner: CloudThumbnailOwner) -> Result<Self, PayloadBoundsError> {
+        let request = Self { owner };
+        request.validate_bounds()?;
+        Ok(request)
+    }
+
+    pub fn validate_bounds(&self) -> Result<(), PayloadBoundsError> {
+        self.owner.validate_bounds()
+    }
+}
+
+/// Versioned cache request for one accepted Cloud media row.
+///
+/// The asset version and expected byte size are copied from the exact row the
+/// controller resolved. Executors must not invent a version (for example `0`)
+/// because doing so can reuse media from an older server revision.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CloudReviewMediaRequest {
+    pub owner: CloudReviewMediaOwner,
+    pub version: u64,
+    pub expected_size_bytes: Option<u64>,
+}
+
+impl CloudReviewMediaRequest {
+    pub fn new(
+        owner: CloudReviewMediaOwner,
+        version: u64,
+        expected_size_bytes: Option<u64>,
+    ) -> Result<Self, PayloadBoundsError> {
+        let request = Self {
+            owner,
+            version,
+            expected_size_bytes,
+        };
+        request.validate_bounds()?;
+        Ok(request)
+    }
+
+    pub fn validate_bounds(&self) -> Result<(), PayloadBoundsError> {
+        self.owner.validate_bounds()
+    }
+}
+
 impl CloudReviewMediaOwner {
     pub fn new(
         token: CloudWorkToken,
@@ -775,6 +878,42 @@ impl UploadSummary {
         }
         if let Some(error) = &self.error {
             check_string("upload.error", error)?;
+        }
+        Ok(())
+    }
+}
+
+/// One bounded upload row paired with the exact durable job identity that may
+/// be canceled. Keeping the token beside the summary prevents UI adapters from
+/// rebuilding upload authority from paths or process-local shadow state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CatalogUploadProjection {
+    pub token: DurableUploadToken,
+    pub summary: UploadSummary,
+}
+
+impl CatalogUploadProjection {
+    pub fn new(
+        token: DurableUploadToken,
+        summary: UploadSummary,
+    ) -> Result<Self, PayloadBoundsError> {
+        let projection = Self { token, summary };
+        projection.validate_bounds()?;
+        Ok(projection)
+    }
+
+    pub fn validate_bounds(&self) -> Result<(), PayloadBoundsError> {
+        self.summary.validate_bounds()?;
+        if self.summary.local_clip_id != self.token.local_clip_id.as_str() {
+            return Err(PayloadBoundsError::Invalid {
+                field: "upload.local_clip_id_mismatch",
+            });
+        }
+        if ClipPathIdentity::from_text(&self.summary.path).as_ref() != Some(&self.token.source_path)
+        {
+            return Err(PayloadBoundsError::Invalid {
+                field: "upload.path_mismatch",
+            });
         }
         Ok(())
     }
@@ -1282,6 +1421,23 @@ pub enum CatalogUploadVisibility {
     Unlisted,
 }
 
+/// Saved Cloud defaults used to initialize the upload dialog. These values
+/// belong to account/settings context, not to a window-owned form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogCloudPreferences {
+    pub default_visibility: CatalogUploadVisibility,
+    pub delete_local_after_upload: bool,
+}
+
+impl Default for CatalogCloudPreferences {
+    fn default() -> Self {
+        Self {
+            default_visibility: CatalogUploadVisibility::Private,
+            delete_local_after_upload: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CatalogAction {
@@ -1585,13 +1741,18 @@ pub enum CatalogEffect {
         token: WindowWorkToken,
         request: ClipDetailRequest,
         target: ResolvedLocalClip,
+        title: String,
+        description: String,
     },
     OpenLocalReview {
         token: WindowWorkToken,
         target: ResolvedLocalClip,
     },
     PrepareCloudReviewMedia {
-        owner: CloudReviewMediaOwner,
+        request: CloudReviewMediaRequest,
+    },
+    LoadCloudThumbnail {
+        request: CloudThumbnailRequest,
     },
     OpenPreparedCloudReview {
         owner: CloudReviewMediaOwner,
@@ -1664,9 +1825,9 @@ impl CatalogEffect {
             Self::LoadClipDetail { request, .. } => Some(CatalogOperationOwner::ClipDetail {
                 owner: request.owner().clone(),
             }),
-            Self::PrepareCloudReviewMedia { owner } => {
+            Self::PrepareCloudReviewMedia { request } => {
                 Some(CatalogOperationOwner::CloudReviewMedia {
-                    owner: owner.clone(),
+                    owner: request.owner.clone(),
                 })
             }
             Self::RenameTitle { token, target, .. } => Some(CatalogOperationOwner::RenameTitle {
@@ -1685,6 +1846,7 @@ impl CatalogEffect {
                     .collect(),
             }),
             Self::OpenLocalReview { .. }
+            | Self::LoadCloudThumbnail { .. }
             | Self::OpenPreparedCloudReview { .. }
             | Self::ReleaseCloudReviewMedia { .. }
             | Self::CloseReview { .. }
@@ -1707,8 +1869,12 @@ impl CatalogEffect {
                 token,
                 request,
                 target,
+                title,
+                description,
             } => {
                 target.validate_bounds()?;
+                check_string("clip_detail.title", title)?;
+                check_string("clip_detail.description", description)?;
                 if request.item() != &target.identity || request.owner().window() != *token {
                     return Err(PayloadBoundsError::Invalid {
                         field: "clip_detail.owner",
@@ -1719,7 +1885,8 @@ impl CatalogEffect {
             Self::OpenLocalReview { target, .. } | Self::Reveal { target, .. } => {
                 target.validate_bounds()
             }
-            Self::PrepareCloudReviewMedia { owner } => owner.validate_bounds(),
+            Self::PrepareCloudReviewMedia { request } => request.validate_bounds(),
+            Self::LoadCloudThumbnail { request } => request.validate_bounds(),
             Self::OpenPreparedCloudReview { owner, media } => {
                 owner.validate_bounds()?;
                 media.validate_bounds()
@@ -1806,6 +1973,10 @@ pub enum CatalogResult {
         owner: CloudReviewMediaOwner,
         media: PreparedCloudReviewMedia,
     },
+    CloudThumbnail {
+        owner: CloudThumbnailOwner,
+        status: PosterStatus,
+    },
     Poster {
         token: PosterWorkToken,
         poster: PosterResult,
@@ -1863,17 +2034,17 @@ impl CatalogResult {
                 owner.validate_bounds()?;
                 media.validate_bounds()
             }
+            Self::CloudThumbnail { owner, status } => {
+                owner.validate_bounds()?;
+                validate_poster_status("cloud_thumbnail", status)
+            }
             Self::Poster { token, poster } => {
                 if poster.path != token.path {
                     return Err(PayloadBoundsError::Invalid {
                         field: "poster.path_mismatch",
                     });
                 }
-                match &poster.status {
-                    PosterStatus::Queued | PosterStatus::Missing => Ok(()),
-                    PosterStatus::Ready { path } => check_string("poster.ready_path", path),
-                    PosterStatus::Failed { message } => check_string("poster.message", message),
-                }
+                validate_poster_status("poster", &poster.status)
             }
             Self::UploadByteProgress { token, progress }
             | Self::UploadCompleted {
@@ -1946,15 +2117,13 @@ impl CatalogResult {
                     CatalogItemIdentity::Local { path } => path.owned_capacity(),
                 })
                 .saturating_add(media.path.capacity()),
+            Self::CloudThumbnail { owner, status } => estimated_cloud_thumbnail_owner_bytes(owner)
+                .saturating_add(estimated_poster_status_bytes(status)),
             Self::Poster { token, poster } => token
                 .path
                 .owned_capacity()
                 .saturating_add(poster.path.owned_capacity())
-                .saturating_add(match &poster.status {
-                    PosterStatus::Ready { path } => path.capacity(),
-                    PosterStatus::Failed { message } => message.capacity(),
-                    PosterStatus::Queued | PosterStatus::Missing => 0,
-                }),
+                .saturating_add(estimated_poster_status_bytes(&poster.status)),
             Self::UploadByteProgress { token, progress }
             | Self::UploadCompleted {
                 token,
@@ -1994,6 +2163,49 @@ impl CatalogResult {
         };
         std::mem::size_of::<Self>().saturating_add(payload)
     }
+}
+
+fn validate_poster_status(
+    context: &'static str,
+    status: &PosterStatus,
+) -> Result<(), PayloadBoundsError> {
+    match status {
+        PosterStatus::Queued | PosterStatus::Missing => Ok(()),
+        PosterStatus::Ready { path } => {
+            if path.trim().is_empty() {
+                return Err(PayloadBoundsError::Invalid { field: context });
+            }
+            check_string("poster.ready_path", path)
+        }
+        PosterStatus::Failed { message } => check_string("poster.message", message),
+    }
+}
+
+fn estimated_poster_status_bytes(status: &PosterStatus) -> usize {
+    match status {
+        PosterStatus::Ready { path } => path.capacity(),
+        PosterStatus::Failed { message } => message.capacity(),
+        PosterStatus::Queued | PosterStatus::Missing => 0,
+    }
+}
+
+fn estimated_cloud_thumbnail_owner_bytes(owner: &CloudThumbnailOwner) -> usize {
+    owner
+        .token
+        .account_key
+        .0
+        .capacity()
+        .saturating_add(match &owner.descriptor.item {
+            CatalogItemIdentity::Cloud {
+                account_key,
+                remote_clip_id,
+                ..
+            } => account_key
+                .0
+                .capacity()
+                .saturating_add(remote_clip_id.0.capacity()),
+            CatalogItemIdentity::Local { path } => path.owned_capacity(),
+        })
 }
 
 fn validate_renamed_clip(result: &RenamedClipInfo) -> Result<(), PayloadBoundsError> {

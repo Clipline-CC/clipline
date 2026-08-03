@@ -5,8 +5,9 @@ use std::time::Duration;
 use thiserror::Error;
 
 use crate::{
-    CatalogOperationOwner, CatalogResult, ClipDetailOwner, CloudReviewMediaOwner, CloudWorkToken,
-    DurableUploadToken, GenerationError, PosterWorkToken, WindowWorkToken,
+    CatalogOperationOwner, CatalogResult, ClipDetailOwner, CloudReviewMediaOwner,
+    CloudThumbnailOwner, CloudWorkToken, DurableUploadToken, GenerationError, PosterWorkToken,
+    WindowWorkToken,
 };
 
 pub const CATALOG_RESULT_CAPACITY: usize = 128;
@@ -21,6 +22,7 @@ pub enum ExpectedResultOwner {
     Upload(DurableUploadToken),
     Operation(CatalogOperationOwner),
     CloudReviewMedia(CloudReviewMediaOwner),
+    CloudThumbnail(CloudThumbnailOwner),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +84,7 @@ enum CoalesceKey {
     ClipDetail(ClipDetailOwner),
     CloudPage(CloudWorkToken),
     Poster(PosterWorkToken),
+    CloudThumbnail(CloudThumbnailOwner),
     UploadBytes(DurableUploadToken),
 }
 
@@ -93,6 +96,9 @@ fn coalesce_key(result: &CatalogResult) -> Option<CoalesceKey> {
             Some(CoalesceKey::CloudPage(completion.token.clone()))
         }
         CatalogResult::Poster { token, .. } => Some(CoalesceKey::Poster(token.clone())),
+        CatalogResult::CloudThumbnail { owner, .. } => {
+            Some(CoalesceKey::CloudThumbnail(owner.clone()))
+        }
         CatalogResult::UploadByteProgress { token, .. } => {
             Some(CoalesceKey::UploadBytes(token.clone()))
         }
@@ -135,6 +141,10 @@ fn validate_owner(
             CatalogResult::CloudReviewMediaPrepared { owner, .. },
             ExpectedResultOwner::CloudReviewMedia(expected),
         ) => validate_cloud_review_media_owner(owner, expected),
+        (
+            CatalogResult::CloudThumbnail { owner, .. },
+            ExpectedResultOwner::CloudThumbnail(expected),
+        ) => validate_cloud_thumbnail_owner(owner, expected),
         (CatalogResult::Poster { token, .. }, ExpectedResultOwner::Poster(expected)) => (token
             == expected)
             .then_some(())
@@ -193,6 +203,21 @@ fn validate_operation_owner(
 fn validate_cloud_review_media_owner(
     actual: &CloudReviewMediaOwner,
     expected: &CloudReviewMediaOwner,
+) -> Result<(), ResultPortError> {
+    if actual.token.account_key != expected.token.account_key
+        || actual.token.account_generation != expected.token.account_generation
+    {
+        Err(ResultPortError::AccountChanged)
+    } else if actual == expected {
+        Ok(())
+    } else {
+        Err(ResultPortError::Stale)
+    }
+}
+
+fn validate_cloud_thumbnail_owner(
+    actual: &CloudThumbnailOwner,
+    expected: &CloudThumbnailOwner,
 ) -> Result<(), ResultPortError> {
     if actual.token.account_key != expected.token.account_key
         || actual.token.account_generation != expected.token.account_generation

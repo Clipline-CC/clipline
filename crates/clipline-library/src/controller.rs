@@ -4,21 +4,27 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use crate::{
-    build_catalog_projection, CatalogAction, CatalogDialogAudioTrackProjection, CatalogDialogKind,
-    CatalogDialogProjection, CatalogEffect, CatalogItemIdentity, CatalogLoadState,
-    CatalogMenuProjection, CatalogOperationOwner, CatalogProjection, CatalogProjectionInput,
-    CatalogProjectionSource, CatalogResult, CatalogRevision, CatalogSource, CatalogUploadOptions,
+    build_catalog_projection, CatalogAction, CatalogCloudPreferences,
+    CatalogDialogAudioTrackProjection, CatalogDialogKind, CatalogDialogProjection, CatalogEffect,
+    CatalogItemIdentity, CatalogLoadState, CatalogMenuProjection, CatalogOperationOwner,
+    CatalogProjection, CatalogProjectionInput, CatalogProjectionSource, CatalogResult,
+    CatalogRevision, CatalogSource, CatalogUploadOptions, CatalogUploadProjection,
     CatalogUploadVisibility, CatalogWarning, ClipDetailRequest, ClipPathIdentity,
     CloudCatalogOwner, CloudLibraryItem, CloudNextPage, CloudPageNumber, CloudPageOutcome,
-    CloudReviewMediaOwner, CloudWorkToken, ForegroundGeneration, GalleryPresentation,
+    CloudReviewMediaOwner, CloudReviewMediaRequest, CloudThumbnailDescriptor, CloudThumbnailOwner,
+    CloudThumbnailRequest, CloudWorkToken, ForegroundGeneration, GalleryPresentation,
     GenerationError, LocalClipItem, LocalDayResolver, LocalGalleryOptions, LocalPageIndex,
     PayloadBoundsError, PosterStatus, PreparedCloudReviewMedia, PresentationError,
-    ProjectionReservation, RequestGeneration, ResolvedLocalClip, SystemProjectionReservation,
-    UploadSummary, WindowAttachmentGeneration, WindowWorkToken, MAX_LOCAL_INDEX_ROWS,
-    MAX_POSTER_RESULT_ENTRIES, MAX_UPLOAD_SUMMARIES,
+    ProjectionReservation, RemoteClipId, RequestGeneration, ResolvedLocalClip,
+    SystemProjectionReservation, WindowAttachmentGeneration, WindowWorkToken,
+    MAX_CATALOG_PAGE_ROWS, MAX_LOCAL_INDEX_ROWS, MAX_POSTER_RESULT_ENTRIES, MAX_UPLOAD_SUMMARIES,
 };
 
-pub const MAX_CATALOG_EFFECTS_PER_UPDATE: usize = 4;
+/// One update may issue one thumbnail request for every accepted Cloud page
+/// row plus the four pre-existing lifecycle/refresh effects.
+pub const MAX_CATALOG_EFFECTS_PER_UPDATE: usize = MAX_CATALOG_PAGE_ROWS + 4;
+pub const MAX_CLOUD_THUMBNAIL_REQUESTS_PER_UPDATE: usize = MAX_CATALOG_PAGE_ROWS;
+const _: () = assert!(MAX_CATALOG_EFFECTS_PER_UPDATE == 64);
 
 type LocalIdentityLookup = Vec<(ClipPathIdentity, usize)>;
 
@@ -132,6 +138,7 @@ pub struct CatalogControllerState {
     window: Option<WindowOwner>,
     next_request: RequestGeneration,
     cloud_owner: Option<CloudCatalogOwner>,
+    cloud_preferences: CatalogCloudPreferences,
     cloud_page: Option<Arc<AcceptedCloudPage>>,
     local_options: LocalGalleryOptions,
     local_page: LocalPageIndex,
@@ -142,7 +149,10 @@ pub struct CatalogControllerState {
     local_lookup: Arc<Vec<(ClipPathIdentity, usize)>>,
     posters: Arc<BTreeMap<ClipPathIdentity, PosterStatus>>,
     poster_order: Arc<Vec<ClipPathIdentity>>,
-    uploads: Arc<Vec<UploadSummary>>,
+    cloud_posters: Arc<BTreeMap<CloudThumbnailDescriptor, PosterStatus>>,
+    cloud_poster_order: Arc<Vec<CloudThumbnailDescriptor>>,
+    pending_cloud_thumbnails: Arc<BTreeMap<CloudThumbnailDescriptor, CloudThumbnailOwner>>,
+    uploads: Arc<Vec<CatalogUploadProjection>>,
     local_refresh: LocalRefreshLane,
     cloud_refresh: CloudRefreshLane,
     pending_detail: Option<ClipDetailRequest>,
@@ -179,8 +189,11 @@ impl CatalogController {
                 },
                 gallery: &GalleryPresentation::default(),
                 selected: &[],
+                selection_mode: false,
+                cloud_query: "",
                 active: None,
                 posters: &BTreeMap::new(),
+                cloud_posters: &BTreeMap::new(),
                 menu: None,
                 dialog: None,
                 uploads: &[],
@@ -206,6 +219,7 @@ impl CatalogController {
                 window: None,
                 next_request: RequestGeneration::INITIAL,
                 cloud_owner: None,
+                cloud_preferences: CatalogCloudPreferences::default(),
                 cloud_page: None,
                 local_options: LocalGalleryOptions::default(),
                 local_page: LocalPageIndex::new(0)?,
@@ -216,6 +230,9 @@ impl CatalogController {
                 local_lookup: Arc::new(Vec::new()),
                 posters: Arc::new(BTreeMap::new()),
                 poster_order: Arc::new(Vec::new()),
+                cloud_posters: Arc::new(BTreeMap::new()),
+                cloud_poster_order: Arc::new(Vec::new()),
+                pending_cloud_thumbnails: Arc::new(BTreeMap::new()),
                 uploads: Arc::new(Vec::new()),
                 local_refresh: LocalRefreshLane::default(),
                 cloud_refresh: CloudRefreshLane::default(),
@@ -272,6 +289,7 @@ impl CatalogController {
         candidate.pending_mutation = None;
         candidate.dialog_delete_targets = None;
         candidate.pending_cloud_review = None;
+        candidate.pending_cloud_thumbnails = Arc::new(BTreeMap::new());
         let mut effects = effect_buffer(self.reservation.as_ref())?;
         let local_target = if let Some(dirty) = candidate.local_refresh.dirty.take() {
             Some(dirty)
@@ -301,6 +319,26 @@ impl CatalogController {
             if let Some(target) = cloud_target {
                 issue_cloud_refresh(&mut candidate, target, &mut effects)?;
             }
+        }
+        if candidate.source == CatalogSource::Cloud
+            && candidate.cloud_refresh.in_flight.is_none()
+            && candidate.cloud_page.is_some()
+        {
+            let owner = candidate
+                .cloud_owner
+                .clone()
+                .ok_or(CatalogControllerError::NoCloudOwner)?;
+            let token = CloudWorkToken {
+                window: next_window_token(&mut candidate)?,
+                account_key: owner.account_key,
+                account_generation: owner.account_generation,
+            };
+            issue_cloud_thumbnail_requests(
+                &mut candidate,
+                token,
+                &mut effects,
+                self.reservation.as_ref(),
+            )?;
         }
         if let Some(item) = candidate
             .active
@@ -335,11 +373,10 @@ impl CatalogController {
                     account_key: owner.account_key,
                     account_generation: owner.account_generation,
                 };
-                let owner = CloudReviewMediaOwner::new(token, item)?;
-                effects.push(CatalogEffect::PrepareCloudReviewMedia {
-                    owner: owner.clone(),
-                });
-                candidate.pending_cloud_review = Some(owner);
+                let cloud_item = resolve_cloud_item(&candidate, &item)?;
+                let request = cloud_review_request(token, item, cloud_item)?;
+                candidate.pending_cloud_review = Some(request.owner.clone());
+                effects.push(CatalogEffect::PrepareCloudReviewMedia { request });
             }
         }
         self.commit(candidate, effects)
@@ -368,6 +405,7 @@ impl CatalogController {
         candidate.pending_mutation = None;
         candidate.dialog_delete_targets = None;
         candidate.pending_cloud_review = None;
+        candidate.pending_cloud_thumbnails = Arc::new(BTreeMap::new());
         candidate.menu = None;
         candidate.dialog = None;
         let mut effects = Vec::new();
@@ -386,14 +424,26 @@ impl CatalogController {
         &mut self,
         owner: Option<CloudCatalogOwner>,
     ) -> Result<Vec<CatalogEffect>, CatalogControllerError> {
-        if self.state.cloud_owner == owner {
+        self.set_cloud_context(owner, CatalogCloudPreferences::default())
+    }
+
+    pub fn set_cloud_context(
+        &mut self,
+        owner: Option<CloudCatalogOwner>,
+        preferences: CatalogCloudPreferences,
+    ) -> Result<Vec<CatalogEffect>, CatalogControllerError> {
+        if self.state.cloud_owner == owner && self.state.cloud_preferences == preferences {
             return Ok(Vec::new());
         }
         let mut candidate = self.state.clone();
         candidate.cloud_owner = owner.clone();
+        candidate.cloud_preferences = preferences;
         candidate.cloud_page = None;
         candidate.cloud_warnings = Arc::new(Vec::new());
         candidate.cloud_refresh = CloudRefreshLane::default();
+        candidate.cloud_posters = Arc::new(BTreeMap::new());
+        candidate.cloud_poster_order = Arc::new(Vec::new());
+        candidate.pending_cloud_thumbnails = Arc::new(BTreeMap::new());
         candidate.cloud_target_page = CloudPageNumber::new(1)?;
         candidate.cloud_load_state = if owner.is_some() {
             CatalogLoadState::Empty
@@ -715,12 +765,10 @@ impl CatalogController {
                         state.active = Some(item);
                     }
                     CatalogSource::Cloud => {
-                        let (token, _) = resolve_cloud(state, &item)?;
-                        let owner = CloudReviewMediaOwner::new(token, item.clone())?;
-                        effects.push(CatalogEffect::PrepareCloudReviewMedia {
-                            owner: owner.clone(),
-                        });
-                        state.pending_cloud_review = Some(owner);
+                        let (token, cloud_item) = resolve_cloud(state, &item)?;
+                        let request = cloud_review_request(token, item.clone(), cloud_item)?;
+                        state.pending_cloud_review = Some(request.owner.clone());
+                        effects.push(CatalogEffect::PrepareCloudReviewMedia { request });
                     }
                 }
                 state.menu = None;
@@ -758,6 +806,14 @@ impl CatalogController {
             }
             CatalogAction::OpenUpload { item } => {
                 let target = resolve_local(state, &item)?;
+                let local = resolve_local_item(state, &item)?;
+                let title = local
+                    .title
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or(local.name.trim())
+                    .to_owned();
                 let token = next_window_token(state)?;
                 let request = ClipDetailRequest::new(target.identity.clone(), token);
                 state.dialog_delete_targets = None;
@@ -766,6 +822,8 @@ impl CatalogController {
                     token,
                     request,
                     target,
+                    title,
+                    description: String::new(),
                 });
                 state.revision = state.revision.checked_next()?;
             }
@@ -917,6 +975,12 @@ impl CatalogController {
                             has_next: matches!(next, CloudNextPage::Probe { .. }),
                         }));
                         state.cloud_target_page = page;
+                        issue_cloud_thumbnail_requests(
+                            state,
+                            completion.token.clone(),
+                            effects,
+                            self.reservation.as_ref(),
+                        )?;
                     }
                     CloudPageOutcome::PastEnd {
                         requested_page,
@@ -983,9 +1047,9 @@ impl CatalogController {
                     destructive: false,
                     text_value: Some(detail.upload().title().to_owned()),
                     description: Some(detail.upload().description().to_owned()),
-                    visibility: Some(CatalogUploadVisibility::Private),
+                    visibility: Some(state.cloud_preferences.default_visibility),
                     audio_tracks,
-                    delete_local_after_upload: false,
+                    delete_local_after_upload: state.cloud_preferences.delete_local_after_upload,
                 }));
                 state.dialog_delete_targets = None;
                 state.pending_detail = None;
@@ -1014,6 +1078,32 @@ impl CatalogController {
                         lease_id: previous.lease_id,
                     });
                 }
+                state.revision = state.revision.checked_next()?;
+                Ok(true)
+            }
+            CatalogResult::CloudThumbnail { owner, status } => {
+                let Some(expected) = state.pending_cloud_thumbnails.get(&owner.descriptor) else {
+                    return Ok(false);
+                };
+                if expected != &owner || !cloud_thumbnail_is_current(state, &owner.descriptor) {
+                    return Ok(false);
+                }
+                let mut pending = reserve_map_clone(
+                    self.reservation.as_ref(),
+                    "controller.pending_cloud_thumbnails_result",
+                    state.pending_cloud_thumbnails.as_ref(),
+                )?;
+                if !matches!(&status, PosterStatus::Queued) {
+                    pending.remove(&owner.descriptor);
+                }
+                let mut posters = reserve_map_clone(
+                    self.reservation.as_ref(),
+                    "controller.cloud_posters_result",
+                    state.cloud_posters.as_ref(),
+                )?;
+                posters.insert(owner.descriptor, status);
+                state.pending_cloud_thumbnails = Arc::new(pending);
+                state.cloud_posters = Arc::new(posters);
                 state.revision = state.revision.checked_next()?;
                 Ok(true)
             }
@@ -1057,23 +1147,30 @@ impl CatalogController {
                 state.revision = state.revision.checked_next()?;
                 Ok(true)
             }
-            CatalogResult::UploadByteProgress { progress, .. }
+            CatalogResult::UploadByteProgress { token, progress }
             | CatalogResult::UploadCompleted {
-                result: progress, ..
+                token,
+                result: progress,
             } => {
+                let entry = CatalogUploadProjection::new(token, progress)?;
                 let mut uploads = reserve_clone(
                     self.reservation.as_ref(),
                     "controller.uploads",
                     state.uploads.as_slice(),
                     1,
                 )?;
-                if let Some(existing) = uploads.iter_mut().find(|item| item.path == progress.path) {
-                    *existing = progress;
+                if let Some(existing) = uploads.iter_mut().find(|item| item.token == entry.token) {
+                    *existing = entry;
+                } else if let Some(existing) = uploads
+                    .iter_mut()
+                    .find(|item| item.token.source_path == entry.token.source_path)
+                {
+                    *existing = entry;
                 } else {
                     if uploads.len() >= MAX_UPLOAD_SUMMARIES {
                         uploads.remove(0);
                     }
-                    uploads.push(progress);
+                    uploads.push(entry);
                 }
                 state.uploads = Arc::new(uploads);
                 state.revision = state.revision.checked_next()?;
@@ -1304,8 +1401,11 @@ fn build_projection(
             },
             gallery,
             selected: state.selected.as_slice(),
+            selection_mode: state.selection_mode,
+            cloud_query: &state.cloud_query,
             active: state.active.as_ref(),
             posters: state.posters.as_ref(),
+            cloud_posters: state.cloud_posters.as_ref(),
             menu: state.menu.as_ref(),
             dialog: state.dialog.as_deref(),
             uploads: state.uploads.as_slice(),
@@ -1333,8 +1433,11 @@ fn build_projection(
                 source,
                 gallery,
                 selected: &[],
+                selection_mode: false,
+                cloud_query: &state.cloud_query,
                 active: state.active.as_ref(),
                 posters: state.posters.as_ref(),
+                cloud_posters: state.cloud_posters.as_ref(),
                 menu: state.menu.as_ref(),
                 dialog: state.dialog.as_deref(),
                 uploads: state.uploads.as_slice(),
@@ -1510,6 +1613,22 @@ fn resolve_local(
     Ok(ResolvedLocalClip::new(path.clone(), item.path.clone())?)
 }
 
+fn resolve_local_item<'a>(
+    state: &'a CatalogControllerState,
+    item: &CatalogItemIdentity,
+) -> Result<&'a LocalClipItem, CatalogControllerError> {
+    let path = item.local_path().ok_or(CatalogControllerError::Invalid {
+        field: "identity.local",
+    })?;
+    let index = state
+        .local_lookup
+        .binary_search_by(|candidate| candidate.0.cmp(path))
+        .map_err(|_| CatalogControllerError::Invalid {
+            field: "identity.unresolved",
+        })?;
+    Ok(&state.local_items[state.local_lookup[index].1])
+}
+
 fn resolve_cloud<'a>(
     state: &'a mut CatalogControllerState,
     item: &CatalogItemIdentity,
@@ -1571,6 +1690,118 @@ fn resolve_cloud_item<'a>(
         .ok_or(CatalogControllerError::Invalid {
             field: "identity.unresolved",
         })
+}
+
+fn cloud_review_request(
+    token: CloudWorkToken,
+    identity: CatalogItemIdentity,
+    item: &CloudLibraryItem,
+) -> Result<CloudReviewMediaRequest, CatalogControllerError> {
+    let expected_size_bytes = item
+        .file_size_bytes
+        .map(u64::try_from)
+        .transpose()
+        .map_err(|_| CatalogControllerError::Invalid {
+            field: "cloud.file_size_bytes",
+        })?;
+    Ok(CloudReviewMediaRequest::new(
+        CloudReviewMediaOwner::new(token, identity)?,
+        item.updated_at_unix,
+        expected_size_bytes,
+    )?)
+}
+
+fn cloud_thumbnail_descriptor(
+    owner: &CloudCatalogOwner,
+    item: &CloudLibraryItem,
+) -> Result<CloudThumbnailDescriptor, CatalogControllerError> {
+    let identity = CatalogItemIdentity::Cloud {
+        account_key: owner.account_key.clone(),
+        account_generation: owner.account_generation,
+        remote_clip_id: RemoteClipId::new(item.remote_clip_id.clone()).map_err(|_| {
+            CatalogControllerError::Invalid {
+                field: "cloud_thumbnail.remote_clip_id",
+            }
+        })?,
+    };
+    Ok(CloudThumbnailDescriptor::new(
+        identity,
+        item.updated_at_unix,
+    )?)
+}
+
+fn issue_cloud_thumbnail_requests(
+    state: &mut CatalogControllerState,
+    token: CloudWorkToken,
+    effects: &mut Vec<CatalogEffect>,
+    reservation: &dyn ProjectionReservation,
+) -> Result<(), CatalogControllerError> {
+    let page = state
+        .cloud_page
+        .clone()
+        .ok_or(CatalogControllerError::Invalid {
+            field: "cloud_thumbnail.page",
+        })?;
+    if page.items.len() > MAX_CLOUD_THUMBNAIL_REQUESTS_PER_UPDATE {
+        return Err(CatalogControllerError::Invalid {
+            field: "cloud_thumbnail.effect_capacity",
+        });
+    }
+    if CloudCatalogOwner::from_work_token(&token) != page.owner {
+        return Err(CatalogControllerError::Invalid {
+            field: "cloud_thumbnail.owner",
+        });
+    }
+    reservation.before_reserve("controller.pending_cloud_thumbnails", page.items.len())?;
+    let mut pending = BTreeMap::new();
+    let mut posters = reserve_map_clone(
+        reservation,
+        "controller.cloud_posters",
+        state.cloud_posters.as_ref(),
+    )?;
+    let mut order = reserve_clone(
+        reservation,
+        "controller.cloud_poster_order",
+        state.cloud_poster_order.as_slice(),
+        page.items.len(),
+    )?;
+    for item in page.items.iter() {
+        let descriptor = cloud_thumbnail_descriptor(&page.owner, item)?;
+        let owner = CloudThumbnailOwner::new(token.clone(), descriptor.clone())?;
+        let request = CloudThumbnailRequest::new(owner.clone())?;
+        if !posters.contains_key(&descriptor) {
+            if order.len() >= MAX_POSTER_RESULT_ENTRIES {
+                let oldest = order.remove(0);
+                posters.remove(&oldest);
+            }
+            order.push(descriptor.clone());
+            posters.insert(descriptor.clone(), PosterStatus::Queued);
+        }
+        pending.insert(descriptor, owner);
+        effects.push(CatalogEffect::LoadCloudThumbnail { request });
+    }
+    state.pending_cloud_thumbnails = Arc::new(pending);
+    state.cloud_posters = Arc::new(posters);
+    state.cloud_poster_order = Arc::new(order);
+    Ok(())
+}
+
+fn cloud_thumbnail_is_current(
+    state: &CatalogControllerState,
+    descriptor: &CloudThumbnailDescriptor,
+) -> bool {
+    let Some(page) = state.cloud_page.as_ref() else {
+        return false;
+    };
+    if !descriptor.item.matches_cloud_catalog_owner(&page.owner) {
+        return false;
+    }
+    let CatalogItemIdentity::Cloud { remote_clip_id, .. } = &descriptor.item else {
+        return false;
+    };
+    page.items.iter().any(|item| {
+        item.remote_clip_id == remote_clip_id.as_str() && item.updated_at_unix == descriptor.version
+    })
 }
 
 fn menu_for(target: CatalogItemIdentity) -> CatalogMenuProjection {
