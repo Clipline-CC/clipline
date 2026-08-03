@@ -4,6 +4,27 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-02): staggered selected-audio mixing
+
+Plan: `docs/superpowers/plans/2026-08-02-staggered-audio-mix.md` (`7e71a86`).
+
+A 0.1.43 support report reproduced `unsupported mp4: overlapping or backward sample presentation
+times` when both output and microphone audio were selected for a cloud upload or shareable Copy.
+The native Opus mixer emitted one full packet at every source packet start, so two valid tracks
+offset by less than one packet produced overlapping mixed samples that the final remux correctly
+rejected.
+
+The shared file-backed and in-memory mixer now maps every selected track onto one continuous
+48 kHz timeline and emits fixed, non-overlapping 20 ms packets. It handles sub-packet track offsets,
+consumes each source track's own Opus pre-skip, tolerates normal 959/961-tick container-duration
+quantization, preserves long gaps without encoding thousands of silent packets, and bounds decoded
+packet expansion before allocation. The fix is commit `5037755`.
+
+The exact staggered-track file regression, the complete `clipline-mp4` suite, full workspace tests,
+fresh-cache crate Clippy, and warning-denied workspace Clippy are green. Separately,
+the report exposed malformed JSON in some redacted log lines when Windows path replacement leaves
+invalid backslash escapes; that diagnostics issue is not part of this media fix.
+
 ## Checkpoint (2026-07-29): Nightly 0.1.43
 
 Plan: `docs/superpowers/plans/2026-07-29-nightly-0.1.43.md`.
