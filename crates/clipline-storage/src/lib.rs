@@ -30,6 +30,17 @@ pub struct GcReport {
     pub status: StorageStatus,
 }
 
+/// Result of an atomic quota-GC authorization/deletion attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuotaDeletionOutcome {
+    /// The exact candidate was deleted (or was already absent). Storage may
+    /// now remove its inventoried sidecars and account the candidate as freed.
+    Deleted,
+    /// The candidate acquired protection at deletion time. Storage leaves the
+    /// clip and every sidecar untouched and continues with later candidates.
+    Protected,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordingRecoveryReport {
     pub recovered: Vec<PathBuf>,
@@ -171,6 +182,54 @@ pub fn enforce_quota_with_protection(
     protect: Option<&Path>,
     additionally_protected: impl Fn(&Path) -> bool,
 ) -> io::Result<GcReport> {
+    let mut delete_candidate = |path: &Path| match remove_file_if_exists(path) {
+        Ok(()) => Ok(QuotaDeletionOutcome::Deleted),
+        // Preserve the legacy race behavior: a protection lease can begin
+        // after inventory/pre-check but before the raw deletion attempt.
+        Err(_) if additionally_protected(path) => Ok(QuotaDeletionOutcome::Protected),
+        Err(error) => Err(error),
+    };
+    enforce_quota_with_deletion_authority_inner(
+        dir,
+        quota_bytes,
+        protect,
+        &additionally_protected,
+        &mut delete_candidate,
+    )
+}
+
+/// Enforce quota with a deletion-time authority owned by the caller.
+///
+/// The protection predicate remains a cheap inventory/pre-delete filter. For
+/// every candidate which reaches the actual deletion point, `delete_candidate`
+/// must atomically authorize and delete that exact clip, returning
+/// [`QuotaDeletionOutcome::Protected`] if a lease or mutation wins the race.
+/// Storage never raw-deletes the MP4 in this API. It removes inventoried
+/// sidecars only after `Deleted`, verifies that the candidate path is absent,
+/// and propagates callback errors without touching that candidate's sidecars.
+pub fn enforce_quota_with_deletion_authority(
+    dir: &Path,
+    quota_bytes: Option<u64>,
+    protect: Option<&Path>,
+    additionally_protected: impl Fn(&Path) -> bool,
+    mut delete_candidate: impl FnMut(&Path) -> io::Result<QuotaDeletionOutcome>,
+) -> io::Result<GcReport> {
+    enforce_quota_with_deletion_authority_inner(
+        dir,
+        quota_bytes,
+        protect,
+        &additionally_protected,
+        &mut delete_candidate,
+    )
+}
+
+fn enforce_quota_with_deletion_authority_inner(
+    dir: &Path,
+    quota_bytes: Option<u64>,
+    protect: Option<&Path>,
+    additionally_protected: &dyn Fn(&Path) -> bool,
+    delete_candidate: &mut dyn FnMut(&Path) -> io::Result<QuotaDeletionOutcome>,
+) -> io::Result<GcReport> {
     let Some(quota) = quota_bytes else {
         return Ok(GcReport {
             deleted_clips: 0,
@@ -212,14 +271,19 @@ pub fn enforce_quota_with_protection(
         }
 
         let clip_bytes = clip.total_bytes();
-        if let Err(error) = remove_file_if_exists(&clip.path) {
-            // A lease can begin after the pre-delete protection check. If it
-            // now owns the file, keep collecting other clips instead of
-            // surfacing the kernel's sharing-violation text to the user.
-            if additionally_protected(&clip.path) {
-                continue;
+        match delete_candidate(&clip.path)? {
+            QuotaDeletionOutcome::Protected => continue,
+            QuotaDeletionOutcome::Deleted => {}
+        }
+        match fs::symlink_metadata(&clip.path) {
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+            Ok(_) => {
+                return Err(io::Error::other(format!(
+                    "quota deletion authority reported deletion but candidate still exists: {:?}",
+                    clip.path
+                )));
             }
-            return Err(error);
         }
         for sidecar in &clip.sidecars {
             remove_file_if_exists(sidecar)?;
@@ -265,7 +329,7 @@ impl ClipFile {
     fn can_delete(
         &self,
         protect: Option<&Path>,
-        additionally_protected: &impl Fn(&Path) -> bool,
+        additionally_protected: &(impl Fn(&Path) -> bool + ?Sized),
     ) -> bool {
         !self.recording
             && !protect.is_some_and(|protected| same_path(&self.path, protected))
@@ -683,6 +747,102 @@ mod tests {
         );
         assert!(newest.exists());
         assert_eq!(report.status.total_bytes, 20);
+    }
+
+    #[test]
+    fn deletion_authority_protects_at_delete_and_gc_continues_with_exact_accounting() {
+        let dir = TestDir::new("clipline-storage", "delete-authority-race");
+        let raced = write_owned(&dir, "raced.mp4", 10);
+        let raced_sidecar = dir.write("raced.markers.json", 2);
+        tick_mtime();
+        let next = write_owned(&dir, "next.mp4", 10);
+        let next_sidecar = dir.write("next.markers.json", 3);
+        tick_mtime();
+        let newest = write_owned(&dir, "newest.mp4", 10);
+        let mut attempted = Vec::new();
+
+        let report = enforce_quota_with_deletion_authority(
+            dir.path(),
+            Some(22),
+            None,
+            |_| false,
+            |path| {
+                attempted.push(path.to_path_buf());
+                if same_path(path, &raced) {
+                    return Ok(QuotaDeletionOutcome::Protected);
+                }
+                remove_file_if_exists(path)?;
+                Ok(QuotaDeletionOutcome::Deleted)
+            },
+        )
+        .unwrap();
+
+        assert_eq!(attempted, vec![raced.clone(), next.clone()]);
+        assert!(raced.exists());
+        assert!(raced_sidecar.exists());
+        assert!(!next.exists());
+        assert!(!next_sidecar.exists());
+        assert!(newest.exists());
+        assert_eq!(report.deleted_clips, 1);
+        assert_eq!(report.freed_bytes, 13);
+        assert_eq!(report.status.clip_count, 2);
+        assert_eq!(report.status.total_bytes, 22);
+        assert!(!report.status.is_over_quota());
+    }
+
+    #[test]
+    fn deletion_authority_error_fails_closed_without_deleting_clip_or_sidecars() {
+        let dir = TestDir::new("clipline-storage", "delete-authority-error");
+        let old = write_owned(&dir, "old.mp4", 10);
+        let old_sidecar = dir.write("old.markers.json", 2);
+        tick_mtime();
+        let keep = write_owned(&dir, "keep.mp4", 10);
+        let mut attempts = 0;
+
+        let error = enforce_quota_with_deletion_authority(
+            dir.path(),
+            Some(10),
+            None,
+            |_| false,
+            |_| {
+                attempts += 1;
+                Err(io::Error::new(
+                    ErrorKind::PermissionDenied,
+                    "injected authority failure",
+                ))
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(attempts, 1);
+        assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+        assert!(old.exists());
+        assert!(old_sidecar.exists());
+        assert!(keep.exists());
+    }
+
+    #[test]
+    fn deletion_authority_cannot_claim_deleted_while_candidate_still_exists() {
+        let dir = TestDir::new("clipline-storage", "delete-authority-false-delete");
+        let old = write_owned(&dir, "old.mp4", 10);
+        let old_sidecar = dir.write("old.markers.json", 2);
+        tick_mtime();
+        let keep = write_owned(&dir, "keep.mp4", 10);
+
+        let error = enforce_quota_with_deletion_authority(
+            dir.path(),
+            Some(10),
+            None,
+            |_| false,
+            |_| Ok(QuotaDeletionOutcome::Deleted),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::Other);
+        assert!(error.to_string().contains("reported deletion"));
+        assert!(old.exists());
+        assert!(old_sidecar.exists());
+        assert!(keep.exists());
     }
 
     #[test]
