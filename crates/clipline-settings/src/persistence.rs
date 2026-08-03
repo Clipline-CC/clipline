@@ -934,6 +934,43 @@ impl SettingsStore {
             .state
             .lock()
             .map_err(|_| SettingsTransactionError::LockPoisoned)?;
+        self.commit_locked(&mut state, transaction)
+    }
+
+    /// Apply one exact Cloud upload-record CAS against the current document
+    /// revision while holding the store's shared commit lock.
+    ///
+    /// The Cloud account identity, account generation, and expected record
+    /// slots carried by `change` remain the mutation authority. Refreshing
+    /// only the outer document revision prevents unrelated settings writes
+    /// from spuriously superseding an otherwise-current upload owner.
+    pub fn compare_exchange_cloud_records(
+        &self,
+        change: CloudRecordCas,
+    ) -> Result<SettingsSnapshot, SettingsTransactionError> {
+        let _commit_guard = self
+            .inner
+            .commit_lock
+            .lock()
+            .map_err(|_| SettingsTransactionError::LockPoisoned)?;
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| SettingsTransactionError::LockPoisoned)?;
+        let transaction = SettingsTransaction {
+            expected_revision: state.snapshot.revision,
+            expected_account_generation: state.snapshot.account_generation,
+            change: SettingsChange::CompareExchangeCloudRecords(change),
+        };
+        self.commit_locked(&mut state, transaction)
+    }
+
+    fn commit_locked(
+        &self,
+        state: &mut StoreState,
+        transaction: SettingsTransaction,
+    ) -> Result<SettingsSnapshot, SettingsTransactionError> {
         if transaction.expected_revision != state.snapshot.revision {
             return Err(SettingsTransactionError::StaleRevision {
                 expected: transaction.expected_revision,
@@ -1022,7 +1059,10 @@ fn apply_change(
     current_account_generation: AccountGeneration,
 ) -> Result<(), SettingsTransactionError> {
     match change {
-        SettingsChange::ReplaceDocument(next) => *document = next,
+        SettingsChange::ReplaceDocument(mut next) => {
+            preserve_global_upload_generation_sequence(&document.cloud, &mut next.cloud);
+            *document = next;
+        }
         SettingsChange::ReplaceUiPreferences(mut next) => {
             next.cloud.host_url = document.cloud.host_url.clone();
             next.cloud.public_url = document.cloud.public_url.clone();
@@ -1032,12 +1072,16 @@ fn apply_change(
             next.cloud.credential_target = document.cloud.credential_target.clone();
             next.cloud.credential_cleanup_targets =
                 document.cloud.credential_cleanup_targets.clone();
+            next.cloud.upload_generation_sequence = document.cloud.upload_generation_sequence;
             next.cloud.uploads = document.cloud.uploads.clone();
             next.osu = document.osu.clone();
             *document = next;
         }
         SettingsChange::SetMediaRoot(media_dir) => document.media_dir = media_dir,
-        SettingsChange::ReplaceCloudSettings(cloud) => document.cloud = cloud,
+        SettingsChange::ReplaceCloudSettings(mut cloud) => {
+            preserve_global_upload_generation_sequence(&document.cloud, &mut cloud);
+            document.cloud = cloud;
+        }
         SettingsChange::ReplaceCloudProfile(profile) => {
             document.cloud.host_url = profile.host_url;
             document.cloud.public_url = profile.public_url;
@@ -1085,6 +1129,12 @@ fn apply_change(
     Ok(())
 }
 
+fn preserve_global_upload_generation_sequence(current: &CloudSettings, next: &mut CloudSettings) {
+    next.upload_generation_sequence = next
+        .upload_generation_sequence
+        .max(current.upload_generation_sequence);
+}
+
 fn apply_cloud_record_cas(
     cloud: &mut CloudSettings,
     change: CloudRecordCas,
@@ -1112,6 +1162,15 @@ fn apply_cloud_record_cas(
     }
 
     validate_cloud_record_cas_transition(&change)?;
+    let admitted_generation = match change.kind {
+        CloudRecordCasKind::Admit { upload_generation } => {
+            if upload_generation <= cloud.upload_generation_sequence {
+                return Err(SettingsTransactionError::StaleCloudRecord);
+            }
+            Some(upload_generation)
+        }
+        CloudRecordCasKind::Advance { .. } | CloudRecordCasKind::StatusSync => None,
+    };
 
     for slot in &change.expected {
         if slot.record.is_some() {
@@ -1123,6 +1182,9 @@ fn apply_cloud_record_cas(
             .record
             .expect("validated Cloud record replacement must be present");
         cloud.uploads.insert(replacement.key, record);
+    }
+    if let Some(upload_generation) = admitted_generation {
+        cloud.upload_generation_sequence = upload_generation;
     }
     Ok(())
 }

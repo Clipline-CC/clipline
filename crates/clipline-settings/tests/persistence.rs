@@ -320,6 +320,232 @@ fn cloud_record_cas(
 }
 
 #[test]
+fn cloud_record_cas_uses_the_current_revision_after_an_unrelated_settings_write() {
+    let dir = TestDir::new("clipline-settings", "cloud-cas-current-revision");
+    let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));
+    let initial = store.snapshot().unwrap();
+    let queued = durable_record(
+        "source-1",
+        None,
+        1,
+        dir.path().join("clip.mp4").display().to_string(),
+        "queued",
+    );
+    let change = CloudRecordCas {
+        account: initial.account.clone(),
+        account_generation: initial.account_generation,
+        kind: CloudRecordCasKind::Admit {
+            upload_generation: 1,
+        },
+        expected: vec![CloudRecordSlot {
+            key: "source-1".into(),
+            record: None,
+        }],
+        replacement: Some(CloudRecordSlot {
+            key: "source-1".into(),
+            record: Some(queued.clone()),
+        }),
+    };
+
+    // The Cloud CAS was prepared from `initial`, but this unrelated settings
+    // transaction wins before publication. Exact record/account ownership is
+    // still current, so the upload must not fail merely because the document
+    // revision advanced.
+    let unrelated_media_root = dir.path().join("other-media").display().to_string();
+    let unrelated = store
+        .transact(transaction(
+            &initial,
+            SettingsChange::SetMediaRoot(unrelated_media_root.clone()),
+        ))
+        .unwrap();
+    let committed = store.compare_exchange_cloud_records(change).unwrap();
+
+    assert_eq!(committed.revision.get(), unrelated.revision.get() + 1);
+    assert_eq!(committed.document.media_dir, unrelated_media_root);
+    assert_eq!(committed.document.cloud.uploads["source-1"], queued);
+}
+
+#[test]
+fn upload_generation_sequence_migrates_and_survives_ui_preference_replacement() {
+    let dir = TestDir::new("clipline-settings", "upload-generation-sequence-migration");
+    let profile = SettingsProfile::isolated(dir.path());
+    let mut legacy = clipline_settings::AppSettings {
+        media_dir: profile.default_media_dir().display().to_string(),
+        ..clipline_settings::AppSettings::default()
+    };
+    legacy.cloud.uploads.insert(
+        "source-1".into(),
+        durable_record(
+            "source-1",
+            None,
+            41,
+            dir.path().join("clip.mp4").display().to_string(),
+            "uploaded_private",
+        ),
+    );
+    // Serialize the pre-watermark shape directly: startup normalization must
+    // derive the sequence from durable legacy records.
+    let bytes = serde_json::to_vec_pretty(&legacy).unwrap();
+    std::fs::write(profile.settings_path(), bytes).unwrap();
+    let store = SettingsStore::open(profile);
+    let migrated = store.snapshot().unwrap();
+    assert_eq!(migrated.document.cloud.upload_generation_sequence, 41);
+
+    let mut preferences = migrated.document.clone();
+    preferences.cloud.upload_generation_sequence = 0;
+    preferences.cloud.uploads.clear();
+    let replaced = store
+        .transact(transaction(
+            &migrated,
+            SettingsChange::ReplaceUiPreferences(preferences),
+        ))
+        .unwrap();
+    assert_eq!(replaced.document.cloud.upload_generation_sequence, 41);
+    assert!(replaced.document.cloud.uploads.contains_key("source-1"));
+}
+
+#[test]
+fn upload_generation_sequence_survives_account_switch_and_process_restart() {
+    let dir = TestDir::new("clipline-settings", "upload-sequence-account-round-trip");
+    let profile = SettingsProfile::isolated(dir.path());
+    let store = SettingsStore::open(profile.clone());
+    let initial = store.snapshot().unwrap();
+    let mut account_a = initial.document.cloud.clone();
+    account_a.host_url = "https://a.example".into();
+    account_a.connected_user_id = Some("user-a".into());
+    account_a.credential_target = Some(cloud_credential_target(&account_a.host_url, "user-a"));
+    let account_a_snapshot = store
+        .transact(transaction(
+            &initial,
+            SettingsChange::ReplaceCloudSettings(account_a.clone()),
+        ))
+        .unwrap();
+    let admitted_generation = 7;
+    let admitted = store
+        .compare_exchange_cloud_records(CloudRecordCas {
+            account: account_a_snapshot.account.clone(),
+            account_generation: account_a_snapshot.account_generation,
+            kind: CloudRecordCasKind::Admit {
+                upload_generation: admitted_generation,
+            },
+            expected: vec![CloudRecordSlot {
+                key: "source-a".into(),
+                record: None,
+            }],
+            replacement: Some(CloudRecordSlot {
+                key: "source-a".into(),
+                record: Some(durable_record(
+                    "source-a",
+                    None,
+                    admitted_generation,
+                    dir.path().join("a.mp4").display().to_string(),
+                    "queued",
+                )),
+            }),
+        })
+        .unwrap();
+
+    let mut account_b = clipline_settings::CloudSettings::default();
+    account_b.host_url = "https://b.example".into();
+    account_b.connected_user_id = Some("user-b".into());
+    account_b.credential_target = Some(cloud_credential_target(&account_b.host_url, "user-b"));
+    let switched_away = store
+        .transact(transaction(
+            &admitted,
+            SettingsChange::ReplaceCloudSettings(account_b),
+        ))
+        .unwrap();
+    assert_eq!(
+        switched_away.document.cloud.upload_generation_sequence,
+        admitted_generation
+    );
+
+    let switched_back = store
+        .transact(transaction(
+            &switched_away,
+            SettingsChange::ReplaceCloudSettings(account_a),
+        ))
+        .unwrap();
+    drop(store);
+
+    let reopened = SettingsStore::open(profile);
+    let restart_snapshot = reopened.snapshot().unwrap();
+    assert_eq!(restart_snapshot.account, switched_back.account);
+    assert_eq!(
+        restart_snapshot.document.cloud.upload_generation_sequence,
+        admitted_generation
+    );
+    let next_generation = admitted_generation + 1;
+    let next = reopened
+        .compare_exchange_cloud_records(CloudRecordCas {
+            account: restart_snapshot.account.clone(),
+            account_generation: restart_snapshot.account_generation,
+            kind: CloudRecordCasKind::Admit {
+                upload_generation: next_generation,
+            },
+            expected: vec![CloudRecordSlot {
+                key: "source-a-replacement".into(),
+                record: None,
+            }],
+            replacement: Some(CloudRecordSlot {
+                key: "source-a-replacement".into(),
+                record: Some(durable_record(
+                    "source-a-replacement",
+                    None,
+                    next_generation,
+                    dir.path().join("a-replacement.mp4").display().to_string(),
+                    "queued",
+                )),
+            }),
+        })
+        .unwrap();
+    assert_eq!(
+        next.document.cloud.upload_generation_sequence,
+        next_generation
+    );
+}
+
+#[test]
+fn profile_sequence_rejects_the_same_admit_generation_for_different_slots() {
+    let dir = TestDir::new("clipline-settings", "upload-generation-sequence-race");
+    let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));
+    let initial = store.snapshot().unwrap();
+    let change = |key: &str| CloudRecordCas {
+        account: initial.account.clone(),
+        account_generation: initial.account_generation,
+        kind: CloudRecordCasKind::Admit {
+            upload_generation: 1,
+        },
+        expected: vec![CloudRecordSlot {
+            key: key.into(),
+            record: None,
+        }],
+        replacement: Some(CloudRecordSlot {
+            key: key.into(),
+            record: Some(durable_record(
+                key,
+                None,
+                1,
+                dir.path().join(format!("{key}.mp4")).display().to_string(),
+                "queued",
+            )),
+        }),
+    };
+
+    let admitted = store
+        .compare_exchange_cloud_records(change("source-1"))
+        .unwrap();
+    assert_eq!(admitted.document.cloud.upload_generation_sequence, 1);
+    let error = store
+        .compare_exchange_cloud_records(change("source-2"))
+        .unwrap_err();
+    assert_eq!(error, SettingsTransactionError::StaleCloudRecord);
+    let current = store.snapshot().unwrap();
+    assert!(current.document.cloud.uploads.contains_key("source-1"));
+    assert!(!current.document.cloud.uploads.contains_key("source-2"));
+}
+
+#[test]
 fn whole_record_cas_admits_once_and_rejects_stale_or_aba_writers_byte_identically() {
     let dir = TestDir::new("clipline-settings", "whole-cloud-record-cas");
     let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));

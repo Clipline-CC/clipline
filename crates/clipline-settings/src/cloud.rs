@@ -33,6 +33,10 @@ fn default_upload_status() -> String {
     "not_uploaded".to_string()
 }
 
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CloudUploadRecord {
     pub local_clip_id: String,
@@ -111,6 +115,11 @@ pub struct CloudSettings {
     pub delete_local_after_upload: bool,
     #[serde(default)]
     pub auto_upload_rules: bool,
+    /// Highest durable upload generation admitted by this settings profile.
+    /// The profile-wide scalar survives record and account replacement so a
+    /// process restart cannot recreate an earlier durable upload token.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub upload_generation_sequence: u64,
     #[serde(default)]
     pub uploads: BTreeMap<String, CloudUploadRecord>,
 }
@@ -128,6 +137,7 @@ impl Default for CloudSettings {
             default_visibility: default_cloud_visibility(),
             delete_local_after_upload: false,
             auto_upload_rules: false,
+            upload_generation_sequence: 0,
             uploads: BTreeMap::new(),
         }
     }
@@ -183,6 +193,11 @@ impl CloudSettings {
                     .then(|| (normalize_cloud_upload_key(&key, &record), record))
             })
             .collect();
+        self.upload_generation_sequence = self
+            .uploads
+            .values()
+            .filter_map(|record| record.upload_generation)
+            .fold(self.upload_generation_sequence, u64::max);
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -222,6 +237,14 @@ impl CloudSettings {
                     record.path.len()
                 ));
             }
+        }
+        if self
+            .uploads
+            .values()
+            .filter_map(|record| record.upload_generation)
+            .any(|generation| generation > self.upload_generation_sequence)
+        {
+            return Err("cloud upload generation sequence is older than a durable record".into());
         }
         Ok(())
     }

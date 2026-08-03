@@ -23,6 +23,8 @@ mod upload;
 mod upload_preparation;
 #[path = "upload/remote.rs"]
 mod upload_remote;
+#[path = "upload/settings.rs"]
+mod upload_settings;
 #[path = "upload/transport.rs"]
 mod upload_transport;
 
@@ -43,4 +45,5 @@ pub use scan::*;
 pub use upload::*;
 pub use upload_preparation::*;
 pub use upload_remote::*;
+pub use upload_settings::*;
 pub use upload_transport::*;
