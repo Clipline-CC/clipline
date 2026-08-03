@@ -867,11 +867,20 @@ pub struct PosterWorkToken {
 pub struct PosterPageItem {
     pub identity: ClipPathIdentity,
     pub native_path: PathBuf,
+    pub source_identity: Option<clipline_shell::FileIdentity>,
     pub seek_seconds: f64,
 }
 
 impl PosterPageItem {
     pub fn new(native_path: PathBuf, seek_seconds: f64) -> Result<Self, PosterControllerError> {
+        Self::new_with_file_identity(native_path, None, seek_seconds)
+    }
+
+    pub fn new_with_file_identity(
+        native_path: PathBuf,
+        source_identity: Option<clipline_shell::FileIdentity>,
+        seek_seconds: f64,
+    ) -> Result<Self, PosterControllerError> {
         let identity =
             ClipPathIdentity::from_path(&native_path).ok_or(PosterControllerError::InvalidPath)?;
         if !seek_seconds.is_finite() || seek_seconds < 0.0 {
@@ -880,6 +889,7 @@ impl PosterPageItem {
         Ok(Self {
             identity,
             native_path,
+            source_identity,
             seek_seconds,
         })
     }
@@ -946,7 +956,10 @@ impl<H> Default for PosterControllerUpdate<H> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PosterCacheEntry {
-    Ready(PathBuf),
+    Ready {
+        path: PathBuf,
+        source_identity: Option<clipline_shell::FileIdentity>,
+    },
     Negative {
         failure: PosterNegativeResult,
         retry_at: Instant,
@@ -1086,7 +1099,10 @@ impl<H> PosterController<H> {
         }
         let cache = match completion {
             PosterCompletion::Ready(path) if path == poster_path(&request.item.native_path) => {
-                PosterCacheEntry::Ready(path)
+                PosterCacheEntry::Ready {
+                    path,
+                    source_identity: request.item.source_identity,
+                }
             }
             PosterCompletion::Ready(_) => PosterCacheEntry::Negative {
                 failure: PosterNegativeResult::Failed(PosterFailureKind::Corrupt),
@@ -1274,8 +1290,14 @@ impl<H> PosterController<H> {
             }
             let cached = self.cache.peek(&item.identity).cloned();
             let (kind, cache_action) = match cached {
-                Some(PosterCacheEntry::Ready(encoded_path)) => {
+                Some(PosterCacheEntry::Ready {
+                    path: encoded_path,
+                    source_identity,
+                }) if source_identity == item.source_identity => {
                     (PosterWorkKind::Decode { encoded_path }, CacheAction::Touch)
+                }
+                Some(PosterCacheEntry::Ready { .. }) => {
+                    (PosterWorkKind::Extract, CacheAction::Remove)
                 }
                 Some(PosterCacheEntry::Negative { retry_at, .. }) if retry_at > now => continue,
                 Some(PosterCacheEntry::Negative { .. }) => {

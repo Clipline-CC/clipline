@@ -8,8 +8,9 @@ use clipline_library::{
     MAX_POSTER_ENCODED_BYTES,
 };
 use clipline_slint_spike::poster::{
-    clone_ui_poster, decode_poster_file, poster_decode_pool_shape, publish_decoded_poster,
-    validate_poster_dimensions, with_ui_poster_controller, DecodedPoster, PosterAdapterError,
+    clone_ui_poster, decode_poster_file, poster_decode_pool_shape, poster_extraction_pool_shape,
+    publish_decoded_poster, validate_poster_dimensions, with_ui_poster_controller, DecodedPoster,
+    PosterAdapterError,
 };
 use image::codecs::jpeg::JpegEncoder;
 use image::ExtendedColorType;
@@ -219,4 +220,29 @@ fn decode_dispatch_uses_a_fixed_bounded_pool_instead_of_a_thread_per_poster() {
     let enqueue_body = &source[enqueue..enqueue_end];
     assert!(enqueue_body.contains("try_send"));
     assert!(!enqueue_body.contains("Builder::new()\n        .name(\"clipline-poster-decode\""));
+
+    let (extract_workers, extract_capacity) = poster_extraction_pool_shape();
+    assert_eq!(extract_workers, 2);
+    assert_eq!(extract_capacity, clipline_library::MAX_DECODED_PAGE_IMAGES);
+    assert!(source.contains("PosterService::standard()"));
+    assert!(source.contains("clipline-poster-extract-{index}"));
+}
+
+#[test]
+fn shell_routes_exact_poster_results_and_releases_images_before_model_clear() {
+    let shell = include_str!("../src/shell.rs");
+    assert!(shell.contains("replace_ui_poster_page("));
+    assert!(shell.contains("resources.poster_viewport_start = start"));
+    assert!(shell.contains("poster_page.items,\n                poster_viewport_start,"));
+    assert!(shell.contains("CatalogItemIdentity::Local { path } => clone_ui_poster(path)"));
+    let detach = shell.find("detach_ui_poster_window(poster_token)").unwrap();
+    let clear = shell
+        .find("clear_window_models(&resources.window)")
+        .unwrap();
+    assert!(detach < clear);
+
+    let source = include_str!("../src/poster.rs");
+    assert!(source.contains("ExpectedResultOwner::Poster(request.token.clone())"));
+    assert!(source.contains("try_send_recoverable"));
+    assert!(source.contains("accepts_request(&request)"));
 }

@@ -297,8 +297,9 @@ mod windows_runtime {
     };
     use clipline_library::{
         catalog_result_channel, ActiveFileRegistry, CatalogDialogTextField, CatalogEffect,
-        CatalogResultReceiver, CatalogSource, CatalogUploadVisibility, ForegroundGeneration,
-        LocalClipFilter, LocalClipGrouping, LocalClipSort, PlaybackSourceLease, ValidatedClipPath,
+        CatalogItemIdentity, CatalogResultReceiver, CatalogResultSender, CatalogSource,
+        CatalogUploadVisibility, ForegroundGeneration, LocalClipFilter, LocalClipGrouping,
+        LocalClipSort, PlaybackSourceLease, RequestGeneration, ValidatedClipPath,
         WindowAttachmentGeneration, WindowWorkToken, CATALOG_RESULT_CAPACITY,
     };
     use clipline_playback::windows::{WindowsD3D11Publisher, WindowsVideoHost};
@@ -325,6 +326,9 @@ mod windows_runtime {
         LiveSessionReport, SessionCommandPort, SpikePublisher, ValidatedLiveMediaSource,
     };
     use crate::options::{write_lifecycle_marker, SpikeOptions, SpikeScenario};
+    use crate::poster::{
+        clone_ui_poster, detach_ui_poster_window, replace_ui_poster_page, update_ui_poster_viewport,
+    };
     use crate::settings::{CandidateSettings, CandidateSettingsProfile};
     use crate::windows::{attach_video_host, update_video_host};
     use crate::{
@@ -376,6 +380,12 @@ mod windows_runtime {
         catalog_attachment: WindowAttachmentGeneration,
         catalog_foreground: ForegroundGeneration,
         catalog_revision: u64,
+        poster_token: WindowWorkToken,
+        poster_stamp: Vec<(
+            clipline_library::ClipPathIdentity,
+            Option<clipline_shell::FileIdentity>,
+        )>,
+        poster_viewport_start: usize,
         desktop_attachment: DesktopAttachment,
         session: Option<LiveSession>,
         host: Option<WindowsVideoHost>,
@@ -392,6 +402,7 @@ mod windows_runtime {
         desktop: SlintDesktopAdapter,
         _settings: CandidateSettings,
         catalog: SlintCatalogController,
+        catalog_sender: CatalogResultSender,
         catalog_results: CatalogResultReceiver,
         catalog_executor: Option<CatalogEffectExecutor>,
         review_bridge: Arc<LiveReviewBridge>,
@@ -542,7 +553,7 @@ mod windows_runtime {
         let (catalog_sender, catalog_results) = catalog_result_channel();
         let catalog_executor = CatalogEffectExecutor::start(
             catalog_handler,
-            catalog_sender,
+            catalog_sender.clone(),
             Arc::new(TimerCatalogWake),
         )?;
         let catalog = SlintCatalogController::new(Arc::new(SystemDayResolver))
@@ -573,6 +584,7 @@ mod windows_runtime {
             desktop,
             _settings: settings,
             catalog,
+            catalog_sender,
             catalog_results,
             catalog_executor: Some(catalog_executor),
             review_bridge,
@@ -724,22 +736,69 @@ mod windows_runtime {
     }
 
     fn publish_catalog_window(runtime: &Rc<RefCell<SlintShell>>) -> Result<(), String> {
-        let (projection, window, attachment) = {
+        let (
+            projection,
+            poster_page,
+            window,
+            attachment,
+            catalog_attachment,
+            catalog_foreground,
+            current_poster_stamp,
+            poster_viewport_start,
+            catalog_sender,
+        ) = {
             let runtime_ref = runtime.borrow();
             let Some(resources) = runtime_ref.window.as_ref() else {
                 return Ok(());
             };
             (
                 runtime_ref.catalog.projection(),
+                runtime_ref
+                    .catalog
+                    .poster_page()
+                    .map_err(|error| error.to_string())?,
                 resources.window.as_weak(),
                 resources.attachment,
+                resources.catalog_attachment,
+                resources.catalog_foreground,
+                resources.poster_stamp.clone(),
+                resources.poster_viewport_start,
+                runtime_ref.catalog_sender.clone(),
             )
         };
+        if current_poster_stamp != poster_page.stamp {
+            let poster_token = WindowWorkToken {
+                attachment: catalog_attachment,
+                foreground: catalog_foreground,
+                request: RequestGeneration::new(projection.revision.get()),
+            };
+            replace_ui_poster_page(
+                window.clone(),
+                catalog_sender,
+                poster_token,
+                poster_page.items,
+                poster_viewport_start,
+            )?;
+            let mut runtime_ref = runtime.borrow_mut();
+            let Some(resources) = runtime_ref.window.as_mut() else {
+                detach_ui_poster_window(poster_token)?;
+                return Ok(());
+            };
+            if resources.attachment != attachment {
+                detach_ui_poster_window(poster_token)?;
+                return Ok(());
+            }
+            resources.poster_token = poster_token;
+            resources.poster_stamp = poster_page.stamp;
+        }
         let Some(window) = window.upgrade() else {
             return Ok(());
         };
-        publish_projection(&window, projection.as_ref(), |_| None)
-            .map_err(|error| error.to_string())?;
+        publish_projection(&window, projection.as_ref(), |identity| match identity {
+            CatalogItemIdentity::Local { path } => clone_ui_poster(path),
+            CatalogItemIdentity::Cloud { .. } => None,
+        })
+        .map_err(|error| error.to_string())?;
         let mut runtime_ref = runtime.borrow_mut();
         let Some(resources) = runtime_ref.window.as_mut() else {
             return Ok(());
@@ -976,11 +1035,20 @@ mod windows_runtime {
             checked_increment(&mut runtime_ref.resources.model_sets_created)?;
             runtime_ref.resources.live_model_sets = 1;
             runtime_ref.resources.max_live_windows = 1;
+            let catalog_attachment = WindowAttachmentGeneration::new(attachment.generation());
+            let catalog_foreground = ForegroundGeneration::new(1);
             runtime_ref.window = Some(WindowResources {
                 attachment,
-                catalog_attachment: WindowAttachmentGeneration::new(attachment.generation()),
-                catalog_foreground: ForegroundGeneration::new(1),
+                catalog_attachment,
+                catalog_foreground,
                 catalog_revision: 0,
+                poster_token: WindowWorkToken {
+                    attachment: catalog_attachment,
+                    foreground: catalog_foreground,
+                    request: RequestGeneration::INITIAL,
+                },
+                poster_stamp: Vec::new(),
+                poster_viewport_start: 0,
                 desktop_attachment,
                 session: None,
                 host: None,
@@ -1245,6 +1313,37 @@ mod windows_runtime {
                 attachment,
                 CatalogUiIntent::SetUploadAudioTrack { row, selected },
             );
+        });
+        let weak_runtime = Rc::downgrade(runtime);
+        window.on_catalog_poster_viewport(move |start| {
+            let Ok(start) = usize::try_from(start) else {
+                return;
+            };
+            let Some(runtime) = weak_runtime.upgrade() else {
+                return;
+            };
+            let poster_token = {
+                let mut runtime_ref = runtime.borrow_mut();
+                if !runtime_ref
+                    .lifecycle
+                    .accept_callback(attachment)
+                    .unwrap_or(false)
+                {
+                    return;
+                }
+                let Some(resources) = runtime_ref
+                    .window
+                    .as_mut()
+                    .filter(|resources| resources.attachment == attachment)
+                else {
+                    return;
+                };
+                resources.poster_viewport_start = start;
+                resources.poster_token
+            };
+            if let Err(error) = update_ui_poster_viewport(poster_token, start) {
+                report_shell_error(&runtime, &error);
+            }
         });
 
         let weak_runtime = Rc::downgrade(runtime);
@@ -1561,6 +1660,13 @@ mod windows_runtime {
                 .map_err(|error| error.to_string())?
         };
         route_catalog_effects(runtime, catalog_effects)?;
+        let poster_token = runtime
+            .borrow()
+            .window
+            .as_ref()
+            .map(|resources| resources.poster_token)
+            .ok_or_else(|| "poster detach requested without a window".to_owned())?;
+        detach_ui_poster_window(poster_token)?;
         let mut resources = runtime
             .borrow_mut()
             .window

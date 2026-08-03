@@ -4,7 +4,7 @@
 //! resolves those indices against the exact immutable projection accepted by
 //! the reducer, so UI code never constructs paths or cloud identities.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc, Arc, Mutex,
@@ -19,7 +19,7 @@ use clipline_library::{
     ExpectedResultOwner, ForegroundGeneration, KnownGameIdentityResolver, LegacyAudioTrackProbe,
     LocalClipFilter, LocalClipGrouping, LocalClipSort, LocalDay, LocalDayResolver,
     LocalIndexCompletion, LocalLibraryRepository, LocalLibraryScanner, Mp4LegacyAudioTrackProbe,
-    PlatformEffect, PlaybackSourceLease, PresentationPoster, ResolvedLocalClip,
+    PlatformEffect, PlaybackSourceLease, PosterPageItem, PresentationPoster, ResolvedLocalClip,
     StandardRepositoryFileSystem, ValidatedClipPath, WindowAttachmentGeneration, WindowWorkToken,
     MAX_CATALOG_STRING_BYTES, MAX_FOREGROUND_MESSAGE_BYTES,
 };
@@ -603,6 +603,17 @@ pub struct SlintCatalogController {
     controller: CatalogController,
 }
 
+/// Exact local page used by the window-scoped poster owner. The stamp includes
+/// the scanner-captured file identity so a same-path replacement invalidates a
+/// retained image without making the Slint callback touch the filesystem.
+pub struct CatalogPosterPage {
+    pub items: Vec<PosterPageItem>,
+    pub stamp: Vec<(
+        clipline_library::ClipPathIdentity,
+        Option<clipline_shell::FileIdentity>,
+    )>,
+}
+
 impl SlintCatalogController {
     pub fn new(days: Arc<dyn LocalDayResolver>) -> Result<Self, CatalogUiError> {
         Ok(Self {
@@ -613,6 +624,70 @@ impl SlintCatalogController {
     #[must_use]
     pub fn projection(&self) -> Arc<CatalogProjection> {
         Arc::clone(&self.controller.state().projection)
+    }
+
+    pub fn poster_page(&self) -> Result<CatalogPosterPage, CatalogUiError> {
+        let state = self.controller.state();
+        if state.source != CatalogSource::Local {
+            return Ok(CatalogPosterPage {
+                items: Vec::new(),
+                stamp: Vec::new(),
+            });
+        }
+        let mut items = Vec::new();
+        let mut stamp = Vec::new();
+        items
+            .try_reserve_exact(state.projection.rows.len())
+            .map_err(|_| {
+                CatalogUiError::Controller(CatalogControllerError::Invalid {
+                    field: "slint.poster_page.items",
+                })
+            })?;
+        stamp
+            .try_reserve_exact(state.projection.rows.len())
+            .map_err(|_| {
+                CatalogUiError::Controller(CatalogControllerError::Invalid {
+                    field: "slint.poster_page.stamp",
+                })
+            })?;
+        for row in &state.projection.rows {
+            let CatalogItemIdentity::Local { path } = &row.identity else {
+                return Err(CatalogUiError::Controller(
+                    CatalogControllerError::Invalid {
+                        field: "slint.poster_page.source",
+                    },
+                ));
+            };
+            let local = state
+                .local_items
+                .iter()
+                .find(|item| item.path_identity().as_ref() == Some(path))
+                .ok_or(CatalogUiError::Controller(
+                    CatalogControllerError::Invalid {
+                        field: "slint.poster_page.identity",
+                    },
+                ))?;
+            let duration =
+                local.duration_s.or((local.marker_summary.duration_s > 0.0)
+                    .then_some(local.marker_summary.duration_s));
+            let seek_seconds = duration
+                .filter(|duration| duration.is_finite() && *duration > 0.0)
+                .map_or(1.0, |duration| (duration * 0.15).min(5.0));
+            items.push(
+                PosterPageItem::new_with_file_identity(
+                    PathBuf::from(&local.path),
+                    local.file_identity,
+                    seek_seconds,
+                )
+                .map_err(|_| {
+                    CatalogUiError::Controller(CatalogControllerError::Invalid {
+                        field: "slint.poster_page.item",
+                    })
+                })?,
+            );
+            stamp.push((path.clone(), local.file_identity));
+        }
+        Ok(CatalogPosterPage { items, stamp })
     }
 
     /// Exact revision retained in Rust. Slint's `int` is only 32-bit, so the

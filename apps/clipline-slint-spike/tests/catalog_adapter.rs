@@ -10,9 +10,10 @@ use clipline_library::{
     CatalogProjectionInput, CatalogProjectionSource, CatalogResult, CatalogRevision,
     CatalogUploadProjection, ClipPathIdentity, CloudAccountGeneration, CloudAccountKey,
     DurableUploadToken, ExpectedResultOwner, ForegroundGeneration, GalleryPresentation,
-    LocalClipFilter, LocalClipId, LocalDay, LocalDayResolver, LocalGalleryOptions, LocalPageIndex,
-    PresentationError, RequestGeneration, SystemProjectionReservation, UploadGeneration,
-    UploadSummary, WindowAttachmentGeneration, WindowWorkToken, CATALOG_RESULT_CAPACITY,
+    LocalClipFilter, LocalClipId, LocalClipItem, LocalDay, LocalDayResolver, LocalGalleryOptions,
+    LocalIndexCompletion, LocalPageIndex, MarkerSidecarSummary, PresentationError,
+    RequestGeneration, SystemProjectionReservation, UploadGeneration, UploadSummary,
+    WindowAttachmentGeneration, WindowWorkToken, CATALOG_RESULT_CAPACITY,
 };
 use clipline_slint_spike::catalog::{
     rejected_effect_result, route_ui_intent, CatalogEffectExecutor, CatalogEffectHandler,
@@ -179,6 +180,59 @@ fn controller_wrapper_starts_with_a_bounded_empty_projection() {
     let projection = controller.projection();
     assert_eq!(projection.rows.len(), 0);
     assert_eq!(projection.revision, CatalogRevision::INITIAL);
+}
+
+#[test]
+fn controller_exposes_only_the_current_local_page_to_the_poster_owner() {
+    let mut controller =
+        clipline_slint_spike::catalog::SlintCatalogController::new(Arc::new(Days)).unwrap();
+    let attachment = WindowAttachmentGeneration::new(50);
+    let foreground = ForegroundGeneration::new(51);
+    let effects = controller.attach(attachment, foreground).unwrap();
+    let (token, revision) = effects
+        .into_iter()
+        .find_map(|effect| match effect {
+            CatalogEffect::RefreshLocal { token, revision } => Some((token, revision)),
+            _ => None,
+        })
+        .unwrap();
+    let item = LocalClipItem {
+        path: "C:/clips/poster.mp4".into(),
+        name: "poster.mp4".into(),
+        title: Some("Poster".into()),
+        kind: "replay".into(),
+        session: None,
+        size_mb: 1.0,
+        modified_unix: 1,
+        duration_s: Some(20.0),
+        marker_count: 0,
+        game: None,
+        file_identity: None,
+        marker_summary: MarkerSidecarSummary::default(),
+    };
+    controller
+        .accept(CatalogResult::LocalIndex(
+            LocalIndexCompletion::new(token, revision, false, vec![item], Vec::new()).unwrap(),
+        ))
+        .unwrap();
+
+    let page = controller.poster_page().unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(
+        page.items[0].native_path.to_string_lossy(),
+        "C:/clips/poster.mp4"
+    );
+    assert_eq!(page.items[0].seek_seconds, 3.0);
+    assert_eq!(page.stamp.len(), 1);
+
+    let revision = controller.revision();
+    controller
+        .dispatch(
+            revision,
+            CatalogUiIntent::SetSource(clipline_library::CatalogSource::Cloud),
+        )
+        .unwrap();
+    assert!(controller.poster_page().unwrap().items.is_empty());
 }
 
 struct FailingHandler;

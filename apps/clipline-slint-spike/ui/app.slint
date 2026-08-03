@@ -141,6 +141,7 @@ export component CliplineSpike inherits Window {
     callback catalog-set-dialog-text(field: CatalogDialogTextField, value: string);
     callback catalog-set-upload-visibility(visibility: CatalogUploadVisibility);
     callback catalog-set-audio-track(track-index: int, selected: bool);
+    callback catalog-poster-viewport(start-index: int);
 
     changed video-stage-x => { root.video-geometry-changed(); }
     changed video-stage-y => { root.video-geometry-changed(); }
@@ -313,6 +314,7 @@ export component CliplineSpike inherits Window {
         cancel-upload-context => { root.catalog-cancel-upload-context(); }
         copy-link-context => { root.catalog-copy-link-context(); }
         open-link-context => { root.catalog-open-link-context(); }
+        poster-viewport(start-index) => { root.catalog-poster-viewport(start-index); }
     }
 
     if root.review-visible : review-view := Rectangle {

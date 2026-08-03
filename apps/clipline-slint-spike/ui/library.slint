@@ -80,6 +80,7 @@ export component LibrarySurface inherits Rectangle {
     in property <bool> can-cancel-upload: false;
     in property <bool> dialog-open: false;
     private property <int> max-visible-rows: 60;
+    private property <int> poster-viewport-start: max(0, Math.floor(-catalog-list.viewport-y / 76px));
 
     callback set-source(source: CatalogSource);
     callback set-query(query: string);
@@ -106,6 +107,9 @@ export component LibrarySurface inherits Rectangle {
     callback cancel-upload-context();
     callback copy-link-context();
     callback open-link-context();
+    callback poster-viewport(start-index: int);
+
+    changed poster-viewport-start => { root.poster-viewport(root.poster-viewport-start); }
 
     background: #14100c;
     accessible-role: main;
@@ -293,7 +297,7 @@ export component LibrarySurface inherits Rectangle {
         Button { x: 356px; y: 3px; width: 102px; height: 32px; text: "Delete"; accessible-label: "Delete selected clips"; enabled: root.selected-count > 0; clicked => { root.delete-selection(); } }
     }
 
-    ListView {
+    catalog-list := ListView {
         x: 24px;
         y: root.selection-mode && root.source == CatalogSource.local ? 156px : 114px;
         width: parent.width - 48px;

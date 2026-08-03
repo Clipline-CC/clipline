@@ -24,6 +24,10 @@ fn item(index: usize) -> PosterPageItem {
     .unwrap()
 }
 
+fn file_identity(device: u64, file: u64) -> clipline_shell::FileIdentity {
+    serde_json::from_value(serde_json::json!({ "device": device, "file": file })).unwrap()
+}
+
 #[test]
 fn retained_image_lookup_is_exact_and_bounded_by_the_decode_window() {
     let mut controller = PosterController::<u64>::new();
@@ -49,6 +53,43 @@ fn retained_image_lookup_is_exact_and_bounded_by_the_decode_window() {
         );
     }
     assert_eq!(controller.retained_image_count(), MAX_DECODED_PAGE_IMAGES);
+}
+
+#[test]
+fn same_path_replacement_identity_forces_extract_and_releases_the_old_image() {
+    let path = PathBuf::from(r"C:\clips\replaced.mp4");
+    let first = PosterPageItem::new_with_file_identity(
+        path.clone(),
+        Some(file_identity(1, 10)),
+        1.0,
+    )
+    .unwrap();
+    let replacement = PosterPageItem::new_with_file_identity(
+        path,
+        Some(file_identity(1, 11)),
+        1.0,
+    )
+    .unwrap();
+    let mut controller = PosterController::<u64>::new();
+    controller
+        .replace_page(window(1, 2, 3), vec![first])
+        .unwrap();
+    let extract = controller.set_viewport(0, 1, 0).unwrap().queued.remove(0);
+    let decode = controller.accept_extracted(
+        &extract,
+        PosterCompletion::Ready(clipline_library::poster_path(&extract.item.native_path)),
+    );
+    let decode = decode.queued.first().unwrap().clone();
+    assert!(controller.accept_decoded(&decode, 7).released.is_empty());
+
+    let replaced = controller
+        .replace_page(window(1, 2, 4), vec![replacement])
+        .unwrap();
+    assert_eq!(replaced.released, vec![7]);
+    let queued = controller.set_viewport(0, 1, 0).unwrap().queued;
+    assert_eq!(queued.len(), 1);
+    assert!(matches!(queued[0].kind, PosterWorkKind::Extract));
+    assert!(!controller.cache_contains(&queued[0].item.identity));
 }
 
 fn poster(index: usize) -> PathBuf {

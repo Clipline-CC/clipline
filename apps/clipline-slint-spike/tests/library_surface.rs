@@ -27,6 +27,8 @@ fn library_surface_is_controller_owned_bounded_and_source_aware() {
         "CatalogGroup { smart, day, game, session, ungrouped }",
         "in property <[LibraryItem]> rows: []",
         "private property <int> max-visible-rows: 60",
+        "private property <int> poster-viewport-start",
+        "changed poster-viewport-start",
         "index < root.max-visible-rows",
         "source == CatalogSource.cloud",
         "selected-count",
@@ -101,6 +103,7 @@ fn library_surface_is_controller_owned_bounded_and_source_aware() {
         "callback catalog-cancel-upload-context()",
         "callback catalog-copy-link-context()",
         "callback catalog-open-link-context()",
+        "callback catalog-poster-viewport(start-index: int)",
     ] {
         assert!(
             app.contains(callback),
