@@ -108,14 +108,8 @@ fn attached_projection_drains_notices_oldest_first_and_stops_on_failure_or_stale
             true
         },
         |revision, notice_id| {
-            acknowledge_presented_notice(
-                &mut controller,
-                &gate,
-                attachment,
-                revision,
-                notice_id,
-            )
-            .then(|| DesktopProjection::from_snapshot(&controller.snapshot()))
+            acknowledge_presented_notice(&mut controller, &gate, attachment, revision, notice_id)
+                .then(|| DesktopProjection::from_snapshot(&controller.snapshot()))
         },
     );
     assert_eq!(count, 4);
@@ -124,7 +118,9 @@ fn attached_projection_drains_notices_oldest_first_and_stops_on_failure_or_stale
 
     let failed = DesktopController::new((), vec!["retained".into()]).unwrap();
     let failed_gate = AttachmentGate::default();
-    let failed_attachment = failed_gate.attach(failed.snapshot().revision.get()).unwrap();
+    let failed_attachment = failed_gate
+        .attach(failed.snapshot().revision.get())
+        .unwrap();
     assert_eq!(
         present_attached_projection_sequence(
             &failed_gate,

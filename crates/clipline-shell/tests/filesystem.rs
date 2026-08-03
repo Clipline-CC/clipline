@@ -3,10 +3,10 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[cfg(unix)]
-use clipline_shell::FileMutationFence;
 #[cfg(windows)]
 use clipline_shell::windows::filesystem::available_space_bytes;
+#[cfg(unix)]
+use clipline_shell::FileMutationFence;
 use clipline_shell::{
     file_identity, open_regular_file_nofollow, opened_file_identity, replace_file_if_identities,
     DirectoryAuthority,

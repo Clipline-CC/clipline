@@ -257,7 +257,7 @@ fn package_probe_is_exact_side_effect_free_and_variant_intrinsic() {
     assert_eq!(probe["productName"], "Clipline");
     assert_eq!(probe["publisher"], "Clipline");
     assert_eq!(probe["identifier"], "io.clipline.app");
-    assert_eq!(probe["version"], "0.1.43");
+    assert_eq!(probe["version"], "0.1.44");
     let expected_variant = if cfg!(feature = "package-regular") {
         "regular"
     } else if cfg!(feature = "package-standalone") {

@@ -38,6 +38,13 @@ standalone Slint all-target tests and warning-denied Clippy, the cross-instance 
 and credential-rotation race regressions, and `git diff --check`. A Fable medium independent audit
 returned GO with no P0/P1; both of its non-blocking hardening findings were fixed before commit.
 
+The subsequent `develop` 0.1.44 merge combined the stricter staggered-audio mixer with the
+writer-authored playback/upload fixture. That fixture legitimately stores a 312-tick final MP4
+sample for a 960-tick decoded Opus packet to discard encoder padding. The merged mixer therefore
+permits only a bounded shorter physical final sample-table entry, while still rejecting every
+non-terminal or edit-list-truncated mismatch over one tick and any container duration longer than
+decoded PCM. Unit and upload-preparation regressions pin both sides of that rule.
+
 Next: add the bounded native Cloud thumbnail decoder/retention owner (two workers, queue 32, at most
 32 decoded images), then finish profile/share/upload/status wiring and the remaining Task 9 surface
 contract before the large-library and lifecycle gates.
@@ -786,6 +793,89 @@ No headline baseline number has been recorded yet because collecting one would r
 user's running Clipline. Next: with Clipline closed, run each scenario three times using
 `target/benchmark/clipline-app.exe` and the protocol in `docs/slint/baseline-protocol.md`; then plan the
 first Slint shell/media vertical slice against those measurements and the frozen ledger.
+## Checkpoint (2026-08-02): Nightly 0.1.44
+
+Plan: `docs/superpowers/plans/2026-08-02-nightly-0.1.44.md`.
+
+Nightly 0.1.44 publishes **#133**, the support-report-driven multitrack audio mixing and diagnostic
+redaction reliability release.
+
+User-visible since 0.1.43: cloud uploads and normal Copy exports can combine output and microphone
+tracks whose starts are offset by less than one Opus packet without producing overlapping or
+backward MP4 timestamps. Mixing now uses one continuous 48 kHz timeline, consumes each track's own
+pre-skip, preserves long gaps without manufacturing silence packets, and rejects corrupt MP4 versus
+decoded Opus duration mismatches beyond the supported one-tick quantization tolerance. Support
+reports also preserve valid JSONL after redacting JSON-escaped Windows paths.
+
+PR #133 is merged to `develop` as `d149b50` with green Ubuntu, Windows, and Greptile checks; both
+Codex review threads were answered and resolved before merge. Microsoft's current official Fixed
+Version download remains 150.0.4078.83, matching the staged standalone runtime, and its required
+review date was refreshed for this release.
+
+**Published** on the rolling `nightly` prerelease from `develop` commit `bd76a6e`, seven assets.
+Every asset was downloaded again from the GitHub release and matched the staged SHA-256 digest.
+Both downloaded manifests parse as version 0.1.44, point at their expected rolling release URLs,
+and contain the exact downloaded sidecar signatures. Both downloaded installers verify under the
+updater public key compiled into Clipline; crossing the standalone signature onto the regular
+installer is correctly rejected.
+
+| asset | bytes | sha256 |
+| --- | --- | --- |
+| `Clipline_0.1.44_x64-setup.exe` | 54,320,782 | `820df11c22acfbe93423685281d364d72c0e96e61b0affec5613ad79ea09c8fe` |
+| `Clipline_0.1.44_x64-standalone-setup.exe` | 277,012,373 | `4700e21da8b1f65b5d05501b7751e74d7bc4d13089f60a11a9c897c3969e17ca` |
+
+GitHub CI does not run on version-only pushes to `develop`; the release commit's application source
+is identical to CI-green merge `d149b50`. Its delta is limited to three version strings, WebView2
+review dates, and release documentation. Full workspace tests, a clean-cache warning-denied
+workspace Clippy run, both release-input preflights, manifest validation, and local updater
+signature verification passed before publication.
+
+The standalone installer was extracted without installation and launched against isolated app data.
+Its packaged 0.1.44 app and all six WebView2 children used the bundled 150.0.4078.83 runtime. It
+loaded a ten-second H.264 clip with separate output and microphone Opus tracks, prepared both audio
+previews, showed `2/2 selected`, and played through `ended` with no media, page, or global error.
+Runtime probing reported H.264 and AV1 support, correctly left HEVC unavailable on this machine, and
+found three encoders.
+
+## Checkpoint (2026-08-02): valid redacted support JSON
+
+Plan: `docs/superpowers/plans/2026-08-02-support-log-json-redaction.md` (`4adecf7`).
+
+Support report log entries remain valid JSONL when diagnostic strings contain Windows drive paths.
+The shared path regex previously consumed only the first backslash of JSON's doubled `\\` path
+separator, leaving an invalid escape such as `\U` in the redacted line. Path separators now consume
+one or more adjacent backslashes, covering both plain diagnostic text and JSON-escaped strings while
+preserving the existing redaction and bundle structure. The fix and exact parse-after-redaction
+regression are commit `e386e64`.
+
+The focused red/green regression, complete application suite, full workspace suite, fresh-cache app
+Clippy, warning-denied workspace Clippy, formatting, and diff checks are green.
+
+## Checkpoint (2026-08-02): staggered selected-audio mixing
+
+Plan: `docs/superpowers/plans/2026-08-02-staggered-audio-mix.md` (`7e71a86`).
+
+A 0.1.43 support report reproduced `unsupported mp4: overlapping or backward sample presentation
+times` when both output and microphone audio were selected for a cloud upload or shareable Copy.
+The native Opus mixer emitted one full packet at every source packet start, so two valid tracks
+offset by less than one packet produced overlapping mixed samples that the final remux correctly
+rejected.
+
+The shared file-backed and in-memory mixer now maps every selected track onto one continuous
+48 kHz timeline and emits fixed, non-overlapping 20 ms packets. It handles sub-packet track offsets,
+consumes each source track's own Opus pre-skip, tolerates normal 959/961-tick container-duration
+quantization, preserves long gaps without encoding thousands of silent packets, and bounds decoded
+packet expansion before allocation. The fix is commit `5037755`.
+
+PR #133 review follow-up (`docs/superpowers/plans/2026-08-02-pr133-review-followup.md`,
+`fee4e01`) additionally rejects MP4 sample-table and decoded Opus duration mismatches beyond the
+supported ±1-tick quantization before PCM can be cropped or padded (`a11cf49`). Codex's separate
+commit-history comment required no rewrite: both original plan commits already precede their
+respective implementation commits and each fix retains its own rollback boundary.
+
+The exact staggered-track file regression, the complete `clipline-mp4` suite, full workspace tests,
+fresh-cache crate Clippy, and warning-denied workspace Clippy are green. The report's separately
+observed malformed redacted-log JSON is fixed by the checkpoint above.
 
 ## Checkpoint (2026-07-29): Nightly 0.1.43
 

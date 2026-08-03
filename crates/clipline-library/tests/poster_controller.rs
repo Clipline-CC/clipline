@@ -58,18 +58,11 @@ fn retained_image_lookup_is_exact_and_bounded_by_the_decode_window() {
 #[test]
 fn same_path_replacement_identity_forces_extract_and_releases_the_old_image() {
     let path = PathBuf::from(r"C:\clips\replaced.mp4");
-    let first = PosterPageItem::new_with_file_identity(
-        path.clone(),
-        Some(file_identity(1, 10)),
-        1.0,
-    )
-    .unwrap();
-    let replacement = PosterPageItem::new_with_file_identity(
-        path,
-        Some(file_identity(1, 11)),
-        1.0,
-    )
-    .unwrap();
+    let first =
+        PosterPageItem::new_with_file_identity(path.clone(), Some(file_identity(1, 10)), 1.0)
+            .unwrap();
+    let replacement =
+        PosterPageItem::new_with_file_identity(path, Some(file_identity(1, 11)), 1.0).unwrap();
     let mut controller = PosterController::<u64>::new();
     controller
         .replace_page(window(1, 2, 3), vec![first])

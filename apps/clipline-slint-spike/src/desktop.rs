@@ -317,7 +317,9 @@ impl SlintDesktopAdapter {
                 {
                     return None;
                 }
-                Some(DesktopProjection::from_snapshot(&state.controller.snapshot()))
+                Some(DesktopProjection::from_snapshot(
+                    &state.controller.snapshot(),
+                ))
             },
         );
         Ok(attachment)
