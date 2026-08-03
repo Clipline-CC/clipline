@@ -2,8 +2,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use clipline_desktop::{
-    CloudAccountScope, CloudUploadProgress, DesktopController, Generation, RecorderEvent, UiEvent,
-    MAX_ACTIVE_UPLOADS,
+    CloudAccountOwner, CloudAccountScope, CloudUploadProgress, CloudUploadUpdateKind,
+    DesktopController, Generation, RecorderEvent, UiEvent, MAX_ACTIVE_UPLOADS,
 };
 use clipline_slint_spike::desktop::{AttachmentGate, DesktopProjection};
 
@@ -13,8 +13,9 @@ fn spike_root() -> PathBuf {
 
 fn upload(generation: u64, id: &str) -> UiEvent {
     UiEvent::CloudUploadProgress {
-        account: CloudAccountScope::INITIAL,
+        account: test_account(),
         generation: Generation::new(generation),
+        update: CloudUploadUpdateKind::State,
         progress: CloudUploadProgress {
             local_clip_id: id.into(),
             path: format!(r"C:\{id}.mp4"),
@@ -25,12 +26,22 @@ fn upload(generation: u64, id: &str) -> UiEvent {
             remote_url: None,
             error: None,
         },
+        notice: None,
     }
+}
+
+fn test_account() -> CloudAccountOwner {
+    CloudAccountOwner::new("account", CloudAccountScope::INITIAL).unwrap()
 }
 
 #[test]
 fn projection_is_revisioned_and_bounds_the_visible_upload_model() {
     let mut controller = DesktopController::new((), vec!["warning".into()]).unwrap();
+    controller
+        .apply_event(UiEvent::CloudAccountChanged {
+            account: Some(test_account()),
+        })
+        .unwrap();
     controller
         .apply_event(UiEvent::Recorder {
             generation: Generation::new(1),

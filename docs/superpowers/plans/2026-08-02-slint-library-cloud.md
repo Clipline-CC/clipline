@@ -378,12 +378,23 @@ lease, or if the 2,000-clip absolute memory/process bound fails.
 
 - Create: `crates/clipline-library/src/cloud/protocol.rs`
 - Create: `crates/clipline-library/tests/cloud_protocol.rs`
+- Create: `crates/clipline-library/tests/cloud_protocol_http.rs`
 - Create: `crates/clipline-library/src/upload.rs`
 - Create: `crates/clipline-library/tests/upload.rs`
 - Create: `crates/clipline-library/tests/upload_account_fence.rs`
+- Create: `crates/clipline-library/tests/upload_source_lease.rs`
 - Modify: `crates/clipline-library/Cargo.toml`
+- Modify: `crates/clipline-library/src/cloud/http.rs`
+- Modify: `crates/clipline-library/src/lib.rs`
 - Modify: `apps/clipline-app/src/cloud_upload.rs`
 - Modify: `apps/clipline-app/src/cloud.rs`
+- Modify: `apps/clipline-app/src/desktop/tauri_sink.rs`
+- Modify: `apps/clipline-app/tests/repository_security.rs`
+- Delete: `apps/clipline-app/src/cloud/cache_identity.rs`
+- Modify: `apps/clipline-slint-spike/tests/desktop_adapter.rs`
+- Modify: `apps/clipline-slint-spike/Cargo.lock`
+- Modify: `crates/clipline-shell/src/lib.rs`
+- Modify: `crates/clipline-shell/src/windows/filesystem.rs`
 - Modify: `crates/clipline-desktop/src/event.rs`
 - Modify: `crates/clipline-desktop/src/snapshot.rs`
 - Modify: `crates/clipline-desktop/src/channel.rs`

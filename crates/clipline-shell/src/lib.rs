@@ -231,6 +231,27 @@ pub fn open_regular_file_nofollow(path: &std::path::Path) -> std::io::Result<std
     }
 }
 
+/// Open one regular upload source without following its final link/reparse
+/// component and retain the strongest mutation exclusion available here.
+///
+/// Windows denies new write/delete sharing while the returned handle lives.
+/// Other supported platforms retain a no-follow regular-file descriptor;
+/// Clipline-owned mutations are additionally excluded by the shared upload
+/// registry.
+pub fn open_regular_file_nofollow_for_upload(
+    path: &std::path::Path,
+) -> std::io::Result<std::fs::File> {
+    #[cfg(windows)]
+    {
+        windows::filesystem::open_regular_file_nofollow_for_upload(path)
+    }
+
+    #[cfg(not(windows))]
+    {
+        open_regular_file_nofollow(path)
+    }
+}
+
 /// Update one regular file's modification time through a no-follow handle only
 /// while it still has the exact identity authorized by the caller.
 pub fn set_regular_file_modified_if_identity(

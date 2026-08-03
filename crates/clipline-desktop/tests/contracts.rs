@@ -1,7 +1,8 @@
 use clipline_desktop::{
-    CloudAccountScope, CloudUploadProgress, GameDetection, Generation, GenerationError, MicMonitor,
-    RecorderEvent, Revision, UiAction, UiEffect, UiEvent, WindowLifecycleMode,
-    WindowLifecycleSnapshot, MAX_MIC_MONITOR_SAMPLES,
+    CloudAccountOwner, CloudAccountScope, CloudUploadProgress, CloudUploadUpdateKind,
+    GameDetection, Generation, GenerationError, MicMonitor, RecorderEvent, Revision, UiAction,
+    UiEffect, UiEvent, WindowLifecycleMode, WindowLifecycleSnapshot, MAX_CLOUD_ACCOUNT_KEY_BYTES,
+    MAX_MIC_MONITOR_SAMPLES,
 };
 use serde_json::json;
 
@@ -146,9 +147,33 @@ fn ui_events_carry_generations_for_stale_completion_domains() {
         error: None,
     };
     let event = UiEvent::CloudUploadProgress {
-        account: CloudAccountScope::new(7),
+        account: CloudAccountOwner::new("account-a", CloudAccountScope::new(7)).unwrap(),
         generation: Generation::new(4),
+        update: CloudUploadUpdateKind::Bytes,
         progress,
+        notice: None,
     };
     assert_eq!(event.generation(), Some(Generation::new(4)));
+}
+
+#[test]
+fn cloud_account_owners_are_bounded_exact_values() {
+    let owner = CloudAccountOwner::new("account-a", CloudAccountScope::new(7)).unwrap();
+    assert_eq!(owner.account_key(), "account-a");
+    assert_eq!(owner.account_generation(), CloudAccountScope::new(7));
+    assert_eq!(
+        serde_json::to_value(&owner).unwrap(),
+        json!({ "account_key": "account-a", "account_generation": 7 })
+    );
+    assert!(CloudAccountOwner::new("", CloudAccountScope::new(1)).is_err());
+    assert!(CloudAccountOwner::new(
+        "x".repeat(MAX_CLOUD_ACCOUNT_KEY_BYTES + 1),
+        CloudAccountScope::new(1)
+    )
+    .is_err());
+    assert!(serde_json::from_value::<CloudAccountOwner>(json!({
+        "account_key": "",
+        "account_generation": 1
+    }))
+    .is_err());
 }

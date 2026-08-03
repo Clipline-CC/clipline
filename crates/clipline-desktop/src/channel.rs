@@ -4,7 +4,10 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-use crate::{CloudAccountScope, Generation, RecorderEvent, Revision, UiEvent, WindowLifecycleMode};
+use crate::{
+    CloudAccountOwner, CloudUploadUpdateKind, Generation, RecorderEvent, Revision, UiEvent,
+    WindowLifecycleMode,
+};
 
 pub const UI_EVENT_CAPACITY: usize = 128;
 
@@ -36,6 +39,8 @@ pub enum UiEventSendError {
         current: Revision,
         received: Revision,
     },
+    #[error("UI event belongs to a replaced cloud account")]
+    AccountChanged,
     #[error("UI event sequence is exhausted")]
     SequenceExhausted,
 }
@@ -55,7 +60,7 @@ enum GenerationDomain {
     Recorder,
     Microphone,
     GameDetection,
-    CloudUpload(CloudAccountScope, String),
+    CloudUpload(CloudAccountOwner, String),
     Enrichment,
 }
 
@@ -66,7 +71,7 @@ enum CoalescingKey {
     WindowLifecycle,
     MicrophoneMonitor,
     GameDetection,
-    CloudUpload(CloudAccountScope, String),
+    CloudUpload(CloudAccountOwner, String),
     Enrichment,
 }
 
@@ -79,6 +84,7 @@ struct ChannelState {
     generations: HashMap<GenerationDomain, Generation>,
     microphone_terminal: Option<Generation>,
     lifecycle: Option<(Revision, WindowLifecycleMode)>,
+    cloud_account: Option<CloudAccountOwner>,
 }
 
 struct Shared {
@@ -268,14 +274,17 @@ fn generation_domain(event: &UiEvent) -> Option<(GenerationDomain, Generation)> 
             account,
             generation,
             progress,
+            ..
         } => Some((
-            GenerationDomain::CloudUpload(*account, progress.local_clip_id.clone()),
+            GenerationDomain::CloudUpload(account.clone(), progress.local_clip_id.clone()),
             *generation,
         )),
         UiEvent::EnrichmentUpdated { generation } => {
             Some((GenerationDomain::Enrichment, *generation))
         }
-        UiEvent::WindowLifecycle { .. } | UiEvent::UserError { .. } => None,
+        UiEvent::WindowLifecycle { .. }
+        | UiEvent::CloudAccountChanged { .. }
+        | UiEvent::UserError { .. } => None,
     }
 }
 
@@ -290,6 +299,11 @@ fn validate_generation(state: &ChannelState, event: &UiEvent) -> Result<(), UiEv
                     received: snapshot.revision,
                 });
             }
+        }
+    }
+    if let UiEvent::CloudUploadProgress { account, .. } = event {
+        if state.cloud_account.as_ref() != Some(account) {
+            return Err(UiEventSendError::AccountChanged);
         }
     }
     let Some((domain, received)) = generation_domain(event) else {
@@ -320,6 +334,12 @@ fn record_generation(state: &mut ChannelState, event: &UiEvent) {
     if let Some((domain, generation)) = generation_domain(event) {
         state.generations.insert(domain, generation);
     }
+    if let UiEvent::CloudAccountChanged { account } = event {
+        state.cloud_account.clone_from(account);
+        state
+            .generations
+            .retain(|domain, _| !matches!(domain, GenerationDomain::CloudUpload(_, _)));
+    }
     if let UiEvent::MicTestError { generation, .. } | UiEvent::MicTestStopped { generation } = event
     {
         state.microphone_terminal = Some(*generation);
@@ -340,9 +360,12 @@ fn coalescing_key(event: &UiEvent) -> Option<CoalescingKey> {
         UiEvent::MicMonitor { .. } => Some(CoalescingKey::MicrophoneMonitor),
         UiEvent::GameDetection { .. } => Some(CoalescingKey::GameDetection),
         UiEvent::CloudUploadProgress {
-            account, progress, ..
+            account,
+            update: CloudUploadUpdateKind::Bytes,
+            progress,
+            ..
         } => Some(CoalescingKey::CloudUpload(
-            *account,
+            account.clone(),
             progress.local_clip_id.clone(),
         )),
         UiEvent::EnrichmentUpdated { .. } => Some(CoalescingKey::Enrichment),
@@ -352,6 +375,11 @@ fn coalescing_key(event: &UiEvent) -> Option<CoalescingKey> {
         }
         | UiEvent::MicTestError { .. }
         | UiEvent::MicTestStopped { .. }
+        | UiEvent::CloudAccountChanged { .. }
+        | UiEvent::CloudUploadProgress {
+            update: CloudUploadUpdateKind::State,
+            ..
+        }
         | UiEvent::UserError { .. } => None,
     }
 }
@@ -364,6 +392,11 @@ fn is_durable_barrier(event: &UiEvent) -> bool {
             ..
         } | UiEvent::MicTestError { .. }
             | UiEvent::MicTestStopped { .. }
+            | UiEvent::CloudAccountChanged { .. }
+            | UiEvent::CloudUploadProgress {
+                update: CloudUploadUpdateKind::State,
+                ..
+            }
             | UiEvent::UserError { .. }
     )
 }

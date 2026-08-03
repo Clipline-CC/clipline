@@ -1,15 +1,16 @@
 use thiserror::Error;
 
 use crate::{
-    CloudAccountScope, CloudUploadSnapshot, DesktopSnapshot, GameSnapshot, Generation,
-    GenerationError, MediaRootSnapshot, MicrophonePhase, MicrophoneSnapshot, Notice, NoticeKind,
-    RecorderEvent, RecorderSnapshot, RecorderStatus, Revision, SavedReplay, StorageStatus,
-    UiAction, UiEffect, UiEvent, WindowLifecycleSnapshot,
+    CloudAccountOwner, CloudUploadSnapshot, CloudUploadUpdateKind, DesktopSnapshot, GameSnapshot,
+    Generation, GenerationError, MediaRootSnapshot, MicrophonePhase, MicrophoneSnapshot, Notice,
+    NoticeKind, RecorderEvent, RecorderSnapshot, RecorderStatus, Revision, SavedReplay,
+    StorageStatus, UiAction, UiEffect, UiEvent, WindowLifecycleSnapshot,
 };
 
 pub const MAX_PENDING_NOTICES: usize = 64;
+pub const MAX_NOTICE_MESSAGE_BYTES: usize = 64 * 1024;
 pub const MAX_ACTIVE_UPLOADS: usize = 16;
-pub const DESKTOP_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+pub const DESKTOP_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApplyEventOutcome {
@@ -33,6 +34,10 @@ pub enum ControllerError {
     NoticesFull { capacity: usize },
     #[error("active upload capacity {capacity} is exhausted")]
     UploadsFull { capacity: usize },
+    #[error("notice contains {actual} bytes; maximum is {maximum}")]
+    NoticeTooLarge { actual: usize, maximum: usize },
+    #[error("invalid cloud progress: {0}")]
+    InvalidCloudProgress(&'static str),
     #[error("invalid recorder metric")]
     InvalidRecorderMetric,
     #[error("invalid desktop snapshot: {0}")]
@@ -59,6 +64,15 @@ where
                 capacity: MAX_PENDING_NOTICES,
             });
         }
+        if let Some(message) = startup_warnings
+            .iter()
+            .find(|message| message.len() > MAX_NOTICE_MESSAGE_BYTES)
+        {
+            return Err(ControllerError::NoticeTooLarge {
+                actual: message.len(),
+                maximum: MAX_NOTICE_MESSAGE_BYTES,
+            });
+        }
         let notices = startup_warnings
             .into_iter()
             .enumerate()
@@ -67,6 +81,7 @@ where
                 kind: NoticeKind::StartupWarning,
                 message,
                 created_revision: Revision::INITIAL,
+                account: None,
             })
             .collect::<Vec<_>>();
         let notice_sequence = u64::try_from(notices.len()).unwrap_or(u64::MAX);
@@ -83,6 +98,7 @@ where
                 latest_saved: None,
                 game: GameSnapshot::default(),
                 microphone: MicrophoneSnapshot::default(),
+                current_cloud_account: None,
                 uploads: Vec::new(),
                 library_revision: Revision::INITIAL,
                 enrichment_generation: Generation::INITIAL,
@@ -228,21 +244,58 @@ where
                     true
                 }
             }
+            UiEvent::CloudAccountChanged { account } => {
+                if next.current_cloud_account == account {
+                    false
+                } else {
+                    next.current_cloud_account.clone_from(&account);
+                    next.uploads
+                        .retain(|upload| account.as_ref() == Some(&upload.account));
+                    next.notices.retain(|notice| {
+                        notice.account.is_none() || notice.account.as_ref() == account.as_ref()
+                    });
+                    next.library_revision = next.library_revision.checked_next()?;
+                    true
+                }
+            }
             UiEvent::CloudUploadProgress {
                 account,
                 generation,
+                update,
                 progress,
+                notice,
             } => {
-                if next
-                    .uploads
-                    .binary_search_by(|upload| {
-                        upload_order(upload, account, &progress.local_clip_id)
-                    })
-                    .is_ok_and(|index| generation < next.uploads[index].generation)
-                {
+                if next.current_cloud_account.as_ref() != Some(&account) {
                     return Ok(ApplyEventOutcome::Stale);
                 }
-                apply_cloud_progress(&mut next, account, generation, progress)?
+                if update == CloudUploadUpdateKind::Bytes && notice.is_some() {
+                    return Err(ControllerError::InvalidCloudProgress(
+                        "byte-only progress cannot carry a notice",
+                    ));
+                }
+                match apply_cloud_progress(
+                    &mut next,
+                    account.clone(),
+                    generation,
+                    update,
+                    progress,
+                )? {
+                    CloudProgressOutcome::Stale => return Ok(ApplyEventOutcome::Stale),
+                    CloudProgressOutcome::Unchanged => false,
+                    CloudProgressOutcome::BytesChanged => true,
+                    CloudProgressOutcome::StateChanged => {
+                        next.library_revision = next.library_revision.checked_next()?;
+                        if let Some(message) = notice {
+                            push_notice(
+                                &mut next,
+                                NoticeKind::CloudUpload,
+                                message,
+                                Some(account),
+                            )?;
+                        }
+                        true
+                    }
+                }
             }
             UiEvent::EnrichmentUpdated { generation } => {
                 if generation < next.enrichment_generation {
@@ -257,7 +310,7 @@ where
                 }
             }
             UiEvent::UserError { message } => {
-                push_notice(&mut next, NoticeKind::Error, message)?;
+                push_notice(&mut next, NoticeKind::Error, message, None)?;
                 true
             }
         };
@@ -376,26 +429,55 @@ fn apply_recorder_event<S>(
             Ok(true)
         }
         RecorderEvent::Error { message } => {
-            push_notice(snapshot, NoticeKind::Error, message)?;
+            push_notice(snapshot, NoticeKind::Error, message, None)?;
             Ok(true)
         }
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloudProgressOutcome {
+    Unchanged,
+    BytesChanged,
+    StateChanged,
+    Stale,
+}
+
 fn apply_cloud_progress<S>(
     snapshot: &mut DesktopSnapshot<S>,
-    account: CloudAccountScope,
+    account: CloudAccountOwner,
     generation: Generation,
+    update: CloudUploadUpdateKind,
     progress: crate::CloudUploadProgress,
-) -> Result<bool, ControllerError> {
+) -> Result<CloudProgressOutcome, ControllerError> {
     match snapshot
         .uploads
-        .binary_search_by(|upload| upload_order(upload, account, &progress.local_clip_id))
+        .binary_search_by(|upload| upload_order(upload, &account, &progress.local_clip_id))
     {
         Ok(index) => {
             let current = &snapshot.uploads[index];
             if generation < current.generation {
-                return Ok(false);
+                return Ok(CloudProgressOutcome::Stale);
+            }
+            if update == CloudUploadUpdateKind::Bytes {
+                if generation != current.generation {
+                    return Err(ControllerError::InvalidCloudProgress(
+                        "byte-only progress cannot start a new upload generation",
+                    ));
+                }
+                if !same_cloud_state(&current.progress, &progress) {
+                    return Err(ControllerError::InvalidCloudProgress(
+                        "byte-only progress changed upload state",
+                    ));
+                }
+                if current.progress.received_size_bytes == progress.received_size_bytes
+                    && current.progress.file_size_bytes == progress.file_size_bytes
+                {
+                    return Ok(CloudProgressOutcome::Unchanged);
+                }
+                snapshot.uploads[index].progress.received_size_bytes = progress.received_size_bytes;
+                snapshot.uploads[index].progress.file_size_bytes = progress.file_size_bytes;
+                return Ok(CloudProgressOutcome::BytesChanged);
             }
             let replacement = CloudUploadSnapshot {
                 account,
@@ -403,13 +485,18 @@ fn apply_cloud_progress<S>(
                 progress,
             };
             if replacement == *current {
-                Ok(false)
+                Ok(CloudProgressOutcome::Unchanged)
             } else {
                 snapshot.uploads[index] = replacement;
-                Ok(true)
+                Ok(CloudProgressOutcome::StateChanged)
             }
         }
         Err(mut index) => {
+            if update == CloudUploadUpdateKind::Bytes {
+                return Err(ControllerError::InvalidCloudProgress(
+                    "byte-only progress has no upload state",
+                ));
+            }
             if snapshot.uploads.len() >= MAX_ACTIVE_UPLOADS {
                 let eviction_index = snapshot
                     .uploads
@@ -425,7 +512,7 @@ fn apply_cloud_progress<S>(
                 index = snapshot
                     .uploads
                     .binary_search_by(|upload| {
-                        upload_order(upload, account, &progress.local_clip_id)
+                        upload_order(upload, &account, &progress.local_clip_id)
                     })
                     .expect_err("the new upload was not present before insertion");
             }
@@ -437,19 +524,31 @@ fn apply_cloud_progress<S>(
                     progress,
                 },
             );
-            Ok(true)
+            Ok(CloudProgressOutcome::StateChanged)
         }
     }
 }
 
+fn same_cloud_state(
+    current: &crate::CloudUploadProgress,
+    next: &crate::CloudUploadProgress,
+) -> bool {
+    current.local_clip_id == next.local_clip_id
+        && current.path == next.path
+        && current.upload_status == next.upload_status
+        && current.remote_clip_id == next.remote_clip_id
+        && current.remote_url == next.remote_url
+        && current.error == next.error
+}
+
 fn upload_order(
     upload: &CloudUploadSnapshot,
-    account: CloudAccountScope,
+    account: &CloudAccountOwner,
     local_clip_id: &str,
 ) -> std::cmp::Ordering {
     upload
         .account
-        .cmp(&account)
+        .cmp(account)
         .then_with(|| upload.progress.local_clip_id.as_str().cmp(local_clip_id))
 }
 
@@ -471,10 +570,17 @@ fn push_notice<S>(
     snapshot: &mut DesktopSnapshot<S>,
     kind: NoticeKind,
     message: String,
+    account: Option<CloudAccountOwner>,
 ) -> Result<(), ControllerError> {
     if snapshot.notices.len() >= MAX_PENDING_NOTICES {
         return Err(ControllerError::NoticesFull {
             capacity: MAX_PENDING_NOTICES,
+        });
+    }
+    if message.len() > MAX_NOTICE_MESSAGE_BYTES {
+        return Err(ControllerError::NoticeTooLarge {
+            actual: message.len(),
+            maximum: MAX_NOTICE_MESSAGE_BYTES,
         });
     }
     let id = snapshot
@@ -487,6 +593,7 @@ fn push_notice<S>(
         kind,
         message,
         created_revision: snapshot.revision.checked_next()?,
+        account,
     });
     Ok(())
 }
@@ -500,18 +607,47 @@ fn validate_snapshot<S>(snapshot: &DesktopSnapshot<S>) -> Result<(), ControllerE
     if snapshot.notices.len() > MAX_PENDING_NOTICES {
         return Err(ControllerError::InvalidSnapshot("too many notices"));
     }
-    if snapshot.uploads.len() > MAX_ACTIVE_UPLOADS {
-        return Err(ControllerError::InvalidSnapshot("too many uploads"));
-    }
     if snapshot
         .notices
         .iter()
-        .any(|notice| notice.id > snapshot.notice_sequence)
+        .any(|notice| notice.message.len() > MAX_NOTICE_MESSAGE_BYTES)
     {
+        return Err(ControllerError::InvalidSnapshot(
+            "notice message exceeds its byte bound",
+        ));
+    }
+    if snapshot.uploads.len() > MAX_ACTIVE_UPLOADS {
+        return Err(ControllerError::InvalidSnapshot("too many uploads"));
+    }
+    if snapshot.notices.iter().any(|notice| {
+        notice.id > snapshot.notice_sequence
+            || notice
+                .account
+                .as_ref()
+                .is_some_and(|account| snapshot.current_cloud_account.as_ref() != Some(account))
+    }) {
         return Err(ControllerError::InvalidSnapshot("notice sequence is stale"));
     }
+    if snapshot
+        .notices
+        .windows(2)
+        .any(|pair| pair[0].id >= pair[1].id)
+    {
+        return Err(ControllerError::InvalidSnapshot(
+            "notice identifiers are not unique and ordered",
+        ));
+    }
+    if snapshot
+        .uploads
+        .iter()
+        .any(|upload| snapshot.current_cloud_account.as_ref() != Some(&upload.account))
+    {
+        return Err(ControllerError::InvalidSnapshot(
+            "upload belongs to a replaced cloud account",
+        ));
+    }
     if snapshot.uploads.windows(2).any(|pair| {
-        upload_order(&pair[0], pair[1].account, &pair[1].progress.local_clip_id)
+        upload_order(&pair[0], &pair[1].account, &pair[1].progress.local_clip_id)
             != std::cmp::Ordering::Less
     }) {
         return Err(ControllerError::InvalidSnapshot(

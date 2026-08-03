@@ -79,6 +79,30 @@ pub fn open_regular_file_nofollow(path: &Path) -> std::io::Result<File> {
     Ok(file)
 }
 
+/// Open a regular upload source without allowing another handle to mutate,
+/// rename, or delete it while this handle is retained.
+///
+/// Multiple readers remain possible. The higher-level upload registry
+/// serializes this open with Clipline-owned mutations; the restrictive share
+/// mode additionally closes the path-based retry race against foreign writers.
+pub fn open_regular_file_nofollow_for_upload(path: &Path) -> std::io::Result<File> {
+    let file = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ.0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+        .open(path)?;
+    let information = information(&file)?;
+    if information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
+        || information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "refusing to lease a filesystem link, reparse point, or non-file",
+        ));
+    }
+    Ok(file)
+}
+
 pub fn open_regular_file_nofollow_for_metadata_write(path: &Path) -> std::io::Result<File> {
     let file = OpenOptions::new()
         .access_mode(FILE_WRITE_ATTRIBUTES.0)

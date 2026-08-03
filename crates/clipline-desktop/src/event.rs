@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{CloudAccountScope, Generation, WindowLifecycleSnapshot};
+use crate::{CloudAccountOwner, Generation, WindowLifecycleSnapshot};
 
 pub const MAX_MIC_MONITOR_SAMPLES: usize = 4_096;
 
@@ -119,6 +119,16 @@ pub struct CloudUploadProgress {
     pub error: Option<String>,
 }
 
+/// Byte-only updates are coalescable and may only change byte counters.
+/// State updates are durable barriers and may replace status/identity/error
+/// fields and optionally create foreground feedback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CloudUploadUpdateKind {
+    Bytes,
+    State,
+}
+
 /// An owned update published by an application producer to any desktop frontend.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -145,10 +155,16 @@ pub enum UiEvent {
         generation: Generation,
         detection: GameDetection,
     },
+    CloudAccountChanged {
+        account: Option<CloudAccountOwner>,
+    },
     CloudUploadProgress {
-        account: CloudAccountScope,
+        account: CloudAccountOwner,
         generation: Generation,
+        update: CloudUploadUpdateKind,
         progress: CloudUploadProgress,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        notice: Option<String>,
     },
     EnrichmentUpdated {
         generation: Generation,
@@ -169,7 +185,9 @@ impl UiEvent {
             | Self::GameDetection { generation, .. }
             | Self::CloudUploadProgress { generation, .. }
             | Self::EnrichmentUpdated { generation } => Some(*generation),
-            Self::WindowLifecycle { .. } | Self::UserError { .. } => None,
+            Self::WindowLifecycle { .. }
+            | Self::CloudAccountChanged { .. }
+            | Self::UserError { .. } => None,
         }
     }
 }

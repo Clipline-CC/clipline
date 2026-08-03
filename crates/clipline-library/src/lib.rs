@@ -17,6 +17,7 @@ mod poster;
 mod presentation;
 mod repository;
 mod scan;
+mod upload;
 
 pub use channel::*;
 pub use cloud::*;
@@ -31,3 +32,4 @@ pub use poster::*;
 pub use presentation::*;
 pub use repository::*;
 pub use scan::*;
+pub use upload::*;

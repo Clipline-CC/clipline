@@ -22,6 +22,11 @@ use super::ports::{
     AvatarTransportResult, CloudCredential, CloudRequestFence, CloudTransport,
     CloudTransportFuture, PortError,
 };
+use super::protocol::{
+    validate_discovery, ClipDetailResponse, CloudApiBase, CloudProtocolError,
+    CreateDeviceTokenRequest, CreateDeviceTokenResponse, DiscoveryResponse,
+    MeResponse as ProtocolMeResponse, UpdateVisibilityRequest,
+};
 use super::{
     CloudClipSummary, CloudListTransportRequest, CloudListTransportResponse, CloudProfileTransport,
     CloudServiceAccount, CloudWorkToken, CLOUD_AVATAR_MAX_BYTES,
@@ -338,6 +343,175 @@ pub async fn bounded_error_message(response: Response, context: &str) -> String 
 #[must_use]
 pub fn successful_or_missing(status: StatusCode, missing_ok: bool) -> bool {
     status.is_success() || (missing_ok && status == StatusCode::NOT_FOUND)
+}
+
+/// Result of the one-byte authenticated media durability probe.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CloudMediaProbe {
+    pub response_bytes: usize,
+    pub total_size_bytes: Option<u64>,
+}
+
+/// Small independently implemented client for Clipline's authenticated
+/// control protocol. All redirects are refused and every buffered response is
+/// bounded by this module's reviewed control/error limits.
+#[derive(Clone)]
+pub struct ReqwestCloudProtocol {
+    control: Client,
+    stream: Client,
+    base: CloudApiBase,
+}
+
+impl ReqwestCloudProtocol {
+    pub fn new(base: CloudApiBase) -> Result<Self, CloudProtocolError> {
+        Ok(Self {
+            control: control_client().map_err(protocol_http_error)?,
+            stream: stream_client().map_err(protocol_http_error)?,
+            base,
+        })
+    }
+
+    #[must_use]
+    pub fn base(&self) -> &CloudApiBase {
+        &self.base
+    }
+
+    pub async fn discovery(&self) -> Result<DiscoveryResponse, CloudProtocolError> {
+        let response = self
+            .send_json(
+                self.control
+                    .get(self.base.api_url(".well-known/clipline-cloud")?),
+                "discover Clipline Cloud",
+            )
+            .await?;
+        validate_discovery(&response)?;
+        Ok(response)
+    }
+
+    pub async fn create_device_token(
+        &self,
+        request: &CreateDeviceTokenRequest,
+    ) -> Result<CreateDeviceTokenResponse, CloudProtocolError> {
+        self.send_json(
+            self.control
+                .post(self.base.api_url("api/v1/auth/device-token")?)
+                .json(request),
+            "create Clipline Cloud device token",
+        )
+        .await
+    }
+
+    pub async fn me(&self, bearer_token: &str) -> Result<ProtocolMeResponse, CloudProtocolError> {
+        self.send_json(
+            self.control
+                .get(self.base.api_url("api/v1/auth/me")?)
+                .bearer_auth(bearer_token),
+            "get Clipline Cloud account",
+        )
+        .await
+    }
+
+    pub async fn get_clip(
+        &self,
+        bearer_token: &str,
+        clip_id: &str,
+    ) -> Result<ClipDetailResponse, CloudProtocolError> {
+        self.send_json(
+            self.control
+                .get(self.base.clip_url(clip_id, None)?)
+                .bearer_auth(bearer_token),
+            "get cloud clip",
+        )
+        .await
+    }
+
+    pub async fn update_visibility(
+        &self,
+        bearer_token: &str,
+        clip_id: &str,
+        request: &UpdateVisibilityRequest,
+    ) -> Result<ClipDetailResponse, CloudProtocolError> {
+        self.send_json(
+            self.control
+                .post(self.base.clip_url(clip_id, Some("visibility"))?)
+                .bearer_auth(bearer_token)
+                .json(request),
+            "update cloud clip visibility",
+        )
+        .await
+    }
+
+    pub async fn probe_media(
+        &self,
+        bearer_token: &str,
+        clip_id: &str,
+    ) -> Result<CloudMediaProbe, CloudProtocolError> {
+        let response = self
+            .stream
+            .get(self.base.clip_url(clip_id, Some("media"))?)
+            .bearer_auth(bearer_token)
+            .header(reqwest::header::RANGE, "bytes=0-0")
+            .header(reqwest::header::ACCEPT_ENCODING, "identity")
+            .send()
+            .await
+            .map_err(|error| CloudProtocolError::Http(error.to_string()))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(protocol_api_error(response, "probe cloud media").await);
+        }
+        let total_size_bytes = response
+            .headers()
+            .get(reqwest::header::CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(content_range_total);
+        let bytes = response_bytes_limited(response, 1, "cloud media probe", || false)
+            .await
+            .map_err(protocol_http_error)?;
+        if bytes.is_empty() {
+            return Err(CloudProtocolError::InvalidUpload(
+                "cloud media probe returned no bytes".into(),
+            ));
+        }
+        Ok(CloudMediaProbe {
+            response_bytes: bytes.len(),
+            total_size_bytes,
+        })
+    }
+
+    async fn send_json<T: DeserializeOwned>(
+        &self,
+        request: reqwest::RequestBuilder,
+        context: &str,
+    ) -> Result<T, CloudProtocolError> {
+        let response = request
+            .send()
+            .await
+            .map_err(|error| CloudProtocolError::Http(error.to_string()))?;
+        if !response.status().is_success() {
+            return Err(protocol_api_error(response, context).await);
+        }
+        bounded_json(response, context, || false)
+            .await
+            .map_err(protocol_http_error)
+    }
+}
+
+fn protocol_http_error(error: CloudHttpError) -> CloudProtocolError {
+    match error {
+        CloudHttpError::Canceled { .. } => CloudProtocolError::Canceled,
+        error => CloudProtocolError::Http(error.to_string()),
+    }
+}
+
+async fn protocol_api_error(response: Response, context: &str) -> CloudProtocolError {
+    let status = response.status();
+    let message = bounded_error_message(response, context).await;
+    CloudProtocolError::Api { status, message }
+}
+
+fn content_range_total(value: &str) -> Option<u64> {
+    let (_, total) = value.rsplit_once('/')?;
+    (total != "*").then(|| total.parse().ok()).flatten()
 }
 
 /// Reviewed rustls transport used by both the compatibility adapter and Slint.

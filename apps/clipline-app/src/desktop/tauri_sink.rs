@@ -126,6 +126,7 @@ fn tauri_emissions(event: &UiEvent) -> Vec<TauriEmission> {
         UiEvent::MicTestStopped { .. } => one("mic-test-stopped", Value::Null),
         UiEvent::GameDetection { detection, .. } => serde_json::to_value(detection)
             .map_or_else(|_| Vec::new(), |payload| one("game-detection", payload)),
+        UiEvent::CloudAccountChanged { .. } => Vec::new(),
         UiEvent::CloudUploadProgress { progress, .. } => serde_json::to_value(progress)
             .map_or_else(
                 |_| Vec::new(),

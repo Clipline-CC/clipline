@@ -1069,7 +1069,6 @@ fn large_application_surfaces_delegate_to_named_domain_owners() {
         "apps/clipline-app/src/app/support.rs",
         "apps/clipline-app/src/service/media_root.rs",
         "apps/clipline-app/src/library/naming.rs",
-        "apps/clipline-app/src/cloud/cache_identity.rs",
     ] {
         assert!(
             root.join(relative).is_file(),
@@ -1086,7 +1085,8 @@ fn large_application_surfaces_delegate_to_named_domain_owners() {
     );
     assert!(library.contains("mod naming;") && !library.contains("fn normalized_clip_file_name("));
     assert!(
-        cloud.contains("mod cache_identity;")
+        cloud.contains("CloudApiBase")
+            && cloud.contains("ReqwestCloudProtocol")
             && !cloud.contains("fn validate_cloud_cache_component")
     );
 

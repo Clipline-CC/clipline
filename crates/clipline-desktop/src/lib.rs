@@ -13,15 +13,16 @@ pub use channel::{
 };
 pub use controller::{
     ApplyEventOutcome, ControllerError, DesktopController, DispatchOutcome, MAX_ACTIVE_UPLOADS,
-    MAX_PENDING_NOTICES,
+    MAX_NOTICE_MESSAGE_BYTES, MAX_PENDING_NOTICES,
 };
 pub use event::{
-    CloudUploadProgress, EventPayloadError, GameDetection, MicMonitor, RecorderEvent, UiEvent,
-    MAX_MIC_MONITOR_SAMPLES,
+    CloudUploadProgress, CloudUploadUpdateKind, EventPayloadError, GameDetection, MicMonitor,
+    RecorderEvent, UiEvent, MAX_MIC_MONITOR_SAMPLES,
 };
 pub use snapshot::{
-    CloudAccountScope, CloudUploadSnapshot, DesktopSnapshot, GameSnapshot, Generation,
-    GenerationError, MediaRootSnapshot, MicrophonePhase, MicrophoneSnapshot, Notice, NoticeKind,
-    RecorderSnapshot, RecorderStatus, Revision, SavedReplay, StorageStatus, WindowLifecycleMode,
-    WindowLifecycleSnapshot,
+    CloudAccountOwner, CloudAccountOwnerError, CloudAccountScope, CloudUploadSnapshot,
+    DesktopSnapshot, GameSnapshot, Generation, GenerationError, MediaRootSnapshot, MicrophonePhase,
+    MicrophoneSnapshot, Notice, NoticeKind, RecorderSnapshot, RecorderStatus, Revision,
+    SavedReplay, StorageStatus, WindowLifecycleMode, WindowLifecycleSnapshot,
+    MAX_CLOUD_ACCOUNT_KEY_BYTES,
 };

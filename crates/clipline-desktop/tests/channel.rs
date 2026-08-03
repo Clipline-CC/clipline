@@ -4,9 +4,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use clipline_desktop::{
-    ui_event_channel, CloudAccountScope, CloudUploadProgress, Generation, MicMonitor,
-    RecorderEvent, Revision, UiEvent, UiEventPublishOutcome, UiEventReceiveError, UiEventSendError,
-    WindowLifecycleMode, WindowLifecycleSnapshot, UI_EVENT_CAPACITY,
+    ui_event_channel, CloudAccountOwner, CloudAccountScope, CloudUploadProgress,
+    CloudUploadUpdateKind, Generation, MicMonitor, RecorderEvent, Revision, UiEvent,
+    UiEventPublishOutcome, UiEventReceiveError, UiEventSendError, WindowLifecycleMode,
+    WindowLifecycleSnapshot, UI_EVENT_CAPACITY,
 };
 
 fn status(generation: u64, segments: usize) -> UiEvent {
@@ -26,19 +27,30 @@ fn status(generation: u64, segments: usize) -> UiEvent {
 }
 
 fn cloud(generation: u64, id: impl Into<String>, received: u64) -> UiEvent {
-    cloud_for_account(1, generation, id, received)
+    cloud_bytes(owner("account-a", 1), generation, id, received)
 }
 
-fn cloud_for_account(
+fn owner(key: &str, generation: u64) -> CloudAccountOwner {
+    CloudAccountOwner::new(key, CloudAccountScope::new(generation)).unwrap()
+}
+
+fn account_changed(account: CloudAccountOwner) -> UiEvent {
+    UiEvent::CloudAccountChanged {
+        account: Some(account),
+    }
+}
+
+fn cloud_bytes(
+    account: CloudAccountOwner,
     account_generation: u64,
-    generation: u64,
     id: impl Into<String>,
     received: u64,
 ) -> UiEvent {
     let local_clip_id = id.into();
     UiEvent::CloudUploadProgress {
-        account: CloudAccountScope::new(account_generation),
-        generation: Generation::new(generation),
+        account,
+        generation: Generation::new(account_generation),
+        update: CloudUploadUpdateKind::Bytes,
         progress: CloudUploadProgress {
             path: format!(r"C:\{local_clip_id}.mp4"),
             local_clip_id,
@@ -49,41 +61,121 @@ fn cloud_for_account(
             remote_url: None,
             error: None,
         },
+        notice: None,
+    }
+}
+
+fn cloud_state(
+    account: CloudAccountOwner,
+    generation: u64,
+    id: impl Into<String>,
+    status: &str,
+    notice: Option<&str>,
+) -> UiEvent {
+    let local_clip_id = id.into();
+    UiEvent::CloudUploadProgress {
+        account,
+        generation: Generation::new(generation),
+        update: CloudUploadUpdateKind::State,
+        progress: CloudUploadProgress {
+            path: format!(r"C:\{local_clip_id}.mp4"),
+            local_clip_id,
+            upload_status: status.to_owned(),
+            received_size_bytes: 0,
+            file_size_bytes: 100,
+            remote_clip_id: None,
+            remote_url: None,
+            error: None,
+        },
+        notice: notice.map(str::to_owned),
     }
 }
 
 #[test]
 fn cloud_progress_never_coalesces_or_stales_across_accounts() {
     let (sender, receiver) = ui_event_channel();
+    let first = owner("same-key", 1);
+    let second = owner("same-key", 2);
 
+    sender.try_publish(account_changed(first.clone())).unwrap();
     assert_eq!(
         sender
-            .try_publish(cloud_for_account(1, 9, "same-clip", 10))
+            .try_publish(cloud_state(
+                first.clone(),
+                9,
+                "same-clip",
+                "uploading",
+                None
+            ))
             .unwrap(),
         UiEventPublishOutcome::Queued
     );
     assert_eq!(
         sender
-            .try_publish(cloud_for_account(2, 1, "same-clip", 20))
+            .try_publish(cloud_bytes(first.clone(), 9, "same-clip", 20))
             .unwrap(),
         UiEventPublishOutcome::Queued
     );
-    assert_eq!(receiver.len(), 2);
-
-    assert_eq!(
-        sender.try_publish(cloud_for_account(1, 8, "same-clip", 30)),
-        Err(UiEventSendError::Stale {
-            current: Generation::new(9),
-            received: Generation::new(8),
-        })
-    );
     assert_eq!(
         sender
-            .try_publish(cloud_for_account(2, 2, "same-clip", 40))
+            .try_publish(cloud_bytes(first.clone(), 9, "same-clip", 30))
             .unwrap(),
         UiEventPublishOutcome::Replaced
     );
-    assert_eq!(receiver.len(), 2);
+
+    sender.try_publish(account_changed(second.clone())).unwrap();
+    assert_eq!(
+        sender.try_publish(cloud_bytes(first, 9, "same-clip", 40)),
+        Err(UiEventSendError::AccountChanged)
+    );
+    assert_eq!(
+        sender
+            .try_publish(cloud_state(
+                second.clone(),
+                1,
+                "same-clip",
+                "uploading",
+                None
+            ))
+            .unwrap(),
+        UiEventPublishOutcome::Queued
+    );
+    assert_eq!(
+        sender
+            .try_publish(cloud_bytes(second, 1, "same-clip", 50))
+            .unwrap(),
+        UiEventPublishOutcome::Queued
+    );
+    assert_eq!(receiver.len(), 6);
+}
+
+#[test]
+fn cloud_state_and_account_changes_are_durable_barriers() {
+    let (sender, receiver) = ui_event_channel();
+    let account = owner("account-a", 1);
+    sender
+        .try_publish(account_changed(account.clone()))
+        .unwrap();
+    sender
+        .try_publish(cloud_state(account.clone(), 1, "clip", "uploading", None))
+        .unwrap();
+    sender
+        .try_publish(cloud_bytes(account.clone(), 1, "clip", 10))
+        .unwrap();
+    sender
+        .try_publish(cloud_state(
+            account.clone(),
+            1,
+            "clip",
+            "uploaded_private",
+            Some("uploaded"),
+        ))
+        .unwrap();
+    sender
+        .try_publish(cloud_bytes(account, 1, "clip", 100))
+        .unwrap();
+
+    assert_eq!(receiver.len(), 5);
 }
 
 #[test]
@@ -172,7 +264,22 @@ fn coalescing_preserves_monotonic_delivery_order() {
 #[test]
 fn capacity_reserves_one_terminal_slot_and_full_is_atomic() {
     let (sender, receiver) = ui_event_channel();
+    let account = owner("account-a", 1);
+    sender
+        .try_publish(account_changed(account.clone()))
+        .unwrap();
+    receiver.try_recv().unwrap();
     for index in 0..(UI_EVENT_CAPACITY - 1) {
+        sender
+            .try_publish(cloud_state(
+                account.clone(),
+                1,
+                format!("clip-{index}"),
+                "uploading",
+                None,
+            ))
+            .unwrap();
+        receiver.try_recv().unwrap();
         sender
             .try_publish(cloud(1, format!("clip-{index}"), index as u64))
             .unwrap();
@@ -273,19 +380,23 @@ fn disconnection_and_bounded_wait_are_explicit() {
 #[test]
 fn concurrent_publishers_never_exceed_capacity_or_duplicate_sequences() {
     let (sender, receiver) = ui_event_channel();
+    let account = owner("account-a", 1);
+    sender
+        .try_publish(account_changed(account.clone()))
+        .unwrap();
+    receiver.try_recv().unwrap();
     let barrier = Arc::new(Barrier::new(5));
     let mut threads = Vec::new();
     for worker in 0..4 {
         let sender = sender.clone();
         let barrier = Arc::clone(&barrier);
+        let account = account.clone();
         threads.push(thread::spawn(move || {
             barrier.wait();
             for index in 0..UI_EVENT_CAPACITY {
-                let result = sender.try_publish(cloud(
-                    1,
-                    format!("worker-{worker}-clip-{index}"),
-                    index as u64,
-                ));
+                let id = format!("worker-{worker}-clip-{index}");
+                let result =
+                    sender.try_publish(cloud_state(account.clone(), 1, id, "uploading", None));
                 assert!(result.is_ok() || matches!(result, Err(UiEventSendError::Full { .. })));
             }
         }));

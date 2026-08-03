@@ -1,7 +1,8 @@
 use clipline_desktop::{
-    ApplyEventOutcome, CloudAccountScope, CloudUploadProgress, ControllerError, DesktopController,
-    GameDetection, Generation, MicMonitor, MicrophonePhase, NoticeKind, RecorderEvent, Revision,
-    UiAction, UiEffect, UiEvent, WindowLifecycleMode, WindowLifecycleSnapshot, MAX_ACTIVE_UPLOADS,
+    ApplyEventOutcome, CloudAccountOwner, CloudAccountScope, CloudUploadProgress,
+    CloudUploadUpdateKind, ControllerError, DesktopController, GameDetection, Generation,
+    MicMonitor, MicrophonePhase, NoticeKind, RecorderEvent, Revision, UiAction, UiEffect, UiEvent,
+    WindowLifecycleMode, WindowLifecycleSnapshot, MAX_ACTIVE_UPLOADS, MAX_NOTICE_MESSAGE_BYTES,
     MAX_PENDING_NOTICES,
 };
 
@@ -37,24 +38,58 @@ fn game(generation: u64, name: &str) -> UiEvent {
     }
 }
 
-fn cloud(generation: u64, id: &str, received: u64) -> UiEvent {
-    cloud_with_status(generation, id, received, "uploading")
-}
-
 fn cloud_with_status(generation: u64, id: &str, received: u64, status: &str) -> UiEvent {
-    cloud_for_account_with_status(1, generation, id, received, status)
+    cloud_state(
+        owner("account-a", 1),
+        generation,
+        id,
+        received,
+        status,
+        None,
+    )
 }
 
-fn cloud_for_account_with_status(
-    account_generation: u64,
+fn owner(key: &str, generation: u64) -> CloudAccountOwner {
+    CloudAccountOwner::new(key, CloudAccountScope::new(generation)).unwrap()
+}
+
+fn account_changed(account: CloudAccountOwner) -> UiEvent {
+    UiEvent::CloudAccountChanged {
+        account: Some(account),
+    }
+}
+
+fn cloud_bytes(account: CloudAccountOwner, generation: u64, id: &str, received: u64) -> UiEvent {
+    UiEvent::CloudUploadProgress {
+        account,
+        generation: Generation::new(generation),
+        update: CloudUploadUpdateKind::Bytes,
+        progress: CloudUploadProgress {
+            local_clip_id: id.to_owned(),
+            path: format!(r"C:\{id}.mp4"),
+            upload_status: "uploading".to_owned(),
+            received_size_bytes: received,
+            file_size_bytes: 100,
+            remote_clip_id: None,
+            remote_url: None,
+            error: None,
+        },
+        notice: None,
+    }
+}
+
+fn cloud_state(
+    account: CloudAccountOwner,
     generation: u64,
     id: &str,
     received: u64,
     status: &str,
+    notice: Option<&str>,
 ) -> UiEvent {
     UiEvent::CloudUploadProgress {
-        account: CloudAccountScope::new(account_generation),
+        account,
         generation: Generation::new(generation),
+        update: CloudUploadUpdateKind::State,
         progress: CloudUploadProgress {
             local_clip_id: id.to_owned(),
             path: format!(r"C:\{id}.mp4"),
@@ -65,47 +100,44 @@ fn cloud_for_account_with_status(
             remote_url: None,
             error: None,
         },
+        notice: notice.map(str::to_owned),
     }
 }
 
 #[test]
-fn same_local_clip_id_is_independent_across_cloud_accounts() {
+fn account_change_prunes_old_progress_and_rejects_delayed_completion() {
     let mut controller = DesktopController::new((), Vec::new()).unwrap();
+    let first = owner("account-a", 1);
+    let second = owner("account-b", 2);
     controller
-        .apply_event(cloud_for_account_with_status(
-            1,
+        .apply_event(account_changed(first.clone()))
+        .unwrap();
+    controller
+        .apply_event(cloud_state(
+            first.clone(),
             9,
             "same-clip",
             10,
             "uploading",
+            None,
         ))
         .unwrap();
     controller
-        .apply_event(cloud_for_account_with_status(
-            2,
-            1,
-            "same-clip",
-            20,
-            "uploading",
-        ))
+        .apply_event(account_changed(second.clone()))
         .unwrap();
-
-    let snapshot = controller.snapshot();
-    assert_eq!(snapshot.uploads.len(), 2);
-    assert_eq!(snapshot.uploads[0].account, CloudAccountScope::new(1));
-    assert_eq!(snapshot.uploads[0].generation, Generation::new(9));
-    assert_eq!(snapshot.uploads[1].account, CloudAccountScope::new(2));
-    assert_eq!(snapshot.uploads[1].generation, Generation::new(1));
+    assert_eq!(controller.snapshot().current_cloud_account, Some(second));
+    assert!(controller.snapshot().uploads.is_empty());
 
     let before = controller.snapshot();
     assert_eq!(
         controller
-            .apply_event(cloud_for_account_with_status(
-                1,
+            .apply_event(cloud_state(
+                first,
                 8,
                 "same-clip",
                 99,
                 "failed",
+                Some("failed"),
             ))
             .unwrap(),
         ApplyEventOutcome::Stale
@@ -120,7 +152,7 @@ fn fresh_snapshot_is_complete_and_keeps_exact_settings() {
         DesktopController::new(settings.clone(), vec!["capture fallback active".to_owned()])
             .unwrap();
     let snapshot = controller.snapshot();
-    assert_eq!(snapshot.schema_version, 1);
+    assert_eq!(snapshot.schema_version, 2);
     assert_eq!(snapshot.revision, Revision::INITIAL);
     assert_eq!(snapshot.settings, settings);
     assert_eq!(snapshot.settings_revision, Revision::INITIAL);
@@ -130,6 +162,7 @@ fn fresh_snapshot_is_complete_and_keeps_exact_settings() {
     assert_eq!(snapshot.game.detection, None);
     assert_eq!(snapshot.microphone.phase, MicrophonePhase::Stopped);
     assert!(snapshot.uploads.is_empty());
+    assert_eq!(snapshot.current_cloud_account, None);
     assert_eq!(snapshot.library_revision, Revision::INITIAL);
     assert_eq!(snapshot.notices.len(), 1);
     assert_eq!(snapshot.notices[0].kind, NoticeKind::StartupWarning);
@@ -167,9 +200,14 @@ fn coalesced_state_advances_once_and_identical_updates_are_noops() {
 #[test]
 fn every_stale_completion_domain_is_rejected_without_mutation() {
     let mut controller = DesktopController::new((), Vec::new()).unwrap();
+    controller
+        .apply_event(account_changed(owner("account-a", 1)))
+        .unwrap();
     controller.apply_event(status(5, true, 1)).unwrap();
     controller.apply_event(game(7, "current")).unwrap();
-    controller.apply_event(cloud(9, "clip", 20)).unwrap();
+    controller
+        .apply_event(cloud_with_status(9, "clip", 20, "uploading"))
+        .unwrap();
     controller
         .apply_event(UiEvent::MicMonitor {
             generation: Generation::new(11),
@@ -194,7 +232,7 @@ fn every_stale_completion_domain_is_rejected_without_mutation() {
     let stale = [
         status(4, false, 0),
         game(6, "stale"),
-        cloud(8, "clip", 90),
+        cloud_state(owner("account-a", 1), 8, "clip", 90, "failed", None),
         UiEvent::MicTestStopped {
             generation: Generation::new(10),
         },
@@ -292,16 +330,190 @@ fn notices_are_bounded_fail_atomically_and_acknowledge_idempotently() {
 }
 
 #[test]
+fn notice_message_bound_fails_atomically() {
+    let mut controller = DesktopController::new((), Vec::new()).unwrap();
+    let before = controller.snapshot();
+    assert_eq!(
+        controller.apply_event(UiEvent::UserError {
+            message: "x".repeat(MAX_NOTICE_MESSAGE_BYTES + 1),
+        }),
+        Err(ControllerError::NoticeTooLarge {
+            actual: MAX_NOTICE_MESSAGE_BYTES + 1,
+            maximum: MAX_NOTICE_MESSAGE_BYTES,
+        })
+    );
+    assert_eq!(controller.snapshot(), before);
+}
+
+#[test]
+fn account_notice_survives_detached_snapshot_and_requires_exact_ack() {
+    let mut controller = DesktopController::new((), Vec::new()).unwrap();
+    let account = owner("account-a", 1);
+    controller
+        .apply_event(account_changed(account.clone()))
+        .unwrap();
+    let completion = cloud_state(
+        account.clone(),
+        1,
+        "clip",
+        100,
+        "uploaded_private",
+        Some("upload complete"),
+    );
+    controller.apply_event(completion.clone()).unwrap();
+
+    let rebuilt = DesktopController::from_snapshot(controller.snapshot()).unwrap();
+    let notice = rebuilt.snapshot().notices[0].clone();
+    assert_eq!(notice.account, Some(account));
+    assert_eq!(notice.kind, NoticeKind::CloudUpload);
+    assert_eq!(notice.message, "upload complete");
+
+    let mut rebuilt = rebuilt;
+    let wrong = rebuilt
+        .dispatch(UiAction::AcknowledgeNotice {
+            notice_id: notice.id + 1,
+        })
+        .unwrap();
+    assert!(!wrong.changed);
+    assert_eq!(rebuilt.snapshot().notices.len(), 1);
+    assert!(
+        rebuilt
+            .dispatch(UiAction::AcknowledgeNotice {
+                notice_id: notice.id,
+            })
+            .unwrap()
+            .changed
+    );
+    assert!(rebuilt.snapshot().notices.is_empty());
+    assert_eq!(
+        rebuilt.apply_event(completion).unwrap(),
+        ApplyEventOutcome::Unchanged
+    );
+    assert!(rebuilt.snapshot().notices.is_empty());
+}
+
+#[test]
+fn account_change_prunes_unacknowledged_old_account_notice() {
+    let mut controller = DesktopController::new((), Vec::new()).unwrap();
+    let first = owner("same-key", 1);
+    controller
+        .apply_event(account_changed(first.clone()))
+        .unwrap();
+    controller
+        .apply_event(cloud_state(
+            first,
+            1,
+            "clip",
+            100,
+            "failed",
+            Some("upload failed"),
+        ))
+        .unwrap();
+    assert_eq!(controller.snapshot().notices.len(), 1);
+
+    controller
+        .apply_event(account_changed(owner("same-key", 2)))
+        .unwrap();
+    assert!(controller.snapshot().notices.is_empty());
+    assert!(controller.snapshot().uploads.is_empty());
+}
+
+#[test]
+fn byte_progress_changes_snapshot_but_only_state_changes_library_revision() {
+    let mut controller = DesktopController::new((), Vec::new()).unwrap();
+    let account = owner("account-a", 1);
+    controller
+        .apply_event(account_changed(account.clone()))
+        .unwrap();
+    let account_revision = controller.snapshot().library_revision;
+    controller
+        .apply_event(cloud_state(
+            account.clone(),
+            1,
+            "clip",
+            0,
+            "uploading",
+            None,
+        ))
+        .unwrap();
+    let state_revision = controller.snapshot().library_revision;
+    assert!(state_revision > account_revision);
+
+    controller
+        .apply_event(cloud_bytes(account.clone(), 1, "clip", 50))
+        .unwrap();
+    assert_eq!(controller.snapshot().library_revision, state_revision);
+    assert_eq!(
+        controller.snapshot().uploads[0]
+            .progress
+            .received_size_bytes,
+        50
+    );
+
+    controller
+        .apply_event(cloud_state(
+            account,
+            1,
+            "clip",
+            100,
+            "uploaded_private",
+            None,
+        ))
+        .unwrap();
+    assert!(controller.snapshot().library_revision > state_revision);
+}
+
+#[test]
+fn byte_progress_cannot_smuggle_a_state_transition() {
+    let mut controller = DesktopController::new((), Vec::new()).unwrap();
+    let account = owner("account-a", 1);
+    controller
+        .apply_event(account_changed(account.clone()))
+        .unwrap();
+    controller
+        .apply_event(cloud_state(
+            account.clone(),
+            1,
+            "clip",
+            0,
+            "uploading",
+            None,
+        ))
+        .unwrap();
+    let mut disguised_state = cloud_bytes(account, 1, "clip", 50);
+    let UiEvent::CloudUploadProgress { progress, .. } = &mut disguised_state else {
+        unreachable!();
+    };
+    progress.upload_status = "failed".into();
+    let before = controller.snapshot();
+    assert_eq!(
+        controller.apply_event(disguised_state),
+        Err(ControllerError::InvalidCloudProgress(
+            "byte-only progress changed upload state"
+        ))
+    );
+    assert_eq!(controller.snapshot(), before);
+}
+
+#[test]
 fn upload_collection_has_a_hard_deterministic_bound() {
     let mut controller = DesktopController::new((), Vec::new()).unwrap();
+    controller
+        .apply_event(account_changed(owner("account-a", 1)))
+        .unwrap();
     for index in 0..MAX_ACTIVE_UPLOADS {
         controller
-            .apply_event(cloud(1, &format!("clip-{index:02}"), index as u64))
+            .apply_event(cloud_with_status(
+                1,
+                &format!("clip-{index:02}"),
+                index as u64,
+                "uploading",
+            ))
             .unwrap();
     }
     let before = controller.snapshot();
     assert_eq!(
-        controller.apply_event(cloud(1, "overflow", 0)),
+        controller.apply_event(cloud_with_status(1, "overflow", 0, "uploading")),
         Err(ControllerError::UploadsFull {
             capacity: MAX_ACTIVE_UPLOADS
         })
@@ -319,6 +531,9 @@ fn upload_collection_has_a_hard_deterministic_bound() {
 #[test]
 fn completed_uploads_are_evicted_oldest_first_under_capacity_pressure() {
     let mut controller = DesktopController::new((), Vec::new()).unwrap();
+    controller
+        .apply_event(account_changed(owner("account-a", 1)))
+        .unwrap();
     for index in 0..MAX_ACTIVE_UPLOADS {
         controller
             .apply_event(cloud_with_status(
@@ -330,7 +545,9 @@ fn completed_uploads_are_evicted_oldest_first_under_capacity_pressure() {
             .unwrap();
     }
 
-    controller.apply_event(cloud(100, "new-upload", 0)).unwrap();
+    controller
+        .apply_event(cloud_with_status(100, "new-upload", 0, "uploading"))
+        .unwrap();
     let snapshot = controller.snapshot();
     assert_eq!(snapshot.uploads.len(), MAX_ACTIVE_UPLOADS);
     assert!(!snapshot

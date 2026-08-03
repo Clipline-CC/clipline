@@ -4,6 +4,27 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-02): Slint replacement Milestone 7, Task 7 foundation
+
+Task 7 now has the permissively licensed Cloud protocol and bounded rustls control client needed
+to remove the remaining AGPL app dependency. Connect, account identity, clip status, visibility,
+and the one-byte ready-media probe preserve configured URL prefixes, refuse redirects, bound every
+buffered body, validate exact discovery and path segments, and no longer use app-local URL helpers.
+
+Desktop Cloud state is owned by an exact bounded account key plus account generation. Connect and
+disconnect are durable barriers; old-account upload events and notices are rejected or pruned.
+Byte-only progress coalesces within one exact account/upload without changing catalog state, while
+identity/status/error/terminal updates are reserved-slot barriers and alone advance the Library
+revision. Account-owned notices survive window destruction and require exact-ID acknowledgement.
+
+The shared upload ownership seam acquires the original validated no-follow source before payload
+preparation, excludes hard-link aliases and local mutations by file identity, rejects duplicate
+account-generation/local-ID admissions, and supports a gap-free transition from retained reader to
+identity-fenced self-delete. Owned payload temps use create-new plus exact-identity Drop cleanup, so
+a foreign replacement is preserved. Root and standalone Slint tests and warning-denied Clippy are
+green. Task 7 is not complete yet: multipart transport, cancellation, record CAS orchestration, and
+the final `clipline-cloud-api` dependency removal remain next.
+
 ## Checkpoint (2026-08-02): Slint replacement Milestone 7, Task 6
 
 Plan: `docs/superpowers/plans/2026-08-02-slint-library-cloud.md`. Account-fenced Cloud list,
