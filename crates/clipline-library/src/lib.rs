@@ -18,6 +18,8 @@ mod presentation;
 mod repository;
 mod scan;
 mod upload;
+#[path = "upload/transport.rs"]
+mod upload_transport;
 
 pub use channel::*;
 pub use cloud::*;
@@ -33,3 +35,4 @@ pub use presentation::*;
 pub use repository::*;
 pub use scan::*;
 pub use upload::*;
+pub use upload_transport::*;

@@ -38,6 +38,7 @@ pub const CLOUD_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 pub const CLOUD_CONTROL_READ_TIMEOUT: Duration = Duration::from_secs(15);
 pub const CLOUD_CONTROL_TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
 pub const CLOUD_STREAM_READ_TIMEOUT: Duration = Duration::from_secs(30);
+pub const CLOUD_MEDIA_PROBE_TOTAL_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Error)]
 pub enum CloudHttpError {
@@ -325,6 +326,16 @@ pub async fn bounded_error_message(response: Response, context: &str) -> String 
     let status = response.status();
     match response_bytes_limited(response, MAX_CLOUD_ERROR_BODY_BYTES, context, || false).await {
         Ok(bytes) => {
+            #[derive(Deserialize)]
+            struct ErrorEnvelope {
+                error: String,
+            }
+            if let Ok(body) = serde_json::from_slice::<ErrorEnvelope>(&bytes) {
+                let message = body.error.trim();
+                if !message.is_empty() {
+                    return message.to_owned();
+                }
+            }
             let text = String::from_utf8_lossy(&bytes);
             let text = text.trim();
             if text.is_empty() {
@@ -360,6 +371,7 @@ pub struct ReqwestCloudProtocol {
     control: Client,
     stream: Client,
     base: CloudApiBase,
+    media_probe_timeout: Duration,
 }
 
 impl ReqwestCloudProtocol {
@@ -368,7 +380,25 @@ impl ReqwestCloudProtocol {
             control: control_client().map_err(protocol_http_error)?,
             stream: stream_client().map_err(protocol_http_error)?,
             base,
+            media_probe_timeout: CLOUD_MEDIA_PROBE_TOTAL_TIMEOUT,
         })
+    }
+
+    /// Tighten the media durability-probe deadline. Production callers use
+    /// the pinned 15-second default; deterministic tests may select a shorter
+    /// positive deadline, but callers cannot weaken the bound.
+    pub fn with_media_probe_timeout(
+        mut self,
+        timeout: Duration,
+    ) -> Result<Self, CloudProtocolError> {
+        if timeout.is_zero() || timeout > CLOUD_MEDIA_PROBE_TOTAL_TIMEOUT {
+            return Err(CloudProtocolError::InvalidUpload(format!(
+                "cloud media probe timeout must be between 1 ns and {} seconds",
+                CLOUD_MEDIA_PROBE_TOTAL_TIMEOUT.as_secs()
+            )));
+        }
+        self.media_probe_timeout = timeout;
+        Ok(self)
     }
 
     #[must_use]
@@ -446,36 +476,46 @@ impl ReqwestCloudProtocol {
         bearer_token: &str,
         clip_id: &str,
     ) -> Result<CloudMediaProbe, CloudProtocolError> {
-        let response = self
-            .stream
-            .get(self.base.clip_url(clip_id, Some("media"))?)
-            .bearer_auth(bearer_token)
-            .header(reqwest::header::RANGE, "bytes=0-0")
-            .header(reqwest::header::ACCEPT_ENCODING, "identity")
-            .send()
+        let probe = async {
+            let response = self
+                .stream
+                .get(self.base.clip_url(clip_id, Some("media"))?)
+                .bearer_auth(bearer_token)
+                .header(reqwest::header::RANGE, "bytes=0-0")
+                .header(reqwest::header::ACCEPT_ENCODING, "identity")
+                .send()
+                .await
+                .map_err(|error| CloudProtocolError::Http(error.to_string()))?;
+            let status = response.status();
+            if !status.is_success() {
+                return Err(protocol_api_error(response, "probe cloud media").await);
+            }
+            let total_size_bytes = response
+                .headers()
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|value| value.to_str().ok())
+                .and_then(content_range_total);
+            let bytes = response_bytes_limited(response, 1, "cloud media probe", || false)
+                .await
+                .map_err(protocol_http_error)?;
+            if bytes.is_empty() {
+                return Err(CloudProtocolError::InvalidUpload(
+                    "cloud media probe returned no bytes".into(),
+                ));
+            }
+            Ok(CloudMediaProbe {
+                response_bytes: bytes.len(),
+                total_size_bytes,
+            })
+        };
+        tokio::time::timeout(self.media_probe_timeout, probe)
             .await
-            .map_err(|error| CloudProtocolError::Http(error.to_string()))?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(protocol_api_error(response, "probe cloud media").await);
-        }
-        let total_size_bytes = response
-            .headers()
-            .get(reqwest::header::CONTENT_RANGE)
-            .and_then(|value| value.to_str().ok())
-            .and_then(content_range_total);
-        let bytes = response_bytes_limited(response, 1, "cloud media probe", || false)
-            .await
-            .map_err(protocol_http_error)?;
-        if bytes.is_empty() {
-            return Err(CloudProtocolError::InvalidUpload(
-                "cloud media probe returned no bytes".into(),
-            ));
-        }
-        Ok(CloudMediaProbe {
-            response_bytes: bytes.len(),
-            total_size_bytes,
-        })
+            .map_err(|_| {
+                CloudProtocolError::Http(format!(
+                    "cloud media probe exceeded its {} ms total deadline",
+                    self.media_probe_timeout.as_millis()
+                ))
+            })?
     }
 
     async fn send_json<T: DeserializeOwned>(

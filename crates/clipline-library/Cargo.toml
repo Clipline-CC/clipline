@@ -20,6 +20,7 @@ serde_json = { workspace = true }
 sha2 = "0.10"
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["fs", "io-util", "sync"] }
+tokio-util = { version = "0.7", features = ["io"] }
 
 [dev-dependencies]
 boa_engine = "0.21.1"

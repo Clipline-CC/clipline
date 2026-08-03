@@ -3,6 +3,7 @@ use clipline_library::protocol::{
     CloudApiBase, CloudProtocolError, CreateDeviceTokenRequest, UpdateVisibilityRequest,
 };
 use httpmock::prelude::*;
+use std::time::{Duration, Instant};
 
 fn discovery_json() -> serde_json::Value {
     serde_json::json!({
@@ -257,4 +258,28 @@ async fn media_probe_rejects_empty_or_range_ignoring_responses() {
         client.probe_media("token", "clip-1").await,
         Err(CloudProtocolError::Http(_))
     ));
+}
+
+#[tokio::test]
+async fn media_probe_has_one_bounded_total_deadline() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(GET).path("/api/v1/clips/clip-1/media");
+        then.status(206)
+            .delay(Duration::from_millis(250))
+            .body(vec![0]);
+    });
+    let client = ReqwestCloudProtocol::new(
+        CloudApiBase::parse(&format!("{}/", server.base_url()), true).unwrap(),
+    )
+    .unwrap()
+    .with_media_probe_timeout(Duration::from_millis(40))
+    .unwrap();
+
+    let started = Instant::now();
+    assert!(matches!(
+        client.probe_media("token", "clip-1").await,
+        Err(CloudProtocolError::Http(message)) if message.contains("deadline")
+    ));
+    assert!(started.elapsed() < Duration::from_millis(200));
 }

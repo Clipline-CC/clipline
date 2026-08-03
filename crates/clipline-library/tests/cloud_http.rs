@@ -75,6 +75,22 @@ async fn bounded_json_and_error_text_use_the_pinned_control_limits() {
         cloud_http::bounded_error_message(response, "cloud error").await,
         "nope"
     );
+
+    server.mock(|when, then| {
+        when.method(GET).path("/json-error");
+        then.status(409)
+            .json_body(serde_json::json!({ "error": "upload already exists" }));
+    });
+    let response = cloud_http::control_client()
+        .unwrap()
+        .get(server.url("/json-error"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        cloud_http::bounded_error_message(response, "cloud error").await,
+        "upload already exists"
+    );
 }
 
 #[tokio::test]

@@ -179,6 +179,7 @@ macro_rules! bounded_id {
 
 bounded_id!(CloudAccountKey, "cloud_account_key");
 bounded_id!(LocalClipId, "local_clip_id");
+bounded_id!(ClientClipId, "client_clip_id");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WindowWorkToken {

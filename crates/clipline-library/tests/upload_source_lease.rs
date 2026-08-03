@@ -2,7 +2,8 @@ use std::io::Write;
 use std::sync::Arc;
 
 use clipline_library::{
-    ActiveFileRegistry, CloudAccountGeneration, CloudAccountKey, DurableUploadToken, LocalClipId,
+    client_clip_id_for_payload, local_clip_id_for_source, ActiveFileRegistry,
+    CloudAccountGeneration, CloudAccountKey, DurableUploadToken, LocalClipId,
     LocalLibraryRepository, MutationLease, OwnedUploadTemp, StandardRepositoryFileSystem,
     UploadGeneration, UploadOwnershipError, ACTIVE_UPLOAD_MUTATION_ERROR,
 };
@@ -48,6 +49,52 @@ fn fixture(
         .validate_clip_path(&clip.display().to_string())
         .unwrap();
     (directory, registry, repository, validated)
+}
+
+#[test]
+fn source_and_payload_identities_are_split_before_preparation() {
+    let (directory, _registry, repository, source) = fixture("split-identities");
+    let stable = local_clip_id_for_source(source.file_identity());
+
+    let alias = directory.path().join("media").join("alias.mp4");
+    std::fs::hard_link(source.canonical_path(), &alias).unwrap();
+    let alias = repository
+        .validate_clip_path(&alias.display().to_string())
+        .unwrap();
+    assert_eq!(stable, local_clip_id_for_source(alias.file_identity()));
+
+    let first_payload = client_clip_id_for_payload(
+        &stable,
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    )
+    .unwrap();
+    assert_eq!(
+        first_payload,
+        client_clip_id_for_payload(
+            &stable,
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        )
+        .unwrap()
+    );
+    assert_ne!(
+        first_payload,
+        client_clip_id_for_payload(
+            &stable,
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        )
+        .unwrap()
+    );
+    assert!(client_clip_id_for_payload(&stable, "not-a-sha256").is_err());
+
+    std::fs::remove_file(source.canonical_path()).unwrap();
+    std::fs::write(source.canonical_path(), b"replacement mp4 bytes").unwrap();
+    let replacement = repository
+        .validate_clip_path(source.canonical_path().to_string_lossy().as_ref())
+        .unwrap();
+    assert_ne!(
+        stable,
+        local_clip_id_for_source(replacement.file_identity())
+    );
 }
 
 fn mutation_error(result: Result<Box<dyn clipline_library::MutationPermit>, String>) -> String {

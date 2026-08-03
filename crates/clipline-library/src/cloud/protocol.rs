@@ -99,10 +99,28 @@ impl CloudApiBase {
     }
 
     pub fn api_url(&self, relative_path: &str) -> Result<Url, CloudProtocolError> {
-        let relative_path = relative_path.trim_start_matches('/');
+        let candidate = relative_path.trim();
+        if candidate.starts_with("//")
+            || candidate.contains(['\\', '?', '#'])
+            || Url::parse(candidate).is_ok()
+        {
+            return Err(CloudProtocolError::InvalidUpload(
+                "cloud API path must be relative and contain no authority, query, or fragment"
+                    .into(),
+            ));
+        }
+        let relative_path = candidate.trim_start_matches('/');
         if relative_path.is_empty() {
             return Err(CloudProtocolError::InvalidUpload(
                 "cloud API path must not be empty".into(),
+            ));
+        }
+        if relative_path
+            .split('/')
+            .any(|segment| segment == "." || segment == "..")
+        {
+            return Err(CloudProtocolError::InvalidUpload(
+                "cloud API path must not contain traversal segments".into(),
             ));
         }
         self.url

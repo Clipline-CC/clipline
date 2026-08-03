@@ -11,10 +11,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use clipline_shell::{opened_file_identity, FileIdentity};
+use sha2::{Digest, Sha256};
 
 use crate::{
-    CloudAccountGeneration, CloudAccountKey, DurableUploadToken, LocalClipId, MutationLease,
-    MutationPermit, ValidatedClipPath, ACTIVE_UPLOAD_MUTATION_ERROR,
+    ClientClipId, CloudAccountGeneration, CloudAccountKey, DurableUploadToken, LocalClipId,
+    MutationLease, MutationPermit, ValidatedClipPath, ACTIVE_UPLOAD_MUTATION_ERROR,
 };
 
 const MAX_TEMP_RESERVATION_ATTEMPTS: usize = 128;
@@ -36,12 +37,51 @@ pub enum UploadOwnershipError {
     GenerationExhausted,
     #[error("upload ownership registry is unavailable")]
     RegistryUnavailable,
+    #[error("upload payload checksum must be exactly 64 hexadecimal SHA-256 characters")]
+    InvalidPayloadChecksum,
     #[error("{action} {path:?}: {message}")]
     File {
         action: &'static str,
         path: PathBuf,
         message: String,
     },
+}
+
+/// Stable admission identity available before payload preparation.
+///
+/// File identity deliberately survives rename, device-prefix spelling, and
+/// hard-link aliases while changing when the directory entry is replaced.
+#[must_use]
+pub fn local_clip_id_for_source(identity: FileIdentity) -> LocalClipId {
+    let mut digest = Sha256::new();
+    digest.update(b"clipline-local-source-v2\0");
+    digest.update(identity.device().to_le_bytes());
+    digest.update(identity.file().to_le_bytes());
+    LocalClipId::new(format!("clipline-local-{:x}", digest.finalize()))
+        .expect("the fixed SHA-256 local clip ID is within the contract bound")
+}
+
+/// Server-facing payload identity computed only after preparation completes.
+///
+/// This remains separate from [`local_clip_id_for_source`] so selected-audio
+/// jobs can own the original source before their payload checksum exists.
+pub fn client_clip_id_for_payload(
+    local_clip_id: &LocalClipId,
+    checksum_sha256: &str,
+) -> Result<ClientClipId, UploadOwnershipError> {
+    let checksum = checksum_sha256.trim();
+    if checksum.len() != 64 || !checksum.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(UploadOwnershipError::InvalidPayloadChecksum);
+    }
+    let mut digest = Sha256::new();
+    digest.update(b"clipline-client-v2\0");
+    digest.update(local_clip_id.as_str().as_bytes());
+    digest.update(b"\0");
+    digest.update(checksum.to_ascii_lowercase().as_bytes());
+    Ok(
+        ClientClipId::new(format!("clipline-client-{:x}", digest.finalize()))
+            .expect("the fixed SHA-256 client clip ID is within the contract bound"),
+    )
 }
 
 impl UploadOwnershipError {

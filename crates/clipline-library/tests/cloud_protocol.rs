@@ -43,6 +43,11 @@ fn resource_and_authenticated_template_urls_are_segment_safe_and_same_origin() {
     assert!(base
         .authenticated_upload_url("https://clips.example:8443/part/7", 7)
         .is_err());
+    assert!(base
+        .api_url("https://foreign.example/api/v1/clips")
+        .is_err());
+    assert!(base.api_url("//foreign.example/api/v1/clips").is_err());
+    assert!(base.api_url("../api/v1/clips").is_err());
 }
 
 #[test]
