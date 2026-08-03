@@ -928,6 +928,7 @@ dependencies = [
  "serde_json",
  "slint",
  "slint-build",
+ "thiserror 2.0.19",
 ]
 
 [[package]]

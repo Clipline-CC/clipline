@@ -2,17 +2,17 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clipline_library::{
-    ForegroundGeneration, MAX_POSTER_DECODED_PIXELS, MAX_POSTER_DIMENSION,
-    MAX_POSTER_ENCODED_BYTES, PosterCompletion, PosterController, PosterGeneration, PosterPageItem,
+    ForegroundGeneration, PosterCompletion, PosterController, PosterGeneration, PosterPageItem,
     PosterWorkKind, PosterWorkRequest, PosterWorkToken, RequestGeneration,
-    WindowAttachmentGeneration, WindowWorkToken,
+    WindowAttachmentGeneration, WindowWorkToken, MAX_POSTER_DECODED_PIXELS, MAX_POSTER_DIMENSION,
+    MAX_POSTER_ENCODED_BYTES,
 };
 use clipline_slint_spike::poster::{
-    DecodedPoster, PosterAdapterError, decode_poster_file, publish_decoded_poster,
-    validate_poster_dimensions,
+    clone_ui_poster, decode_poster_file, poster_decode_pool_shape, publish_decoded_poster,
+    validate_poster_dimensions, with_ui_poster_controller, DecodedPoster, PosterAdapterError,
 };
-use image::ExtendedColorType;
 use image::codecs::jpeg::JpegEncoder;
+use image::ExtendedColorType;
 
 struct TestDirectory(PathBuf);
 
@@ -163,6 +163,37 @@ fn image_is_constructed_only_after_the_controller_accepts_the_exact_token() {
 }
 
 #[test]
+fn ui_poster_clone_accessor_returns_only_the_exact_retained_identity() {
+    let directory = TestDirectory::new("clone-accessor");
+    let clip = directory.0.join("clip.mp4");
+    let other_clip = directory.0.join("other.mp4");
+    let poster = directory.0.join("clip.poster.jpg");
+    std::fs::write(&clip, b"clip").unwrap();
+    write_jpeg(&poster, 4, 4);
+
+    let item = PosterPageItem::new(clip.clone(), 0.0).unwrap();
+    let identity = item.identity.clone();
+    let other_identity = PosterPageItem::new(other_clip, 0.0).unwrap().identity;
+    let decode = with_ui_poster_controller(|controller| {
+        controller.replace_page(window(), vec![item]).unwrap();
+        let extract = controller.set_viewport(0, 1, 0).unwrap().queued.remove(0);
+        controller
+            .accept_extracted(&extract, PosterCompletion::Ready(poster))
+            .queued
+            .remove(0)
+    });
+    let decoded = decode_poster_file(decode).unwrap();
+    with_ui_poster_controller(|controller| publish_decoded_poster(controller, decoded).unwrap());
+
+    assert!(clone_ui_poster(&identity).is_some());
+    assert!(clone_ui_poster(&other_identity).is_none());
+    with_ui_poster_controller(|controller| {
+        let _ = controller.detach_window().unwrap();
+    });
+    assert!(clone_ui_poster(&identity).is_none());
+}
+
+#[test]
 fn adapter_source_forbids_path_loading_and_text_encoded_images() {
     let source = include_str!("../src/poster.rs");
     assert!(!source.contains("Image::load_from_path"));
@@ -174,4 +205,18 @@ fn adapter_source_forbids_path_loading_and_text_encoded_images() {
     assert!(source.contains("slint::Weak<CliplineSpike>"));
     assert!(source.contains("slint::invoke_from_event_loop"));
     assert!(source.contains("window.upgrade().is_some()"));
+}
+
+#[test]
+fn decode_dispatch_uses_a_fixed_bounded_pool_instead_of_a_thread_per_poster() {
+    let (workers, queue_capacity) = poster_decode_pool_shape();
+    assert_eq!(workers, 2);
+    assert_eq!(queue_capacity, clipline_library::MAX_DECODED_PAGE_IMAGES);
+
+    let source = include_str!("../src/poster.rs");
+    let enqueue = source.find("pub fn spawn_poster_decode").unwrap();
+    let enqueue_end = source[enqueue..].find("\nfn poster_decode_pool").unwrap() + enqueue;
+    let enqueue_body = &source[enqueue..enqueue_end];
+    assert!(enqueue_body.contains("try_send"));
+    assert!(!enqueue_body.contains("Builder::new()\n        .name(\"clipline-poster-decode\""));
 }

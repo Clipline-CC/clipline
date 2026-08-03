@@ -1,0 +1,409 @@
+import { Button, ComboBox, LineEdit, ListView } from "std-widgets.slint";
+
+export enum CatalogSource { local, cloud }
+export enum CatalogFilter { all, replay, session, trim, marked }
+export enum CatalogSort { newest, oldest, largest, marks }
+export enum CatalogGroup { smart, day, game, session, ungrouped }
+
+export struct LibraryItem {
+    title: string,
+    subtitle: string,
+    duration: string,
+    kind: string,
+    kind-color: color,
+    poster-image: image,
+    poster-a: color,
+    poster-b: color,
+    game-badge: string,
+    marker-badge: string,
+    outcome-badge: string,
+    upload-badge: string,
+    warning: string,
+    selected: bool,
+    active: bool,
+}
+
+component SmallLabel inherits Text {
+    color: #a89784;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    vertical-alignment: center;
+}
+
+component Badge inherits Rectangle {
+    in property <string> label;
+    in property <color> badge-color: #3a2d23;
+    visible: root.label != "";
+    height: 18px;
+    width: min(130px, max(42px, badge-text.preferred-width + 14px));
+    border-radius: 9px;
+    background: root.badge-color;
+    badge-text := Text {
+        x: 7px;
+        width: parent.width - 14px;
+        height: parent.height;
+        text: root.label;
+        color: #f3eadf;
+        font-size: 8px;
+        font-weight: 700;
+        overflow: elide;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+export component LibrarySurface inherits Rectangle {
+    in property <[LibraryItem]> rows: [];
+    in property <CatalogSource> source: CatalogSource.local;
+    in property <string> load-state: "empty";
+    in property <string> error-text: "";
+    in-out property <string> query: "";
+    in property <CatalogFilter> filter: CatalogFilter.all;
+    in property <CatalogSort> sort: CatalogSort.newest;
+    in property <CatalogGroup> group: CatalogGroup.smart;
+    in property <string> range-text: "0 of 0";
+    in property <int> page: 1;
+    in property <bool> has-previous: false;
+    in property <bool> has-next: false;
+    in property <int> selected-count: 0;
+    in property <bool> selection-mode: false;
+    in-out property <int> focused-row: -1;
+    in property <int> context-row: -1;
+    in property <bool> can-review: false;
+    in property <bool> can-rename: false;
+    in property <bool> can-delete: false;
+    in property <bool> can-upload: false;
+    in property <bool> can-reveal: false;
+    in property <bool> can-copy-link: false;
+    in property <bool> can-open-link: false;
+    in property <bool> can-cancel-upload: false;
+    in property <bool> dialog-open: false;
+    private property <int> max-visible-rows: 60;
+
+    callback set-source(source: CatalogSource);
+    callback set-query(query: string);
+    callback set-filter(filter: CatalogFilter);
+    callback set-sort(sort: CatalogSort);
+    callback set-group(group: CatalogGroup);
+    callback previous-page();
+    callback next-page();
+    callback refresh();
+    callback open-row(row-index: int);
+    callback toggle-row(row-index: int);
+    callback open-context(row-index: int);
+    callback enter-selection();
+    callback exit-selection();
+    callback select-visible();
+    callback clear-selection();
+    callback delete-selection();
+    callback escape();
+    callback reveal-context();
+    callback upload-context();
+    callback rename-title-context();
+    callback rename-file-context();
+    callback delete-context();
+    callback cancel-upload-context();
+    callback copy-link-context();
+    callback open-link-context();
+
+    background: #14100c;
+    accessible-role: main;
+    accessible-label: root.source == CatalogSource.cloud ? "Cloud clips" : "Local clips";
+    forward-focus: catalog-keyboard;
+
+    function move-focus(delta: int) {
+        if (root.rows.length == 0) {
+            root.focused-row = -1;
+        } else if (root.focused-row < 0) {
+            root.focused-row = 0;
+        } else if (delta < 0) {
+            root.focused-row = max(0, root.focused-row - 1);
+        } else {
+            root.focused-row = min(root.rows.length - 1, root.focused-row + 1);
+        }
+    }
+
+    catalog-keyboard := FocusScope {
+        width: 1px;
+        height: 1px;
+        focus-changed-event => {
+            if (self.has-focus && root.rows.length > 0 && root.focused-row < 0) {
+                root.focused-row = 0;
+            }
+        }
+        key-pressed(event) => {
+            // Fail closed if focus transfer into a newly opened dialog is
+            // delayed by one event-loop turn.
+            if (root.dialog-open) {
+                return accept;
+            } else if (event.text == Key.UpArrow || event.text == Key.LeftArrow) {
+                root.move-focus(-1);
+                return accept;
+            } else if (event.text == Key.DownArrow || event.text == Key.RightArrow) {
+                root.move-focus(1);
+                return accept;
+            // Slint names the platform Enter key Key.Return.
+            } else if (event.text == Key.Return) {
+                if (root.focused-row >= 0 && root.focused-row < root.rows.length) {
+                    root.open-row(root.focused-row);
+                }
+                return accept;
+            } else if (event.text == Key.Space && root.selection-mode) {
+                if (root.focused-row >= 0 && root.focused-row < root.rows.length) {
+                    root.toggle-row(root.focused-row);
+                }
+                return accept;
+            } else if (event.text == Key.Menu || (event.text == Key.F10 && event.modifiers.shift)) {
+                if (root.focused-row >= 0 && root.focused-row < root.rows.length) {
+                    root.open-context(root.focused-row);
+                }
+                return accept;
+            } else if (event.text == "a" && event.modifiers.control && root.source == CatalogSource.local) {
+                root.select-visible();
+                return accept;
+            } else if (event.text == Key.PageUp) {
+                if (root.has-previous) { root.previous-page(); }
+                return accept;
+            } else if (event.text == Key.PageDown) {
+                if (root.has-next) { root.next-page(); }
+                return accept;
+            } else if (event.text == Key.Escape) {
+                root.escape();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    Rectangle {
+        x: 24px;
+        y: 16px;
+        width: parent.width - 48px;
+        height: 42px;
+        background: transparent;
+        Text {
+            width: 230px;
+            height: parent.height;
+            text: root.source == CatalogSource.cloud ? "Cloud Library" : "Local Library";
+            color: #f3eadf;
+            font-size: 23px;
+            font-weight: 750;
+            vertical-alignment: center;
+        }
+        Button {
+            x: parent.width - 250px;
+            width: 94px;
+            height: 34px;
+            text: "Local";
+            checked: root.source == CatalogSource.local;
+            accessible-label: "Show local clips";
+            clicked => { root.set-source(CatalogSource.local); }
+        }
+        Button {
+            x: parent.width - 150px;
+            width: 94px;
+            height: 34px;
+            text: "Cloud";
+            checked: root.source == CatalogSource.cloud;
+            accessible-label: "Show Cloud clips";
+            clicked => { root.set-source(CatalogSource.cloud); }
+        }
+        Button {
+            x: parent.width - 50px;
+            width: 50px;
+            height: 34px;
+            text: "↻";
+            accessible-label: "Refresh clips";
+            clicked => { root.refresh(); }
+        }
+    }
+
+    Rectangle {
+        x: 24px;
+        y: 66px;
+        width: parent.width - 48px;
+        height: 40px;
+        background: transparent;
+
+        LineEdit {
+            width: root.source == CatalogSource.cloud ? parent.width - 164px : max(180px, parent.width - 560px);
+            height: 34px;
+            text: root.query;
+            placeholder-text: "Search title, game, or marker";
+            accessible-label: "Search clips";
+            edited(value) => { root.query = value; root.set-query(value); }
+        }
+
+        if root.source == CatalogSource.local : ComboBox {
+            x: parent.width - 548px;
+            width: 126px;
+            height: 34px;
+            model: ["All", "Replay", "Session", "Trim", "Marked"];
+            current-index: root.filter == CatalogFilter.all ? 0 : root.filter == CatalogFilter.replay ? 1 : root.filter == CatalogFilter.session ? 2 : root.filter == CatalogFilter.trim ? 3 : 4;
+            accessible-label: "Clip type filter";
+            selected(value) => {
+                root.set-filter(self.current-index == 0 ? CatalogFilter.all : self.current-index == 1 ? CatalogFilter.replay : self.current-index == 2 ? CatalogFilter.session : self.current-index == 3 ? CatalogFilter.trim : CatalogFilter.marked);
+            }
+        }
+        if root.source == CatalogSource.local : ComboBox {
+            x: parent.width - 416px;
+            width: 126px;
+            height: 34px;
+            model: ["Newest", "Oldest", "Largest", "Most marks"];
+            current-index: root.sort == CatalogSort.newest ? 0 : root.sort == CatalogSort.oldest ? 1 : root.sort == CatalogSort.largest ? 2 : 3;
+            accessible-label: "Sort clips";
+            selected(value) => {
+                root.set-sort(self.current-index == 0 ? CatalogSort.newest : self.current-index == 1 ? CatalogSort.oldest : self.current-index == 2 ? CatalogSort.largest : CatalogSort.marks);
+            }
+        }
+        if root.source == CatalogSource.local : ComboBox {
+            x: parent.width - 284px;
+            width: 126px;
+            height: 34px;
+            model: ["Smart", "Day", "Game", "Session", "No groups"];
+            current-index: root.group == CatalogGroup.smart ? 0 : root.group == CatalogGroup.day ? 1 : root.group == CatalogGroup.game ? 2 : root.group == CatalogGroup.session ? 3 : 4;
+            accessible-label: "Group clips";
+            selected(value) => {
+                root.set-group(self.current-index == 0 ? CatalogGroup.smart : self.current-index == 1 ? CatalogGroup.day : self.current-index == 2 ? CatalogGroup.game : self.current-index == 3 ? CatalogGroup.session : CatalogGroup.ungrouped);
+            }
+        }
+        if root.source == CatalogSource.local : Button {
+            x: parent.width - 152px;
+            width: 152px;
+            height: 34px;
+            text: root.selection-mode ? "Exit selection" : "Select multiple";
+            accessible-label: root.selection-mode ? "Exit clip selection" : "Enter clip selection";
+            clicked => { if (root.selection-mode) { root.exit-selection(); } else { root.enter-selection(); } }
+        }
+    }
+
+    if root.selection-mode && root.source == CatalogSource.local && !root.dialog-open : Rectangle {
+        x: 24px;
+        y: 110px;
+        width: parent.width - 48px;
+        height: 38px;
+        border-radius: 5px;
+        background: #292017;
+        accessible-role: region;
+        accessible-label: "Bulk clip actions";
+        Text { x: 10px; width: 150px; height: parent.height; text: root.selected-count + " selected"; color: #e5c183; font-size: 11px; font-weight: 700; vertical-alignment: center; }
+        Button { x: 156px; y: 3px; width: 106px; height: 32px; text: "Select page"; accessible-label: "Select visible clips"; clicked => { root.select-visible(); } }
+        Button { x: 268px; y: 3px; width: 82px; height: 32px; text: "Clear"; accessible-label: "Clear clip selection"; enabled: root.selected-count > 0; clicked => { root.clear-selection(); } }
+        Button { x: 356px; y: 3px; width: 102px; height: 32px; text: "Delete"; accessible-label: "Delete selected clips"; enabled: root.selected-count > 0; clicked => { root.delete-selection(); } }
+    }
+
+    ListView {
+        x: 24px;
+        y: root.selection-mode && root.source == CatalogSource.local ? 156px : 114px;
+        width: parent.width - 48px;
+        height: parent.height - self.y - 58px;
+        accessible-role: list;
+        accessible-label: root.source == CatalogSource.cloud ? "Cloud clip results" : "Local clip results";
+
+        for row[index] in root.rows : Rectangle {
+            visible: index < root.max-visible-rows;
+            width: parent.width;
+            height: 76px;
+            border-radius: 6px;
+            background: row.active ? #3a291a : row.selected ? #2a3222 : Math.mod(index, 2) == 0 ? #18120e : #1b1510;
+            border-width: root.focused-row == index ? 2px : 1px;
+            border-color: root.focused-row == index ? #e5c183 : row.active ? #d9962a : #30251c;
+            accessible-role: list-item;
+            accessible-label: row.title + ". " + row.subtitle;
+            accessible-description: row.warning;
+            accessible-value: row.duration;
+            accessible-checkable: root.selection-mode;
+            accessible-checked: row.selected;
+            accessible-expandable: true;
+            accessible-expanded: root.context-row == index;
+            accessible-action-default => { if (!root.dialog-open) { if (root.selection-mode) { root.toggle-row(index); } else { root.open-row(index); } } }
+
+            poster := Rectangle {
+                x: 8px;
+                y: 8px;
+                width: 96px;
+                height: 60px;
+                border-radius: 4px;
+                clip: true;
+                background: @linear-gradient(110deg, row.poster-a, row.poster-b);
+                Image { width: parent.width; height: parent.height; source: row.poster-image; image-fit: cover; accessible-label: row.title + " poster"; }
+            }
+            Text { x: 116px; y: 8px; width: parent.width - 330px; height: 20px; text: row.title; color: #f3eadf; font-size: 13px; font-weight: 700; overflow: elide; }
+            Text { x: 116px; y: 28px; width: parent.width - 330px; height: 17px; text: row.subtitle; color: #8d7d6d; font-size: 10px; overflow: elide; }
+            Badge { x: 116px; y: 50px; label: row.kind; badge-color: row.kind-color; }
+            Badge { x: 194px; y: 50px; label: row.game-badge; badge-color: #345065; }
+            Badge { x: 282px; y: 50px; label: row.marker-badge; badge-color: #654a26; }
+            Badge { x: 378px; y: 50px; label: row.outcome-badge; badge-color: #3d583e; }
+            Badge { x: parent.width - 186px; y: 50px; label: row.upload-badge; badge-color: #503d61; }
+            Text { x: parent.width - 186px; y: 8px; width: 130px; height: 24px; text: row.duration; color: #c0b3a5; font-size: 11px; horizontal-alignment: right; vertical-alignment: center; }
+            Button { x: parent.width - 48px; y: 8px; width: 40px; height: 32px; text: "⋯"; enabled: !root.dialog-open; accessible-label: "Actions for " + row.title; clicked => { root.focused-row = index; root.open-context(index); } }
+            TouchArea {
+                x: 0;
+                y: 0;
+                width: parent.width - 54px;
+                height: parent.height;
+                enabled: !root.dialog-open;
+                clicked => { root.focused-row = index; if (root.selection-mode) { root.toggle-row(index); } else { root.open-row(index); } }
+            }
+        }
+    }
+
+    if root.load-state != "ready" : Rectangle {
+        x: 24px;
+        y: 158px;
+        width: parent.width - 48px;
+        height: parent.height - 230px;
+        background: #14100cee;
+        accessible-role: region;
+        accessible-label: root.load-state == "loading" ? "Loading clips" : root.load-state == "disconnected" ? "Cloud disconnected" : root.load-state == "error" ? "Clip loading error" : "No clips";
+        Text {
+            x: 24px;
+            y: parent.height / 2 - 34px;
+            width: parent.width - 48px;
+            height: 68px;
+            text: root.load-state == "loading" ? "Loading clips…" : root.load-state == "disconnected" ? "Connect Clipline Cloud to view uploaded clips." : root.load-state == "error" ? root.error-text : root.query != "" ? "No clips match this search." : "No clips yet.";
+            color: #a89784;
+            font-size: 13px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            wrap: word-wrap;
+        }
+    }
+
+    if root.context-row >= 0 && !root.dialog-open : Rectangle {
+        x: parent.width - 250px;
+        y: 158px;
+        width: 220px;
+        height: 356px;
+        border-radius: 7px;
+        background: #211a14;
+        border-width: 1px;
+        border-color: #59412e;
+        accessible-role: groupbox;
+        accessible-label: "Clip context menu";
+        accessible-expanded: true;
+        Button { x: 8px; y: 8px; width: 204px; height: 30px; text: "Open"; visible: root.can-review; clicked => { root.open-row(root.context-row); } }
+        Button { x: 8px; y: 42px; width: 204px; height: 30px; text: "Rename title"; visible: root.can-rename; clicked => { root.rename-title-context(); } }
+        Button { x: 8px; y: 76px; width: 204px; height: 30px; text: "Rename file"; visible: root.can-rename && root.source == CatalogSource.local; clicked => { root.rename-file-context(); } }
+        Button { x: 8px; y: 110px; width: 204px; height: 30px; text: "Delete"; visible: root.can-delete; clicked => { root.delete-context(); } }
+        Button { x: 8px; y: 144px; width: 204px; height: 30px; text: "Upload"; visible: root.can-upload; clicked => { root.upload-context(); } }
+        Button { x: 8px; y: 178px; width: 204px; height: 30px; text: "Cancel upload"; visible: root.can-cancel-upload; clicked => { root.cancel-upload-context(); } }
+        Button { x: 8px; y: 212px; width: 204px; height: 30px; text: "Reveal in Explorer"; visible: root.can-reveal; clicked => { root.reveal-context(); } }
+        Button { x: 8px; y: 246px; width: 204px; height: 30px; text: "Copy public link"; visible: root.can-copy-link; clicked => { root.copy-link-context(); } }
+        Button { x: 8px; y: 280px; width: 204px; height: 30px; text: "Open public link"; visible: root.can-open-link; clicked => { root.open-link-context(); } }
+        Text { x: 8px; y: 318px; width: 204px; height: 28px; text: "Esc closes this menu"; color: #8d7d6d; font-size: 9px; horizontal-alignment: center; vertical-alignment: center; }
+    }
+
+    Rectangle {
+        x: 24px;
+        y: parent.height - 48px;
+        width: parent.width - 48px;
+        height: 38px;
+        background: #17110c;
+        border-radius: 5px;
+        SmallLabel { x: 10px; width: 180px; height: parent.height; text: root.range-text; accessible-label: "Visible clip range " + root.range-text; }
+        Button { x: parent.width - 224px; y: 3px; width: 104px; height: 32px; text: "Previous"; enabled: root.has-previous; accessible-label: "Previous clip page"; clicked => { root.previous-page(); } }
+        Button { x: parent.width - 112px; y: 3px; width: 104px; height: 32px; text: "Next"; enabled: root.has-next; accessible-label: "Next clip page"; clicked => { root.next-page(); } }
+    }
+}

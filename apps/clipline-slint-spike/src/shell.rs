@@ -289,12 +289,20 @@ fn increment(counter: &mut u64) -> Result<(), LifecycleError> {
 mod windows_runtime {
     use std::cell::RefCell;
     use std::rc::{Rc, Weak};
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use clipline_desktop::{
         Generation, RecorderEvent, Revision, UiEvent, WindowLifecycleMode, WindowLifecycleSnapshot,
     };
+    use clipline_library::{
+        catalog_result_channel, ActiveFileRegistry, CatalogDialogTextField, CatalogEffect,
+        CatalogResultReceiver, CatalogSource, CatalogUploadVisibility, ForegroundGeneration,
+        LocalClipFilter, LocalClipGrouping, LocalClipSort, PlaybackSourceLease, ValidatedClipPath,
+        WindowAttachmentGeneration, WindowWorkToken, CATALOG_RESULT_CAPACITY,
+    };
     use clipline_playback::windows::{WindowsD3D11Publisher, WindowsVideoHost};
+    use clipline_settings::LibraryConfig;
     use clipline_shell::activation::ActivationCommand;
     use clipline_shell::windows::activation::{
         acquire_or_activate, WindowsInstanceGuard, WindowsInstanceRole,
@@ -305,13 +313,27 @@ mod windows_runtime {
     };
     use slint::ComponentHandle;
 
+    use crate::catalog::{
+        publish_projection, CatalogEffectExecutor, CatalogResultWake, CatalogReviewPort,
+        CatalogUiIntent, LocalCatalogEffectHandler, SlintCatalogController, SystemCatalogReveal,
+        SystemDayResolver,
+    };
     use crate::controller::PlaybackController;
     use crate::desktop::{DesktopAttachment, SlintDesktopAdapter};
-    use crate::live::{LiveSession, LiveSessionReport, SessionCommandPort, SpikePublisher};
+    use crate::live::{
+        LiveMediaCommandPort, LiveMediaLease, LiveMediaRequestToken, LiveSession,
+        LiveSessionReport, SessionCommandPort, SpikePublisher, ValidatedLiveMediaSource,
+    };
     use crate::options::{write_lifecycle_marker, SpikeOptions, SpikeScenario};
     use crate::settings::{CandidateSettings, CandidateSettingsProfile};
     use crate::windows::{attach_video_host, update_video_host};
-    use crate::{CliplineSpike, DesktopUploadItem, LibraryItem, SpikeTray, TimelineMarker};
+    use crate::{
+        CatalogDialogTextField as SlintDialogTextField, CatalogFilter as SlintCatalogFilter,
+        CatalogGroup as SlintCatalogGroup, CatalogSort as SlintCatalogSort,
+        CatalogSource as SlintCatalogSource,
+        CatalogUploadVisibility as SlintCatalogUploadVisibility, CliplineSpike, DesktopUploadItem,
+        LibraryItem, SpikeTray, TimelineMarker,
+    };
 
     use super::{AttachmentToken, LifecycleAction, LifecycleSnapshot, ShellLifecycle};
 
@@ -351,6 +373,9 @@ mod windows_runtime {
 
     struct WindowResources {
         attachment: AttachmentToken,
+        catalog_attachment: WindowAttachmentGeneration,
+        catalog_foreground: ForegroundGeneration,
+        catalog_revision: u64,
         desktop_attachment: DesktopAttachment,
         session: Option<LiveSession>,
         host: Option<WindowsVideoHost>,
@@ -366,6 +391,12 @@ mod windows_runtime {
         tray: SpikeTray,
         desktop: SlintDesktopAdapter,
         _settings: CandidateSettings,
+        catalog: SlintCatalogController,
+        catalog_results: CatalogResultReceiver,
+        catalog_executor: Option<CatalogEffectExecutor>,
+        review_bridge: Arc<LiveReviewBridge>,
+        pending_review_open: Option<CatalogEffect>,
+        live_start_scheduled: Option<AttachmentToken>,
         window: Option<WindowResources>,
         options: SpikeOptions,
         latest_session: Option<LiveSessionReport>,
@@ -374,6 +405,88 @@ mod windows_runtime {
         marker_revision: u64,
         stop_observed: bool,
         quit_event_loop_requested: bool,
+    }
+
+    #[derive(Clone)]
+    struct LiveReviewBinding {
+        attachment: WindowAttachmentGeneration,
+        foreground: ForegroundGeneration,
+        port: LiveMediaCommandPort,
+    }
+
+    #[derive(Default)]
+    struct LiveReviewBridge(Mutex<Option<LiveReviewBinding>>);
+
+    impl LiveReviewBridge {
+        fn attach(
+            &self,
+            attachment: WindowAttachmentGeneration,
+            foreground: ForegroundGeneration,
+            port: LiveMediaCommandPort,
+        ) {
+            *self.0.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(LiveReviewBinding {
+                attachment,
+                foreground,
+                port,
+            });
+        }
+
+        fn revoke(&self, attachment: WindowAttachmentGeneration, foreground: ForegroundGeneration) {
+            let mut binding = self.0.lock().unwrap_or_else(|poison| poison.into_inner());
+            if binding.as_ref().is_some_and(|binding| {
+                binding.attachment == attachment && binding.foreground == foreground
+            }) {
+                binding.take();
+            }
+        }
+
+        fn is_attached(
+            &self,
+            attachment: WindowAttachmentGeneration,
+            foreground: ForegroundGeneration,
+        ) -> bool {
+            self.0
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .as_ref()
+                .is_some_and(|binding| {
+                    binding.attachment == attachment && binding.foreground == foreground
+                })
+        }
+    }
+
+    impl CatalogReviewPort for LiveReviewBridge {
+        fn open(
+            &self,
+            token: WindowWorkToken,
+            source: ValidatedClipPath,
+            lease: PlaybackSourceLease,
+        ) -> Result<(), String> {
+            let binding = self.0.lock().unwrap_or_else(|poison| poison.into_inner());
+            let binding = binding
+                .as_ref()
+                .filter(|binding| {
+                    binding.attachment == token.attachment && binding.foreground == token.foreground
+                })
+                .ok_or_else(|| "native review session belongs to a stale window".to_owned())?;
+            let request = LiveMediaRequestToken::new(token.request.get())
+                .map_err(|error| error.to_string())?;
+            binding
+                .port
+                .open(
+                    request,
+                    ValidatedLiveMediaSource::local(source, LiveMediaLease::new(lease)),
+                )
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        }
+    }
+
+    #[derive(Default)]
+    struct TimerCatalogWake;
+
+    impl CatalogResultWake for TimerCatalogWake {
+        fn wake(&self) {}
     }
 
     pub fn run(options: SpikeOptions) -> Result<ShellRunReport, String> {
@@ -411,6 +524,29 @@ mod windows_runtime {
         settings
             .snapshot()
             .map_err(|error| format!("open Slint candidate settings: {error}"))?;
+        let media_root = settings
+            .store()
+            .media_root()
+            .map_err(|error| format!("resolve Slint candidate media root: {error}"))?;
+        std::fs::create_dir_all(&media_root)
+            .map_err(|error| format!("create Slint candidate media root: {error}"))?;
+        let active_files = ActiveFileRegistry::new();
+        let review_bridge = Arc::new(LiveReviewBridge::default());
+        let catalog_handler = Arc::new(LocalCatalogEffectHandler::open_with_review_port(
+            &media_root,
+            active_files,
+            Arc::new(clipline_library::Mp4LegacyAudioTrackProbe),
+            Arc::new(SystemCatalogReveal),
+            review_bridge.clone(),
+        )?);
+        let (catalog_sender, catalog_results) = catalog_result_channel();
+        let catalog_executor = CatalogEffectExecutor::start(
+            catalog_handler,
+            catalog_sender,
+            Arc::new(TimerCatalogWake),
+        )?;
+        let catalog = SlintCatalogController::new(Arc::new(SystemDayResolver))
+            .map_err(|error| error.to_string())?;
         let hotkeys = WindowsHotkeyService::start(shell_commands.clone())
             .map_err(|error| format!("start Slint spike hotkey service: {error}"))?;
 
@@ -436,6 +572,12 @@ mod windows_runtime {
             tray,
             desktop,
             _settings: settings,
+            catalog,
+            catalog_results,
+            catalog_executor: Some(catalog_executor),
+            review_bridge,
+            pending_review_open: None,
+            live_start_scheduled: None,
             window: None,
             options,
             latest_session: None,
@@ -552,6 +694,165 @@ mod windows_runtime {
             };
             dispatch_command(runtime, command.command)?;
         }
+        pump_catalog_results(runtime)?;
+        Ok(())
+    }
+
+    fn pump_catalog_results(runtime: &Rc<RefCell<SlintShell>>) -> Result<(), String> {
+        let mut changed = false;
+        for _ in 0..CATALOG_RESULT_CAPACITY {
+            let result = runtime.borrow().catalog_results.try_recv();
+            let Some(result) = result else {
+                break;
+            };
+            let (effects, result_changed) = {
+                let mut runtime_ref = runtime.borrow_mut();
+                let before = runtime_ref.catalog.revision();
+                let effects = runtime_ref
+                    .catalog
+                    .accept(result)
+                    .map_err(|error| error.to_string())?;
+                (effects, runtime_ref.catalog.revision() != before)
+            };
+            changed |= result_changed;
+            route_catalog_effects(runtime, effects)?;
+        }
+        if changed {
+            publish_catalog_window(runtime)?;
+        }
+        Ok(())
+    }
+
+    fn publish_catalog_window(runtime: &Rc<RefCell<SlintShell>>) -> Result<(), String> {
+        let (projection, window, attachment) = {
+            let runtime_ref = runtime.borrow();
+            let Some(resources) = runtime_ref.window.as_ref() else {
+                return Ok(());
+            };
+            (
+                runtime_ref.catalog.projection(),
+                resources.window.as_weak(),
+                resources.attachment,
+            )
+        };
+        let Some(window) = window.upgrade() else {
+            return Ok(());
+        };
+        publish_projection(&window, projection.as_ref(), |_| None)
+            .map_err(|error| error.to_string())?;
+        let mut runtime_ref = runtime.borrow_mut();
+        let Some(resources) = runtime_ref.window.as_mut() else {
+            return Ok(());
+        };
+        if resources.attachment == attachment {
+            resources.catalog_revision = projection.revision.get();
+        }
+        Ok(())
+    }
+
+    fn dispatch_catalog_intent(
+        runtime: &Rc<RefCell<SlintShell>>,
+        attachment: AttachmentToken,
+        intent: CatalogUiIntent,
+    ) -> Result<(), String> {
+        let effects = {
+            let mut runtime_ref = runtime.borrow_mut();
+            if !runtime_ref
+                .lifecycle
+                .accept_callback(attachment)
+                .map_err(|error| error.to_string())?
+            {
+                return Ok(());
+            }
+            let revision = runtime_ref
+                .window
+                .as_ref()
+                .filter(|resources| resources.attachment == attachment)
+                .map(|resources| resources.catalog_revision)
+                .ok_or_else(|| "catalog callback belongs to a missing window".to_owned())?;
+            runtime_ref
+                .catalog
+                .dispatch(revision, intent)
+                .map_err(|error| error.to_string())?
+        };
+        publish_catalog_window(runtime)?;
+        route_catalog_effects(runtime, effects)
+    }
+
+    fn route_catalog_effects(
+        runtime: &Rc<RefCell<SlintShell>>,
+        effects: Vec<CatalogEffect>,
+    ) -> Result<(), String> {
+        for effect in effects {
+            match effect {
+                CatalogEffect::CloseReview { token } => stop_review_session(runtime, token)?,
+                CatalogEffect::ReleaseCloudReviewMedia { .. } => {}
+                effect @ CatalogEffect::OpenLocalReview { token, .. }
+                    if !runtime
+                        .borrow()
+                        .review_bridge
+                        .is_attached(token.attachment, token.foreground) =>
+                {
+                    let attachment = {
+                        let mut runtime_ref = runtime.borrow_mut();
+                        if let Some(resources) = runtime_ref.window.as_ref() {
+                            resources.window.set_review_visible(true);
+                        }
+                        runtime_ref.pending_review_open = Some(effect);
+                        runtime_ref
+                            .window
+                            .as_ref()
+                            .map(|resources| resources.attachment)
+                    };
+                    if let Some(attachment) = attachment {
+                        schedule_live_start(Rc::downgrade(runtime), attachment, 0);
+                    }
+                }
+                CatalogEffect::RefreshLocal { .. }
+                | CatalogEffect::LoadClipDetail { .. }
+                | CatalogEffect::OpenLocalReview { .. }
+                | CatalogEffect::RenameTitle { .. }
+                | CatalogEffect::RenameFile { .. }
+                | CatalogEffect::Delete { .. }
+                | CatalogEffect::Reveal { .. } => {
+                    if matches!(&effect, CatalogEffect::OpenLocalReview { .. }) {
+                        if let Some(resources) = runtime.borrow().window.as_ref() {
+                            resources.window.set_review_visible(true);
+                        }
+                    }
+                    let rejected = {
+                        let runtime_ref = runtime.borrow();
+                        let executor = runtime_ref
+                            .catalog_executor
+                            .as_ref()
+                            .ok_or_else(|| "catalog executor is shut down".to_owned())?;
+                        executor.try_submit(effect).err()
+                    };
+                    if let Some(rejected) = rejected {
+                        if let Some(completion) = crate::catalog::rejected_effect_result(
+                            &rejected,
+                            "catalog executor queue is full",
+                        ) {
+                            let followups = runtime
+                                .borrow_mut()
+                                .catalog
+                                .accept(completion.result)
+                                .map_err(|error| error.to_string())?;
+                            publish_catalog_window(runtime)?;
+                            route_catalog_effects(runtime, followups)?;
+                        }
+                    }
+                }
+                unsupported => {
+                    let runtime_ref = runtime.borrow();
+                    if let Some(resources) = runtime_ref.window.as_ref() {
+                        resources.window.set_status_text(
+                            format!("Catalog action is not connected yet: {unsupported:?}").into(),
+                        );
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -664,7 +965,7 @@ mod windows_runtime {
                 .map_err(|failure| failure.to_string())?;
             return Err(error.to_string());
         }
-        {
+        let catalog_effects = {
             let mut runtime_ref = runtime.borrow_mut();
             runtime_ref
                 .lifecycle
@@ -677,18 +978,40 @@ mod windows_runtime {
             runtime_ref.resources.max_live_windows = 1;
             runtime_ref.window = Some(WindowResources {
                 attachment,
+                catalog_attachment: WindowAttachmentGeneration::new(attachment.generation()),
+                catalog_foreground: ForegroundGeneration::new(1),
+                catalog_revision: 0,
                 desktop_attachment,
                 session: None,
                 host: None,
                 window,
             });
             publish_lifecycle(&mut runtime_ref, WindowLifecycleMode::Foreground)?;
+            let catalog_attachment = WindowAttachmentGeneration::new(attachment.generation());
+            let catalog_foreground =
+                ForegroundGeneration::new(runtime_ref.lifecycle_revision.get());
+            let effects = runtime_ref
+                .catalog
+                .attach(catalog_attachment, catalog_foreground)
+                .map_err(|error| error.to_string())?;
+            let projection = runtime_ref.catalog.projection();
+            let resources = runtime_ref
+                .window
+                .as_mut()
+                .expect("window was installed before catalog attach");
+            publish_projection(&resources.window, projection.as_ref(), |_| None)
+                .map_err(|error| error.to_string())?;
+            resources.catalog_attachment = catalog_attachment;
+            resources.catalog_foreground = catalog_foreground;
+            resources.catalog_revision = projection.revision.get();
             write_shell_marker(
                 &mut runtime_ref,
                 "windowCreated",
                 &format!("window attachment {} created", attachment.generation()),
             );
-        }
+            effects
+        };
+        route_catalog_effects(runtime, catalog_effects)?;
         schedule_live_start(Rc::downgrade(runtime), attachment, 0);
         Ok(())
     }
@@ -698,6 +1021,29 @@ mod windows_runtime {
         window: &CliplineSpike,
         attachment: AttachmentToken,
     ) {
+        macro_rules! catalog_no_arg {
+            ($setter:ident, $intent:expr) => {{
+                let weak_runtime = Rc::downgrade(runtime);
+                window.$setter(move || {
+                    invoke_catalog_callback(&weak_runtime, attachment, $intent);
+                });
+            }};
+        }
+        macro_rules! catalog_row {
+            ($setter:ident, $intent:ident) => {{
+                let weak_runtime = Rc::downgrade(runtime);
+                window.$setter(move |row| {
+                    let Ok(row) = usize::try_from(row) else {
+                        return;
+                    };
+                    invoke_catalog_callback(
+                        &weak_runtime,
+                        attachment,
+                        CatalogUiIntent::$intent { row },
+                    );
+                });
+            }};
+        }
         let weak_runtime = Rc::downgrade(runtime);
         window.on_play_pause(move || {
             with_controller(&weak_runtime, attachment, |controller| {
@@ -747,8 +1093,159 @@ mod windows_runtime {
                 }
             }
         });
-        window.on_show_library(|| {});
+        let weak_runtime = Rc::downgrade(runtime);
+        window.on_show_library(move || {
+            invoke_catalog_callback(&weak_runtime, attachment, CatalogUiIntent::CloseActive);
+        });
         window.on_show_review(|| {});
+
+        let weak_runtime = Rc::downgrade(runtime);
+        window.on_catalog_set_source(move |source| {
+            let source = match source {
+                SlintCatalogSource::Local => CatalogSource::Local,
+                SlintCatalogSource::Cloud => CatalogSource::Cloud,
+            };
+            invoke_catalog_callback(
+                &weak_runtime,
+                attachment,
+                CatalogUiIntent::SetSource(source),
+            );
+        });
+        let weak_runtime = Rc::downgrade(runtime);
+        window.on_catalog_set_query(move |query| {
+            invoke_catalog_callback(
+                &weak_runtime,
+                attachment,
+                CatalogUiIntent::SetQuery(query.to_string()),
+            );
+        });
+        let weak_runtime = Rc::downgrade(runtime);
+        window.on_catalog_set_filter(move |filter| {
+            let filter = match filter {
+                SlintCatalogFilter::All => LocalClipFilter::All,
+                SlintCatalogFilter::Replay => LocalClipFilter::Replay,
+                SlintCatalogFilter::Session => LocalClipFilter::Session,
+                SlintCatalogFilter::Trim => LocalClipFilter::Trim,
+                SlintCatalogFilter::Marked => LocalClipFilter::Marked,
+            };
+            invoke_catalog_callback(
+                &weak_runtime,
+                attachment,
+                CatalogUiIntent::SetLocalFilter(filter),
+            );
+        });
+        let weak_runtime = Rc::downgrade(runtime);
+        window.on_catalog_set_sort(move |sort| {
+            let sort = match sort {
+                SlintCatalogSort::Newest => LocalClipSort::Newest,
+                SlintCatalogSort::Oldest => LocalClipSort::Oldest,
+                SlintCatalogSort::Largest => LocalClipSort::Largest,
+                SlintCatalogSort::Marks => LocalClipSort::Marks,
+            };
+            invoke_catalog_callback(
+                &weak_runtime,
+                attachment,
+                CatalogUiIntent::SetLocalSort(sort),
+            );
+        });
+        let weak_runtime = Rc::downgrade(runtime);
+        window.on_catalog_set_group(move |group| {
+            let grouping = match group {
+                SlintCatalogGroup::Smart => LocalClipGrouping::Smart,
+                SlintCatalogGroup::Day => LocalClipGrouping::Day,
+                SlintCatalogGroup::Game => LocalClipGrouping::Game,
+                SlintCatalogGroup::Session => LocalClipGrouping::Session,
+                SlintCatalogGroup::Ungrouped => LocalClipGrouping::None,
+            };
+            invoke_catalog_callback(
+                &weak_runtime,
+                attachment,
+                CatalogUiIntent::SetLocalGrouping(grouping),
+            );
+        });
+        catalog_no_arg!(on_catalog_previous_page, CatalogUiIntent::PreviousPage);
+        catalog_no_arg!(on_catalog_next_page, CatalogUiIntent::NextPage);
+        catalog_no_arg!(on_catalog_refresh, CatalogUiIntent::Refresh);
+        catalog_row!(on_catalog_open_row, OpenRow);
+        catalog_row!(on_catalog_toggle_row, ToggleSelection);
+        catalog_row!(on_catalog_open_context, OpenContext);
+        catalog_no_arg!(on_catalog_enter_selection, CatalogUiIntent::EnterSelection);
+        catalog_no_arg!(on_catalog_exit_selection, CatalogUiIntent::ExitSelection);
+        catalog_no_arg!(
+            on_catalog_select_visible,
+            CatalogUiIntent::SelectVisiblePage
+        );
+        catalog_no_arg!(on_catalog_clear_selection, CatalogUiIntent::ClearSelection);
+        catalog_no_arg!(
+            on_catalog_delete_selection,
+            CatalogUiIntent::DeleteSelection
+        );
+        catalog_no_arg!(on_catalog_escape, CatalogUiIntent::Escape);
+        catalog_no_arg!(on_catalog_reveal_context, CatalogUiIntent::RevealFromMenu);
+        catalog_no_arg!(on_catalog_upload_context, CatalogUiIntent::UploadFromMenu);
+        catalog_no_arg!(
+            on_catalog_rename_title_context,
+            CatalogUiIntent::RenameTitleFromMenu
+        );
+        catalog_no_arg!(
+            on_catalog_rename_file_context,
+            CatalogUiIntent::RenameFileFromMenu
+        );
+        catalog_no_arg!(on_catalog_delete_context, CatalogUiIntent::DeleteFromMenu);
+        catalog_no_arg!(
+            on_catalog_cancel_upload_context,
+            CatalogUiIntent::CancelUploadFromMenu
+        );
+        catalog_no_arg!(
+            on_catalog_copy_link_context,
+            CatalogUiIntent::CopyPublicLinkFromMenu
+        );
+        catalog_no_arg!(
+            on_catalog_open_link_context,
+            CatalogUiIntent::OpenInBrowserFromMenu
+        );
+        catalog_no_arg!(on_catalog_confirm_dialog, CatalogUiIntent::ConfirmDialog);
+        catalog_no_arg!(on_catalog_cancel_dialog, CatalogUiIntent::CancelDialog);
+        let weak_runtime = Rc::downgrade(runtime);
+        window.on_catalog_set_dialog_text(move |field, value| {
+            let field = match field {
+                SlintDialogTextField::Title => CatalogDialogTextField::Title,
+                SlintDialogTextField::FileName => CatalogDialogTextField::FileName,
+                SlintDialogTextField::Description => CatalogDialogTextField::Description,
+            };
+            invoke_catalog_callback(
+                &weak_runtime,
+                attachment,
+                CatalogUiIntent::SetDialogText {
+                    field,
+                    value: value.to_string(),
+                },
+            );
+        });
+        let weak_runtime = Rc::downgrade(runtime);
+        window.on_catalog_set_upload_visibility(move |visibility| {
+            let visibility = match visibility {
+                SlintCatalogUploadVisibility::Private => CatalogUploadVisibility::Private,
+                SlintCatalogUploadVisibility::Public => CatalogUploadVisibility::Public,
+                SlintCatalogUploadVisibility::Unlisted => CatalogUploadVisibility::Unlisted,
+            };
+            invoke_catalog_callback(
+                &weak_runtime,
+                attachment,
+                CatalogUiIntent::SetUploadVisibility(visibility),
+            );
+        });
+        let weak_runtime = Rc::downgrade(runtime);
+        window.on_catalog_set_audio_track(move |row, selected| {
+            let Ok(row) = usize::try_from(row) else {
+                return;
+            };
+            invoke_catalog_callback(
+                &weak_runtime,
+                attachment,
+                CatalogUiIntent::SetUploadAudioTrack { row, selected },
+            );
+        });
 
         let weak_runtime = Rc::downgrade(runtime);
         window.window().on_close_requested(move || {
@@ -775,15 +1272,45 @@ mod windows_runtime {
         });
     }
 
+    fn invoke_catalog_callback(
+        runtime: &Weak<RefCell<SlintShell>>,
+        attachment: AttachmentToken,
+        intent: CatalogUiIntent,
+    ) {
+        let Some(runtime) = runtime.upgrade() else {
+            return;
+        };
+        if let Err(error) = dispatch_catalog_intent(&runtime, attachment, intent) {
+            report_shell_error(&runtime, &error);
+        }
+    }
+
     fn schedule_live_start(
         runtime: Weak<RefCell<SlintShell>>,
         attachment: AttachmentToken,
         attempt: u16,
     ) {
+        let Some(runtime_now) = runtime.upgrade() else {
+            return;
+        };
+        {
+            let mut runtime_ref = runtime_now.borrow_mut();
+            if runtime_ref.live_start_scheduled == Some(attachment) {
+                return;
+            }
+            runtime_ref.live_start_scheduled = Some(attachment);
+        }
+        drop(runtime_now);
         slint::Timer::single_shot(HANDLE_RETRY, move || {
             let Some(runtime) = runtime.upgrade() else {
                 return;
             };
+            {
+                let mut runtime_ref = runtime.borrow_mut();
+                if runtime_ref.live_start_scheduled == Some(attachment) {
+                    runtime_ref.live_start_scheduled = None;
+                }
+            }
             if let Err(error) = start_live(&runtime, attachment, attempt) {
                 report_shell_error(&runtime, &error);
             }
@@ -819,31 +1346,13 @@ mod windows_runtime {
                 resources.window.as_weak(),
             )
         };
-        let Some(fixture) = fixture else {
-            if let Some(window) = window.upgrade() {
-                window.set_status_text("Static Slint shell ready · no fixture selected".into());
-            }
-            {
-                let mut runtime_ref = runtime.borrow_mut();
-                write_shell_marker(
-                    &mut runtime_ref,
-                    "ready",
-                    "interactive static Slint shell ready",
-                );
-            }
-            if exit_after_ready {
-                runtime
-                    .borrow()
-                    .shell_commands
-                    .try_send(ShellCommand::Quit)
-                    .map_err(|error| error.to_string())?;
-            }
-            return Ok(());
-        };
+        let dynamic = fixture.is_none();
         let Some(window_component) = window.upgrade() else {
             return Ok(());
         };
-        window_component.set_review_visible(true);
+        if !dynamic {
+            window_component.set_review_visible(true);
+        }
         let (publisher, host) = if cpu_diagnostic {
             (
                 SpikePublisher::Cpu(crate::cpu_frame::CpuDiagnosticPublisher::new(window)),
@@ -867,17 +1376,29 @@ mod windows_runtime {
         };
         let live_exit_after_ready = exit_after_ready && scenario != SpikeScenario::RevealClose100;
         let shell_commands = runtime.borrow().shell_commands.clone();
-        let session = LiveSession::start(
-            publisher,
-            window_component.as_weak(),
-            fixture,
-            scenario,
-            marker_path,
-            live_exit_after_ready,
-            shell_commands,
-        )?;
+        let session = if let Some(fixture) = fixture {
+            LiveSession::start(
+                publisher,
+                window_component.as_weak(),
+                fixture,
+                scenario,
+                marker_path,
+                live_exit_after_ready,
+                shell_commands,
+            )?
+        } else {
+            LiveSession::start_dynamic(
+                publisher,
+                window_component.as_weak(),
+                scenario,
+                marker_path,
+                false,
+                shell_commands,
+            )?
+        };
+        let media_commands = session.media_commands();
         let host_created = host.is_some();
-        {
+        let pending_review = {
             let mut runtime_ref = runtime.borrow_mut();
             if !runtime_ref
                 .lifecycle
@@ -888,18 +1409,44 @@ mod windows_runtime {
                 drop(host);
                 return Ok(());
             }
-            {
+            let review_bridge = Arc::clone(&runtime_ref.review_bridge);
+            let (catalog_attachment, catalog_foreground) = {
                 let Some(resources) = runtime_ref.window.as_mut() else {
                     return Ok(());
                 };
                 resources.host = host;
                 resources.session = Some(session);
-            }
+                (resources.catalog_attachment, resources.catalog_foreground)
+            };
+            review_bridge.attach(catalog_attachment, catalog_foreground, media_commands);
             checked_increment(&mut runtime_ref.resources.playback_started)?;
             runtime_ref.resources.live_playback_sessions = 1;
             if host_created {
                 checked_increment(&mut runtime_ref.resources.video_hosts_created)?;
                 runtime_ref.resources.live_video_hosts = 1;
+            }
+            runtime_ref.pending_review_open.take()
+        };
+        if let Some(effect) = pending_review {
+            route_catalog_effects(runtime, vec![effect])?;
+        }
+        if dynamic {
+            window_component
+                .set_status_text("Static Slint shell ready · native review idle".into());
+            {
+                let mut runtime_ref = runtime.borrow_mut();
+                write_shell_marker(
+                    &mut runtime_ref,
+                    "ready",
+                    "interactive Slint shell and native review runtime ready",
+                );
+            }
+            if exit_after_ready {
+                runtime
+                    .borrow()
+                    .shell_commands
+                    .try_send(ShellCommand::Quit)
+                    .map_err(|error| error.to_string())?;
             }
         }
         if scenario == SpikeScenario::RevealClose100 {
@@ -926,6 +1473,54 @@ mod windows_runtime {
         Ok(())
     }
 
+    fn stop_review_session(
+        runtime: &Rc<RefCell<SlintShell>>,
+        token: WindowWorkToken,
+    ) -> Result<(), String> {
+        let (session, host) = {
+            let mut runtime_ref = runtime.borrow_mut();
+            let Some(resources) = runtime_ref.window.as_ref() else {
+                return Ok(());
+            };
+            if resources.catalog_attachment != token.attachment
+                || resources.catalog_foreground != token.foreground
+            {
+                return Ok(());
+            }
+            let catalog_attachment = resources.catalog_attachment;
+            let catalog_foreground = resources.catalog_foreground;
+            runtime_ref.pending_review_open = None;
+            runtime_ref
+                .review_bridge
+                .revoke(catalog_attachment, catalog_foreground);
+            let resources = runtime_ref
+                .window
+                .as_mut()
+                .expect("review window was validated without yielding");
+            resources.window.set_review_visible(false);
+            (resources.session.take(), resources.host.take())
+        };
+        let mut first_error = None;
+        if let Some(session) = session {
+            match session.shutdown() {
+                Ok(report) => runtime.borrow_mut().latest_session = Some(report),
+                Err(error) => remember_first_error(&mut first_error, error),
+            }
+            let mut runtime_ref = runtime.borrow_mut();
+            checked_increment(&mut runtime_ref.resources.playback_stopped)?;
+            runtime_ref.resources.live_playback_sessions = 0;
+        }
+        if let Some(mut host) = host {
+            if let Err(error) = host.close() {
+                remember_first_error(&mut first_error, error.to_string());
+            }
+            let mut runtime_ref = runtime.borrow_mut();
+            checked_increment(&mut runtime_ref.resources.video_hosts_dropped)?;
+            runtime_ref.resources.live_video_hosts = 0;
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+
     fn drop_window(
         runtime: &Rc<RefCell<SlintShell>>,
         attachment: AttachmentToken,
@@ -948,6 +1543,24 @@ mod windows_runtime {
                 .expect("window was validated without yielding the UI thread");
             resources.window.set_playing(false);
         }
+        let catalog_effects = {
+            let mut runtime_ref = runtime.borrow_mut();
+            let (catalog_attachment, catalog_foreground) = runtime_ref
+                .window
+                .as_ref()
+                .map(|resources| (resources.catalog_attachment, resources.catalog_foreground))
+                .ok_or_else(|| "catalog detach requested without a window".to_owned())?;
+            runtime_ref.pending_review_open = None;
+            runtime_ref.live_start_scheduled = None;
+            runtime_ref
+                .review_bridge
+                .revoke(catalog_attachment, catalog_foreground);
+            runtime_ref
+                .catalog
+                .detach()
+                .map_err(|error| error.to_string())?
+        };
+        route_catalog_effects(runtime, catalog_effects)?;
         let mut resources = runtime
             .borrow_mut()
             .window
@@ -1066,16 +1679,22 @@ mod windows_runtime {
                 remember_first_error(&mut first_error, error);
             }
         }
-        let (hotkeys, activation, request_event_loop_quit) = {
+        let (hotkeys, activation, catalog_executor, request_event_loop_quit) = {
             let mut runtime_ref = runtime.borrow_mut();
             let request = !runtime_ref.quit_event_loop_requested;
             runtime_ref.quit_event_loop_requested = true;
             (
                 runtime_ref.hotkeys.take(),
                 runtime_ref.activation.take(),
+                runtime_ref.catalog_executor.take(),
                 request,
             )
         };
+        if let Some(executor) = catalog_executor {
+            if let Err(error) = executor.shutdown() {
+                remember_first_error(&mut first_error, error);
+            }
+        }
         if let Some(hotkeys) = hotkeys {
             if let Err(error) = hotkeys.shutdown() {
                 remember_first_error(&mut first_error, error.to_string());
@@ -1192,6 +1811,11 @@ mod windows_runtime {
         window.set_library_items(slint::ModelRc::new(slint::VecModel::from(
             Vec::<LibraryItem>::new(),
         )));
+        window.set_catalog_dialog(crate::CatalogDialogModel::default());
+        window.set_catalog_dialog_audio_tracks(slint::ModelRc::new(slint::VecModel::from(Vec::<
+            crate::CatalogAudioTrack,
+        >::new(
+        ))));
         window.set_timeline_markers(slint::ModelRc::new(slint::VecModel::from(Vec::<
             TimelineMarker,
         >::new())));

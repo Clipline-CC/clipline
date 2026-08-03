@@ -1,15 +1,9 @@
 import { Button, CheckBox, ListView, Slider } from "std-widgets.slint";
+import { CatalogFilter, CatalogGroup, CatalogSort, CatalogSource, LibraryItem, LibrarySurface } from "library.slint";
+import { CatalogAudioTrack, CatalogDialogKind, CatalogDialogModel, CatalogDialogs, CatalogDialogTextField, CatalogUploadVisibility } from "dialogs.slint";
 
-export struct LibraryItem {
-    title: string,
-    subtitle: string,
-    duration: string,
-    kind: string,
-    kind-color: color,
-    poster-image: image,
-    poster-a: color,
-    poster-b: color,
-}
+export { CatalogFilter, CatalogGroup, CatalogSort, CatalogSource, LibraryItem } from "library.slint";
+export { CatalogAudioTrack, CatalogDialogKind, CatalogDialogModel, CatalogDialogTextField, CatalogUploadVisibility } from "dialogs.slint";
 
 export struct TimelineMarker {
     position: float,
@@ -61,6 +55,31 @@ export component CliplineSpike inherits Window {
     default-font-family: "Segoe UI";
 
     in property <[LibraryItem]> library-items: [];
+    in property <CatalogSource> catalog-source: CatalogSource.local;
+    in property <string> catalog-load-state: "empty";
+    in property <string> catalog-error-text: "";
+    in-out property <string> catalog-query: "";
+    in property <CatalogFilter> catalog-filter: CatalogFilter.all;
+    in property <CatalogSort> catalog-sort: CatalogSort.newest;
+    in property <CatalogGroup> catalog-group: CatalogGroup.smart;
+    in property <string> catalog-range-text: "0 of 0";
+    in property <int> catalog-page: 1;
+    in property <bool> catalog-has-previous: false;
+    in property <bool> catalog-has-next: false;
+    in property <int> catalog-selected-count: 0;
+    in property <bool> catalog-selection-mode: false;
+    in-out property <int> catalog-focused-row: -1;
+    in property <int> catalog-context-row: -1;
+    in property <bool> catalog-can-review: false;
+    in property <bool> catalog-can-rename: false;
+    in property <bool> catalog-can-delete: false;
+    in property <bool> catalog-can-upload: false;
+    in property <bool> catalog-can-reveal: false;
+    in property <bool> catalog-can-copy-link: false;
+    in property <bool> catalog-can-open-link: false;
+    in property <bool> catalog-can-cancel-upload: false;
+    in property <CatalogDialogModel> catalog-dialog;
+    in property <[CatalogAudioTrack]> catalog-dialog-audio-tracks: [];
     in property <[TimelineMarker]> timeline-markers: [];
     in property <[DesktopUploadItem]> desktop-uploads: [];
     in-out property <string> recorder-state: "BUFFERING";
@@ -92,6 +111,36 @@ export component CliplineSpike inherits Window {
     callback set-track(track-id: int, selected: bool);
     callback set-volume(value: float);
     callback video-geometry-changed();
+    callback catalog-set-source(source: CatalogSource);
+    callback catalog-set-query(query: string);
+    callback catalog-set-filter(filter: CatalogFilter);
+    callback catalog-set-sort(sort: CatalogSort);
+    callback catalog-set-group(group: CatalogGroup);
+    callback catalog-previous-page();
+    callback catalog-next-page();
+    callback catalog-refresh();
+    callback catalog-open-row(row-index: int);
+    callback catalog-toggle-row(row-index: int);
+    callback catalog-open-context(row-index: int);
+    callback catalog-enter-selection();
+    callback catalog-exit-selection();
+    callback catalog-select-visible();
+    callback catalog-clear-selection();
+    callback catalog-delete-selection();
+    callback catalog-escape();
+    callback catalog-reveal-context();
+    callback catalog-upload-context();
+    callback catalog-rename-title-context();
+    callback catalog-rename-file-context();
+    callback catalog-delete-context();
+    callback catalog-cancel-upload-context();
+    callback catalog-copy-link-context();
+    callback catalog-open-link-context();
+    callback catalog-confirm-dialog();
+    callback catalog-cancel-dialog();
+    callback catalog-set-dialog-text(field: CatalogDialogTextField, value: string);
+    callback catalog-set-upload-visibility(visibility: CatalogUploadVisibility);
+    callback catalog-set-audio-track(track-index: int, selected: bool);
 
     changed video-stage-x => { root.video-geometry-changed(); }
     changed video-stage-y => { root.video-geometry-changed(); }
@@ -208,74 +257,62 @@ export component CliplineSpike inherits Window {
         }
     }
 
-    if !root.review-visible : library-view := Rectangle {
+    if !root.review-visible : library-view := LibrarySurface {
         x: side-bar.width;
         y: top-bar.height;
         width: root.width - side-bar.width;
         height: root.height - top-bar.height;
-        background: #14100c;
-        accessible-role: groupbox;
-        accessible-label: "Local Library";
+        rows: root.library-items;
+        source: root.catalog-source;
+        load-state: root.catalog-load-state;
+        error-text: root.catalog-error-text;
+        query <=> root.catalog-query;
+        filter: root.catalog-filter;
+        sort: root.catalog-sort;
+        group: root.catalog-group;
+        range-text: root.catalog-range-text;
+        page: root.catalog-page;
+        has-previous: root.catalog-has-previous;
+        has-next: root.catalog-has-next;
+        selected-count: root.catalog-selected-count;
+        selection-mode: root.catalog-selection-mode;
+        focused-row <=> root.catalog-focused-row;
+        context-row: root.catalog-context-row;
+        can-review: root.catalog-can-review;
+        can-rename: root.catalog-can-rename;
+        can-delete: root.catalog-can-delete;
+        can-upload: root.catalog-can-upload;
+        can-reveal: root.catalog-can-reveal;
+        can-copy-link: root.catalog-can-copy-link;
+        can-open-link: root.catalog-can-open-link;
+        can-cancel-upload: root.catalog-can-cancel-upload;
+        dialog-open: root.catalog-dialog.open;
 
-        Text { x: 24px; y: 20px; width: 500px; height: 30px; text: "Local Library"; color: #f3eadf; font-size: 23px; font-weight: 750; }
-        Text { x: 24px; y: 50px; width: 500px; height: 20px; text: "24 representative clips · bounded model"; color: #8d7d6d; font-size: 11px; }
-
-        Rectangle {
-            x: 24px;
-            y: 80px;
-            width: parent.width - 48px;
-            height: 28px;
-            background: #1c1611;
-            border-radius: 5px;
-            SectionLabel { x: 10px; width: 58px; height: parent.height; text: "POSTER"; }
-            SectionLabel { x: 76px; width: parent.width - 330px; height: parent.height; text: "CLIP"; }
-            SectionLabel { x: parent.width - 230px; width: 94px; height: parent.height; text: "TYPE"; }
-            SectionLabel { x: parent.width - 118px; width: 98px; height: parent.height; text: "DURATION"; horizontal-alignment: right; }
-        }
-
-        ListView {
-            x: 24px;
-            y: 112px;
-            width: parent.width - 48px;
-            height: parent.height - 132px;
-            accessible-label: "Twenty four local clips";
-            for row[index] in root.library-items : Rectangle {
-                width: parent.width;
-                height: 22px;
-                background: Math.mod(index, 2) == 0 ? #18120e : #1b1510;
-                border-width: 1px;
-                border-color: #241b15;
-
-                Rectangle {
-                    x: 5px;
-                    y: 3px;
-                    width: 56px;
-                    height: 16px;
-                    border-radius: 3px;
-                    clip: true;
-                    background: @linear-gradient(90deg, row.poster-a, row.poster-b);
-                    Image {
-                        width: parent.width;
-                        height: parent.height;
-                        source: row.poster-image;
-                        image-fit: cover;
-                    }
-                    Rectangle { x: 5px + Math.mod(index * 11, 34) * 1px; y: 3px; width: 7px; height: 10px; background: #ffffff28; }
-                }
-                Text { x: 72px; y: 1px; width: parent.width - 330px; height: 13px; text: row.title; color: #eee4d8; font-size: 10.5px; font-weight: 650; overflow: elide; }
-                Text { x: 72px; y: 11px; width: parent.width - 330px; height: 9px; text: row.subtitle; color: #827466; font-size: 8px; overflow: elide; }
-                Rectangle {
-                    x: parent.width - 224px;
-                    y: 3px;
-                    width: 82px;
-                    height: 16px;
-                    border-radius: 8px;
-                    background: row.kind-color;
-                    Text { text: row.kind; color: #17110c; font-size: 8px; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; }
-                }
-                Text { x: parent.width - 118px; width: 98px; height: parent.height; text: row.duration; color: #c0b3a5; font-size: 9.5px; horizontal-alignment: right; vertical-alignment: center; }
-            }
-        }
+        set-source(source) => { root.catalog-set-source(source); }
+        set-query(query) => { root.catalog-set-query(query); }
+        set-filter(filter) => { root.catalog-set-filter(filter); }
+        set-sort(sort) => { root.catalog-set-sort(sort); }
+        set-group(group) => { root.catalog-set-group(group); }
+        previous-page => { root.catalog-previous-page(); }
+        next-page => { root.catalog-next-page(); }
+        refresh => { root.catalog-refresh(); }
+        open-row(index) => { root.catalog-open-row(index); }
+        toggle-row(index) => { root.catalog-toggle-row(index); }
+        open-context(index) => { root.catalog-open-context(index); }
+        enter-selection => { root.catalog-enter-selection(); }
+        exit-selection => { root.catalog-exit-selection(); }
+        select-visible => { root.catalog-select-visible(); }
+        clear-selection => { root.catalog-clear-selection(); }
+        delete-selection => { root.catalog-delete-selection(); }
+        escape => { root.catalog-escape(); }
+        reveal-context => { root.catalog-reveal-context(); }
+        upload-context => { root.catalog-upload-context(); }
+        rename-title-context => { root.catalog-rename-title-context(); }
+        rename-file-context => { root.catalog-rename-file-context(); }
+        delete-context => { root.catalog-delete-context(); }
+        cancel-upload-context => { root.catalog-cancel-upload-context(); }
+        copy-link-context => { root.catalog-copy-link-context(); }
+        open-link-context => { root.catalog-open-link-context(); }
     }
 
     if root.review-visible : review-view := Rectangle {
@@ -377,5 +414,19 @@ export component CliplineSpike inherits Window {
             Text { x: parent.width - 300px; y: 45px; width: 56px; height: 20px; text: "Volume"; color: #a89784; font-size: 10px; vertical-alignment: center; }
             Slider { x: parent.width - 240px; y: 46px; width: 230px; height: 18px; minimum: 0; maximum: 1; step: 0.01; value: root.volume; accessible-label: "Playback volume"; changed(value) => { root.volume = value; root.set-volume(value); } }
         }
+    }
+
+    CatalogDialogs {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        dialog: root.catalog-dialog;
+        audio-tracks: root.catalog-dialog-audio-tracks;
+        confirm-dialog => { root.catalog-confirm-dialog(); }
+        cancel-dialog => { root.catalog-cancel-dialog(); }
+        set-dialog-text(field, value) => { root.catalog-set-dialog-text(field, value); }
+        set-upload-visibility(visibility) => { root.catalog-set-upload-visibility(visibility); }
+        set-audio-track(index, selected) => { root.catalog-set-audio-track(index, selected); }
     }
 }

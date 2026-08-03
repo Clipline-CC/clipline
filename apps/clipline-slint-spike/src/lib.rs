@@ -1,5 +1,6 @@
 //! Non-distributed Slint presentation spike for Clipline.
 
+pub mod catalog;
 pub mod controller;
 pub mod cpu_frame;
 pub mod desktop;
@@ -17,39 +18,12 @@ pub mod windows;
 slint::include_modules!();
 
 pub fn create_window() -> Result<CliplineSpike, slint::PlatformError> {
-    use model::ClipKind;
-
     let window = CliplineSpike::new()?;
-    let library_items: Vec<LibraryItem> = model::representative_library()
-        .into_iter()
-        .map(|row| {
-            let (kind, kind_color) = match row.kind {
-                ClipKind::Replay => ("REPLAY", color(217, 150, 42)),
-                ClipKind::Session => ("SESSION", color(100, 164, 214)),
-                ClipKind::Trim => ("TRIM", color(116, 185, 126)),
-            };
-            let seed = u16::from(row.poster_seed);
-            LibraryItem {
-                title: row.title.into(),
-                subtitle: row.subtitle.into(),
-                duration: model::format_clock(row.duration_ticks).into(),
-                kind: kind.into(),
-                kind_color,
-                poster_image: slint::Image::default(),
-                poster_a: color(
-                    (34 + seed * 7 % 72) as u8,
-                    (23 + seed * 11 % 58) as u8,
-                    (16 + seed * 13 % 46) as u8,
-                ),
-                poster_b: color(
-                    (92 + seed * 5 % 92) as u8,
-                    (54 + seed * 3 % 74) as u8,
-                    (28 + seed * 9 % 64) as u8,
-                ),
-            }
-        })
-        .collect();
-    window.set_library_items(slint::ModelRc::new(slint::VecModel::from(library_items)));
+    // The production component starts empty. Catalog rows are published only
+    // from the long-lived, token-fenced Rust controller after window attach.
+    window.set_library_items(slint::ModelRc::new(slint::VecModel::from(
+        Vec::<LibraryItem>::new(),
+    )));
 
     let timeline_markers = vec![
         TimelineMarker {

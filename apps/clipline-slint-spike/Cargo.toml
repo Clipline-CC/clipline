@@ -39,6 +39,7 @@ slint = { version = "=1.17.1", default-features = false, features = [
     "std",
     "system-tray",
 ] }
+thiserror = "2"
 
 [build-dependencies]
 serde_json = "1"

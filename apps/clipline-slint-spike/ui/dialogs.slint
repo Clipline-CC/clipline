@@ -1,0 +1,253 @@
+import { Button, CheckBox, LineEdit, ListView, TextEdit } from "std-widgets.slint";
+
+export enum CatalogDialogKind { none, rename-title, rename-file, delete, upload, cancel-upload, partial-delete }
+export enum CatalogDialogTextField { title, file-name, description }
+export enum CatalogUploadVisibility { private, unlisted, public }
+
+export struct CatalogAudioTrack {
+    label: string,
+    selected: bool,
+}
+
+export struct CatalogDialogModel {
+    open: bool,
+    kind: CatalogDialogKind,
+    title: string,
+    message: string,
+    confirm-label: string,
+    text-value: string,
+    description: string,
+    visibility: CatalogUploadVisibility,
+    destructive: bool,
+    delete-local-after-upload: bool,
+    progress: string,
+}
+
+export component CatalogDialogs inherits Rectangle {
+    in property <CatalogDialogModel> dialog;
+    in property <[CatalogAudioTrack]> audio-tracks: [];
+    private property <int> title-max-utf16: 140;
+    private property <int> description-max-utf16: 5000;
+    private property <bool> dialog-open: root.dialog.open;
+
+    callback confirm-dialog();
+    callback cancel-dialog();
+    callback set-dialog-text(field: CatalogDialogTextField, value: string);
+    callback set-upload-visibility(visibility: CatalogUploadVisibility);
+    callback set-audio-track(track-index: int, selected: bool);
+
+    visible: root.dialog.open;
+    background: #090705b8;
+    accessible-role: form;
+    accessible-label: "Catalog dialog";
+    accessible-description: root.dialog.message;
+    forward-focus: dialog-focus;
+
+    // This layer is deliberately a full-window pointer barrier. It is declared
+    // before the panel so dialog controls remain interactive while every press,
+    // release, and move outside the panel terminates at the modal scrim.
+    modal-scrim := TouchArea {
+        width: parent.width;
+        height: parent.height;
+        enabled: root.dialog.open;
+        pointer-event(event) => { }
+    }
+
+    changed dialog-open => {
+        if (root.dialog-open) {
+            dialog-focus.focus();
+        }
+    }
+
+    dialog-focus := FocusScope {
+        width: 1px;
+        height: 1px;
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.cancel-dialog();
+                return accept;
+            } else if (event.text == Key.Return) {
+                if (!root.dialog.destructive || !event.repeat) {
+                    root.confirm-dialog();
+                }
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    panel := Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: min(620px, parent.width - 48px);
+        height: root.dialog.kind == CatalogDialogKind.upload ? min(610px, parent.height - 48px) : root.dialog.kind == CatalogDialogKind.partial-delete ? 340px : 280px;
+        border-radius: 9px;
+        background: #211a14;
+        border-width: 1px;
+        border-color: root.dialog.destructive ? #9a493e : #59412e;
+        accessible-role: groupbox;
+        accessible-label: root.dialog.title;
+
+        Text {
+            x: 24px;
+            y: 18px;
+            width: parent.width - 48px;
+            height: 28px;
+            text: root.dialog.title;
+            color: #f3eadf;
+            font-size: 19px;
+            font-weight: 750;
+            overflow: elide;
+        }
+        Text {
+            x: 24px;
+            y: 52px;
+            width: parent.width - 48px;
+            height: root.dialog.kind == CatalogDialogKind.upload ? 42px : 76px;
+            text: root.dialog.message;
+            color: #a89784;
+            font-size: 11px;
+            wrap: word-wrap;
+            overflow: elide;
+        }
+
+        if root.dialog.kind == CatalogDialogKind.rename-title || root.dialog.kind == CatalogDialogKind.rename-file : LineEdit {
+            x: 24px;
+            y: 138px;
+            width: parent.width - 48px;
+            height: 36px;
+            text: root.dialog.text-value;
+            accessible-label: root.dialog.kind == CatalogDialogKind.rename-title ? "New clip title" : "New clip file name";
+            edited(value) => { root.set-dialog-text(root.dialog.kind == CatalogDialogKind.rename-file ? CatalogDialogTextField.file-name : CatalogDialogTextField.title, value); }
+        }
+
+        if root.dialog.kind == CatalogDialogKind.upload : Rectangle {
+            x: 24px;
+            y: 100px;
+            width: parent.width - 48px;
+            height: parent.height - 166px;
+            background: transparent;
+
+            Text { width: 180px; height: 18px; text: "Title"; color: #d8ccbd; font-size: 10px; font-weight: 700; }
+            LineEdit {
+                y: 20px;
+                width: parent.width;
+                height: 36px;
+                text: root.dialog.text-value;
+                accessible-label: "Upload title";
+                accessible-description: "Maximum 140 UTF-16 code units";
+                edited(value) => { root.set-dialog-text(CatalogDialogTextField.title, value); }
+            }
+            Text { x: parent.width - 180px; width: 180px; height: 18px; text: "Limit " + root.title-max-utf16; color: #8d7d6d; font-size: 9px; horizontal-alignment: right; }
+
+            Text { y: 66px; width: 180px; height: 18px; text: "Description"; color: #d8ccbd; font-size: 10px; font-weight: 700; }
+            TextEdit {
+                y: 86px;
+                width: parent.width;
+                height: 72px;
+                text: root.dialog.description;
+                wrap: word-wrap;
+                accessible-label: "Upload description";
+                accessible-description: "Maximum 5000 UTF-16 code units";
+                edited(value) => { root.set-dialog-text(CatalogDialogTextField.description, value); }
+            }
+            Text { x: parent.width - 180px; y: 66px; width: 180px; height: 18px; text: "Limit " + root.description-max-utf16; color: #8d7d6d; font-size: 9px; horizontal-alignment: right; }
+
+            Text { y: 166px; width: 180px; height: 18px; text: "Visibility"; color: #d8ccbd; font-size: 10px; font-weight: 700; }
+            Rectangle {
+                y: 186px;
+                width: parent.width;
+                height: 36px;
+                accessible-role: radio-group;
+                accessible-label: "Upload visibility";
+                Button { width: 112px; height: 34px; text: "Private"; checked: root.dialog.visibility == CatalogUploadVisibility.private; accessible-label: "Private upload"; clicked => { root.set-upload-visibility(CatalogUploadVisibility.private); } }
+                Button { x: 118px; width: 112px; height: 34px; text: "Unlisted"; checked: root.dialog.visibility == CatalogUploadVisibility.unlisted; accessible-label: "Unlisted upload"; clicked => { root.set-upload-visibility(CatalogUploadVisibility.unlisted); } }
+                Button { x: 236px; width: 112px; height: 34px; text: "Public"; checked: root.dialog.visibility == CatalogUploadVisibility.public; accessible-label: "Public upload"; clicked => { root.set-upload-visibility(CatalogUploadVisibility.public); } }
+            }
+
+            Text { y: 232px; width: 180px; height: 18px; text: "Audio tracks"; color: #d8ccbd; font-size: 10px; font-weight: 700; }
+            ListView {
+                y: 250px;
+                width: parent.width;
+                height: 80px;
+                accessible-role: list;
+                accessible-label: "Upload audio tracks";
+                for track[index] in root.audio-tracks : CheckBox {
+                    width: parent.width;
+                    height: 30px;
+                    text: track.label;
+                    checked: track.selected;
+                    accessible-label: "Include audio track " + track.label;
+                    toggled => { root.set-audio-track(index, !track.selected); }
+                }
+            }
+
+            Rectangle {
+                y: 336px;
+                width: parent.width;
+                height: 44px;
+                border-radius: 5px;
+                background: #17110c;
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    height: parent.height;
+                    text: root.dialog.delete-local-after-upload ? "Saved Cloud setting: delete the local clip after a successful upload." : "Saved Cloud setting: keep the local clip after upload.";
+                    color: #8d7d6d;
+                    font-size: 9px;
+                    wrap: word-wrap;
+                    vertical-alignment: center;
+                    accessible-label: self.text;
+                }
+            }
+        }
+
+        if root.dialog.kind == CatalogDialogKind.partial-delete : Rectangle {
+            x: 24px;
+            y: 136px;
+            width: parent.width - 48px;
+            height: 120px;
+            border-radius: 5px;
+            background: #2b1b17;
+            border-width: 1px;
+            border-color: #704039;
+            visible: root.dialog.kind == CatalogDialogKind.partial-delete;
+            accessible-role: region;
+            accessible-label: "Partial delete report";
+            Text { x: 12px; y: 10px; width: parent.width - 24px; height: parent.height - 20px; text: root.dialog.message; color: #e1bbb4; font-size: 10px; wrap: word-wrap; overflow: elide; }
+        }
+
+        if root.dialog.progress != "" : Text {
+            x: 24px;
+            y: parent.height - 74px;
+            width: parent.width - 48px;
+            height: 20px;
+            text: root.dialog.progress;
+            color: #e5c183;
+            font-size: 10px;
+            accessible-role: progress-indicator;
+            accessible-label: "Upload progress";
+            accessible-value: root.dialog.progress;
+        }
+
+        Button {
+            x: parent.width - 220px;
+            y: parent.height - 50px;
+            width: 94px;
+            height: 34px;
+            text: "Cancel";
+            visible: root.dialog.kind != CatalogDialogKind.partial-delete;
+            accessible-label: "Cancel dialog";
+            clicked => { root.cancel-dialog(); }
+        }
+        Button {
+            x: parent.width - 118px;
+            y: parent.height - 50px;
+            width: 94px;
+            height: 34px;
+            text: root.dialog.confirm-label;
+            accessible-label: root.dialog.confirm-label;
+            clicked => { root.confirm-dialog(); }
+        }
+    }
+}

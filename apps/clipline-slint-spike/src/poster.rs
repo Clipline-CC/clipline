@@ -2,11 +2,16 @@
 
 use std::io::{Cursor, Read};
 use std::path::Path;
+use std::sync::{
+    mpsc::{self, SyncSender, TrySendError},
+    Arc, Mutex, OnceLock,
+};
 
 use clipline_library::{
-    MAX_POSTER_DECODED_PIXELS, MAX_POSTER_DECODER_ALLOC_BYTES, MAX_POSTER_DIMENSION,
-    MAX_POSTER_ENCODED_BYTES, MAX_POSTER_RGB_BYTES, PosterController, PosterControllerError,
-    PosterControllerUpdate, PosterFailureKind, PosterWorkKind, PosterWorkRequest,
+    PosterController, PosterControllerError, PosterControllerUpdate, PosterFailureKind,
+    PosterWorkKind, PosterWorkRequest, MAX_DECODED_PAGE_IMAGES, MAX_POSTER_DECODED_PIXELS,
+    MAX_POSTER_DECODER_ALLOC_BYTES, MAX_POSTER_DIMENSION, MAX_POSTER_ENCODED_BYTES,
+    MAX_POSTER_RGB_BYTES,
 };
 use image::{ImageFormat, ImageReader, Limits};
 use slint::{Rgb8Pixel, SharedPixelBuffer};
@@ -17,6 +22,23 @@ thread_local! {
     static UI_POSTERS: std::cell::RefCell<PosterController<slint::Image>> =
         std::cell::RefCell::new(PosterController::new());
 }
+
+const POSTER_DECODE_WORKERS: usize = 2;
+const POSTER_DECODE_QUEUE_CAPACITY: usize = MAX_DECODED_PAGE_IMAGES;
+const _: () = assert!(POSTER_DECODE_WORKERS > 0);
+const _: () = assert!(POSTER_DECODE_QUEUE_CAPACITY >= POSTER_DECODE_WORKERS);
+
+struct PosterDecodeJob {
+    window: slint::Weak<CliplineSpike>,
+    request: PosterWorkRequest,
+}
+
+struct PosterDecodePool {
+    sender: SyncSender<PosterDecodeJob>,
+    _workers: Vec<std::thread::JoinHandle<()>>,
+}
+
+static POSTER_DECODE_POOL: OnceLock<Result<PosterDecodePool, String>> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PosterAdapterError {
@@ -153,33 +175,117 @@ pub fn with_ui_poster_controller<R>(
     UI_POSTERS.with(|controller| operation(&mut controller.borrow_mut()))
 }
 
-/// Decode on a named worker and post only owned pixels plus an exact request
-/// token to the Slint event loop. A missing weak component still completes the
-/// controller lease so window destruction cannot strand the 32-slot budget.
+/// Clone one exact decoded image retained by the bounded UI-thread owner.
+///
+/// The controller retains at most [`MAX_DECODED_PAGE_IMAGES`] handles, and a
+/// pending or stale identity never produces a clone.
+#[must_use]
+pub fn clone_ui_poster(identity: &clipline_library::ClipPathIdentity) -> Option<slint::Image> {
+    with_ui_poster_controller(|controller| controller.retained_image(identity).cloned())
+}
+
+/// Return the fixed worker and queue bounds used by the poster decoder.
+#[must_use]
+pub const fn poster_decode_pool_shape() -> (usize, usize) {
+    (POSTER_DECODE_WORKERS, POSTER_DECODE_QUEUE_CAPACITY)
+}
+
+/// Enqueue decoding on the fixed bounded worker pool and post only owned
+/// pixels plus an exact request token to the Slint event loop. A missing weak
+/// component still completes the controller lease so window destruction
+/// cannot strand the 32-slot budget.
 pub fn spawn_poster_decode(
     window: slint::Weak<CliplineSpike>,
     request: PosterWorkRequest,
-) -> std::io::Result<std::thread::JoinHandle<()>> {
-    let recovery_window = window.clone();
-    let recovery_request = request.clone();
-    let result = std::thread::Builder::new()
-        .name("clipline-poster-decode".to_owned())
-        .spawn(move || match decode_poster_file(request.clone()) {
+) -> std::io::Result<()> {
+    let pool = match poster_decode_pool() {
+        Ok(pool) => pool,
+        Err(error) => {
+            let _ = dispatch_decode_failure(window, request, PosterFailureKind::Unavailable);
+            return Err(error);
+        }
+    };
+    match pool.sender.try_send(PosterDecodeJob { window, request }) {
+        Ok(()) => Ok(()),
+        Err(TrySendError::Full(job)) => {
+            let _ =
+                dispatch_decode_failure(job.window, job.request, PosterFailureKind::Unavailable);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "poster decode queue is full",
+            ))
+        }
+        Err(TrySendError::Disconnected(job)) => {
+            let _ =
+                dispatch_decode_failure(job.window, job.request, PosterFailureKind::Unavailable);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "poster decode workers stopped",
+            ))
+        }
+    }
+}
+
+fn poster_decode_pool() -> std::io::Result<&'static PosterDecodePool> {
+    match POSTER_DECODE_POOL.get_or_init(PosterDecodePool::start) {
+        Ok(pool) => Ok(pool),
+        Err(message) => Err(std::io::Error::other(message.clone())),
+    }
+}
+
+impl PosterDecodePool {
+    fn start() -> Result<Self, String> {
+        let (sender, receiver) = mpsc::sync_channel(POSTER_DECODE_QUEUE_CAPACITY);
+        let receiver = Arc::new(Mutex::new(receiver));
+        let mut workers = Vec::new();
+        workers
+            .try_reserve_exact(POSTER_DECODE_WORKERS)
+            .map_err(|error| format!("poster decode worker allocation failed: {error}"))?;
+
+        for index in 0..POSTER_DECODE_WORKERS {
+            let worker_receiver = Arc::clone(&receiver);
+            match std::thread::Builder::new()
+                .name(format!("clipline-poster-decode-{index}"))
+                .spawn(move || poster_decode_worker(&worker_receiver))
+            {
+                Ok(worker) => workers.push(worker),
+                Err(error) => {
+                    drop(sender);
+                    drop(receiver);
+                    for worker in workers {
+                        let _ = worker.join();
+                    }
+                    return Err(format!("poster decode worker could not start: {error}"));
+                }
+            }
+        }
+        Ok(Self {
+            sender,
+            _workers: workers,
+        })
+    }
+}
+
+fn poster_decode_worker(receiver: &Mutex<mpsc::Receiver<PosterDecodeJob>>) {
+    loop {
+        let job = {
+            let receiver = receiver
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            receiver.recv()
+        };
+        let Ok(PosterDecodeJob { window, request }) = job else {
+            return;
+        };
+        match decode_poster_file(request.clone()) {
             Ok(decoded) => {
                 let _ = dispatch_decoded_poster(window, decoded);
             }
             Err(error) => {
                 let _ = dispatch_decode_failure(window, request, failure_kind(error));
             }
-        });
-    if result.is_err() {
-        let _ = dispatch_decode_failure(
-            recovery_window,
-            recovery_request,
-            PosterFailureKind::Unavailable,
-        );
+        }
     }
-    result
 }
 
 fn dispatch_decoded_poster(

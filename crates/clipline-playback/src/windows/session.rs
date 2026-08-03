@@ -197,6 +197,16 @@ pub fn session_channel() -> (SessionClient, SessionRuntime) {
 }
 
 impl SessionClient {
+    /// Permanently disconnect the command/update client and wake a runtime
+    /// blocked waiting for work. This is the fail-safe shutdown path when the
+    /// bounded command inbox cannot accept a terminal `Close` command.
+    pub fn disconnect(&self) {
+        if let Ok(mut ports) = self.shared.ports.lock() {
+            ports.client_connected = false;
+        }
+        self.shared.command_ready.notify_all();
+    }
+
     pub fn try_send(&self, command: PlaybackCommand) -> Result<EnqueueOutcome, SessionSendError> {
         let elapsed_100ns = self.shared.anchor.elapsed().as_nanos() / 100;
         let accepted_at = MonotonicTime100ns::new(u64::try_from(elapsed_100ns).unwrap_or(u64::MAX));
@@ -213,7 +223,7 @@ impl SessionClient {
             .ports
             .lock()
             .map_err(|_| SessionSendError::Disconnected)?;
-        if !ports.runtime_connected {
+        if !ports.runtime_connected || !ports.client_connected {
             return Err(SessionSendError::Disconnected);
         }
         let outcome =
@@ -239,10 +249,7 @@ impl SessionClient {
 
 impl Drop for SessionClient {
     fn drop(&mut self) {
-        if let Ok(mut ports) = self.shared.ports.lock() {
-            ports.client_connected = false;
-        }
-        self.shared.command_ready.notify_all();
+        self.disconnect();
     }
 }
 
