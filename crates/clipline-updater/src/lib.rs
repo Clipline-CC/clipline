@@ -364,6 +364,7 @@ impl VerifiedInstaller {
         &self.telemetry
     }
 
+    #[cfg(windows)]
     fn transfer_cleanup(mut self) -> (PathBuf, DownloadTelemetry) {
         self.cleanup_on_drop = false;
         (self.path.clone(), self.telemetry.clone())
