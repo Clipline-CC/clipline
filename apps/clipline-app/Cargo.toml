@@ -33,7 +33,7 @@ chrono = "0.4.45"
 rfd = "0.15"
 png = "0.17"
 base64 = "0.22"
-rodio = { version = "0.17", default-features = false, features = ["vorbis"] }
+rodio = { version = "0.22", default-features = false, features = ["vorbis"] }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
