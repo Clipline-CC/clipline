@@ -4,16 +4,16 @@ use clipline_library::{
     CatalogAction, CatalogEffect, CatalogItemIdentity, CatalogPage, CatalogResult, CatalogRevision,
     CatalogSource, CatalogUploadOptions, CatalogUploadVisibility, ClipDetailRequest, ClipGame,
     ClipPathIdentity, CloudAccountGeneration, CloudAccountKey, CloudAccountSnapshot,
-    CloudLibraryItem, CloudListPageCompletion, CloudNextPage, CloudPageNumber, CloudPageOutcome,
-    CloudWorkToken, DurableUploadToken, ForegroundGeneration, GenerationError, LocalClipFilter,
-    LocalClipGrouping, LocalClipId, LocalClipItem, LocalClipSort, LocalIndexCompletion,
-    LocalPageIndex, MutationFailure, MutationReport, PayloadBoundsError, PosterGeneration,
-    PresentationRow, RemoteClipId, RequestGeneration, ResolvedLocalClip, UploadGeneration,
-    UploadSummary, WindowAttachmentGeneration, WindowWorkToken, MAX_CATALOG_IDENTITY_BYTES,
-    MAX_CATALOG_PAGE_ROWS, MAX_CLOUD_INDEX_ROWS, MAX_CLOUD_SERVER_PAGE, MAX_DECODED_PAGE_IMAGES,
-    MAX_LOCAL_INDEX_PAYLOAD_BYTES, MAX_LOCAL_INDEX_ROWS, MAX_MUTATION_PATH_BYTES,
-    MAX_POSTER_RESULT_ENTRIES, MAX_UPLOAD_DESCRIPTION_UTF16, MAX_UPLOAD_SUMMARIES,
-    MAX_UPLOAD_TITLE_UTF16,
+    CloudCatalogOwner, CloudLibraryItem, CloudListPageCompletion, CloudNextPage, CloudPageNumber,
+    CloudPageOutcome, CloudWorkToken, DurableUploadToken, ForegroundGeneration, GenerationError,
+    LocalClipFilter, LocalClipGrouping, LocalClipId, LocalClipItem, LocalClipSort,
+    LocalIndexCompletion, LocalPageIndex, MutationFailure, MutationReport, PayloadBoundsError,
+    PosterGeneration, PresentationRow, RemoteClipId, RequestGeneration, ResolvedLocalClip,
+    UploadGeneration, UploadSummary, WindowAttachmentGeneration, WindowWorkToken,
+    MAX_CATALOG_IDENTITY_BYTES, MAX_CATALOG_PAGE_ROWS, MAX_CLOUD_INDEX_ROWS, MAX_CLOUD_SERVER_PAGE,
+    MAX_DECODED_PAGE_IMAGES, MAX_LOCAL_INDEX_PAYLOAD_BYTES, MAX_LOCAL_INDEX_ROWS,
+    MAX_MUTATION_PATH_BYTES, MAX_POSTER_RESULT_ENTRIES, MAX_UPLOAD_DESCRIPTION_UTF16,
+    MAX_UPLOAD_SUMMARIES, MAX_UPLOAD_TITLE_UTF16,
 };
 
 #[test]
@@ -99,6 +99,16 @@ fn work_tokens_pin_exact_window_account_and_upload_ownership() {
     };
 
     assert_eq!(cloud.window, window);
+    let catalog_owner = CloudCatalogOwner::from_work_token(&cloud);
+    assert_eq!(catalog_owner.account_key, cloud.account_key);
+    assert_eq!(catalog_owner.account_generation, cloud.account_generation);
+    let cloud_identity = CatalogItemIdentity::Cloud {
+        account_key: catalog_owner.account_key.clone(),
+        account_generation: catalog_owner.account_generation,
+        remote_clip_id: RemoteClipId::new("remote-7").unwrap(),
+    };
+    assert!(cloud_identity.matches_cloud_catalog_owner(&catalog_owner));
+    assert!(cloud_identity.matches_cloud_owner(&cloud));
     let json = serde_json::to_value(&upload).unwrap();
     assert_eq!(json["account_generation"], 13);
     assert_eq!(json["upload_generation"], 21);
@@ -295,7 +305,9 @@ fn page_action_upload_mutation_and_presentation_are_serializable() {
         has_next: false,
         truncated: false,
         items: vec![PresentationRow {
-            id: "local-1".into(),
+            identity: CatalogItemIdentity::Local {
+                path: ClipPathIdentity::from_text(r"C:\Clips\One.mp4").unwrap(),
+            },
             path: r"C:\Clips\One.mp4".into(),
             title: "One".into(),
             subtitle: "Today".into(),
@@ -303,7 +315,11 @@ fn page_action_upload_mutation_and_presentation_are_serializable() {
             kind: "replay".into(),
             selected: false,
             active: true,
-            upload_status: None,
+            game_badge: None,
+            marker_badge: None,
+            outcome_badge: None,
+            upload_badge: None,
+            poster: clipline_library::PresentationPoster::Missing,
             warning: None,
         }],
         warnings: Vec::new(),

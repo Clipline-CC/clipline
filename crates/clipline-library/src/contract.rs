@@ -205,6 +205,25 @@ pub struct CloudWorkToken {
     pub account_generation: CloudAccountGeneration,
 }
 
+/// Stable Cloud catalog ownership independent of any window attachment or
+/// request. Accepted metadata may be reprojected after a window rebuild while
+/// still rejecting a replacement login for the same account.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CloudCatalogOwner {
+    pub account_key: CloudAccountKey,
+    pub account_generation: CloudAccountGeneration,
+}
+
+impl CloudCatalogOwner {
+    #[must_use]
+    pub fn from_work_token(token: &CloudWorkToken) -> Self {
+        Self {
+            account_key: token.account_key.clone(),
+            account_generation: token.account_generation,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DurableUploadToken {
     pub account_key: CloudAccountKey,
@@ -259,6 +278,19 @@ impl CatalogItemIdentity {
                 ..
             } if account_key == &token.account_key
                 && *account_generation == token.account_generation
+        )
+    }
+
+    #[must_use]
+    pub fn matches_cloud_catalog_owner(&self, owner: &CloudCatalogOwner) -> bool {
+        matches!(
+            self,
+            Self::Cloud {
+                account_key,
+                account_generation,
+                ..
+            } if account_key == &owner.account_key
+                && *account_generation == owner.account_generation
         )
     }
 }
@@ -334,7 +366,7 @@ impl LocalClipItem {
         ClipPathIdentity::from_text(&self.path)
     }
 
-    fn validate_bounds(&self) -> Result<(), PayloadBoundsError> {
+    pub(crate) fn validate_bounds(&self) -> Result<(), PayloadBoundsError> {
         check_string("local.path", &self.path)?;
         if self.path_identity().is_none() {
             return Err(PayloadBoundsError::Invalid {
@@ -387,13 +419,13 @@ impl LocalClipItem {
         }
         if !self.marker_summary.duration_s.is_finite()
             || self.marker_summary.duration_s < 0.0
-            || self.marker_summary.marker_digest.len() > MAX_CLIP_DETAIL_FIELD_BYTES
-            || self.marker_summary.search_text.len() > MAX_CLIP_DETAIL_FIELD_BYTES
+            || self.marker_summary.marker_digest.len() > MAX_CATALOG_STRING_BYTES
+            || self.marker_summary.search_text.len() > MAX_CATALOG_STRING_BYTES
             || self
                 .marker_summary
                 .player_summary
                 .as_ref()
-                .is_some_and(|summary| summary.champion_name.len() > MAX_CLIP_DETAIL_FIELD_BYTES)
+                .is_some_and(|summary| summary.champion_name.len() > MAX_CATALOG_STRING_BYTES)
         {
             return Err(PayloadBoundsError::Invalid {
                 field: "local.marker_summary",
@@ -446,7 +478,7 @@ impl CloudLibraryItem {
         ClipPathIdentity::from_text(&self.path)
     }
 
-    fn validate_bounds(&self) -> Result<(), PayloadBoundsError> {
+    pub(crate) fn validate_bounds(&self) -> Result<(), PayloadBoundsError> {
         check_string("cloud.remote_clip_id", &self.remote_clip_id)?;
         if RemoteClipId::new(self.remote_clip_id.clone()).is_err() {
             return Err(PayloadBoundsError::Invalid {
@@ -516,6 +548,24 @@ pub struct UploadSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_url: Option<String>,
     pub error: Option<String>,
+}
+
+impl UploadSummary {
+    pub(crate) fn validate_bounds(&self) -> Result<(), PayloadBoundsError> {
+        check_string("upload.local_clip_id", &self.local_clip_id)?;
+        check_string("upload.path", &self.path)?;
+        check_string("upload.status", &self.upload_status)?;
+        if let Some(remote_clip_id) = &self.remote_clip_id {
+            check_string("upload.remote_clip_id", remote_clip_id)?;
+        }
+        if let Some(remote_url) = &self.remote_url {
+            check_string("upload.remote_url", remote_url)?;
+        }
+        if let Some(error) = &self.error {
+            check_string("upload.error", error)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -914,7 +964,7 @@ impl CloudListPageCompletion {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PresentationRow {
-    pub id: String,
+    pub identity: CatalogItemIdentity,
     pub path: String,
     pub title: String,
     pub subtitle: String,
@@ -922,8 +972,25 @@ pub struct PresentationRow {
     pub kind: String,
     pub selected: bool,
     pub active: bool,
-    pub upload_status: Option<String>,
+    pub game_badge: Option<String>,
+    pub marker_badge: Option<String>,
+    pub outcome_badge: Option<String>,
+    pub upload_badge: Option<String>,
+    pub poster: PresentationPoster,
     pub warning: Option<String>,
+}
+
+/// Fixed-shape poster state retained by a presentation row.
+///
+/// Rows never retain decoded images or a variable badge collection. The
+/// desktop adapter resolves a ready path into a window-scoped image later.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PresentationPoster {
+    Queued,
+    Ready { path: String },
+    Missing,
+    Failed { message: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

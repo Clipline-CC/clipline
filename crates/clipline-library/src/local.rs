@@ -19,8 +19,8 @@ use thiserror::Error;
 use crate::{
     marker_digest, ClipDetail, ClipDetailAudioTrack, ClipDetailError, ClipDetailRequest,
     ClipDetailResult, GalleryMarker, MarkerTick, PlayerCardSummary, UploadDialogSummary,
-    MAX_CLIP_DETAIL_AUDIO_TRACKS, MAX_CLIP_DETAIL_FIELD_BYTES, MAX_CLIP_DETAIL_MARKERS,
-    MAX_CLIP_DETAIL_SIDECAR_BYTES,
+    MAX_CATALOG_STRING_BYTES, MAX_CLIP_DETAIL_AUDIO_TRACKS, MAX_CLIP_DETAIL_FIELD_BYTES,
+    MAX_CLIP_DETAIL_MARKERS, MAX_CLIP_DETAIL_SIDECAR_BYTES,
 };
 
 /// Maximum object/array depth accepted before JSON deserialization.
@@ -469,8 +469,10 @@ fn summarize_markers(markers: &ClipMarkers) -> Result<MarkerSidecarSummary, Loca
         .iter()
         .map(|marker| GalleryMarker::new(format!("{:?}", marker.event.kind)))
         .collect::<Vec<_>>();
-    let marker_digest = marker_digest(&gallery_markers, None)
-        .map_err(|error| LocalSidecarError::Projection(error.to_string()))?;
+    let marker_digest = bounded_catalog_text(
+        &marker_digest(&gallery_markers, None)
+            .map_err(|error| LocalSidecarError::Projection(error.to_string()))?,
+    );
     let passed = markers.plays.iter().filter(|play| play.passed).count();
     let incomplete = markers
         .plays
@@ -489,7 +491,7 @@ fn summarize_markers(markers: &ClipMarkers) -> Result<MarkerSidecarSummary, Loca
         .player_summary
         .as_ref()
         .map(|summary| PlayerCardSummary {
-            champion_name: summary.champion_name.clone(),
+            champion_name: bounded_catalog_text(&summary.champion_name),
             kills: summary.kills,
             deaths: summary.deaths,
             assists: summary.assists,
@@ -554,13 +556,33 @@ fn append_search_term(output: &mut String, term: &str) {
     else {
         return;
     };
-    if next_len > MAX_CLIP_DETAIL_FIELD_BYTES {
-        return;
-    }
     if separator != 0 {
+        if output.len() == MAX_CATALOG_STRING_BYTES {
+            return;
+        }
         output.push(' ');
     }
-    output.push_str(term);
+    let remaining = MAX_CATALOG_STRING_BYTES.saturating_sub(output.len());
+    if next_len <= MAX_CATALOG_STRING_BYTES {
+        output.push_str(term);
+    } else {
+        let mut end = remaining.min(term.len());
+        while end != 0 && !term.is_char_boundary(end) {
+            end -= 1;
+        }
+        output.push_str(&term[..end]);
+    }
+}
+
+fn bounded_catalog_text(value: &str) -> String {
+    if value.len() <= MAX_CATALOG_STRING_BYTES {
+        return value.to_owned();
+    }
+    let mut end = MAX_CATALOG_STRING_BYTES;
+    while end != 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_owned()
 }
 
 fn validate_json_depth(bytes: &[u8]) -> Result<(), LocalSidecarError> {

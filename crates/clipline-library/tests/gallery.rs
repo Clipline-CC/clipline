@@ -351,6 +351,46 @@ fn local_filter_and_search_match_shipping_fields_and_kind_fallback() {
 }
 
 #[test]
+fn local_search_includes_the_compact_marker_haystack_case_insensitively() {
+    let days = TestDays {
+        today_start: 1_000_000,
+    };
+    let mut enriched = clip(r"C:\Clips\Marker.mp4", "Marker.mp4", 1_010_000);
+    enriched.marker_summary.search_text =
+        "Faker Blue Team Teleport Rabadon's Deathcap Blue Zenith".into();
+    let unrelated = clip(r"C:\Clips\Other.mp4", "Other.mp4", 1_000_000);
+    let clips = [enriched, unrelated];
+
+    // The compact sidecar projection deliberately extends the shipping JS
+    // champion-name search to participant, team, spell, item, and play terms.
+    for query in [
+        "fAkEr",
+        "BLUE TEAM",
+        "telePORT",
+        "rabadon's deathCAP",
+        "blue ZENITH",
+    ] {
+        let result = build_local_gallery(
+            &clips,
+            &LocalGalleryOptions {
+                query: query.to_owned(),
+                ..Default::default()
+            },
+            &days,
+        );
+        assert_eq!(
+            result
+                .items
+                .iter()
+                .map(|item| item.path.as_str())
+                .collect::<Vec<_>>(),
+            vec![r"C:\Clips\Marker.mp4"],
+            "compact marker search should match `{query}`"
+        );
+    }
+}
+
+#[test]
 fn local_sorts_have_explicit_recency_and_path_identity_tie_breakers() {
     let clips = catalog();
     let days = TestDays {

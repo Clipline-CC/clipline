@@ -614,11 +614,12 @@ fn search_matches(clip: &LocalClipItem, query: &str) -> bool {
     }
     let game = clip.game.as_ref().map_or("", |game| game.name.as_str());
     format!(
-        "{} {} {} {}",
+        "{} {} {} {} {}",
         local_clip_display_title(clip),
         clip.name,
         clip.session.as_deref().unwrap_or_default(),
         game,
+        clip.marker_summary.search_text,
     )
     .to_lowercase()
     .contains(query)
