@@ -65,7 +65,7 @@ static FRONTEND_READY: AtomicBool = AtomicBool::new(false);
 static WEBVIEW_READY_WATCHDOG_ARMED: AtomicBool = AtomicBool::new(false);
 static WEBVIEW_REPAIR_NOTICE_SHOWN: AtomicBool = AtomicBool::new(false);
 
-struct WindowLifecycleState(Mutex<WindowLifecycleSnapshot>);
+pub(crate) struct WindowLifecycleState(Mutex<WindowLifecycleSnapshot>);
 
 impl Default for WindowLifecycleState {
     fn default() -> Self {
@@ -79,7 +79,7 @@ impl Default for WindowLifecycleState {
 }
 
 impl WindowLifecycleState {
-    fn snapshot(&self) -> WindowLifecycleSnapshot {
+    pub(crate) fn snapshot(&self) -> WindowLifecycleSnapshot {
         match self.0.lock() {
             Ok(snapshot) => *snapshot,
             Err(poisoned) => *poisoned.into_inner(),
@@ -1380,6 +1380,58 @@ impl RuntimeState {
             .unwrap_or_default()
     }
 
+    pub(crate) fn cloud_settings_generation(
+        &self,
+    ) -> Result<(crate::settings::CloudSettings, u64), String> {
+        if let Some(store) = self.2.as_ref() {
+            let snapshot = store.snapshot().map_err(|error| error.to_string())?;
+            return Ok((snapshot.document.cloud, snapshot.account_generation.get()));
+        }
+        Ok((self.settings().cloud, 1))
+    }
+
+    pub(crate) fn with_cloud_settings_exclusive<T>(
+        &self,
+        operation: impl FnOnce(&crate::settings::CloudSettings, u64) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let _save_guard = Self::lock_cloud_settings_save()?;
+        if let Some(store) = self.2.as_ref() {
+            let snapshot = store.snapshot().map_err(|error| error.to_string())?;
+            return operation(&snapshot.document.cloud, snapshot.account_generation.get());
+        }
+        let cloud = self.settings().cloud;
+        operation(&cloud, 1)
+    }
+
+    pub(crate) fn replace_cloud_profile_if_generation(
+        &self,
+        expected_generation: u64,
+        mut cloud: crate::settings::CloudSettings,
+    ) -> Result<AppSettings, String> {
+        cloud.normalize();
+        let Some(store) = self.2.as_ref() else {
+            if expected_generation != 1 {
+                return Err("cloud account changed while profile work was in flight".into());
+            }
+            return self.update_cloud_with(|current| *current = cloud, AppSettings::save);
+        };
+        let _save_guard = Self::lock_cloud_settings_save()?;
+        let before = store.snapshot().map_err(|error| error.to_string())?;
+        if before.account_generation.get() != expected_generation {
+            return Err("cloud account changed while profile work was in flight".into());
+        }
+        let after = store
+            .transact(SettingsTransaction {
+                expected_revision: before.revision,
+                expected_account_generation: before.account_generation,
+                change: SettingsChange::ReplaceCloudProfile(cloud),
+            })
+            .map_err(|error| error.to_string())?;
+        let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+        inner.settings.cloud = after.document.cloud;
+        Ok(inner.settings.clone())
+    }
+
     pub(crate) fn update_cloud<F>(&self, update: F) -> Result<AppSettings, String>
     where
         F: FnOnce(&mut crate::settings::CloudSettings),
@@ -1962,7 +2014,14 @@ fn publish_window_lifecycle<R: Runtime>(
 
 fn publish_background_window<R: Runtime>(app: &AppHandle<R>, mode: WindowLifecycleMode) {
     app.state::<MicTestState>().stop();
-    publish_window_lifecycle(app, mode);
+    let background = publish_window_lifecycle(app, mode);
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        if app.state::<WindowLifecycleState>().snapshot() == background {
+            crate::cloud::release_all_cloud_media_leases();
+        }
+    });
 }
 
 /// Request a WebView2 memory-usage target level for one window, best-effort.
@@ -3248,6 +3307,7 @@ pub fn run(
             crate::cloud::list_cloud_clips,
             crate::cloud::cloud_clip_thumbnail,
             crate::cloud::cache_cloud_clip_media,
+            crate::cloud::release_cloud_media_lease,
             crate::cloud::cloud_user_profile,
             crate::cloud::cloud_user_avatar,
             crate::cloud::open_cloud_user_profile,

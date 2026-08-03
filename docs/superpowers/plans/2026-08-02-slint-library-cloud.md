@@ -325,9 +325,11 @@ lease, or if the 2,000-clip absolute memory/process bound fails.
 - Create: `crates/clipline-library/src/cloud.rs`
 - Create: `crates/clipline-library/src/cloud/cache.rs`
 - Create: `crates/clipline-library/src/cloud/cache_identity.rs`
+- Create: `crates/clipline-library/src/cloud/http.rs`
 - Create: `crates/clipline-library/src/cloud/ports.rs`
 - Create: `crates/clipline-library/tests/cloud_service.rs`
 - Create: `crates/clipline-library/tests/cloud_cache.rs`
+- Create: `crates/clipline-library/tests/cloud_http.rs`
 - Modify: `crates/clipline-library/Cargo.toml`
 - Modify: `apps/clipline-app/src/cloud.rs`
 - Modify: `apps/clipline-app/src/cloud/cache_identity.rs`
@@ -359,11 +361,13 @@ lease, or if the 2,000-clip absolute memory/process bound fails.
 
 **Implement to green**
 
-- Move cloud transport/cache logic into the shared crate and pin the existing cloud API revision;
-  do not duplicate requests in the Slint package.
-- Add only the already reviewed `clipline-cloud-api`, `reqwest` rustls, `tokio`, hashing/time, and
-  `clipline-settings` dependencies/features required by this service; record license/security
-  review and reject native-TLS or framework dependency creep.
+- Move cloud transport/cache logic into the shared crate; do not duplicate requests in the Slint
+  package. The pinned `clipline-cloud-api` revision is AGPL-3.0-or-later, so keep it app-only until
+  Task 7 removes the remaining connect/upload/status adapter uses. Reimplement only the bounded
+  first-party wire shapes required here in the permissively licensed shared crate.
+- Add only `reqwest` rustls, `tokio`, hashing/time, and `clipline-settings` dependencies/features
+  required by this service; record license/security review and reject native-TLS or framework
+  dependency creep.
 - Keep connect/disconnect/settings controls in Milestone 8, but accept account-snapshot changes now
   and invalidate every window-scoped request atomically.
 - Browser/profile/clip opening remains a typed platform effect executed by reviewed helpers.

@@ -5,28 +5,47 @@
 mod cache_identity;
 use cache_identity::validate_cloud_cache_component;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, UNIX_EPOCH};
 
 use base64::{engine::general_purpose, Engine as _};
 use chrono::{DateTime, Utc};
 use clipline_cloud_api::types::{CreateDeviceTokenRequest, CreateDeviceTokenResponse};
 use clipline_cloud_api::{
-    sha256_hex, ClipDetailResponse, ClipSummaryResponse, CloudApiError, CloudClient,
-    CreateUploadRequest, DiscoveryResponse, ListClipsRequest, MeResponse, UpdateVisibilityRequest,
+    sha256_hex, ClipDetailResponse, CloudApiError, CloudClient, CreateUploadRequest,
+    DiscoveryResponse, MeResponse, UpdateVisibilityRequest,
 };
-use clipline_desktop::{CloudAccountScope, Generation, UiEvent, UiEventSink};
+use clipline_desktop::{
+    CloudAccountScope, Generation, UiEvent, UiEventSink, WindowLifecycleMode,
+};
 use clipline_events::ClipMarkers;
+use clipline_library::cache::{
+    AccountPublicationGuard, AvailableSpacePort, CloudAssetRequest as SharedCloudAssetRequest,
+    CloudCache, CloudCacheError, CloudCancellation, CloudMediaLease,
+};
+use clipline_library::cache_identity::{
+    CloudAccountFence, CloudAssetKey, CloudAssetKind, CloudCacheNamespace,
+};
+use clipline_library::http::{ReqwestAssetDownload, ReqwestCloudTransport};
+use clipline_library::ports::{
+    CloudAccountPort, CloudCredential, CloudCredentialPort, CloudProfilePatch, CloudRequestFence,
+    PortError,
+};
+use clipline_library::{
+    account_key as shared_account_key, CloudAccountFields,
+    CloudAccountGeneration as LibraryAccountGeneration, CloudAccountSnapshot, CloudBrowserEffect,
+    CloudService, CloudServiceAccount, CloudUserProfile as SharedCloudUserProfile, CloudWorkToken,
+    ForegroundGeneration, RequestGeneration, WindowAttachmentGeneration, WindowWorkToken,
+};
 use clipline_shell::windows::credential::CredentialStore;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, Runtime};
-use tokio::io::AsyncWriteExt;
+use tauri::{AppHandle, Manager, Runtime, Wry};
 
-use crate::app::RuntimeState;
+use crate::app::{RuntimeState, WindowLifecycleState};
 use crate::library::{validate_clip_path, StorageSettings};
 use crate::settings::{normalize_cloud_visibility, CloudSettings, CloudUploadRecord};
 use crate::util::unix_now;
@@ -36,26 +55,167 @@ const READY_POLL_ATTEMPTS: usize = 30;
 const READY_POLL_DELAY: Duration = Duration::from_secs(1);
 const READY_MEDIA_PROBE_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const READY_MEDIA_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
-const CLOUD_LIBRARY_PAGE_SIZE: i64 = 100;
-const CLOUD_LIBRARY_MAX_PAGES: i64 = 100;
-const CLOUD_LIBRARY_MAX_CLIPS: usize = 10_000;
 const REMOTE_NOT_FOUND_SYNC_MARKER: &str = "remote clip not found during status sync";
-const MAX_AVATAR_BYTES: usize = 2 * 1024 * 1024;
-const CLOUD_CACHE_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const UPLOAD_PAYLOAD_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
-const CLOUD_THUMBNAIL_MAX_BYTES: u64 = 10 * 1024 * 1024;
-const CLOUD_MEDIA_FALLBACK_MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
-const CLOUD_MEDIA_HARD_MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
-const CLOUD_MEDIA_SIZE_SLACK_BYTES: u64 = 64 * 1024 * 1024;
 const CLOUD_CREDENTIALS: CredentialStore = CredentialStore::new("cloud token");
-const CLOUD_CACHE_QUOTA_BYTES: u64 = 10 * 1024 * 1024 * 1024;
-const CLOUD_CACHE_FREE_SPACE_FLOOR_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-const CLOUD_CACHE_TEMP_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
-const CLOUD_CACHE_PLAYBACK_LEASE: Duration = Duration::from_secs(24 * 60 * 60);
-static CLOUD_CACHE_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-static CLOUD_CACHE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-static CLOUD_CACHE_LEASES: OnceLock<Mutex<BTreeMap<PathBuf, Instant>>> = OnceLock::new();
-static CLOUD_USER_AVATAR_CACHE: OnceLock<Mutex<Option<CachedCloudUserAvatar>>> = OnceLock::new();
+static CLOUD_COMPAT_REQUEST_GENERATION: AtomicU64 = AtomicU64::new(0);
+static CLOUD_MEDIA_LEASE_GENERATION: AtomicU64 = AtomicU64::new(0);
+static UPLOAD_PAYLOAD_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+static SHARED_CLOUD_SERVICE: OnceLock<CloudService> = OnceLock::new();
+static SHARED_CLOUD_MEDIA_LEASES: OnceLock<Mutex<HashMap<u64, CloudMediaLease>>> = OnceLock::new();
+
+#[derive(Clone)]
+struct RuntimeCloudAccountPort {
+    app: AppHandle<Wry>,
+}
+
+impl RuntimeCloudAccountPort {
+    fn current(&self) -> Result<CloudServiceAccount, PortError> {
+        let state = self.app.state::<RuntimeState>();
+        state
+            .with_cloud_settings_exclusive(|cloud, generation| {
+                service_account_from_settings(cloud, generation).map_err(|error| error.to_string())
+            })
+            .map_err(PortError::new)
+    }
+}
+
+impl CloudAccountPort for RuntimeCloudAccountPort {
+    fn snapshot(&self) -> Result<CloudServiceAccount, PortError> {
+        self.current()
+    }
+
+    fn apply_profile(
+        &self,
+        expected_key: &clipline_library::CloudAccountKey,
+        expected_generation: LibraryAccountGeneration,
+        patch: CloudProfilePatch,
+    ) -> Result<CloudServiceAccount, PortError> {
+        let state = self.app.state::<RuntimeState>();
+        let current = self.current()?;
+        if &current.snapshot.account_key != expected_key
+            || current.snapshot.generation != expected_generation
+            || current.snapshot.user_id.as_deref() != Some(patch.user_id.as_str())
+        {
+            return Err(PortError::account_changed());
+        }
+        let mut cloud = state.cloud_settings_generation().map_err(PortError::new)?.0;
+        cloud.connected_username = Some(patch.username);
+        cloud.connected_display_name = patch.display_name;
+        let settings = state
+            .replace_cloud_profile_if_generation(expected_generation.get(), cloud)
+            .map_err(|_| PortError::account_changed())?;
+        service_account_from_settings(&settings.cloud, expected_generation.get())
+    }
+}
+
+struct RuntimeCloudCredentialPort;
+
+impl CloudCredentialPort for RuntimeCloudCredentialPort {
+    fn read(&self, target: &str) -> Result<CloudCredential, PortError> {
+        read_credential(target)
+            .map(CloudCredential::new)
+            .map_err(PortError::new)
+    }
+}
+
+#[derive(Clone)]
+struct ExactCloudFence {
+    app: AppHandle<Wry>,
+    token: CloudWorkToken,
+}
+
+impl CloudRequestFence for ExactCloudFence {
+    fn is_current(&self, token: &CloudWorkToken) -> bool {
+        if &self.token != token {
+            return false;
+        }
+        let lifecycle = self.app.state::<WindowLifecycleState>().snapshot();
+        lifecycle.mode == WindowLifecycleMode::Foreground
+            && lifecycle.revision.get() == token.window.foreground.get()
+    }
+}
+
+fn shared_cloud_service(app: &AppHandle<Wry>) -> Result<&'static CloudService, String> {
+    if let Some(service) = SHARED_CLOUD_SERVICE.get() {
+        return Ok(service);
+    }
+    let transport = ReqwestCloudTransport::new().map_err(|error| error.to_string())?;
+    let service = CloudService::new(
+        Arc::new(RuntimeCloudAccountPort { app: app.clone() }),
+        Arc::new(RuntimeCloudCredentialPort),
+        Arc::new(transport),
+    );
+    let _ = SHARED_CLOUD_SERVICE.set(service);
+    SHARED_CLOUD_SERVICE
+        .get()
+        .ok_or_else(|| "initialize shared cloud service".to_string())
+}
+
+fn service_account_from_settings(
+    cloud: &CloudSettings,
+    generation: u64,
+) -> Result<CloudServiceAccount, PortError> {
+    let account_key = shared_account_key(&CloudAccountFields {
+        host_url: cloud.host_url.clone(),
+        connected_user_id: cloud.connected_user_id.clone().unwrap_or_default(),
+        credential_target: cloud.credential_target.clone().unwrap_or_default(),
+    })
+    .map_err(|error| PortError::new(error.to_string()))?;
+    Ok(CloudServiceAccount {
+        snapshot: CloudAccountSnapshot {
+            account_key,
+            generation: LibraryAccountGeneration::new(generation),
+            connected: cloud.connected(),
+            host_url: cloud.host_url.clone(),
+            public_url: cloud.public_url.clone(),
+            username: cloud.connected_username.clone(),
+            display_name: cloud.connected_display_name.clone(),
+            user_id: cloud.connected_user_id.clone(),
+            default_visibility: cloud.default_visibility.clone(),
+            delete_local_after_upload: cloud.delete_local_after_upload,
+            auto_upload_rules: cloud.auto_upload_rules,
+        },
+        credential_target: cloud.credential_target.clone(),
+        local_paths_by_clip_id: cloud
+            .uploads
+            .values()
+            .map(|record| (record.local_clip_id.clone(), record.path.clone()))
+            .collect(),
+    })
+}
+
+fn current_cloud_work(app: &AppHandle<Wry>) -> Result<(CloudWorkToken, ExactCloudFence), String> {
+    let lifecycle = app.state::<WindowLifecycleState>().snapshot();
+    if lifecycle.mode != WindowLifecycleMode::Foreground {
+        return Err("cloud foreground work requires the main window".into());
+    }
+    let account = RuntimeCloudAccountPort { app: app.clone() }
+        .snapshot()
+        .map_err(|error| error.to_string())?;
+    let request = CLOUD_COMPAT_REQUEST_GENERATION
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            current.checked_add(1)
+        })
+        .map_err(|_| "cloud compatibility request generation exhausted".to_string())?
+        + 1;
+    let token = CloudWorkToken {
+        window: WindowWorkToken {
+            attachment: WindowAttachmentGeneration::new(1),
+            foreground: ForegroundGeneration::new(lifecycle.revision.get()),
+            request: RequestGeneration::new(request),
+        },
+        account_key: account.snapshot.account_key,
+        account_generation: account.snapshot.generation,
+    };
+    Ok((
+        token.clone(),
+        ExactCloudFence {
+            app: app.clone(),
+            token,
+        },
+    ))
+}
 
 #[derive(Debug, Deserialize)]
 pub struct CloudConnectRequest {
@@ -108,6 +268,17 @@ pub struct CloudUserProfile {
     pub username: String,
     pub display_name: Option<String>,
     pub profile_url: String,
+}
+
+impl From<SharedCloudUserProfile> for CloudUserProfile {
+    fn from(profile: SharedCloudUserProfile) -> Self {
+        Self {
+            user_id: profile.user_id,
+            username: profile.username,
+            display_name: profile.display_name,
+            profile_url: profile.profile_url,
+        }
+    }
 }
 
 pub type CloudUploadProgressEvent = clipline_desktop::CloudUploadProgress;
@@ -175,46 +346,7 @@ pub struct CachedCloudClip {
     pub size_mb: f64,
     pub modified_unix: u64,
     pub duration_s: Option<f64>,
-}
-
-struct CloudAssetDownload<'a> {
-    remote_clip_id: &'a str,
-    asset: &'a str,
-    extension: &'a str,
-    version: Option<u64>,
-    expected_size_bytes: Option<i64>,
-    max_size_bytes: u64,
-    missing_ok: bool,
-}
-
-#[derive(Clone)]
-struct CachedCloudUserAvatar {
-    key: String,
-    etag: Option<String>,
-    data_url: String,
-}
-
-struct OwnedCloudCacheTemp {
-    path: PathBuf,
-    armed: bool,
-}
-
-impl OwnedCloudCacheTemp {
-    fn new(path: PathBuf) -> Self {
-        Self { path, armed: true }
-    }
-
-    fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for OwnedCloudCacheTemp {
-    fn drop(&mut self) {
-        if self.armed {
-            let _ = std::fs::remove_file(&self.path);
-        }
-    }
+    pub cloud_media_lease_id: u64,
 }
 
 #[tauri::command]
@@ -227,395 +359,325 @@ pub fn cloud_status(state: tauri::State<RuntimeState>) -> CloudConnectionStatus 
 }
 
 #[tauri::command]
-pub async fn list_cloud_clips(
-    state: tauri::State<'_, RuntimeState>,
-) -> Result<CloudLibraryListResult, String> {
-    let settings = state.settings();
-    let cloud = settings.cloud.clone();
-    let token_target = cloud
-        .credential_target
-        .clone()
-        .ok_or_else(|| "connect to Clipline Cloud first".to_string())?;
-    let token = read_credential(&token_target)?;
-    let client = connected_client(&cloud, &token)?;
-
-    let mut page = 1;
-    let mut clips = Vec::new();
-    let mut remote_ids = BTreeSet::new();
-    let mut truncated = false;
-    while page <= CLOUD_LIBRARY_MAX_PAGES && clips.len() < CLOUD_LIBRARY_MAX_CLIPS {
-        let request = ListClipsRequest {
-            sort: Some("uploaded_at_desc".to_string()),
-            page: Some(page),
-            page_size: Some(CLOUD_LIBRARY_PAGE_SIZE),
-            ..Default::default()
-        };
-        let response: clipline_cloud_api::ClipListResponse = bounded_cloud_json(
-            cloud_request(
-                client.base_url(),
-                Some(&token),
-                reqwest::Method::GET,
-                "api/v1/clips",
-            )?
-            .query(&request),
-            "list cloud clips",
-        )
+pub async fn list_cloud_clips(app: AppHandle<Wry>) -> Result<CloudLibraryListResult, String> {
+    let service = shared_cloud_service(&app)?;
+    let (token, fence) = current_cloud_work(&app)?;
+    let result = service
+        .legacy_list(token, &fence)
         .await
-        .map_err(cloud_error)?;
-        let clip_count = response.clips.len();
-        for clip in response.clips {
-            if !remote_ids.insert(clip.id.clone()) {
-                continue;
-            }
-            let local_record = clip
-                .client_clip_id
-                .as_deref()
-                .and_then(|local_clip_id| cloud.uploads.get(local_clip_id));
-            clips.push(cloud_library_clip_from_summary(&clip, local_record));
-            if clips.len() >= CLOUD_LIBRARY_MAX_CLIPS {
-                truncated = true;
-                break;
-            }
-        }
-        if clip_count < CLOUD_LIBRARY_PAGE_SIZE as usize {
-            break;
-        }
-        page += 1;
-        if page > CLOUD_LIBRARY_MAX_PAGES {
-            truncated = true;
-        }
-    }
-
-    Ok(CloudLibraryListResult { clips, truncated })
+        .map_err(|error| error.to_string())?;
+    Ok(CloudLibraryListResult {
+        clips: result
+            .value
+            .clips
+            .into_iter()
+            .map(|clip| CloudLibraryClip {
+                remote_clip_id: clip.remote_clip_id,
+                local_clip_id: clip.local_clip_id,
+                path: clip.path,
+                title: clip.title,
+                remote_url: clip.remote_url,
+                visibility: clip.visibility,
+                upload_status: clip.upload_status,
+                updated_at_unix: clip.updated_at_unix,
+                uploaded_at_unix: clip.uploaded_at_unix,
+                duration_ms: clip.duration_ms,
+                file_size_bytes: clip.file_size_bytes,
+                source_type: clip.source_type,
+            })
+            .collect(),
+        truncated: result.value.truncated,
+    })
 }
 
 #[tauri::command]
-pub async fn cloud_clip_thumbnail<R: Runtime>(
-    app: AppHandle<R>,
-    state: tauri::State<'_, RuntimeState>,
+pub async fn cloud_clip_thumbnail(
+    app: AppHandle<Wry>,
     request: CloudClipAssetRequest,
 ) -> Result<Option<String>, String> {
-    let (cloud, token) = cloud_asset_context(&state)?;
-    let Some(path) = download_cloud_asset_to_cache(
-        &cloud,
-        &token,
-        CloudAssetDownload {
-            remote_clip_id: &request.remote_clip_id,
-            asset: "thumbnail",
-            extension: "jpg",
-            version: request.updated_at_unix,
-            expected_size_bytes: None,
-            max_size_bytes: CLOUD_THUMBNAIL_MAX_BYTES,
-            missing_ok: true,
-        },
-    )
-    .await?
-    else {
+    let lifecycle = current_foreground_lifecycle(&app)?;
+    let (cache, account) = shared_cloud_cache(&app, lifecycle)?;
+    let asset_request = shared_cloud_asset_request(&account, &request, CloudAssetKind::Thumbnail)?;
+    let worker_cache = Arc::clone(&cache);
+    let cached = tokio::task::spawn_blocking(move || {
+        worker_cache.get(asset_request, &CloudCancellation::default())
+    })
+    .await
+    .map_err(|error| format!("cloud thumbnail worker failed: {error}"))?
+    .map_err(|error| error.to_string())?;
+    let Some(cached) = cached else {
         return Ok(None);
     };
-    allow_cloud_cache_asset(&app, &path)?;
-    Ok(Some(path.display().to_string()))
+    allow_cloud_cache_asset(&app, cached.path())?;
+    Ok(Some(cloud_cache_display_path(cached.path())))
 }
 
 #[tauri::command]
-pub async fn cache_cloud_clip_media<R: Runtime>(
-    app: AppHandle<R>,
-    state: tauri::State<'_, RuntimeState>,
+pub async fn cache_cloud_clip_media(
+    app: AppHandle<Wry>,
     request: CloudClipAssetRequest,
 ) -> Result<CachedCloudClip, String> {
-    let (cloud, token) = cloud_asset_context(&state)?;
-    let path = download_cloud_asset_to_cache(
-        &cloud,
-        &token,
-        CloudAssetDownload {
-            remote_clip_id: &request.remote_clip_id,
-            asset: "media",
-            extension: "mp4",
-            version: request.updated_at_unix,
-            expected_size_bytes: request.file_size_bytes,
-            max_size_bytes: cloud_media_cache_max_bytes(request.file_size_bytes),
-            missing_ok: false,
-        },
-    )
-    .await?
-    .ok_or_else(|| "cloud clip media is not available".to_string())?;
-    allow_cloud_cache_asset(&app, &path)?;
-    cached_cloud_clip_from_path(&path, &request)
-}
-
-#[tauri::command]
-pub async fn cloud_user_avatar(
-    state: tauri::State<'_, RuntimeState>,
-) -> Result<Option<String>, String> {
-    let (cloud, token) = cloud_asset_context(&state)?;
-    let cache_key = cloud_user_avatar_cache_key(&cloud)?;
-    let cached = cached_cloud_user_avatar(&cache_key);
-    let url = cloud_user_avatar_url(&cloud)?;
-    let mut request = crate::bounded_http::authenticated_stream_client()?
-        .get(url)
-        .bearer_auth(token);
-    if let Some(etag) = cached.as_ref().and_then(|avatar| avatar.etag.as_deref()) {
-        request = request.header(reqwest::header::IF_NONE_MATCH, etag);
-    }
-
-    let response = request
-        .send()
-        .await
-        .map_err(|e| format!("download cloud avatar: {e}"))?;
-    let status = response.status();
-    if status == reqwest::StatusCode::NOT_FOUND {
-        clear_cached_cloud_user_avatar(&cache_key);
-        return Ok(None);
-    }
-    if status == reqwest::StatusCode::NOT_MODIFIED {
-        return Ok(cached.map(|avatar| avatar.data_url));
-    }
-    if !status.is_success() {
-        let message =
-            crate::bounded_http::response_error_message(response, status, "cloud avatar").await;
-        return Err(format!(
-            "download cloud avatar failed with {status}: {message}"
-        ));
-    }
-    if response
-        .content_length()
-        .is_some_and(|length| length as usize > MAX_AVATAR_BYTES)
-    {
-        return Err("cloud avatar is too large".to_string());
-    }
-
-    let content_type = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_string);
-    let etag = response
-        .headers()
-        .get(reqwest::header::ETAG)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_string);
-    let bytes =
-        crate::bounded_http::response_bytes_limited(response, MAX_AVATAR_BYTES, "cloud avatar")
-            .await?;
-    let data_url = cloud_user_avatar_data_url(content_type.as_deref(), &bytes)?;
-    store_cached_cloud_user_avatar(CachedCloudUserAvatar {
-        key: cache_key,
-        etag,
-        data_url: data_url.clone(),
-    });
-    Ok(Some(data_url))
-}
-
-#[tauri::command]
-pub async fn cloud_user_profile(
-    state: tauri::State<'_, RuntimeState>,
-) -> Result<CloudUserProfile, String> {
-    let (cloud, token) = cloud_asset_context(&state)?;
-    let client = connected_client(&cloud, &token)?;
-    let response: MeResponse = bounded_cloud_json(
-        cloud_request(
-            client.base_url(),
-            Some(&token),
-            reqwest::Method::GET,
-            "api/v1/auth/me",
-        )?,
-        "load cloud profile",
-    )
+    let lifecycle = current_foreground_lifecycle(&app)?;
+    let (cache, account) = shared_cloud_cache(&app, lifecycle)?;
+    let asset_request = shared_cloud_asset_request(&account, &request, CloudAssetKind::Media)?;
+    let worker_cache = Arc::clone(&cache);
+    let cached = tokio::task::spawn_blocking(move || {
+        worker_cache.get(asset_request, &CloudCancellation::default())
+    })
     .await
-    .map_err(cloud_error)?;
-    let profile = cloud_user_profile_from_response(&cloud, &response.user)?;
-    let profile_for_settings = profile.clone();
-    let _settings = state.update_cloud(|cloud| {
-        cloud.connected_user_id = Some(profile_for_settings.user_id.clone());
-        cloud.connected_username = Some(profile_for_settings.username.clone());
-        cloud.connected_display_name = profile_for_settings.display_name.clone();
-    })?;
-    Ok(profile)
+    .map_err(|error| format!("cloud media worker failed: {error}"))?
+    .map_err(|error| error.to_string())?
+    .ok_or_else(|| "cloud clip media is not available".to_string())?;
+    allow_cloud_cache_asset(&app, cached.path())?;
+    let lease = cache
+        .accept_media(&account, cached)
+        .map_err(|error| error.to_string())?;
+    let path = lease.path().to_path_buf();
+    let mut clip = cached_cloud_clip_from_path(&path, &request)?;
+    let cloud_media_lease_id = register_cloud_media_lease(lease)?;
+    clip.cloud_media_lease_id = cloud_media_lease_id;
+    Ok(clip)
 }
 
 #[tauri::command]
-pub fn open_cloud_user_profile(state: tauri::State<RuntimeState>) -> Result<(), String> {
-    let cloud = state.settings().cloud;
-    let username = cloud
-        .connected_username
+pub fn release_cloud_media_lease(cloud_media_lease_id: u64) -> Result<(), String> {
+    shared_cloud_media_leases()
+        .lock()
+        .map_err(|_| "cloud media lease lock poisoned".to_string())?
+        .remove(&cloud_media_lease_id);
+    Ok(())
+}
+
+pub(crate) fn release_all_cloud_media_leases() {
+    if let Some(leases) = SHARED_CLOUD_MEDIA_LEASES.get() {
+        leases
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+}
+
+#[tauri::command]
+pub async fn cloud_user_avatar(app: AppHandle<Wry>) -> Result<Option<String>, String> {
+    let service = shared_cloud_service(&app)?;
+    let (token, fence) = current_cloud_work(&app)?;
+    let result = service
+        .avatar(token, &fence)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(result
+        .value
+        .map(|avatar| cloud_user_avatar_data_url(&avatar.content_type, &avatar.bytes)))
+}
+
+#[tauri::command]
+pub async fn cloud_user_profile(app: AppHandle<Wry>) -> Result<CloudUserProfile, String> {
+    let service = shared_cloud_service(&app)?;
+    let (token, fence) = current_cloud_work(&app)?;
+    let result = service
+        .profile(token, &fence)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(result.value.into())
+}
+
+#[tauri::command]
+pub fn open_cloud_user_profile(app: AppHandle<Wry>) -> Result<(), String> {
+    let service = shared_cloud_service(&app)?;
+    let (token, fence) = current_cloud_work(&app)?;
+    let effect = service
+        .open_profile_effect(token, &fence)
+        .map_err(|error| error.to_string())?;
+    open_cloud_browser_effect(effect.value)
+}
+
+#[tauri::command]
+pub fn open_cloud_clip(app: AppHandle<Wry>, remote_clip_id: String) -> Result<(), String> {
+    let service = shared_cloud_service(&app)?;
+    let (token, fence) = current_cloud_work(&app)?;
+    let effect = service
+        .open_clip_effect(token, &fence, &remote_clip_id)
+        .map_err(|error| error.to_string())?;
+    open_cloud_browser_effect(effect.value)
+}
+
+struct RuntimeCloudAvailableSpace;
+
+impl AvailableSpacePort for RuntimeCloudAvailableSpace {
+    fn available_bytes(&self, cache_root: &Path) -> Result<u64, CloudCacheError> {
+        crate::windows::available_space_bytes(cache_root, "read shared cloud cache free space")
+            .map_err(CloudCacheError::Io)
+    }
+}
+
+#[derive(Clone)]
+struct RuntimeCloudPublicationGuard {
+    app: AppHandle<Wry>,
+    lifecycle: clipline_desktop::WindowLifecycleSnapshot,
+}
+
+impl AccountPublicationGuard for RuntimeCloudPublicationGuard {
+    fn is_current(&self, account: &CloudAccountFence) -> bool {
+        if self.app.state::<WindowLifecycleState>().snapshot() != self.lifecycle {
+            return false;
+        }
+        self.app
+            .state::<RuntimeState>()
+            .with_cloud_settings_exclusive(|cloud, generation| {
+                Ok(cloud_cache_account_fence(cloud, generation)
+                    .is_ok_and(|current| current == *account))
+            })
+            .unwrap_or(false)
+    }
+
+    fn publish_if_current(
+        &self,
+        account: &CloudAccountFence,
+        publication: &mut dyn FnMut() -> Result<(), CloudCacheError>,
+    ) -> Result<(), CloudCacheError> {
+        if self.app.state::<WindowLifecycleState>().snapshot() != self.lifecycle {
+            return Err(CloudCacheError::StaleAccount);
+        }
+        let mut publication_result = None;
+        self.app
+            .state::<RuntimeState>()
+            .with_cloud_settings_exclusive(|cloud, generation| {
+                let current = cloud_cache_account_fence(cloud, generation)
+                    .map_err(|error| error.to_string())?;
+                publication_result = Some(if &current == account
+                    && self.app.state::<WindowLifecycleState>().snapshot() == self.lifecycle
+                {
+                    publication()
+                } else {
+                    Err(CloudCacheError::StaleAccount)
+                });
+                Ok(())
+            })
+            .map_err(CloudCacheError::Io)?;
+        publication_result.unwrap_or_else(|| {
+            Err(CloudCacheError::Internal(
+                "cloud account publication closure was not invoked".into(),
+            ))
+        })
+    }
+}
+
+fn shared_cloud_cache(
+    app: &AppHandle<Wry>,
+    lifecycle: clipline_desktop::WindowLifecycleSnapshot,
+) -> Result<(Arc<CloudCache>, CloudAccountFence), String> {
+    if lifecycle.mode != WindowLifecycleMode::Foreground
+        || app.state::<WindowLifecycleState>().snapshot() != lifecycle
+    {
+        return Err("cloud cache work requires the current foreground window".into());
+    }
+    let state = app.state::<RuntimeState>();
+    let (cloud, generation) = state.cloud_settings_generation()?;
+    let account = cloud_cache_account_fence(&cloud, generation)?;
+    let credential_target = cloud
+        .credential_target
         .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| "Clipline Cloud username is unknown".to_string())?;
-    let url = cloud_user_profile_url(&cloud, username)?;
-    open_cloud_url(url.as_str(), "cloud user profile")
+        .ok_or_else(|| "Clipline Cloud is not connected".to_string())?;
+    let credential = read_credential(credential_target)?;
+    let root = prepare_cloud_cache_root()?;
+    let download = ReqwestAssetDownload::new(&cloud.host_url, credential)
+        .map_err(|error| error.to_string())?;
+    let cache = CloudCache::open(
+        root,
+        Arc::new(download),
+        Arc::new(RuntimeCloudAvailableSpace),
+        Arc::new(RuntimeCloudPublicationGuard {
+            app: app.clone(),
+            lifecycle,
+        }),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok((Arc::new(cache), account))
 }
 
-#[tauri::command]
-pub fn open_cloud_clip(
-    state: tauri::State<RuntimeState>,
-    remote_clip_id: String,
-) -> Result<(), String> {
-    let cloud = state.settings().cloud;
-    let url = cloud_owner_clip_page_url(&cloud, &remote_clip_id)?;
-    open_cloud_url(url.as_str(), "cloud clip page")
+fn current_foreground_lifecycle(
+    app: &AppHandle<Wry>,
+) -> Result<clipline_desktop::WindowLifecycleSnapshot, String> {
+    let lifecycle = app.state::<WindowLifecycleState>().snapshot();
+    if lifecycle.mode != WindowLifecycleMode::Foreground {
+        return Err("cloud foreground work requires the main window".into());
+    }
+    Ok(lifecycle)
+}
+
+fn cloud_cache_account_fence(
+    cloud: &CloudSettings,
+    generation: u64,
+) -> Result<CloudAccountFence, String> {
+    if !cloud.connected() {
+        return Err("Clipline Cloud is not connected".into());
+    }
+    let service =
+        service_account_from_settings(cloud, generation).map_err(|error| error.to_string())?;
+    let stable_account = cloud
+        .connected_user_id
+        .as_deref()
+        .or(cloud.connected_username.as_deref())
+        .or(cloud.credential_target.as_deref())
+        .ok_or_else(|| "Clipline Cloud account identity is unavailable".to_string())?;
+    Ok(CloudAccountFence {
+        account_key: service.snapshot.account_key,
+        account_generation: service.snapshot.generation,
+        cache_namespace: CloudCacheNamespace::derive(&cloud.host_url, stable_account)
+            .map_err(|error| error.to_string())?,
+    })
+}
+
+fn shared_cloud_asset_request(
+    account: &CloudAccountFence,
+    request: &CloudClipAssetRequest,
+    kind: CloudAssetKind,
+) -> Result<SharedCloudAssetRequest, String> {
+    let expected_size_bytes = request
+        .file_size_bytes
+        .filter(|bytes| *bytes > 0)
+        .map(u64::try_from)
+        .transpose()
+        .map_err(|_| "cloud asset size is invalid".to_string())?;
+    Ok(SharedCloudAssetRequest {
+        account: account.clone(),
+        asset: CloudAssetKey::new(
+            &request.remote_clip_id,
+            kind,
+            request.updated_at_unix.unwrap_or(0),
+        )
+        .map_err(|error| error.to_string())?,
+        expected_size_bytes: (kind == CloudAssetKind::Media)
+            .then_some(expected_size_bytes)
+            .flatten(),
+    })
+}
+
+fn shared_cloud_media_leases() -> &'static Mutex<HashMap<u64, CloudMediaLease>> {
+    SHARED_CLOUD_MEDIA_LEASES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn register_cloud_media_lease(lease: CloudMediaLease) -> Result<u64, String> {
+    let lease_id = CLOUD_MEDIA_LEASE_GENERATION
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            current.checked_add(1)
+        })
+        .map_err(|_| "cloud media lease generation exhausted".to_string())?
+        + 1;
+    shared_cloud_media_leases()
+        .lock()
+        .map_err(|_| "cloud media lease lock poisoned".to_string())?
+        .insert(lease_id, lease);
+    Ok(lease_id)
+}
+
+fn open_cloud_browser_effect(effect: CloudBrowserEffect) -> Result<(), String> {
+    open_cloud_url(&effect.url, &effect.context)
 }
 
 fn open_cloud_url(url: &str, context: &str) -> Result<(), String> {
     clipline_shell::windows::shell_execute::open_browser_url(url, context)
         .map_err(|error| error.to_string())
-}
-
-fn cloud_asset_context(
-    state: &tauri::State<'_, RuntimeState>,
-) -> Result<(CloudSettings, String), String> {
-    let cloud = state.settings().cloud;
-    let token_target = cloud
-        .credential_target
-        .as_deref()
-        .ok_or_else(|| "Clipline Cloud is not connected".to_string())?;
-    let token = read_credential(token_target)?;
-    Ok((cloud, token))
-}
-
-async fn download_cloud_asset_to_cache(
-    cloud: &CloudSettings,
-    token: &str,
-    request: CloudAssetDownload<'_>,
-) -> Result<Option<PathBuf>, String> {
-    let cache_root = prepare_cloud_cache_root()?;
-    let target = cloud_clip_cache_path(
-        cloud,
-        request.remote_clip_id,
-        request.asset,
-        request.extension,
-        request.version,
-    )?;
-    lease_cloud_cache_path(&target);
-    prune_cloud_cache_for_download(&cache_root, 0, std::slice::from_ref(&target))?;
-    if cached_asset_matches(&target, request.expected_size_bytes) {
-        touch_cloud_cache_entry(&target)?;
-        return Ok(Some(target));
-    }
-    let url = cloud_clip_asset_url(cloud, request.remote_clip_id, request.asset)?;
-    if let Some(parent) = target.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| format!("create cloud cache: {e}"))?;
-    }
-
-    let response = crate::bounded_http::authenticated_stream_client()?
-        .get(url)
-        .bearer_auth(token)
-        .send()
-        .await
-        .map_err(|e| format!("download cloud {}: {e}", request.asset))?;
-    let status = response.status();
-    if status == reqwest::StatusCode::NOT_FOUND && request.missing_ok {
-        return Ok(None);
-    }
-    if !status.is_success() {
-        let message = crate::bounded_http::response_error_message(
-            response,
-            status,
-            &format!("cloud {}", request.asset),
-        )
-        .await;
-        return Err(format!(
-            "download cloud {} failed with {status}: {message}",
-            request.asset
-        ));
-    }
-    if response
-        .content_length()
-        .is_some_and(|length| length > request.max_size_bytes)
-    {
-        return Err(format!(
-            "download cloud {} is too large (limit {:.1} MB)",
-            request.asset,
-            request.max_size_bytes as f64 / (1024.0 * 1024.0)
-        ));
-    }
-    let reservation = response
-        .content_length()
-        .unwrap_or(request.max_size_bytes)
-        .min(request.max_size_bytes);
-    prune_cloud_cache_for_download(&cache_root, reservation, std::slice::from_ref(&target))?;
-
-    let tmp = cloud_clip_cache_tmp_path(&target)?;
-    let mut response = response;
-    let mut file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&tmp)
-        .await
-        .map_err(|e| format!("create cloud cache file: {e}"))?;
-    let mut tmp_owner = OwnedCloudCacheTemp::new(tmp.clone());
-    let mut written = 0_u64;
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|e| format!("read cloud {}: {e}", request.asset))?
-    {
-        written += chunk.len() as u64;
-        if written > request.max_size_bytes {
-            return Err(format!(
-                "download cloud {} is too large (limit {:.1} MB)",
-                request.asset,
-                request.max_size_bytes as f64 / (1024.0 * 1024.0)
-            ));
-        }
-        file.write_all(&chunk)
-            .await
-            .map_err(|e| format!("write cloud cache file: {e}"))?;
-    }
-    file.flush()
-        .await
-        .map_err(|e| format!("flush cloud cache file: {e}"))?;
-    drop(file);
-    if written == 0 {
-        return Err(format!(
-            "download cloud {} returned an empty body",
-            request.asset
-        ));
-    }
-
-    {
-        let _cache_guard = cloud_cache_lock()
-            .lock()
-            .map_err(|_| "cloud cache lock is poisoned".to_string())?;
-        if target.exists() && !cached_asset_matches(&target, request.expected_size_bytes) {
-            let _ = std::fs::remove_file(cloud_cache_marker_path(&target));
-            let _ = std::fs::remove_file(&target);
-        }
-        let mut protected = leased_cloud_cache_paths();
-        protected.push(target.clone());
-        protected.push(tmp.clone());
-        let free = cloud_cache_available_space(&cache_root)?;
-        enforce_cloud_cache_limits(
-            &cache_root,
-            CLOUD_CACHE_MAX_AGE,
-            CLOUD_CACHE_QUOTA_BYTES,
-            free,
-            CLOUD_CACHE_FREE_SPACE_FLOOR_BYTES,
-            written,
-            &protected,
-        )?;
-    }
-
-    match tokio::fs::rename(&tmp, &target).await {
-        Ok(()) => {
-            tmp_owner.disarm();
-            write_cloud_cache_marker(&target, written).await?;
-            touch_cloud_cache_entry(&target)?;
-            lease_cloud_cache_path(&target);
-            Ok(Some(target))
-        }
-        Err(error) if target.exists() => {
-            if cached_asset_matches(&target, request.expected_size_bytes) {
-                touch_cloud_cache_entry(&target)?;
-                Ok(Some(target))
-            } else {
-                Err(format!("finalize cloud cache file: {error}"))
-            }
-        }
-        Err(error) => Err(format!("finalize cloud cache file: {error}")),
-    }
 }
 
 fn cloud_clip_asset_url(
@@ -631,125 +693,11 @@ fn cloud_clip_asset_url(
         .map_err(|e| format!("cloud asset URL is invalid: {e}"))
 }
 
-fn cloud_user_avatar_url(cloud: &CloudSettings) -> Result<reqwest::Url, String> {
-    let base =
-        clipline_cloud_api::validate_cloud_host(&cloud.host_url, true).map_err(cloud_error)?;
-    base.join("api/v1/me/avatar")
-        .map_err(|e| format!("cloud avatar URL is invalid: {e}"))
-}
-
-fn cloud_user_profile_from_response(
-    cloud: &CloudSettings,
-    user: &clipline_cloud_api::UserResponse,
-) -> Result<CloudUserProfile, String> {
-    let display_name = user
-        .display_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
-    Ok(CloudUserProfile {
-        user_id: user.id.clone(),
-        username: user.username.clone(),
-        display_name,
-        profile_url: cloud_user_profile_url(cloud, &user.username)?.to_string(),
-    })
-}
-
-fn cloud_user_profile_url(cloud: &CloudSettings, username: &str) -> Result<reqwest::Url, String> {
-    let username = username.trim();
-    if username.is_empty() {
-        return Err("Clipline Cloud username is unknown".to_string());
-    }
-    let base = cloud.public_url.as_deref().unwrap_or(&cloud.host_url);
-    let mut url = clipline_cloud_api::validate_cloud_host(base, true).map_err(cloud_error)?;
-    url = url
-        .join("u/")
-        .map_err(|e| format!("cloud user profile URL is invalid: {e}"))?;
-    url.path_segments_mut()
-        .map_err(|_| "cloud user profile URL cannot be a base".to_string())?
-        .pop_if_empty()
-        .push(username);
-    Ok(url)
-}
-
-fn cloud_user_avatar_cache_key(cloud: &CloudSettings) -> Result<String, String> {
-    let base =
-        clipline_cloud_api::validate_cloud_host(&cloud.host_url, true).map_err(cloud_error)?;
-    let user_id = cloud
-        .connected_user_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| "Clipline Cloud user is unknown".to_string())?;
-    Ok(format!("{}|{user_id}", base.as_str().trim_end_matches('/')))
-}
-
-fn cloud_user_avatar_data_url(content_type: Option<&str>, bytes: &[u8]) -> Result<String, String> {
-    if bytes.is_empty() {
-        return Err("cloud avatar returned an empty body".to_string());
-    }
-    if bytes.len() > MAX_AVATAR_BYTES {
-        return Err("cloud avatar is too large".to_string());
-    }
-    let mime = content_type
-        .and_then(|value| value.split(';').next())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("image/jpeg")
-        .to_ascii_lowercase();
-    if !mime.starts_with("image/") {
-        return Err(format!("cloud avatar response is not an image: {mime}"));
-    }
-    Ok(format!(
-        "data:{mime};base64,{}",
+fn cloud_user_avatar_data_url(content_type: &str, bytes: &[u8]) -> String {
+    format!(
+        "data:{content_type};base64,{}",
         general_purpose::STANDARD.encode(bytes)
-    ))
-}
-
-fn cloud_user_avatar_cache() -> &'static Mutex<Option<CachedCloudUserAvatar>> {
-    CLOUD_USER_AVATAR_CACHE.get_or_init(|| Mutex::new(None))
-}
-
-fn cached_cloud_user_avatar(key: &str) -> Option<CachedCloudUserAvatar> {
-    cloud_user_avatar_cache()
-        .lock()
-        .ok()
-        .and_then(|avatar| avatar.as_ref().filter(|cached| cached.key == key).cloned())
-}
-
-fn store_cached_cloud_user_avatar(avatar: CachedCloudUserAvatar) {
-    if let Ok(mut cached) = cloud_user_avatar_cache().lock() {
-        *cached = Some(avatar);
-    }
-}
-
-fn clear_cached_cloud_user_avatar(key: &str) {
-    if let Ok(mut cached) = cloud_user_avatar_cache().lock() {
-        if cached.as_ref().is_some_and(|avatar| avatar.key == key) {
-            *cached = None;
-        }
-    }
-}
-
-fn cloud_clip_cache_path(
-    cloud: &CloudSettings,
-    remote_clip_id: &str,
-    asset: &str,
-    extension: &str,
-    version: Option<u64>,
-) -> Result<PathBuf, String> {
-    let file_name = cache_identity::cloud_cache_file_name(
-        remote_clip_id,
-        asset,
-        extension,
-        version.unwrap_or(0),
-    )?;
-    Ok(cloud_clip_cache_dir(cloud)?.join(file_name))
-}
-
-fn cloud_clip_cache_dir(cloud: &CloudSettings) -> Result<PathBuf, String> {
-    Ok(cloud_clip_cache_root_dir().join(cloud_cache_namespace(cloud)?))
+    )
 }
 
 fn cloud_clip_cache_root_dir() -> PathBuf {
@@ -803,308 +751,11 @@ fn migrate_legacy_cloud_cache(legacy: &Path, local: &Path) -> Result<(), String>
     Ok(())
 }
 
-fn cloud_cache_namespace(cloud: &CloudSettings) -> Result<String, String> {
-    let base =
-        clipline_cloud_api::validate_cloud_host(&cloud.host_url, true).map_err(cloud_error)?;
-    let account = cloud
-        .connected_user_id
-        .as_deref()
-        .or(cloud.connected_username.as_deref())
-        .or(cloud.credential_target.as_deref())
-        .unwrap_or("anonymous")
-        .trim();
-    Ok(cache_identity::cloud_cache_namespace(
-        base.as_str(),
-        account,
-    ))
-}
-
-fn cached_asset_matches(path: &Path, expected_size_bytes: Option<i64>) -> bool {
-    let Ok(meta) = std::fs::metadata(path) else {
-        return false;
-    };
-    if !meta.is_file() || meta.len() == 0 {
-        return false;
-    }
-    if cloud_cache_marker_matches(path, meta.len()) {
-        return true;
-    }
-    match expected_size_bytes {
-        Some(expected) if expected > 0 => meta.len() == expected as u64,
-        _ => true,
-    }
-}
-
-fn cloud_cache_marker_path(path: &Path) -> PathBuf {
-    let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
-    if extension.is_empty() {
-        path.with_extension("ok")
-    } else {
-        path.with_extension(format!("{extension}.ok"))
-    }
-}
-
-fn cloud_cache_marker_matches(path: &Path, size_bytes: u64) -> bool {
-    std::fs::read_to_string(cloud_cache_marker_path(path))
-        .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        == Some(size_bytes)
-}
-
-async fn write_cloud_cache_marker(path: &Path, size_bytes: u64) -> Result<(), String> {
-    tokio::fs::write(cloud_cache_marker_path(path), size_bytes.to_string())
-        .await
-        .map_err(|e| format!("write cloud cache marker: {e}"))
-}
-
-fn cloud_clip_cache_tmp_path(target: &Path) -> Result<PathBuf, String> {
-    let file_name = target
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| "cloud cache target has no filename".to_string())?;
-    let count = CLOUD_CACHE_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    Ok(target.with_file_name(format!("{file_name}.{}.{}.tmp", std::process::id(), count)))
-}
-
-fn cloud_media_cache_max_bytes(expected_size_bytes: Option<i64>) -> u64 {
-    expected_size_bytes
-        .filter(|bytes| *bytes > 0)
-        .map(|bytes| {
-            (bytes as u64)
-                .saturating_mul(2)
-                .saturating_add(CLOUD_MEDIA_SIZE_SLACK_BYTES)
-        })
-        .unwrap_or(CLOUD_MEDIA_FALLBACK_MAX_BYTES)
-        .min(CLOUD_MEDIA_HARD_MAX_BYTES)
-}
-
-#[derive(Debug, Default, PartialEq, Eq)]
-struct CloudCachePruneReport {
-    evicted_entries: usize,
-    freed_bytes: u64,
-    remaining_bytes: u64,
-}
-
-struct CloudCacheEntry {
-    path: PathBuf,
-    marker: Option<PathBuf>,
-    bytes: u64,
-    modified: std::time::SystemTime,
-}
-
-fn cloud_cache_lock() -> &'static Mutex<()> {
-    CLOUD_CACHE_LOCK.get_or_init(|| Mutex::new(()))
-}
-
-fn cloud_cache_leases() -> &'static Mutex<BTreeMap<PathBuf, Instant>> {
-    CLOUD_CACHE_LEASES.get_or_init(|| Mutex::new(BTreeMap::new()))
-}
-
-fn lease_cloud_cache_path(path: &Path) {
-    if let Ok(mut leases) = cloud_cache_leases().lock() {
-        let now = Instant::now();
-        leases.retain(|_, expires| *expires > now);
-        leases.insert(path.to_path_buf(), now + CLOUD_CACHE_PLAYBACK_LEASE);
-    }
-}
-
-fn leased_cloud_cache_paths() -> Vec<PathBuf> {
-    let Ok(mut leases) = cloud_cache_leases().lock() else {
-        return Vec::new();
-    };
-    let now = Instant::now();
-    leases.retain(|_, expires| *expires > now);
-    leases.keys().cloned().collect()
-}
-
-fn prune_cloud_cache_for_download(
-    root: &Path,
-    additional_bytes: u64,
-    additionally_protected: &[PathBuf],
-) -> Result<CloudCachePruneReport, String> {
-    let _guard = cloud_cache_lock()
-        .lock()
-        .map_err(|_| "cloud cache lock is poisoned".to_string())?;
-    let mut protected = leased_cloud_cache_paths();
-    protected.extend_from_slice(additionally_protected);
-    let free = cloud_cache_available_space(root)?;
-    enforce_cloud_cache_limits(
-        root,
-        CLOUD_CACHE_MAX_AGE,
-        CLOUD_CACHE_QUOTA_BYTES,
-        free,
-        CLOUD_CACHE_FREE_SPACE_FLOOR_BYTES.saturating_add(additional_bytes),
-        additional_bytes,
-        &protected,
-    )
-}
-
-fn enforce_cloud_cache_limits(
-    root: &Path,
-    max_age: Duration,
-    quota_bytes: u64,
-    available_bytes: u64,
-    free_space_floor_bytes: u64,
-    additional_bytes: u64,
-    protected: &[PathBuf],
-) -> Result<CloudCachePruneReport, String> {
-    let now = std::time::SystemTime::now();
-    let mut entries = Vec::new();
-    collect_cloud_cache_entries(root, now, &mut entries)?;
-    entries.sort_by_key(|entry| entry.modified);
-    let total = entries
-        .iter()
-        .fold(0_u64, |sum, entry| sum.saturating_add(entry.bytes));
-    let required_for_quota = total
-        .saturating_add(additional_bytes)
-        .saturating_sub(quota_bytes);
-    let required_for_free_space = free_space_floor_bytes.saturating_sub(available_bytes);
-    let required = required_for_quota.max(required_for_free_space);
-    let mut report = CloudCachePruneReport::default();
-
-    for entry in entries {
-        let is_protected = protected.iter().any(|path| {
-            path == &entry.path || entry.marker.as_ref().is_some_and(|marker| marker == path)
-        });
-        if is_protected {
-            continue;
-        }
-        let old = now
-            .duration_since(entry.modified)
-            .ok()
-            .is_some_and(|age| age >= max_age);
-        if !old && report.freed_bytes >= required {
-            continue;
-        }
-        if std::fs::remove_file(&entry.path).is_err() {
-            continue;
-        }
-        if let Some(marker) = entry.marker {
-            let _ = std::fs::remove_file(marker);
-        }
-        report.evicted_entries += 1;
-        report.freed_bytes = report.freed_bytes.saturating_add(entry.bytes);
-    }
-
-    report.remaining_bytes = total.saturating_sub(report.freed_bytes);
-    let quota_satisfied = report.remaining_bytes.saturating_add(additional_bytes) <= quota_bytes;
-    let free_space_satisfied =
-        available_bytes.saturating_add(report.freed_bytes) >= free_space_floor_bytes;
-    if !quota_satisfied || !free_space_satisfied {
-        return Err(format!(
-            "cloud cache cannot reserve {:.1} MB without evicting active media or crossing its disk limits",
-            additional_bytes as f64 / (1024.0 * 1024.0)
-        ));
-    }
-    Ok(report)
-}
-
-fn collect_cloud_cache_entries(
-    directory: &Path,
-    now: std::time::SystemTime,
-    entries: &mut Vec<CloudCacheEntry>,
-) -> Result<(), String> {
-    let read_dir = match std::fs::read_dir(directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(format!("read cloud cache {directory:?}: {error}")),
-    };
-    for entry in read_dir.flatten() {
-        let path = entry.path();
-        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
-            continue;
-        };
-        if metadata.is_dir() {
-            if !metadata_is_link(&metadata) {
-                collect_cloud_cache_entries(&path, now, entries)?;
-            }
-            continue;
-        }
-        if !metadata.is_file() || metadata_is_link(&metadata) {
-            continue;
-        }
-        let modified = metadata.modified().unwrap_or(std::time::UNIX_EPOCH);
-        if is_owned_cloud_cache_temp(&path) {
-            let stale = now
-                .duration_since(modified)
-                .ok()
-                .is_some_and(|age| age >= CLOUD_CACHE_TEMP_MAX_AGE);
-            if stale {
-                let _ = std::fs::remove_file(path);
-            }
-            continue;
-        }
-        let is_marker = path.extension().and_then(|ext| ext.to_str()) == Some("ok");
-        if is_marker {
-            let asset = path.with_extension("");
-            if asset.is_file() {
-                continue;
-            }
-            entries.push(CloudCacheEntry {
-                path,
-                marker: None,
-                bytes: metadata.len(),
-                modified,
-            });
-            continue;
-        }
-        let marker = cloud_cache_marker_path(&path);
-        let marker_bytes = std::fs::metadata(&marker)
-            .ok()
-            .filter(|metadata| metadata.is_file())
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
-        entries.push(CloudCacheEntry {
-            path,
-            marker: (marker_bytes > 0).then_some(marker),
-            bytes: metadata.len().saturating_add(marker_bytes),
-            modified,
-        });
-    }
-    Ok(())
-}
-
-fn is_owned_cloud_cache_temp(path: &Path) -> bool {
-    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-    let mut parts = name.rsplit('.');
-    parts.next() == Some("tmp")
-        && parts
-            .next()
-            .is_some_and(|part| part.bytes().all(|byte| byte.is_ascii_digit()))
-        && parts
-            .next()
-            .is_some_and(|part| part.bytes().all(|byte| byte.is_ascii_digit()))
-        && parts.next().is_some()
-}
-
 fn metadata_is_link(metadata: &std::fs::Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
     metadata.file_type().is_symlink()
         || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-}
-
-fn touch_cloud_cache_entry(path: &Path) -> Result<(), String> {
-    let now = std::time::SystemTime::now();
-    std::fs::File::options()
-        .write(true)
-        .open(path)
-        .and_then(|file| file.set_modified(now))
-        .map_err(|error| format!("refresh cloud cache recency: {error}"))?;
-    let marker = cloud_cache_marker_path(path);
-    if marker.exists() {
-        let _ = std::fs::File::options()
-            .write(true)
-            .open(marker)
-            .and_then(|file| file.set_modified(now));
-    }
-    Ok(())
-}
-
-fn cloud_cache_available_space(path: &Path) -> Result<u64, String> {
-    crate::windows::available_space_bytes(path, "read cloud cache free space")
 }
 
 fn allow_cloud_cache_asset<R: Runtime>(app: &AppHandle<R>, path: &Path) -> Result<(), String> {
@@ -1148,7 +799,7 @@ fn cached_cloud_clip_from_path(
         format!("{title}.mp4")
     };
     Ok(CachedCloudClip {
-        path: path.display().to_string(),
+        path: cloud_cache_display_path(path),
         name,
         size_mb: meta.len() as f64 / (1024.0 * 1024.0),
         modified_unix,
@@ -1156,7 +807,20 @@ fn cached_cloud_clip_from_path(
             .duration_ms
             .filter(|duration| *duration >= 0)
             .map(|duration| duration as f64 / 1000.0),
+        cloud_media_lease_id: 0,
     })
+}
+
+fn cloud_cache_display_path(path: &Path) -> String {
+    let display = path.to_string_lossy();
+    let lowercase = display.to_ascii_lowercase();
+    if lowercase.starts_with(r"\\?\unc\") {
+        format!(r"\\{}", &display[8..])
+    } else if lowercase.starts_with(r"\\?\") {
+        display[4..].to_string()
+    } else {
+        display.into_owned()
+    }
 }
 
 #[tauri::command]
@@ -1997,7 +1661,7 @@ fn reserve_upload_payload_path(source: &Path) -> Result<PathBuf, String> {
         .ok_or_else(|| "clip path must include a parent directory".to_string())?;
     prune_abandoned_upload_payloads(parent);
     for _ in 0..128 {
-        let suffix = CLOUD_CACHE_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let suffix = UPLOAD_PAYLOAD_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
         let mut name = file_name.to_os_string();
         name.push(format!(
             ".clipline-upload-{}-{suffix}.tmp",
@@ -2274,32 +1938,6 @@ fn apply_remote_clip_to_record(record: &mut CloudUploadRecord, clip: &ClipDetail
     record.updated_at_unix = unix_now();
 }
 
-fn cloud_library_clip_from_summary(
-    clip: &ClipSummaryResponse,
-    local_record: Option<&CloudUploadRecord>,
-) -> CloudLibraryClip {
-    CloudLibraryClip {
-        remote_clip_id: clip.id.clone(),
-        local_clip_id: clip.client_clip_id.clone(),
-        path: local_record
-            .map(|record| record.path.clone())
-            .unwrap_or_default(),
-        title: clip.title.clone(),
-        remote_url: if clip.visibility == "private" {
-            String::new()
-        } else {
-            clip.public_url.clone().unwrap_or_default()
-        },
-        visibility: clip.visibility.clone(),
-        upload_status: upload_status_for_summary_clip(clip),
-        updated_at_unix: datetime_to_unix_seconds(clip.updated_at),
-        uploaded_at_unix: clip.uploaded_at.map(datetime_to_unix_seconds),
-        duration_ms: clip.duration_ms,
-        file_size_bytes: clip.file_size_bytes,
-        source_type: clip.source_type.clone(),
-    }
-}
-
 fn upload_status_for_remote_clip(clip: &ClipDetailResponse) -> String {
     if clip.status != "ready" {
         "uploaded_processing".to_string()
@@ -2308,19 +1946,6 @@ fn upload_status_for_remote_clip(clip: &ClipDetailResponse) -> String {
     } else {
         "uploaded_public".to_string()
     }
-}
-
-fn upload_status_for_summary_clip(clip: &ClipSummaryResponse) -> String {
-    match clip.status.as_str() {
-        "failed" => "failed".to_string(),
-        "ready" if clip.visibility == "private" => "uploaded_private".to_string(),
-        "ready" => "uploaded_public".to_string(),
-        _ => "uploaded_processing".to_string(),
-    }
-}
-
-fn datetime_to_unix_seconds(value: DateTime<Utc>) -> u64 {
-    value.timestamp().max(0) as u64
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2473,23 +2098,6 @@ async fn verify_ready_cloud_media(
     Ok(())
 }
 
-fn cloud_owner_clip_page_url(
-    cloud: &CloudSettings,
-    remote_clip_id: &str,
-) -> Result<reqwest::Url, String> {
-    let remote_clip_id = validate_cloud_cache_component(remote_clip_id, "remote clip id")?;
-    let base = cloud.public_url.as_deref().unwrap_or(&cloud.host_url);
-    let mut url = clipline_cloud_api::validate_cloud_host(base, true).map_err(cloud_error)?;
-    url = url
-        .join("clip/")
-        .map_err(|error| format!("cloud clip page URL is invalid: {error}"))?;
-    url.path_segments_mut()
-        .map_err(|_| "cloud clip page URL cannot be a base".to_string())?
-        .pop_if_empty()
-        .push(remote_clip_id);
-    Ok(url)
-}
-
 fn credential_target(host_url: &str, user_id: &str) -> String {
     clipline_settings::cloud::cloud_credential_target(host_url, user_id)
 }
@@ -2523,7 +2131,6 @@ fn cloud_error_is_not_found(error: &CloudApiError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clipline_cloud_api::ClipSummaryResponse;
     use clipline_events::ClipAudioTrack;
     use clipline_mp4::{
         AudioTrackConfig, FragSample, HybridMp4Writer, TrackConfig, VideoTrackConfig,
@@ -2537,6 +2144,18 @@ mod tests {
         assert_eq!(
             credential_target("https://clips.example.com", "user_1"),
             "Clipline Cloud:https://clips.example.com:user_1"
+        );
+    }
+
+    #[test]
+    fn cached_asset_dto_hides_windows_verbatim_prefixes() {
+        assert_eq!(
+            cloud_cache_display_path(Path::new(r"\\?\C:\Videos\Clipline\clip.mp4")),
+            r"C:\Videos\Clipline\clip.mp4"
+        );
+        assert_eq!(
+            cloud_cache_display_path(Path::new(r"\\?\UNC\nas\clips\clip.mp4")),
+            r"\\nas\clips\clip.mp4"
         );
     }
 
@@ -3007,33 +2626,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn private_cloud_summary_maps_to_library_clip_without_share_url() {
-        let local = upload_record("local-1", "D:\\Videos\\known.mp4", "uploaded_public", 10);
-
-        let entry = cloud_library_clip_from_summary(
-            &clip_summary(
-                "remote-1",
-                Some("local-1"),
-                "Server Title",
-                "private",
-                "ready",
-                None,
-            ),
-            Some(&local),
-        );
-
-        assert_eq!(entry.remote_clip_id, "remote-1");
-        assert_eq!(entry.local_clip_id.as_deref(), Some("local-1"));
-        assert_eq!(entry.path, "D:\\Videos\\known.mp4");
-        assert_eq!(entry.title, "Server Title");
-        assert_eq!(entry.remote_url, "");
-        assert_eq!(entry.visibility, "private");
-        assert_eq!(entry.upload_status, "uploaded_private");
-        assert_eq!(entry.source_type.as_deref(), Some("replay"));
-        assert!(entry.updated_at_unix > 0);
-    }
-
     #[tokio::test]
     async fn visibility_update_refreshes_canonical_public_url() {
         let server = MockServer::start();
@@ -3150,38 +2742,6 @@ mod tests {
     }
 
     #[test]
-    fn cloud_owner_clip_page_url_uses_configured_origin_and_one_safe_segment() {
-        let public_cloud = CloudSettings {
-            host_url: "https://api.example.com/base/".into(),
-            public_url: Some("https://clips.example.com/cloud/".into()),
-            ..CloudSettings::default()
-        };
-        assert_eq!(
-            cloud_owner_clip_page_url(&public_cloud, "remote-1_ABC")
-                .expect("public clip page")
-                .as_str(),
-            "https://clips.example.com/cloud/clip/remote-1_ABC"
-        );
-
-        let private_cloud = CloudSettings {
-            host_url: "http://127.0.0.1:8080/root/".into(),
-            ..CloudSettings::default()
-        };
-        assert_eq!(
-            cloud_owner_clip_page_url(&private_cloud, "remote-2")
-                .expect("private clip page")
-                .as_str(),
-            "http://127.0.0.1:8080/root/clip/remote-2"
-        );
-        for invalid in ["", "../escape", "remote/escape", "remote?redirect=evil"] {
-            assert!(
-                cloud_owner_clip_page_url(&public_cloud, invalid).is_err(),
-                "remote id must be one safe segment: {invalid}"
-            );
-        }
-    }
-
-    #[test]
     fn cloud_clip_asset_url_uses_api_host_and_safe_clip_ids() {
         let cloud = CloudSettings {
             host_url: "https://clips.example.com/base".into(),
@@ -3194,178 +2754,6 @@ mod tests {
         );
         assert!(cloud_clip_asset_url(&cloud, "../escape", "media").is_err());
         assert!(cloud_clip_asset_url(&cloud, "remote/escape", "thumbnail").is_err());
-    }
-
-    #[test]
-    fn cloud_clip_cache_path_keeps_remote_ids_inside_cache() {
-        let cloud = CloudSettings {
-            host_url: "https://clips.example.com".into(),
-            connected_user_id: Some("user-1".into()),
-            ..CloudSettings::default()
-        };
-        let path = cloud_clip_cache_path(&cloud, "remote-1_ABC", "media", "mp4", Some(42))
-            .expect("cache path");
-        assert!(path.ends_with("remote-1_ABC-media-42.mp4"));
-        assert!(cloud_clip_cache_path(&cloud, "../escape", "media", "mp4", None).is_err());
-        assert!(cloud_clip_cache_path(&cloud, "remote-1", "../asset", "mp4", None).is_err());
-    }
-
-    #[test]
-    fn cloud_clip_cache_path_is_namespaced_by_account() {
-        let first = CloudSettings {
-            host_url: "https://clips.example.com".into(),
-            connected_user_id: Some("user-1".into()),
-            ..CloudSettings::default()
-        };
-        let second = CloudSettings {
-            host_url: "https://clips.example.com".into(),
-            connected_user_id: Some("user-2".into()),
-            ..CloudSettings::default()
-        };
-
-        let first_path =
-            cloud_clip_cache_path(&first, "remote-1", "media", "mp4", Some(1)).unwrap();
-        let second_path =
-            cloud_clip_cache_path(&second, "remote-1", "media", "mp4", Some(1)).unwrap();
-
-        assert_ne!(first_path.parent(), second_path.parent());
-        assert_eq!(
-            first_path.file_name().and_then(|name| name.to_str()),
-            second_path.file_name().and_then(|name| name.to_str())
-        );
-    }
-
-    #[test]
-    fn cached_asset_marker_accepts_actual_download_size() {
-        let dir = TestDir::new("clipline-cloud", "cached-asset-marker");
-        let asset = dir.path().join("remote-media-42.mp4");
-        std::fs::write(&asset, b"served bytes").unwrap();
-        std::fs::write(cloud_cache_marker_path(&asset), b"12").unwrap();
-
-        assert!(
-            cached_asset_matches(&asset, Some(999)),
-            "a completed cloud-cache download should not be invalidated by a stale server size"
-        );
-    }
-
-    #[test]
-    fn cloud_cache_prunes_lru_pairs_but_preserves_leased_entries() {
-        let dir = TestDir::new("clipline-cloud", "cloud-cache-lru");
-        let account = dir.path().join("account");
-        std::fs::create_dir_all(&account).unwrap();
-        let oldest = account.join("old.mp4");
-        let newer = account.join("new.mp4");
-        let leased = account.join("playing.mp4");
-        let now = std::time::SystemTime::now();
-        for (path, age) in [(&oldest, 30), (&newer, 20), (&leased, 10)] {
-            std::fs::write(path, [0_u8; 8]).unwrap();
-            std::fs::write(cloud_cache_marker_path(path), b"8").unwrap();
-            std::fs::File::options()
-                .write(true)
-                .open(path)
-                .unwrap()
-                .set_modified(now - Duration::from_secs(age))
-                .unwrap();
-        }
-
-        let report = enforce_cloud_cache_limits(
-            dir.path(),
-            Duration::from_secs(365 * 24 * 60 * 60),
-            18,
-            u64::MAX,
-            0,
-            0,
-            std::slice::from_ref(&leased),
-        )
-        .unwrap();
-
-        assert_eq!(report.evicted_entries, 1);
-        assert!(!oldest.exists());
-        assert!(!cloud_cache_marker_path(&oldest).exists());
-        assert!(newer.exists());
-        assert!(leased.exists());
-    }
-
-    #[test]
-    fn cloud_cache_prunes_only_stale_owned_temps() {
-        let dir = TestDir::new("clipline-cloud", "cloud-cache-temp-ownership");
-        let stale = dir.path().join("media.mp4.123.1.tmp");
-        let active = dir.path().join("media.mp4.123.2.tmp");
-        let unrelated = dir.path().join("editor.tmp");
-        for path in [&stale, &active, &unrelated] {
-            std::fs::write(path, b"tmp").unwrap();
-        }
-        std::fs::File::options()
-            .write(true)
-            .open(&stale)
-            .unwrap()
-            .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1))
-            .unwrap();
-
-        enforce_cloud_cache_limits(
-            dir.path(),
-            CLOUD_CACHE_MAX_AGE,
-            u64::MAX,
-            u64::MAX,
-            0,
-            0,
-            &[],
-        )
-        .unwrap();
-
-        assert!(!stale.exists());
-        assert!(active.exists());
-        assert!(unrelated.exists());
-    }
-
-    #[test]
-    fn cloud_cache_refuses_capacity_when_every_candidate_is_leased() {
-        let dir = TestDir::new("clipline-cloud", "cloud-cache-leased-capacity");
-        let leased = dir.path().join("playing.mp4");
-        std::fs::write(&leased, [0_u8; 8]).unwrap();
-
-        let error = enforce_cloud_cache_limits(
-            dir.path(),
-            CLOUD_CACHE_MAX_AGE,
-            4,
-            u64::MAX,
-            0,
-            0,
-            std::slice::from_ref(&leased),
-        )
-        .unwrap_err();
-
-        assert!(error.contains("active media"), "{error}");
-        assert!(leased.exists());
-    }
-
-    #[test]
-    fn owned_cloud_cache_temp_cleans_only_while_armed() {
-        let dir = TestDir::new("clipline-cloud", "cloud-cache-temp-guard");
-        let abandoned = dir.path().join("abandoned.tmp");
-        let published = dir.path().join("published.tmp");
-        std::fs::write(&abandoned, b"partial").unwrap();
-        std::fs::write(&published, b"complete").unwrap();
-
-        drop(OwnedCloudCacheTemp::new(abandoned.clone()));
-        let mut owner = OwnedCloudCacheTemp::new(published.clone());
-        owner.disarm();
-        drop(owner);
-
-        assert!(!abandoned.exists());
-        assert!(published.exists());
-    }
-
-    #[test]
-    fn cloud_media_size_hint_is_clamped_to_hard_limit() {
-        assert_eq!(
-            cloud_media_cache_max_bytes(Some(i64::MAX)),
-            CLOUD_MEDIA_HARD_MAX_BYTES
-        );
-        assert_eq!(
-            cloud_media_cache_max_bytes(Some(1)),
-            CLOUD_MEDIA_SIZE_SLACK_BYTES + 2
-        );
     }
 
     #[test]
@@ -3394,30 +2782,6 @@ mod tests {
     }
 
     #[test]
-    fn cloud_user_avatar_url_uses_api_host() {
-        let cloud = CloudSettings {
-            host_url: "https://clips.example.com/base".into(),
-            ..CloudSettings::default()
-        };
-        let url = cloud_user_avatar_url(&cloud).expect("avatar URL");
-        assert_eq!(
-            url.as_str(),
-            "https://clips.example.com/base/api/v1/me/avatar"
-        );
-    }
-
-    #[test]
-    fn cloud_user_profile_url_uses_public_url_and_escapes_username() {
-        let cloud = CloudSettings {
-            host_url: "https://api.example.com/base".into(),
-            public_url: Some("https://clips.example.com/cloud".into()),
-            ..CloudSettings::default()
-        };
-        let url = cloud_user_profile_url(&cloud, "Dain 98").expect("profile URL");
-        assert_eq!(url.as_str(), "https://clips.example.com/cloud/u/Dain%2098");
-    }
-
-    #[test]
     fn cloud_connection_status_includes_display_name() {
         let cloud = CloudSettings {
             connected_display_name: Some("Dain".into()),
@@ -3432,18 +2796,10 @@ mod tests {
     }
 
     #[test]
-    fn cloud_user_avatar_data_url_requires_image_content_type() {
+    fn cloud_user_avatar_data_url_preserves_legacy_shape() {
         assert_eq!(
-            cloud_user_avatar_data_url(Some("image/png"), b"\x01\x02\x03").unwrap(),
+            cloud_user_avatar_data_url("image/png", b"\x01\x02\x03"),
             "data:image/png;base64,AQID"
-        );
-        assert!(
-            cloud_user_avatar_data_url(Some("text/html"), b"<script>").is_err(),
-            "avatar data URLs must only accept image responses"
-        );
-        assert!(
-            cloud_user_avatar_data_url(Some("image/png"), b"").is_err(),
-            "empty avatar bodies should not render as broken images"
         );
     }
 
@@ -3676,39 +3032,6 @@ mod tests {
 
     fn test_cloud_client(server: &MockServer) -> CloudClient {
         CloudClient::with_device_token(server.base_url().parse().unwrap(), "token")
-    }
-
-    fn clip_summary(
-        id: &str,
-        client_clip_id: Option<&str>,
-        title: &str,
-        visibility: &str,
-        status: &str,
-        public_url: Option<&str>,
-    ) -> ClipSummaryResponse {
-        let now = Utc::now();
-        ClipSummaryResponse {
-            id: id.into(),
-            client_clip_id: client_clip_id.map(str::to_string),
-            title: title.into(),
-            description: None,
-            game_name: Some("League of Legends".into()),
-            game_id: Some("league_of_legends".into()),
-            source_type: Some("replay".into()),
-            recorded_at: Some(now),
-            uploaded_at: Some(now),
-            duration_ms: Some(30_000),
-            file_size_bytes: Some(12_345),
-            width: Some(1920),
-            height: Some(1080),
-            fps: Some(60.0),
-            visibility: visibility.into(),
-            status: status.into(),
-            public_url: public_url.map(str::to_string),
-            view_count: 0,
-            created_at: now,
-            updated_at: now,
-        }
     }
 
     fn test_dir(name: &str) -> std::path::PathBuf {

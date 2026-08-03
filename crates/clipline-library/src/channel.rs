@@ -81,7 +81,9 @@ enum CoalesceKey {
 fn coalesce_key(result: &CatalogResult) -> Option<CoalesceKey> {
     match result {
         CatalogResult::LocalPage { token, .. } => Some(CoalesceKey::LocalPage(*token)),
-        CatalogResult::CloudPage { token, .. } => Some(CoalesceKey::CloudPage(token.clone())),
+        CatalogResult::CloudPage(completion) => {
+            Some(CoalesceKey::CloudPage(completion.token.clone()))
+        }
         CatalogResult::Poster { token, .. } => Some(CoalesceKey::Poster(token.clone())),
         CatalogResult::UploadByteProgress { token, .. } => {
             Some(CoalesceKey::UploadBytes(token.clone()))
@@ -109,12 +111,12 @@ fn validate_owner(
             == expected)
             .then_some(())
             .ok_or(ResultPortError::Stale),
-        (CatalogResult::CloudPage { token, .. }, ExpectedResultOwner::Cloud(expected)) => {
-            if token.account_key != expected.account_key
-                || token.account_generation != expected.account_generation
+        (CatalogResult::CloudPage(completion), ExpectedResultOwner::Cloud(expected)) => {
+            if completion.token.account_key != expected.account_key
+                || completion.token.account_generation != expected.account_generation
             {
                 Err(ResultPortError::AccountChanged)
-            } else if token.window != expected.window {
+            } else if completion.token.window != expected.window {
                 Err(ResultPortError::Stale)
             } else {
                 Ok(())
@@ -135,7 +137,7 @@ fn validate_owner(
                 Ok(())
             }
         }
-        (CatalogResult::CloudPage { .. }, ExpectedResultOwner::Upload(_))
+        (CatalogResult::CloudPage(_), ExpectedResultOwner::Upload(_))
         | (
             CatalogResult::UploadByteProgress { .. } | CatalogResult::UploadCompleted { .. },
             ExpectedResultOwner::Cloud(_),

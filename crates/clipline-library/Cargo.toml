@@ -8,12 +8,20 @@ license.workspace = true
 clipline-capture = { path = "../clipline-capture" }
 clipline-events = { path = "../clipline-events" }
 clipline-mp4 = { path = "../clipline-mp4" }
+clipline-settings = { path = "../clipline-settings" }
 clipline-shell = { path = "../clipline-shell" }
+bytes = "1"
+chrono = "0.4.45"
+futures-util = "0.3"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
+reqwest = { workspace = true, features = ["stream"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = "0.10"
 thiserror = { workspace = true }
+tokio = { workspace = true, features = ["fs", "io-util", "sync"] }
 
 [dev-dependencies]
 boa_engine = "0.21.1"
 clipline-test-utils = { path = "../clipline-test-utils" }
+httpmock = { workspace = true }

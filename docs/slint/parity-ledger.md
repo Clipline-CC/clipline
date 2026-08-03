@@ -54,8 +54,9 @@ stable; the baseline commit preserves exact historical locations.
 | `command:upload_clip_to_cloud` | `cloud.rs`; lease local clip and start upload. | M7 cloud controller | Lease/progress/cancel fixture. | `not_started` |
 | `command:sync_cloud_clip_status` | `cloud.rs`; reconcile local and authoritative remote state. | M7 cloud controller | Windows path identity and stale-result tests. | `not_started` |
 | `command:list_cloud_clips` | `cloud.rs`; paged authoritative remote listing. | M7 cloud controller | Pagination/generation fixture. | `not_started` |
-| `command:cloud_clip_thumbnail` | `cloud.rs`; bounded cached remote thumbnail. | M7 cloud controller | Cache/quota/cancellation test. | `not_started` |
-| `command:cache_cloud_clip_media` | `cloud.rs`; download and lease remote media. | M7 cloud controller | Cache limit, partial download, stale-open tests. | `not_started` |
+| `command:cloud_clip_thumbnail` | Shared `clipline-library/cloud/{cache,http}.rs`; Tauri remains a thin asset-scope/JSON adapter for the bounded cached remote thumbnail. | M7 cloud controller | Cache/quota/cancellation test. | `not_started` |
+| `command:cache_cloud_clip_media` | Shared `clipline-library/cloud/{cache,http}.rs`; Tauri adapts the account-fenced download and scoped media lease. | M7 cloud controller | Cache limit, partial download, stale-open tests. | `not_started` |
+| `command:release_cloud_media_lease` | Compatibility adapter releases the exact scoped shared-cache playback lease on Review close, source replacement, or background entry. | M7 cloud controller | Shared cache lease-count tests plus Tauri command/foreground cleanup contract. | `implemented` |
 | `command:cloud_user_profile` | `cloud.rs`; retrieve connected profile metadata. | M7 cloud controller | Account-generation fixture. | `not_started` |
 | `command:cloud_user_avatar` | `cloud.rs`; retrieve bounded avatar bytes. | M7 cloud controller | Bounds/cache/error test. | `not_started` |
 | `command:open_cloud_user_profile` | `cloud.rs`; open trusted profile URL. | M7 cloud controller | URL allowlist and shell test. | `not_started` |

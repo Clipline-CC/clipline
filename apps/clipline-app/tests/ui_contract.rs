@@ -2695,13 +2695,17 @@ fn lifecycle_guards_refreshes_posters_and_cloud_media_completions() {
     );
     let cloud_open = js_function_body(&cloud, "openCloudEntryInApp");
     let stale_guard = cloud_open
-        .find("if (!isForegroundWorkCurrent(lifecycleWork)) return;")
+        .find("if (!isForegroundWorkCurrent(lifecycleWork)) {")
         .expect("cloud download stale-generation guard");
+    let stale_release = cloud_open[stale_guard..]
+        .find("releaseCloudMediaLease(clip);")
+        .map(|offset| stale_guard + offset)
+        .expect("stale cloud download releases its media lease");
     let open_clip = cloud_open
         .find("openClip({")
         .expect("cloud download opens a clip");
     assert!(
-        stale_guard < open_clip,
+        stale_guard < stale_release && stale_release < open_clip,
         "a cloud download completing after background entry must not recreate media"
     );
     assert!(
@@ -3605,6 +3609,39 @@ fn library_has_cloud_source_tab() {
         app_rs().contains("crate::cloud::open_cloud_clip"),
         "native command registry must expose open_cloud_clip for Cloud card links"
     );
+}
+
+#[test]
+fn cloud_media_lease_tracks_the_active_review_source() {
+    let review = read_ui_js("review-player.js");
+    let cloud = read_ui_js("cloud.js");
+    let release = js_function_body(&review, "releaseCloudMediaLease");
+    assert!(release.contains("clip.cloud_media_lease_id = null;"));
+    assert!(release.contains("invoke(\"release_cloud_media_lease\""));
+
+    for name in ["suspendReviewPlayback", "closeReview"] {
+        let body = js_function_body(&review, name);
+        assert!(body.contains("releaseReviewVideoSource();"));
+        assert!(body.contains("releaseCloudMediaLease(currentClip);"));
+        assert!(
+            body.find("releaseReviewVideoSource();")
+                < body.find("releaseCloudMediaLease(currentClip);"),
+            "{name} must release the browser source before its cache lease"
+        );
+    }
+
+    let open = js_function_body(&review, "openClip");
+    assert!(open.contains("return false;"));
+    assert!(open.contains("releaseCloudMediaLease(currentClip);"));
+    assert!(
+        open.find("releaseReviewVideoSource();")
+            < open.find("releaseCloudMediaLease(currentClip);"),
+        "replacement must release the old browser source before its cache lease"
+    );
+
+    let cloud_open = js_function_body(&cloud, "openCloudEntryInApp");
+    assert!(cloud_open.contains("releaseCloudMediaLease(clip);"));
+    assert!(cloud_open.contains("if (opened === false) releaseCloudMediaLease(clip);"));
 }
 
 #[test]

@@ -231,6 +231,28 @@ pub fn open_regular_file_nofollow(path: &std::path::Path) -> std::io::Result<std
     }
 }
 
+/// Update one regular file's modification time through a no-follow handle only
+/// while it still has the exact identity authorized by the caller.
+pub fn set_regular_file_modified_if_identity(
+    path: &std::path::Path,
+    expected: FileIdentity,
+    modified: std::time::SystemTime,
+) -> std::io::Result<()> {
+    #[cfg(windows)]
+    let file = windows::filesystem::open_regular_file_nofollow_for_metadata_write(path)?;
+
+    #[cfg(not(windows))]
+    let file = open_regular_file_nofollow(path)?;
+
+    if opened_file_identity(&file)? != expected {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "regular file identity changed before metadata update",
+        ));
+    }
+    file.set_modified(modified)
+}
+
 /// Open one directory without following its final link/reparse component.
 pub fn open_directory_nofollow(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     #[cfg(windows)]

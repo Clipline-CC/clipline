@@ -348,6 +348,15 @@ function releaseReviewVideoSource() {
   video.load();
 }
 
+function releaseCloudMediaLease(clip) {
+  const leaseId = Number(clip && clip.cloud_media_lease_id);
+  if (!Number.isSafeInteger(leaseId) || leaseId <= 0) return;
+  clip.cloud_media_lease_id = null;
+  invoke("release_cloud_media_lease", { cloudMediaLeaseId: leaseId }).catch((error) => {
+    console.warn("release cloud media lease failed", error);
+  });
+}
+
 function restoreVideoAfterRename(path, time, shouldResume, rate) {
   setReviewVideoSource(path, { resumeTime: time, shouldResume, rate });
   currentReviewAudioKey = null;
@@ -506,6 +515,7 @@ function suspendReviewPlayback({ renderGallery = true } = {}) {
   clearOverlayIdleCheck();
   video.pause();
   releaseReviewVideoSource();
+  releaseCloudMediaLease(currentClip);
   reviewSeekState = PlayerCore.createLogicalSeekState();
   currentClip = null;
   currentReviewMediaPath = null;
@@ -718,9 +728,13 @@ function openClip(clip) {
     syncSettingsDraftFromForm({ resetDiscard: false });
     if (settingsHaveUnsavedChanges()) {
       showSettingsDiscardWarning();
-      return;
+      return false;
     }
     toggleSettings(false);
+  }
+  if (currentClip) {
+    releaseReviewVideoSource();
+    releaseCloudMediaLease(currentClip);
   }
   cancelDesiredAudioPreview();
   clearReviewAudioSidecars("direct");
@@ -761,6 +775,7 @@ function openClip(clip) {
     requestSelectedAudioPreview();
   }
   syncCloudClipStatus(clip);
+  return true;
 }
 
 function closeReview() {
@@ -770,6 +785,7 @@ function closeReview() {
   clearOverlayIdleCheck();
   video.pause();
   releaseReviewVideoSource();
+  releaseCloudMediaLease(currentClip);
   reviewSeekState = PlayerCore.createLogicalSeekState();
   currentClip = null;
   simpleTrimMode = false;

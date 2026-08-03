@@ -370,13 +370,17 @@ async function openCloudEntryInApp(entry) {
     const clip = await invoke("cache_cloud_clip_media", {
       request: cloudClipAssetRequest(entry),
     });
-    if (!isForegroundWorkCurrent(lifecycleWork)) return;
-    openClip({
+    if (!isForegroundWorkCurrent(lifecycleWork)) {
+      releaseCloudMediaLease(clip);
+      return;
+    }
+    const opened = openClip({
       ...clip,
       cloud_remote_clip_id: entry.remote_clip_id,
       cloud_remote_url: entry.remote_url,
       cloud_visibility: entry.visibility,
     });
+    if (opened === false) releaseCloudMediaLease(clip);
     setDeckStatus("");
   } catch (e) {
     if (!isForegroundWorkCurrent(lifecycleWork)) return;

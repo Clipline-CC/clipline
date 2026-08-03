@@ -1003,15 +1003,23 @@ name = "clipline-library"
 version = "0.1.0"
 dependencies = [
  "boa_engine",
+ "bytes",
+ "chrono",
  "clipline-capture",
  "clipline-events",
  "clipline-mp4",
+ "clipline-settings",
  "clipline-shell",
  "clipline-test-utils",
+ "futures-util",
+ "httpmock",
  "image",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

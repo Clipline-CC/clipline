@@ -4,6 +4,45 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-02): Slint replacement Milestone 7, Task 6
+
+Plan: `docs/superpowers/plans/2026-08-02-slint-library-cloud.md`. Account-fenced Cloud list,
+profile/avatar, browser effects, thumbnail download, and media-cache behavior now live in the
+framework-neutral `clipline-library` service. The shared transport is rustls-only, refuses
+redirects, bounds control JSON at 4 MiB and error text at 64 KiB, bounds avatars at 2 MiB and
+thumbnails at 10 MiB, streams media without whole-body buffering, and enforces the existing local-
+only plain-HTTP rule at every URL construction boundary. The compatibility collector retains the
+old 100 x 100 / 10,000-row JSON contract; the native path uses true 60-row server paging without
+inventing totals.
+
+The shared cache keys every flight by exact account generation, namespace, and asset version. It
+has a process-wide four-download permit, 64-flight ceiling, exclusive identity-owned temps, durable
+asset-plus-marker publication, a 10 GiB quota, 2 GiB free-space floor, seven-day age policy, and
+24-hour crash-temp cleanup. Eviction and publication use retained directory authorities and exact
+file identities, fail closed on owned-namespace scan errors, reserve the entire permitted response
+before download, and protect active temps, returned assets, and accepted playback media. Cache
+results are rechecked after shared-flight completion as well as before I/O and publication.
+
+The Tauri commands are thin compatibility adapters. Account/profile writes use generation CAS;
+foreground work is tied to the current lifecycle revision. Media is handed to the player only
+after an exact `CloudMediaLease` is acquired, then released after the browser source closes, on
+replacement, on a rejected/stale open, on background entry, or through an idempotent explicit
+release command. The background backstop is itself lifecycle-revision fenced so a rapid reopen
+cannot release a replacement foreground lease. Cached DTO paths hide Windows verbatim prefixes,
+while asset-scope validation retains canonical containment.
+
+`clipline-cloud-api` was not linked into the shared crate: the pinned revision is
+AGPL-3.0-or-later. It remains app-only for the old connect/upload/status code and must be removed in
+Task 7 before the shared Cloud boundary is complete. The shared implementation uses only the
+bounded first-party wire shapes it needs. Fable's independent Task 6 audit is GO with no P0/P1;
+the plain-HTTP defense-in-depth and DTO-prefix observations from that audit were also fixed before
+commit. All `clipline-library` targets, Cloud transport/cache/service tests, Tauri migration/UI
+lease contracts, app unit checks, and warning-denied Clippy for both changed packages are green.
+
+Next: Task 7, move upload/status persistence and foreground feedback into the account-safe shared
+controller, remove the remaining app-local AGPL client dependency, and preserve active-file lease
+coordination with local mutation.
+
 ## Checkpoint (2026-08-02): Slint replacement Milestone 7, Task 5
 
 Plan: `docs/superpowers/plans/2026-08-02-slint-library-cloud.md`. Poster extraction is now one

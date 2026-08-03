@@ -1,14 +1,15 @@
 use std::path::PathBuf;
 
 use clipline_library::{
-    CatalogAction, CatalogPage, CatalogRevision, CatalogSource, ClipGame, ClipPathIdentity,
-    CloudAccountGeneration, CloudAccountKey, CloudAccountSnapshot, CloudLibraryItem,
+    CatalogAction, CatalogPage, CatalogResult, CatalogRevision, CatalogSource, ClipGame,
+    ClipPathIdentity, CloudAccountGeneration, CloudAccountKey, CloudAccountSnapshot,
+    CloudLibraryItem, CloudListPageCompletion, CloudNextPage, CloudPageNumber, CloudPageOutcome,
     CloudWorkToken, DurableUploadToken, ForegroundGeneration, GenerationError, LocalClipId,
     LocalClipItem, MutationFailure, MutationReport, PayloadBoundsError, PosterGeneration,
     PresentationRow, RequestGeneration, UploadGeneration, UploadSummary,
     WindowAttachmentGeneration, WindowWorkToken, MAX_CATALOG_IDENTITY_BYTES, MAX_CATALOG_PAGE_ROWS,
-    MAX_CLOUD_INDEX_ROWS, MAX_DECODED_PAGE_IMAGES, MAX_LOCAL_INDEX_ROWS, MAX_MUTATION_PATH_BYTES,
-    MAX_POSTER_RESULT_ENTRIES, MAX_UPLOAD_SUMMARIES,
+    MAX_CLOUD_INDEX_ROWS, MAX_CLOUD_SERVER_PAGE, MAX_DECODED_PAGE_IMAGES, MAX_LOCAL_INDEX_ROWS,
+    MAX_MUTATION_PATH_BYTES, MAX_POSTER_RESULT_ENTRIES, MAX_UPLOAD_SUMMARIES,
 };
 
 #[test]
@@ -300,6 +301,172 @@ fn public_contract_bounds_are_consistent() {
     assert_eq!(MAX_CLOUD_INDEX_ROWS, 10_000);
     assert_eq!(MAX_MUTATION_PATH_BYTES, 1024 * 1024);
     assert_eq!(MAX_UPLOAD_SUMMARIES, 16);
+    assert_eq!(MAX_CLOUD_SERVER_PAGE, 1_000_000);
+}
+
+fn cloud_page_token() -> CloudWorkToken {
+    CloudWorkToken {
+        window: WindowWorkToken {
+            attachment: WindowAttachmentGeneration::new(1),
+            foreground: ForegroundGeneration::new(2),
+            request: RequestGeneration::new(3),
+        },
+        account_key: CloudAccountKey::new("https://clips.example|user-1|credential-1").unwrap(),
+        account_generation: CloudAccountGeneration::new(4),
+    }
+}
+
+fn cloud_page_items(count: usize) -> Vec<CloudLibraryItem> {
+    (0..count)
+        .map(|index| CloudLibraryItem {
+            remote_clip_id: format!("remote-{index}"),
+            local_clip_id: None,
+            path: String::new(),
+            title: format!("Clip {index}"),
+            remote_url: format!("https://clips.example/c/remote-{index}"),
+            visibility: "public".into(),
+            upload_status: "uploaded_public".into(),
+            updated_at_unix: 1,
+            uploaded_at_unix: None,
+            duration_ms: Some(1_000),
+            file_size_bytes: Some(1_024),
+            source_type: Some("replay".into()),
+        })
+        .collect()
+}
+
+#[test]
+fn cloud_pages_expose_only_conservative_server_paging_truth() {
+    let page_one = CloudPageNumber::new(1).unwrap();
+    let short = CloudListPageCompletion::page(
+        cloud_page_token(),
+        CatalogRevision::new(1),
+        page_one,
+        cloud_page_items(59),
+        Vec::new(),
+    )
+    .unwrap();
+    assert!(matches!(
+        short.outcome,
+        CloudPageOutcome::Page {
+            page,
+            next: CloudNextPage::Terminal,
+            ..
+        } if page == page_one
+    ));
+
+    let full = CloudListPageCompletion::page(
+        cloud_page_token(),
+        CatalogRevision::new(2),
+        page_one,
+        cloud_page_items(60),
+        Vec::new(),
+    )
+    .unwrap();
+    assert!(matches!(
+        full.outcome,
+        CloudPageOutcome::Page {
+            next: CloudNextPage::Probe { page },
+            ..
+        } if page.get() == 2
+    ));
+
+    let empty_first = CloudListPageCompletion::page(
+        cloud_page_token(),
+        CatalogRevision::new(3),
+        page_one,
+        Vec::new(),
+        Vec::new(),
+    )
+    .unwrap();
+    assert!(matches!(
+        empty_first.outcome,
+        CloudPageOutcome::Page {
+            next: CloudNextPage::Terminal,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn empty_following_page_steps_back_without_inventing_a_total() {
+    let page_two = CloudPageNumber::new(2).unwrap();
+    assert_eq!(
+        CloudListPageCompletion::page(
+            cloud_page_token(),
+            CatalogRevision::new(1),
+            page_two,
+            Vec::new(),
+            Vec::new(),
+        ),
+        Err(PayloadBoundsError::Invalid {
+            field: "cloud_page.empty_nonfirst"
+        })
+    );
+
+    let completion = CloudListPageCompletion::past_end(
+        cloud_page_token(),
+        CatalogRevision::new(1),
+        page_two,
+        Vec::new(),
+    )
+    .unwrap();
+    assert!(matches!(
+        completion.outcome,
+        CloudPageOutcome::PastEnd {
+            requested_page,
+            fallback_page,
+        } if requested_page.get() == 2 && fallback_page.get() == 1
+    ));
+    let json = serde_json::to_value(CatalogResult::CloudPage(completion)).unwrap();
+    assert_eq!(json["kind"], "cloud_page");
+    assert!(json.to_string().find("total").is_none());
+    assert!(json.to_string().find("page_count").is_none());
+}
+
+#[test]
+fn cloud_page_numbers_and_shapes_fail_closed() {
+    assert_eq!(
+        CloudPageNumber::new(0),
+        Err(PayloadBoundsError::Invalid {
+            field: "cloud_page.number"
+        })
+    );
+    assert_eq!(
+        CloudPageNumber::new(MAX_CLOUD_SERVER_PAGE + 1),
+        Err(PayloadBoundsError::TooLarge {
+            field: "cloud_page.number",
+            actual: MAX_CLOUD_SERVER_PAGE as usize + 1,
+            maximum: MAX_CLOUD_SERVER_PAGE as usize,
+        })
+    );
+    assert!(CloudListPageCompletion::page(
+        cloud_page_token(),
+        CatalogRevision::new(1),
+        CloudPageNumber::new(1).unwrap(),
+        cloud_page_items(MAX_CATALOG_PAGE_ROWS + 1),
+        Vec::new(),
+    )
+    .is_err());
+
+    let malformed = CatalogResult::CloudPage(CloudListPageCompletion {
+        token: cloud_page_token(),
+        revision: CatalogRevision::new(1),
+        outcome: CloudPageOutcome::Page {
+            page: CloudPageNumber::new(1).unwrap(),
+            items: cloud_page_items(59),
+            next: CloudNextPage::Probe {
+                page: CloudPageNumber::new(2).unwrap(),
+            },
+        },
+        warnings: Vec::new(),
+    });
+    assert_eq!(
+        malformed.validate_bounds(),
+        Err(PayloadBoundsError::Invalid {
+            field: "cloud_page.next"
+        })
+    );
 }
 
 #[test]

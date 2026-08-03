@@ -1,11 +1,11 @@
 use clipline_library::{
     catalog_result_channel, CatalogPage, CatalogResult, CatalogResultPublishOutcome,
     CatalogRevision, CatalogSource, ClipPathIdentity, CloudAccountGeneration, CloudAccountKey,
-    CloudLibraryItem, CloudWorkToken, DurableUploadToken, ExpectedResultOwner,
-    ForegroundGeneration, LocalClipId, LocalClipItem, MutationReport, PosterGeneration,
-    PosterResult, PosterStatus, PosterWorkToken, RequestGeneration, ResultPortError,
-    UploadGeneration, UploadSummary, WindowAttachmentGeneration, WindowWorkToken,
-    CATALOG_RESULT_CAPACITY,
+    CloudLibraryItem, CloudListPageCompletion, CloudNextPage, CloudPageNumber, CloudPageOutcome,
+    CloudWorkToken, DurableUploadToken, ExpectedResultOwner, ForegroundGeneration, LocalClipId,
+    LocalClipItem, MutationReport, PosterGeneration, PosterResult, PosterStatus, PosterWorkToken,
+    RequestGeneration, ResultPortError, UploadGeneration, UploadSummary,
+    WindowAttachmentGeneration, WindowWorkToken, CATALOG_RESULT_CAPACITY,
 };
 
 fn window(request: u64) -> WindowWorkToken {
@@ -65,6 +65,39 @@ fn progress(token: DurableUploadToken, received: u64) -> CatalogResult {
             error: None,
         },
     }
+}
+
+fn cloud_item(id: &str) -> CloudLibraryItem {
+    CloudLibraryItem {
+        remote_clip_id: id.into(),
+        local_clip_id: None,
+        path: String::new(),
+        title: format!("Clip {id}"),
+        remote_url: format!("https://clips.example/c/{id}"),
+        visibility: "public".into(),
+        upload_status: "uploaded_public".into(),
+        updated_at_unix: 1,
+        uploaded_at_unix: None,
+        duration_ms: Some(1_000),
+        file_size_bytes: Some(1_024),
+        source_type: Some("replay".into()),
+    }
+}
+
+fn cloud_page(token: CloudWorkToken, page: u32, item_count: usize) -> CatalogResult {
+    let items = (0..item_count)
+        .map(|index| cloud_item(&format!("remote-{page}-{index}")))
+        .collect();
+    CatalogResult::CloudPage(
+        CloudListPageCompletion::page(
+            token,
+            CatalogRevision::new(1),
+            CloudPageNumber::new(page).unwrap(),
+            items,
+            Vec::new(),
+        )
+        .unwrap(),
+    )
 }
 
 #[test]
@@ -206,20 +239,7 @@ fn stale_account_changed_and_disconnected_are_distinct() {
 
     let old_cloud = cloud("account-a", 1, 3);
     let new_cloud = cloud("account-b", 1, 3);
-    let result = CatalogResult::CloudPage {
-        token: old_cloud,
-        page: CatalogPage {
-            source: CatalogSource::Cloud,
-            revision: CatalogRevision::new(1),
-            page: 1,
-            page_size: 60,
-            total: 0,
-            has_next: false,
-            truncated: false,
-            items: Vec::new(),
-            warnings: Vec::new(),
-        },
-    };
+    let result = cloud_page(old_cloud, 1, 0);
     assert_eq!(
         sender.try_send(result, ExpectedResultOwner::Cloud(new_cloud)),
         Err(ResultPortError::AccountChanged)
@@ -233,6 +253,42 @@ fn stale_account_changed_and_disconnected_are_distinct() {
         ),
         Err(ResultPortError::Disconnected)
     );
+}
+
+#[test]
+fn cloud_pages_coalesce_only_for_the_same_exact_window_and_account_token() {
+    let (sender, receiver) = catalog_result_channel();
+    let first = cloud("account-a", 1, 20);
+    let replacement = cloud("account-a", 1, 21);
+    let other_generation = cloud("account-a", 2, 21);
+
+    sender
+        .try_send(
+            cloud_page(first.clone(), 1, 59),
+            ExpectedResultOwner::Cloud(first.clone()),
+        )
+        .unwrap();
+    assert_eq!(
+        sender.try_send(
+            cloud_page(first.clone(), 1, 60),
+            ExpectedResultOwner::Cloud(first),
+        ),
+        Ok(CatalogResultPublishOutcome::Replaced)
+    );
+    sender
+        .try_send(
+            cloud_page(replacement.clone(), 1, 59),
+            ExpectedResultOwner::Cloud(replacement),
+        )
+        .unwrap();
+    sender
+        .try_send(
+            cloud_page(other_generation.clone(), 1, 59),
+            ExpectedResultOwner::Cloud(other_generation),
+        )
+        .unwrap();
+
+    assert_eq!(receiver.len(), 3);
 }
 
 #[test]
@@ -353,20 +409,16 @@ fn inconsistent_pages_and_invalid_numeric_items_fail_closed() {
         file_size_bytes: Some(-2),
         source_type: None,
     };
-    let result = CatalogResult::CloudPage {
+    let result = CatalogResult::CloudPage(CloudListPageCompletion {
         token: cloud_token.clone(),
-        page: CatalogPage {
-            source: CatalogSource::Cloud,
-            revision: CatalogRevision::new(1),
-            page: 1,
-            page_size: 1,
-            total: 1,
-            has_next: false,
-            truncated: false,
+        revision: CatalogRevision::new(1),
+        outcome: CloudPageOutcome::Page {
+            page: CloudPageNumber::new(1).unwrap(),
             items: vec![cloud_item],
-            warnings: Vec::new(),
+            next: CloudNextPage::Terminal,
         },
-    };
+        warnings: Vec::new(),
+    });
     assert_eq!(
         sender.try_send(result, ExpectedResultOwner::Cloud(cloud_token)),
         Err(ResultPortError::InvalidPayload {

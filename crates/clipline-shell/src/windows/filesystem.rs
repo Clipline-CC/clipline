@@ -12,7 +12,7 @@ use windows::Win32::Storage::FileSystem::{
     SetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ATTRIBUTE_DIRECTORY,
     FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS,
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_RENAME_INFO_0,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, MOVEFILE_REPLACE_EXISTING,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, MOVEFILE_REPLACE_EXISTING,
     MOVEFILE_WRITE_THROUGH,
 };
 
@@ -64,6 +64,24 @@ pub fn opened_file_identity_components(file: &File) -> std::io::Result<(u64, u64
 pub fn open_regular_file_nofollow(path: &Path) -> std::io::Result<File> {
     let file = OpenOptions::new()
         .read(true)
+        .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+        .open(path)?;
+    let information = information(&file)?;
+    if information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
+        || information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "refusing to open a filesystem link, reparse point, or non-file",
+        ));
+    }
+    Ok(file)
+}
+
+pub fn open_regular_file_nofollow_for_metadata_write(path: &Path) -> std::io::Result<File> {
+    let file = OpenOptions::new()
+        .access_mode(FILE_WRITE_ATTRIBUTES.0)
         .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
         .open(path)?;

@@ -8,6 +8,7 @@ use crate::{
 };
 
 pub const MAX_CATALOG_PAGE_ROWS: usize = 60;
+pub const MAX_CLOUD_SERVER_PAGE: u32 = 1_000_000;
 pub const MAX_DECODED_PAGE_IMAGES: usize = 32;
 pub const MAX_POSTER_RESULT_ENTRIES: usize = 120;
 pub const MAX_LOCAL_INDEX_ROWS: usize = 10_000;
@@ -428,6 +429,225 @@ impl<T> CatalogPage<T> {
     }
 }
 
+/// A one-based Clipline Cloud server page.
+///
+/// The pinned API clamps page numbers rather than rejecting them, so the
+/// client validates the same upper bound before issuing a request. Keeping
+/// this distinct from the zero-based local gallery page also prevents the
+/// adapter from silently requesting the wrong server offset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct CloudPageNumber(u32);
+
+impl CloudPageNumber {
+    pub fn new(value: u32) -> Result<Self, PayloadBoundsError> {
+        if value == 0 {
+            return Err(PayloadBoundsError::Invalid {
+                field: "cloud_page.number",
+            });
+        }
+        if value > MAX_CLOUD_SERVER_PAGE {
+            return Err(PayloadBoundsError::TooLarge {
+                field: "cloud_page.number",
+                actual: value as usize,
+                maximum: MAX_CLOUD_SERVER_PAGE as usize,
+            });
+        }
+        Ok(Self(value))
+    }
+
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+
+    pub fn checked_next(self) -> Result<Self, PayloadBoundsError> {
+        let next = self.0.checked_add(1).ok_or(PayloadBoundsError::TooLarge {
+            field: "cloud_page.number",
+            actual: usize::MAX,
+            maximum: MAX_CLOUD_SERVER_PAGE as usize,
+        })?;
+        Self::new(next)
+    }
+
+    pub fn checked_previous(self) -> Result<Self, PayloadBoundsError> {
+        self.0
+            .checked_sub(1)
+            .filter(|previous| *previous != 0)
+            .map(Self)
+            .ok_or(PayloadBoundsError::Invalid {
+                field: "cloud_page.previous",
+            })
+    }
+}
+
+impl<'de> Deserialize<'de> for CloudPageNumber {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = u32::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CloudNextPage {
+    Probe { page: CloudPageNumber },
+    Terminal,
+}
+
+/// Server-page truth without an invented total or page count.
+///
+/// A full page can only say that probing the following page is reasonable.
+/// If that probe is empty, the controller retains the preceding page and
+/// consumes `PastEnd` to disable its conservative Next affordance.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CloudPageOutcome {
+    Page {
+        page: CloudPageNumber,
+        items: Vec<CloudLibraryItem>,
+        next: CloudNextPage,
+    },
+    PastEnd {
+        requested_page: CloudPageNumber,
+        fallback_page: CloudPageNumber,
+    },
+}
+
+impl CloudPageOutcome {
+    #[must_use]
+    pub fn has_previous(&self) -> bool {
+        match self {
+            Self::Page { page, .. } => page.get() > 1,
+            Self::PastEnd { fallback_page, .. } => fallback_page.get() > 1,
+        }
+    }
+
+    #[must_use]
+    pub fn items(&self) -> &[CloudLibraryItem] {
+        match self {
+            Self::Page { items, .. } => items,
+            Self::PastEnd { .. } => &[],
+        }
+    }
+
+    fn validate_shape(&self) -> Result<(), PayloadBoundsError> {
+        match self {
+            Self::Page { page, items, next } => {
+                check_len("cloud_page.items", items.len(), MAX_CATALOG_PAGE_ROWS)?;
+                if items.is_empty() && page.get() > 1 {
+                    return Err(PayloadBoundsError::Invalid {
+                        field: "cloud_page.empty_nonfirst",
+                    });
+                }
+                let expected_next =
+                    if items.len() == MAX_CATALOG_PAGE_ROWS && page.get() < MAX_CLOUD_SERVER_PAGE {
+                        CloudNextPage::Probe {
+                            page: page.checked_next()?,
+                        }
+                    } else {
+                        CloudNextPage::Terminal
+                    };
+                if *next != expected_next {
+                    return Err(PayloadBoundsError::Invalid {
+                        field: "cloud_page.next",
+                    });
+                }
+                Ok(())
+            }
+            Self::PastEnd {
+                requested_page,
+                fallback_page,
+            } => {
+                if requested_page.get() <= 1 || requested_page.checked_previous()? != *fallback_page
+                {
+                    return Err(PayloadBoundsError::Invalid {
+                        field: "cloud_page.fallback",
+                    });
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CloudListPageCompletion {
+    pub token: CloudWorkToken,
+    pub revision: CatalogRevision,
+    pub outcome: CloudPageOutcome,
+    pub warnings: Vec<CatalogWarning>,
+}
+
+impl CloudListPageCompletion {
+    pub fn page(
+        token: CloudWorkToken,
+        revision: CatalogRevision,
+        page: CloudPageNumber,
+        items: Vec<CloudLibraryItem>,
+        warnings: Vec<CatalogWarning>,
+    ) -> Result<Self, PayloadBoundsError> {
+        let next = if items.len() == MAX_CATALOG_PAGE_ROWS && page.get() < MAX_CLOUD_SERVER_PAGE {
+            CloudNextPage::Probe {
+                page: page.checked_next()?,
+            }
+        } else {
+            CloudNextPage::Terminal
+        };
+        let completion = Self {
+            token,
+            revision,
+            outcome: CloudPageOutcome::Page { page, items, next },
+            warnings,
+        };
+        completion.validate_bounds()?;
+        Ok(completion)
+    }
+
+    pub fn past_end(
+        token: CloudWorkToken,
+        revision: CatalogRevision,
+        requested_page: CloudPageNumber,
+        warnings: Vec<CatalogWarning>,
+    ) -> Result<Self, PayloadBoundsError> {
+        let fallback_page = requested_page.checked_previous()?;
+        let completion = Self {
+            token,
+            revision,
+            outcome: CloudPageOutcome::PastEnd {
+                requested_page,
+                fallback_page,
+            },
+            warnings,
+        };
+        completion.validate_bounds()?;
+        Ok(completion)
+    }
+
+    fn validate_bounds(&self) -> Result<(), PayloadBoundsError> {
+        self.outcome.validate_shape()?;
+        check_len(
+            "cloud_page.warnings",
+            self.warnings.len(),
+            MAX_CATALOG_WARNINGS,
+        )?;
+        for warning in &self.warnings {
+            check_string("warning.code", &warning.code)?;
+            check_string("warning.message", &warning.message)?;
+            if let Some(path) = &warning.path {
+                check_string("warning.path", path)?;
+            }
+        }
+        for item in self.outcome.items() {
+            item.validate_bounds()?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PresentationRow {
     pub id: String,
@@ -560,10 +780,7 @@ pub enum CatalogResult {
         token: WindowWorkToken,
         page: CatalogPage<LocalClipItem>,
     },
-    CloudPage {
-        token: CloudWorkToken,
-        page: CatalogPage<CloudLibraryItem>,
-    },
+    CloudPage(CloudListPageCompletion),
     Poster {
         token: PosterWorkToken,
         poster: PosterResult,
@@ -606,13 +823,7 @@ impl CatalogResult {
                 }
                 Ok(())
             }
-            Self::CloudPage { page, .. } => {
-                page.validate_shape(MAX_CLOUD_INDEX_ROWS)?;
-                for item in &page.items {
-                    item.validate_bounds()?;
-                }
-                Ok(())
-            }
+            Self::CloudPage(completion) => completion.validate_bounds(),
             Self::Poster { token, poster } => {
                 if poster.path != token.path {
                     return Err(PayloadBoundsError::Invalid {
