@@ -298,9 +298,9 @@ mod windows_runtime {
     use clipline_library::{
         catalog_result_channel, ActiveFileRegistry, CatalogDialogTextField, CatalogEffect,
         CatalogItemIdentity, CatalogResultReceiver, CatalogResultSender, CatalogSource,
-        CatalogUploadVisibility, ForegroundGeneration, LocalClipFilter, LocalClipGrouping,
-        LocalClipSort, PlaybackSourceLease, RequestGeneration, ValidatedClipPath,
-        WindowAttachmentGeneration, WindowWorkToken, CATALOG_RESULT_CAPACITY,
+        CatalogUploadVisibility, CloudCatalogOwner, ForegroundGeneration, LocalClipFilter,
+        LocalClipGrouping, LocalClipSort, PlaybackSourceLease, RequestGeneration,
+        ValidatedClipPath, WindowAttachmentGeneration, WindowWorkToken, CATALOG_RESULT_CAPACITY,
     };
     use clipline_playback::windows::{WindowsD3D11Publisher, WindowsVideoHost};
     use clipline_settings::LibraryConfig;
@@ -319,6 +319,7 @@ mod windows_runtime {
         CatalogUiIntent, LocalCatalogEffectHandler, SlintCatalogController, SystemCatalogReveal,
         SystemDayResolver,
     };
+    use crate::cloud::{CatalogCloudLifetime, NativeCloudRuntime};
     use crate::controller::PlaybackController;
     use crate::desktop::{DesktopAttachment, SlintDesktopAdapter};
     use crate::live::{
@@ -347,6 +348,7 @@ mod windows_runtime {
     const HANDLE_RETRY: Duration = Duration::from_millis(10);
     const MAX_HANDLE_ATTEMPTS: u16 = 200;
     const REVEAL_CLOSE_CYCLES: u64 = 100;
+    const MAX_CLOUD_STARTUP_DIAGNOSTIC_BYTES: usize = 1_024;
 
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
     pub struct ShellResourceSnapshot {
@@ -401,10 +403,12 @@ mod windows_runtime {
         tray: SpikeTray,
         desktop: SlintDesktopAdapter,
         _settings: CandidateSettings,
+        catalog_cloud: CatalogCloudLifetime,
+        cloud_owner: Option<CloudCatalogOwner>,
+        cloud_startup_error: Option<String>,
         catalog: SlintCatalogController,
         catalog_sender: CatalogResultSender,
         catalog_results: CatalogResultReceiver,
-        catalog_executor: Option<CatalogEffectExecutor>,
         review_bridge: Arc<LiveReviewBridge>,
         pending_review_open: Option<CatalogEffect>,
         live_start_scheduled: Option<AttachmentToken>,
@@ -416,6 +420,12 @@ mod windows_runtime {
         marker_revision: u64,
         stop_observed: bool,
         quit_event_loop_requested: bool,
+    }
+
+    impl Drop for SlintShell {
+        fn drop(&mut self) {
+            let _ = self.catalog_cloud.shutdown();
+        }
     }
 
     #[derive(Clone)]
@@ -543,20 +553,47 @@ mod windows_runtime {
             .map_err(|error| format!("create Slint candidate media root: {error}"))?;
         let active_files = ActiveFileRegistry::new();
         let review_bridge = Arc::new(LiveReviewBridge::default());
-        let catalog_handler = Arc::new(LocalCatalogEffectHandler::open_with_review_port(
-            &media_root,
-            active_files,
-            Arc::new(clipline_library::Mp4LegacyAudioTrackProbe),
-            Arc::new(SystemCatalogReveal),
-            review_bridge.clone(),
-        )?);
+        let local_catalog_handler: Arc<dyn crate::catalog::CatalogEffectHandler> =
+            Arc::new(LocalCatalogEffectHandler::open_with_review_port(
+                &media_root,
+                active_files,
+                Arc::new(clipline_library::Mp4LegacyAudioTrackProbe),
+                Arc::new(SystemCatalogReveal),
+                review_bridge.clone(),
+            )?);
+        let (cloud, cloud_owner, cloud_preferences, cloud_startup_error) =
+            match NativeCloudRuntime::open(settings.store().clone()) {
+                Ok(cloud) => match cloud.account_context() {
+                    Ok((owner, preferences)) => (Some(cloud), owner, preferences, None),
+                    Err(error) => (
+                        Some(cloud),
+                        None,
+                        clipline_library::CatalogCloudPreferences::default(),
+                        Some(bounded_cloud_startup_diagnostic(error)),
+                    ),
+                },
+                Err(error) => (
+                    None,
+                    None,
+                    clipline_library::CatalogCloudPreferences::default(),
+                    Some(bounded_cloud_startup_diagnostic(error)),
+                ),
+            };
+        let catalog_handler = cloud.as_ref().map_or_else(
+            || Arc::clone(&local_catalog_handler),
+            |cloud| cloud.effect_handler(Arc::clone(&local_catalog_handler)),
+        );
         let (catalog_sender, catalog_results) = catalog_result_channel();
         let catalog_executor = CatalogEffectExecutor::start(
             catalog_handler,
             catalog_sender.clone(),
             Arc::new(TimerCatalogWake),
         )?;
-        let catalog = SlintCatalogController::new(Arc::new(SystemDayResolver))
+        let catalog_cloud = CatalogCloudLifetime::new(cloud, catalog_executor);
+        let mut catalog = SlintCatalogController::new(Arc::new(SystemDayResolver))
+            .map_err(|error| error.to_string())?;
+        let initial_catalog_effects = catalog
+            .set_cloud_context(cloud_owner.clone(), cloud_preferences)
             .map_err(|error| error.to_string())?;
         let hotkeys = WindowsHotkeyService::start(shell_commands.clone())
             .map_err(|error| format!("start Slint spike hotkey service: {error}"))?;
@@ -583,10 +620,12 @@ mod windows_runtime {
             tray,
             desktop,
             _settings: settings,
+            catalog_cloud,
+            cloud_owner,
+            cloud_startup_error,
             catalog,
             catalog_sender,
             catalog_results,
-            catalog_executor: Some(catalog_executor),
             review_bridge,
             pending_review_open: None,
             live_start_scheduled: None,
@@ -616,7 +655,11 @@ mod windows_runtime {
                 "trayReady",
                 "tray-first shell services ready",
             );
+            if let Some(error) = runtime_ref.cloud_startup_error.clone() {
+                write_shell_marker(&mut runtime_ref, "cloudUnavailable", &error);
+            }
         }
+        route_catalog_effects(&runtime, initial_catalog_effects)?;
         execute_action(&runtime, initial_action)?;
         if runtime.borrow().options.scenario == SpikeScenario::RevealClose100
             && runtime.borrow().window.is_none()
@@ -868,6 +911,7 @@ mod windows_runtime {
                     }
                 }
                 CatalogEffect::RefreshLocal { .. }
+                | CatalogEffect::RefreshCloud { .. }
                 | CatalogEffect::LoadClipDetail { .. }
                 | CatalogEffect::OpenLocalReview { .. }
                 | CatalogEffect::RenameTitle { .. }
@@ -882,8 +926,8 @@ mod windows_runtime {
                     let rejected = {
                         let runtime_ref = runtime.borrow();
                         let executor = runtime_ref
-                            .catalog_executor
-                            .as_ref()
+                            .catalog_cloud
+                            .executor()
                             .ok_or_else(|| "catalog executor is shut down".to_owned())?;
                         executor.try_submit(effect).err()
                     };
@@ -1058,20 +1102,54 @@ mod windows_runtime {
             let catalog_attachment = WindowAttachmentGeneration::new(attachment.generation());
             let catalog_foreground =
                 ForegroundGeneration::new(runtime_ref.lifecycle_revision.get());
-            let effects = runtime_ref
+            if let Some(cloud) = runtime_ref.catalog_cloud.cloud() {
+                cloud.attach(
+                    catalog_attachment,
+                    catalog_foreground,
+                    runtime_ref.cloud_owner.clone(),
+                )?;
+            }
+            let effects = match runtime_ref
                 .catalog
                 .attach(catalog_attachment, catalog_foreground)
-                .map_err(|error| error.to_string())?;
+            {
+                Ok(effects) => effects,
+                Err(error) => {
+                    if let Some(cloud) = runtime_ref.catalog_cloud.cloud() {
+                        cloud.detach();
+                    }
+                    return Err(error.to_string());
+                }
+            };
             let projection = runtime_ref.catalog.projection();
+            let publish_result = runtime_ref
+                .window
+                .as_ref()
+                .ok_or_else(|| "window disappeared during catalog attach".to_owned())
+                .and_then(|resources| {
+                    publish_projection(&resources.window, projection.as_ref(), |_| None)
+                        .map_err(|error| error.to_string())
+                });
+            if let Err(error) = publish_result {
+                if let Some(cloud) = runtime_ref.catalog_cloud.cloud() {
+                    cloud.detach();
+                }
+                let _ = runtime_ref.catalog.detach();
+                return Err(error);
+            }
+            let cloud_startup_error = runtime_ref.cloud_startup_error.clone();
             let resources = runtime_ref
                 .window
                 .as_mut()
                 .expect("window was installed before catalog attach");
-            publish_projection(&resources.window, projection.as_ref(), |_| None)
-                .map_err(|error| error.to_string())?;
             resources.catalog_attachment = catalog_attachment;
             resources.catalog_foreground = catalog_foreground;
             resources.catalog_revision = projection.revision.get();
+            if let Some(error) = cloud_startup_error {
+                resources
+                    .window
+                    .set_status_text(format!("Cloud unavailable: {error}").into());
+            }
             write_shell_marker(
                 &mut runtime_ref,
                 "windowCreated",
@@ -1654,6 +1732,9 @@ mod windows_runtime {
             runtime_ref
                 .review_bridge
                 .revoke(catalog_attachment, catalog_foreground);
+            if let Some(cloud) = runtime_ref.catalog_cloud.cloud() {
+                cloud.detach();
+            }
             runtime_ref
                 .catalog
                 .detach()
@@ -1785,21 +1866,20 @@ mod windows_runtime {
                 remember_first_error(&mut first_error, error);
             }
         }
-        let (hotkeys, activation, catalog_executor, request_event_loop_quit) = {
+        let (hotkeys, activation, catalog_cloud_result, request_event_loop_quit) = {
             let mut runtime_ref = runtime.borrow_mut();
             let request = !runtime_ref.quit_event_loop_requested;
             runtime_ref.quit_event_loop_requested = true;
+            let catalog_cloud_result = runtime_ref.catalog_cloud.shutdown();
             (
                 runtime_ref.hotkeys.take(),
                 runtime_ref.activation.take(),
-                runtime_ref.catalog_executor.take(),
+                catalog_cloud_result,
                 request,
             )
         };
-        if let Some(executor) = catalog_executor {
-            if let Err(error) = executor.shutdown() {
-                remember_first_error(&mut first_error, error);
-            }
+        if let Err(error) = catalog_cloud_result {
+            remember_first_error(&mut first_error, error);
         }
         if let Some(hotkeys) = hotkeys {
             if let Err(error) = hotkeys.shutdown() {
@@ -1988,6 +2068,18 @@ mod windows_runtime {
             .checked_add(1)
             .ok_or_else(|| "Slint shell resource counter exhausted".to_owned())?;
         Ok(())
+    }
+
+    fn bounded_cloud_startup_diagnostic(mut error: String) -> String {
+        if error.len() <= MAX_CLOUD_STARTUP_DIAGNOSTIC_BYTES {
+            return error;
+        }
+        let mut end = MAX_CLOUD_STARTUP_DIAGNOSTIC_BYTES;
+        while end != 0 && !error.is_char_boundary(end) {
+            end -= 1;
+        }
+        error.truncate(end);
+        error
     }
 
     fn remember_first_error(first_error: &mut Option<String>, error: String) {

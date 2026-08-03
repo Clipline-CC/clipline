@@ -4,6 +4,31 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-03): Slint replacement Milestone 7, Task 9 native Cloud refresh
+
+The Slint candidate now owns one process-lifetime, two-worker Tokio Cloud runtime beside the
+catalog executor. The first native `RefreshCloud` path uses the shared settings-backed account
+adapter, Windows Credential Manager, bounded rustls transport, exact window/account/request
+fences, and the existing 60-row controller projection. Local effects continue through the shared
+local handler, and invalid Cloud startup state is reported with a bounded diagnostic without
+preventing Local Library use.
+
+The shared account adapter derives stable client-id-to-path mappings from the complete bounded
+settings document, rejects ambiguous or oversized state before cloning it, applies profile
+updates through an exact account-generation/user CAS, and preserves the process-restart-safe
+upload generation sequence. Stale ownership takes precedence over malformed payload content at
+both the adapter and settings transaction boundaries.
+
+Window detach cancels the active request promptly. Normal quit and every exceptional shell Drop
+share one idempotent lifetime owner with the order `detach/cancel -> close and join catalog
+workers -> bounded Tokio shutdown`; a waiting-transport regression exercises the former abnormal
+exit leak. Standalone all-target tests and warning-denied Clippy are green, and both shared-account
+and live-runtime slices received independent GO audits with no remaining P0/P1.
+
+Next: finish Task 9 by splitting request ownership into independent page, thumbnail, media,
+profile/share, and durable-upload lanes; wire the bounded Cloud cache, native thumbnail retention,
+review-media lease transfer, profile/share actions, upload/status projection, and lifecycle tests.
+
 ## Checkpoint (2026-08-03): Slint replacement Milestone 7, Task 8 bounded catalog
 
 The framework-neutral Library surface now has one long-lived, transactional `CatalogController`.

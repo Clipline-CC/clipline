@@ -128,8 +128,13 @@ impl CatalogEffectExecutor {
         let (sender, receiver) = mpsc::sync_channel(CATALOG_EFFECT_QUEUE_CAPACITY);
         let receiver = Arc::new(Mutex::new(receiver));
         let stopping = Arc::new(AtomicBool::new(false));
-        let mut workers = Vec::new();
-        workers
+        let mut executor = Self {
+            sender: Some(sender),
+            workers: Vec::new(),
+            stopping,
+        };
+        executor
+            .workers
             .try_reserve_exact(CATALOG_EFFECT_WORKERS)
             .map_err(|_| "reserve catalog effect workers".to_owned())?;
         for index in 0..CATALOG_EFFECT_WORKERS {
@@ -137,18 +142,23 @@ impl CatalogEffectExecutor {
             let results = results.clone();
             let wake = Arc::clone(&wake);
             let receiver = Arc::clone(&receiver);
-            let stopping = Arc::clone(&stopping);
-            let worker = std::thread::Builder::new()
+            let stopping = Arc::clone(&executor.stopping);
+            let worker = match std::thread::Builder::new()
                 .name(format!("clipline-catalog-{index}"))
                 .spawn(move || worker_loop(receiver, handler, results, wake, stopping))
-                .map_err(|error| format!("start catalog effect worker: {error}"))?;
-            workers.push(worker);
+            {
+                Ok(worker) => worker,
+                Err(error) => {
+                    let start_error = format!("start catalog effect worker: {error}");
+                    return match executor.shutdown_inner() {
+                        Ok(()) => Err(start_error),
+                        Err(cleanup) => Err(format!("{start_error}; cleanup failed: {cleanup}")),
+                    };
+                }
+            };
+            executor.workers.push(worker);
         }
-        Ok(Self {
-            sender: Some(sender),
-            workers,
-            stopping,
-        })
+        Ok(executor)
     }
 
     /// Non-blocking callback boundary. A rejected effect is returned intact so
@@ -169,6 +179,10 @@ impl CatalogEffectExecutor {
     }
 
     pub fn shutdown(mut self) -> Result<(), String> {
+        self.shutdown_inner()
+    }
+
+    fn shutdown_inner(&mut self) -> Result<(), String> {
         self.stopping.store(true, Ordering::Release);
         self.sender.take();
         let mut first_error = None;
@@ -178,6 +192,12 @@ impl CatalogEffectExecutor {
             }
         }
         first_error.map_or(Ok(()), Err)
+    }
+}
+
+impl Drop for CatalogEffectExecutor {
+    fn drop(&mut self) {
+        let _ = self.shutdown_inner();
     }
 }
 
@@ -707,6 +727,14 @@ impl SlintCatalogController {
 
     pub fn detach(&mut self) -> Result<Vec<CatalogEffect>, CatalogUiError> {
         Ok(self.controller.detach()?)
+    }
+
+    pub fn set_cloud_context(
+        &mut self,
+        owner: Option<clipline_library::CloudCatalogOwner>,
+        preferences: clipline_library::CatalogCloudPreferences,
+    ) -> Result<Vec<CatalogEffect>, CatalogUiError> {
+        Ok(self.controller.set_cloud_context(owner, preferences)?)
     }
 
     pub fn dispatch(

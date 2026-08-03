@@ -1,6 +1,6 @@
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    Arc,
+    mpsc, Arc, Mutex,
 };
 use std::time::Duration;
 
@@ -295,6 +295,66 @@ impl CatalogEffectHandler for PanickingHandler {
     ) -> Result<Option<clipline_slint_spike::catalog::OwnedCatalogResult>, String> {
         panic!("injected catalog handler panic")
     }
+}
+
+struct WaitingHandler {
+    started: mpsc::Sender<()>,
+    release: Mutex<mpsc::Receiver<()>>,
+}
+
+impl CatalogEffectHandler for WaitingHandler {
+    fn execute(
+        &self,
+        _effect: CatalogEffect,
+    ) -> Result<Option<clipline_slint_spike::catalog::OwnedCatalogResult>, String> {
+        let _ = self.started.send(());
+        self.release
+            .lock()
+            .map_err(|_| "release lock poisoned".to_owned())?
+            .recv()
+            .map_err(|_| "release sender dropped".to_owned())?;
+        Ok(None)
+    }
+}
+
+#[test]
+fn executor_drop_closes_admission_and_joins_every_worker() {
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let (sender, _receiver) = catalog_result_channel();
+    let executor = CatalogEffectExecutor::start(
+        Arc::new(WaitingHandler {
+            started: started_tx,
+            release: Mutex::new(release_rx),
+        }),
+        sender,
+        Arc::new(WakeCounter::default()),
+    )
+    .unwrap();
+    let token = WindowWorkToken {
+        attachment: WindowAttachmentGeneration::new(40),
+        foreground: ForegroundGeneration::new(41),
+        request: RequestGeneration::new(42),
+    };
+    executor
+        .try_submit(CatalogEffect::RefreshLocal {
+            token,
+            revision: CatalogRevision::new(43),
+        })
+        .unwrap();
+    started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+    let (dropped_tx, dropped_rx) = mpsc::channel();
+    let dropper = std::thread::spawn(move || {
+        drop(executor);
+        let _ = dropped_tx.send(());
+    });
+    assert!(dropped_rx.recv_timeout(Duration::from_millis(50)).is_err());
+    release_tx.send(()).unwrap();
+    dropped_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("executor Drop must join both fixed workers");
+    dropper.join().unwrap();
 }
 
 #[test]

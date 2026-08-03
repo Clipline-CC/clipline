@@ -929,6 +929,7 @@ dependencies = [
  "slint",
  "slint-build",
  "thiserror 2.0.19",
+ "tokio",
 ]
 
 [[package]]

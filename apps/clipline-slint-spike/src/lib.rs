@@ -1,6 +1,7 @@
 //! Non-distributed Slint presentation spike for Clipline.
 
 pub mod catalog;
+pub mod cloud;
 pub mod controller;
 pub mod cpu_frame;
 pub mod desktop;

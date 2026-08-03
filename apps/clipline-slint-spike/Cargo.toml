@@ -40,6 +40,7 @@ slint = { version = "=1.17.1", default-features = false, features = [
     "system-tray",
 ] }
 thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 
 [build-dependencies]
 serde_json = "1"
