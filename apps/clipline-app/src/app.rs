@@ -41,9 +41,9 @@ use crate::games::{DetectedGame, GameWindowInfo};
 use crate::osu_enrichment::OsuTitleEvent;
 use crate::service::{self, Cmd, Event, ServiceOptions};
 use crate::settings::{
-    quota_bytes_from_gb, AppSettings, AppSettingsServiceExt, CaptureMode, CustomGameSettings,
-    GameRecordingMode, SettingsChange, SettingsProfile, SettingsSnapshot, SettingsStore,
-    SettingsTransaction,
+    quota_bytes_from_gb, AppSettings, AppSettingsServiceExt, CaptureMode, CloudAccountIdentity,
+    CloudUploadRecord, CustomGameSettings, GameRecordingMode, SettingsChange, SettingsProfile,
+    SettingsSnapshot, SettingsStore, SettingsTransaction,
 };
 use crate::updates::{channel_enabled, UpdateChannel};
 use crate::util::unix_now_i64;
@@ -1449,6 +1449,86 @@ impl RuntimeState {
                 expected_revision: before.revision,
                 expected_account_generation: before.account_generation,
                 change: SettingsChange::ReplaceCloudSettings(cloud),
+            })
+            .map_err(|error| error.to_string())?;
+        let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+        inner.settings.cloud = after.document.cloud;
+        Ok(inner.settings.clone())
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Task 7's upload adapter will implement UploadRecordPort through this exact CAS"
+        )
+    )]
+    pub(crate) fn compare_exchange_cloud_record(
+        &self,
+        expected_generation: u64,
+        expected_account: &CloudAccountIdentity,
+        key: String,
+        expected: Option<CloudUploadRecord>,
+        replacement: Option<CloudUploadRecord>,
+    ) -> Result<AppSettings, String> {
+        let _save_guard = Self::lock_cloud_settings_save()?;
+        let Some(store) = self.2.as_ref() else {
+            if expected_generation != 1 {
+                return Err("cloud account changed while upload work was in flight".into());
+            }
+            let mut next = self
+                .0
+                .lock()
+                .map_err(|_| "runtime state lock poisoned")?
+                .settings
+                .clone();
+            if &CloudAccountIdentity::from_settings(&next.cloud) != expected_account {
+                return Err("cloud account changed while upload work was in flight".into());
+            }
+            if next.cloud.uploads.get(&key) != expected.as_ref() {
+                return Err("cloud upload record changed while work was in flight".into());
+            }
+            match replacement {
+                Some(record) => {
+                    next.cloud.uploads.insert(key, record);
+                }
+                None => {
+                    next.cloud.uploads.remove(&key);
+                }
+            }
+            next.cloud.normalize();
+            AppSettings::save(&next)?;
+            let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+            inner.settings.cloud = next.cloud;
+            return Ok(inner.settings.clone());
+        };
+
+        let before = store.snapshot().map_err(|error| error.to_string())?;
+        if before.account_generation.get() != expected_generation
+            || &before.account != expected_account
+        {
+            return Err("cloud account changed while upload work was in flight".into());
+        }
+        let change = match replacement {
+            Some(record) => SettingsChange::UpsertCloudRecord {
+                account: expected_account.clone(),
+                key,
+                expected,
+                record,
+            },
+            None => SettingsChange::RemoveCloudRecord {
+                account: expected_account.clone(),
+                key,
+                expected: expected.ok_or_else(|| {
+                    "removing a cloud upload record requires its expected value".to_string()
+                })?,
+            },
+        };
+        let after = store
+            .transact(SettingsTransaction {
+                expected_revision: before.revision,
+                expected_account_generation: before.account_generation,
+                change,
             })
             .map_err(|error| error.to_string())?;
         let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
@@ -4084,6 +4164,95 @@ mod tests {
         assert_eq!(result.cloud.host_url, "https://clips.example.com");
         assert_eq!(state.settings().cloud, persisted.document.cloud);
         assert_eq!(persisted.revision.get(), initial.revision.get() + 1);
+    }
+
+    #[test]
+    fn cloud_record_compare_exchange_rejects_older_record_and_account_completions() {
+        let dir = TestDir::new("clipline-app", "settings-store-cloud-record-cas");
+        let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));
+        let initial = store.snapshot().unwrap();
+        let state = RuntimeState::with_store(initial.document.clone(), None, store.clone());
+        state
+            .update_cloud(|cloud| {
+                cloud.host_url = "https://clips.example.com".into();
+                cloud.connected_user_id = Some("user-a".into());
+                cloud.credential_target = Some("credential-a".into());
+            })
+            .unwrap();
+        let account_a = store.snapshot().unwrap();
+        let queued = CloudUploadRecord {
+            local_clip_id: "local-1".into(),
+            path: r"D:\Videos\Clipline\clip.mp4".into(),
+            remote_clip_id: None,
+            remote_url: None,
+            visibility: "private".into(),
+            upload_status: "queued".into(),
+            error: None,
+            updated_at_unix: 1,
+        };
+        state
+            .compare_exchange_cloud_record(
+                account_a.account_generation.get(),
+                &account_a.account,
+                "local-1".into(),
+                None,
+                Some(queued.clone()),
+            )
+            .unwrap();
+
+        let retrying = CloudUploadRecord {
+            upload_status: "retrying".into(),
+            updated_at_unix: 2,
+            ..queued.clone()
+        };
+        state
+            .compare_exchange_cloud_record(
+                account_a.account_generation.get(),
+                &account_a.account,
+                "local-1".into(),
+                Some(queued.clone()),
+                Some(retrying.clone()),
+            )
+            .unwrap();
+        let before_stale_record = store.snapshot().unwrap();
+        let uploaded = CloudUploadRecord {
+            upload_status: "uploaded_private".into(),
+            remote_clip_id: Some("remote-1".into()),
+            updated_at_unix: 3,
+            ..queued.clone()
+        };
+        let error = state
+            .compare_exchange_cloud_record(
+                account_a.account_generation.get(),
+                &account_a.account,
+                "local-1".into(),
+                Some(queued.clone()),
+                Some(uploaded.clone()),
+            )
+            .unwrap_err();
+        assert!(error.contains("record changed"), "{error}");
+        assert_eq!(store.snapshot().unwrap(), before_stale_record);
+        assert_eq!(state.settings(), before_stale_record.document);
+
+        state
+            .update_cloud(|cloud| {
+                cloud.connected_user_id = Some("user-b".into());
+                cloud.credential_target = Some("credential-b".into());
+            })
+            .unwrap();
+        let before_stale_account = store.snapshot().unwrap();
+        let error = state
+            .compare_exchange_cloud_record(
+                account_a.account_generation.get(),
+                &account_a.account,
+                "local-1".into(),
+                Some(retrying),
+                Some(uploaded),
+            )
+            .unwrap_err();
+        assert!(error.contains("account changed"), "{error}");
+        assert_eq!(store.snapshot().unwrap(), before_stale_account);
+        assert_eq!(state.settings(), before_stale_account.document);
     }
 
     #[test]
