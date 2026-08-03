@@ -807,15 +807,31 @@ fn typed_effects_pin_exact_owners_and_resolved_paths() {
         account_key: CloudAccountKey::new("account-upload").unwrap(),
         account_generation: CloudAccountGeneration::new(17),
     };
+    let valid_upload = CatalogEffect::StartUpload {
+        token: window,
+        owner: upload_owner.clone(),
+        target: target.clone(),
+        options: valid_options,
+    };
+    assert_eq!(valid_upload.validate_bounds(), Ok(()));
     assert_eq!(
-        CatalogEffect::StartUpload {
-            token: window,
-            owner: upload_owner.clone(),
-            target: target.clone(),
-            options: valid_options,
-        }
-        .validate_bounds(),
+        valid_upload.validate_for_cloud_owner(Some(&upload_owner)),
         Ok(())
+    );
+    assert_eq!(
+        valid_upload.validate_for_cloud_owner(Some(&CloudCatalogOwner {
+            account_key: upload_owner.account_key.clone(),
+            account_generation: upload_owner.account_generation.checked_next().unwrap(),
+        })),
+        Err(PayloadBoundsError::Invalid {
+            field: "upload.cloud_owner"
+        })
+    );
+    assert_eq!(
+        valid_upload.validate_for_cloud_owner(None),
+        Err(PayloadBoundsError::Invalid {
+            field: "upload.cloud_owner"
+        })
     );
     let duplicate_audio = CatalogUploadOptions {
         title: None,

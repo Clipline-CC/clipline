@@ -1314,14 +1314,7 @@ impl CatalogController {
             });
         }
         for effect in &effects {
-            effect.validate_bounds()?;
-            if let CatalogEffect::StartUpload { owner, .. } = effect {
-                if candidate.cloud_owner.as_ref() != Some(owner) {
-                    return Err(CatalogControllerError::Invalid {
-                        field: "upload.cloud_owner",
-                    });
-                }
-            }
+            effect.validate_for_cloud_owner(candidate.cloud_owner.as_ref())?;
         }
         candidate.projection = Arc::new(build_projection(
             &candidate,

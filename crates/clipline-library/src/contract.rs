@@ -1834,6 +1834,25 @@ pub enum CatalogEffect {
 }
 
 impl CatalogEffect {
+    /// Validates the effect against the exact account context that is current
+    /// at the handoff boundary. Upload work is durable and window-independent,
+    /// so accepting it under a replacement login would otherwise cross the
+    /// account-generation fence.
+    pub fn validate_for_cloud_owner(
+        &self,
+        current_owner: Option<&CloudCatalogOwner>,
+    ) -> Result<(), PayloadBoundsError> {
+        self.validate_bounds()?;
+        if let Self::StartUpload { owner, .. } = self {
+            if current_owner != Some(owner) {
+                return Err(PayloadBoundsError::Invalid {
+                    field: "upload.cloud_owner",
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Derives the exact owner executors must echo in `OperationFailed`.
     /// Effects without controller-owned fallible work return `None`.
     pub fn operation_owner(&self) -> Result<Option<CatalogOperationOwner>, PayloadBoundsError> {
