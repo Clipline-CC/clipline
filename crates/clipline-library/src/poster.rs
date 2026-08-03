@@ -1098,16 +1098,24 @@ impl<H> PosterController<H> {
             return Ok(update);
         }
         let cache = match completion {
-            PosterCompletion::Ready(path) if path == poster_path(&request.item.native_path) => {
-                PosterCacheEntry::Ready {
-                    path,
-                    source_identity: request.item.source_identity,
+            PosterCompletion::Ready(path) => {
+                let expected = poster_path(&request.item.native_path);
+                if same_catalog_path(&path, &expected) {
+                    PosterCacheEntry::Ready {
+                        // Keep the request spelling after accepting an
+                        // equivalent canonical Windows path. The decoder's
+                        // ownership contract is then exact without leaking a
+                        // `\\?\` path into display-facing state.
+                        path: expected,
+                        source_identity: request.item.source_identity,
+                    }
+                } else {
+                    PosterCacheEntry::Negative {
+                        failure: PosterNegativeResult::Failed(PosterFailureKind::Corrupt),
+                        retry_at: retry_at(now),
+                    }
                 }
             }
-            PosterCompletion::Ready(_) => PosterCacheEntry::Negative {
-                failure: PosterNegativeResult::Failed(PosterFailureKind::Corrupt),
-                retry_at: retry_at(now),
-            },
             PosterCompletion::Missing => PosterCacheEntry::Negative {
                 failure: PosterNegativeResult::Missing,
                 retry_at: retry_at(now),
@@ -1460,6 +1468,12 @@ enum CacheAction {
 
 fn retry_at(now: Instant) -> Instant {
     now.checked_add(POSTER_NEGATIVE_RETRY).unwrap_or(now)
+}
+
+fn same_catalog_path(left: &Path, right: &Path) -> bool {
+    ClipPathIdentity::from_path(left)
+        .zip(ClipPathIdentity::from_path(right))
+        .is_some_and(|(left, right)| left == right)
 }
 
 impl<H> Default for PosterController<H> {

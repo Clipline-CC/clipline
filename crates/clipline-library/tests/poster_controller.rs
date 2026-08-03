@@ -90,6 +90,26 @@ fn poster(index: usize) -> PathBuf {
 }
 
 #[test]
+fn windows_verbatim_poster_path_is_normalized_to_the_request_spelling() {
+    let mut controller = PosterController::<u64>::new();
+    controller
+        .replace_page(window(1, 2, 3), vec![item(0)])
+        .unwrap();
+    let extract = controller.set_viewport(0, 1, 0).unwrap().queued.remove(0);
+
+    let update = controller.accept_extracted(
+        &extract,
+        PosterCompletion::Ready(PathBuf::from(r"\\?\C:\clips\clip-0.poster.jpg")),
+    );
+
+    assert_eq!(update.queued.len(), 1);
+    assert!(matches!(
+        &update.queued[0].kind,
+        PosterWorkKind::Decode { encoded_path } if encoded_path == &poster(0)
+    ));
+}
+
+#[test]
 fn viewport_queues_at_most_32_and_releases_every_handle_that_leaves_the_window() {
     let mut controller = PosterController::<u64>::new();
     let page: Vec<_> = (0..MAX_CATALOG_PAGE_ROWS).map(item).collect();
