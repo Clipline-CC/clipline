@@ -507,6 +507,35 @@ fn admission_rejection_maps_only_owned_operations_to_exact_failures() {
     ));
     assert!(rejected_effect_result(&CatalogEffect::CloseReview { token }, "full").is_none());
 
+    let cloud_token = CloudWorkToken {
+        window: token,
+        account_key: CloudAccountKey::new("account-a").unwrap(),
+        account_generation: CloudAccountGeneration::new(7),
+    };
+    let cloud_item = CatalogItemIdentity::Cloud {
+        account_key: cloud_token.account_key.clone(),
+        account_generation: cloud_token.account_generation,
+        remote_clip_id: RemoteClipId::new("remote-1").unwrap(),
+    };
+    let completion = rejected_effect_result(
+        &CatalogEffect::OpenInBrowser {
+            token: cloud_token,
+            item: cloud_item,
+        },
+        "executor queue is full",
+    )
+    .unwrap();
+    assert!(matches!(
+        completion,
+        clipline_slint_spike::catalog::OwnedCatalogResult {
+            result: CatalogResult::ForegroundFeedback {
+                token: actual,
+                message,
+            },
+            expected: ExpectedResultOwner::Window(expected),
+        } if actual == token && expected == token && message == "executor queue is full"
+    ));
+
     let (effect, owner) = cloud_thumbnail_effect(token, 9);
     let completion = rejected_effect_result(&effect, "executor queue is full").unwrap();
     assert!(matches!(

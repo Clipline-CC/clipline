@@ -1886,7 +1886,6 @@ pub enum CatalogEffect {
     OpenInBrowser {
         token: CloudWorkToken,
         item: CatalogItemIdentity,
-        url: String,
     },
     CopyPublicLink {
         token: CloudWorkToken,
@@ -2026,9 +2025,14 @@ impl CatalogEffect {
                 target.validate_bounds()?;
                 options.validate_bounds()
             }
-            Self::OpenInBrowser { token, item, url }
-            | Self::CopyPublicLink { token, item, url } => {
+            Self::OpenInBrowser { token, item } => validate_cloud_item_owner(item, token),
+            Self::CopyPublicLink { token, item, url } => {
                 validate_cloud_item_owner(item, token)?;
+                if url.trim().is_empty() {
+                    return Err(PayloadBoundsError::Invalid {
+                        field: "cloud_link.url",
+                    });
+                }
                 check_string("cloud_link.url", url)
             }
         }

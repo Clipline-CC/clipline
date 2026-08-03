@@ -777,7 +777,6 @@ fn typed_effects_pin_exact_owners_and_resolved_paths() {
         CatalogEffect::OpenInBrowser {
             token: cloud.clone(),
             item: cloud_item.clone(),
-            url: "https://clips.example/c/remote-1".into(),
         }
         .validate_bounds(),
         Ok(())
@@ -786,13 +785,33 @@ fn typed_effects_pin_exact_owners_and_resolved_paths() {
     stale_cloud.account_generation = CloudAccountGeneration::new(5);
     assert_eq!(
         CatalogEffect::CopyPublicLink {
-            token: stale_cloud,
+            token: stale_cloud.clone(),
             item: cloud_item,
             url: "https://clips.example/c/remote-1".into(),
         }
         .validate_bounds(),
         Err(PayloadBoundsError::Invalid {
             field: "cloud_item.owner"
+        })
+    );
+    let exact_cloud = CloudWorkToken {
+        account_generation: CloudAccountGeneration::new(4),
+        ..stale_cloud
+    };
+    let exact_item = CatalogItemIdentity::Cloud {
+        account_key: exact_cloud.account_key.clone(),
+        account_generation: exact_cloud.account_generation,
+        remote_clip_id: RemoteClipId::new("remote-1").unwrap(),
+    };
+    assert_eq!(
+        CatalogEffect::CopyPublicLink {
+            token: exact_cloud,
+            item: exact_item,
+            url: String::new(),
+        }
+        .validate_bounds(),
+        Err(PayloadBoundsError::Invalid {
+            field: "cloud_link.url"
         })
     );
 

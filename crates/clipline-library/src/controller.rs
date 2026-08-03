@@ -807,7 +807,7 @@ impl CatalogController {
             CatalogAction::CloseActive => close_active(state, effects)?,
             CatalogAction::OpenContext { item } => {
                 require_current_identity(state, &item)?;
-                state.menu = Some(menu_for(item));
+                state.menu = Some(menu_for(state, item)?);
                 state.revision = state.revision.checked_next()?;
             }
             CatalogAction::CloseContext => {
@@ -923,19 +923,18 @@ impl CatalogController {
                 });
             }
             CatalogAction::OpenInBrowser { item } => {
-                let (token, cloud) = resolve_cloud(state, &item)?;
-                effects.push(CatalogEffect::OpenInBrowser {
-                    token,
-                    item,
-                    url: cloud.remote_url.clone(),
-                });
+                let (token, _) = resolve_cloud(state, &item)?;
+                effects.push(CatalogEffect::OpenInBrowser { token, item });
             }
             CatalogAction::CopyPublicLink { item } => {
                 let (token, cloud) = resolve_cloud(state, &item)?;
+                let url = cloud_public_link(cloud).ok_or(CatalogControllerError::Invalid {
+                    field: "cloud.public_link",
+                })?;
                 effects.push(CatalogEffect::CopyPublicLink {
                     token,
                     item,
-                    url: cloud.remote_url.clone(),
+                    url: url.to_owned(),
                 });
             }
             CatalogAction::CancelUpload { token } => {
@@ -1847,9 +1846,18 @@ fn cloud_thumbnail_is_current(
     })
 }
 
-fn menu_for(target: CatalogItemIdentity) -> CatalogMenuProjection {
+fn menu_for(
+    state: &CatalogControllerState,
+    target: CatalogItemIdentity,
+) -> Result<CatalogMenuProjection, CatalogControllerError> {
     let local = target.source() == CatalogSource::Local;
-    CatalogMenuProjection {
+    let can_copy_link = if local {
+        false
+    } else {
+        let item = resolve_cloud_item(state, &target)?;
+        cloud_public_link(item).is_some()
+    };
+    Ok(CatalogMenuProjection {
         target,
         can_review: true,
         can_rename: local,
@@ -1857,8 +1865,15 @@ fn menu_for(target: CatalogItemIdentity) -> CatalogMenuProjection {
         can_upload: local,
         can_reveal: local,
         can_open_browser: !local,
-        can_copy_link: !local,
-    }
+        can_copy_link,
+    })
+}
+
+fn cloud_public_link(item: &CloudLibraryItem) -> Option<&str> {
+    (matches!(item.visibility.as_str(), "public" | "unlisted")
+        && item.upload_status == "uploaded_public"
+        && !item.remote_url.trim().is_empty())
+    .then_some(item.remote_url.as_str())
 }
 
 fn open_local_text_dialog(

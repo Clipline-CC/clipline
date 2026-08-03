@@ -12,16 +12,19 @@ use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
 };
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
-use windows::Win32::System::Ole::CF_HDROP;
+use windows::Win32::System::Ole::{CF_HDROP, CF_UNICODETEXT};
 use windows::Win32::UI::Shell::DROPFILES;
 
 const OPEN_ATTEMPTS: usize = 8;
 const OPEN_RETRY_DELAY: Duration = Duration::from_millis(15);
+const MAX_CLIPBOARD_TEXT_UTF16_UNITS: usize = 16 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum WindowsClipboardError {
     #[error("clipboard file path contains an embedded NUL")]
     PathContainsNul,
+    #[error("clipboard text contains an embedded NUL")]
+    TextContainsNul,
     #[error("clipboard file-list payload is too large")]
     PayloadTooLarge,
     #[error("{operation}: {message}")]
@@ -40,6 +43,26 @@ pub fn copy_file_to_clipboard(
     owner_window: isize,
 ) -> Result<(), WindowsClipboardError> {
     let payload = dropfiles_payload(path)?;
+    copy_payload_to_clipboard(&payload, CF_HDROP.0, owner_window)
+}
+
+/// Copies bounded Unicode text to the Windows clipboard as `CF_UNICODETEXT`.
+///
+/// `owner_window` follows [`copy_file_to_clipboard`]. Embedded NULs are
+/// rejected because Windows treats the first one as the end of the payload.
+pub fn copy_text_to_clipboard(
+    text: &str,
+    owner_window: isize,
+) -> Result<(), WindowsClipboardError> {
+    let payload = unicode_text_payload(text)?;
+    copy_payload_to_clipboard(&payload, CF_UNICODETEXT.0, owner_window)
+}
+
+fn copy_payload_to_clipboard(
+    payload: &[u8],
+    format: u16,
+    owner_window: isize,
+) -> Result<(), WindowsClipboardError> {
     let handle = unsafe { GlobalAlloc(GMEM_MOVEABLE, payload.len()) }
         .map_err(|error| native_error("allocate clipboard memory", error))?;
     let mut transfer = ClipboardTransfer::new(handle);
@@ -71,7 +94,7 @@ pub fn copy_file_to_clipboard(
                 unsafe { EmptyClipboard() }
                     .map_err(|error| native_error("empty clipboard", error))?;
                 let clipboard_handle = HANDLE(transfer.handle().0);
-                unsafe { SetClipboardData(CF_HDROP.0.into(), Some(clipboard_handle)) }
+                unsafe { SetClipboardData(format.into(), Some(clipboard_handle)) }
                     .map_err(|error| native_error("set clipboard data", error))?;
                 transfer.release();
                 return Ok(());
@@ -125,6 +148,31 @@ fn dropfiles_payload(path: &Path) -> Result<Vec<u8>, WindowsClipboardError> {
     for (index, unit) in wide.into_iter().enumerate() {
         let offset = header_len + index * size_of::<u16>();
         payload[offset..offset + size_of::<u16>()].copy_from_slice(&unit.to_le_bytes());
+    }
+    Ok(payload)
+}
+
+fn unicode_text_payload(text: &str) -> Result<Vec<u8>, WindowsClipboardError> {
+    let units: Vec<u16> = text.encode_utf16().collect();
+    if units.contains(&0) {
+        return Err(WindowsClipboardError::TextContainsNul);
+    }
+    if units.len() > MAX_CLIPBOARD_TEXT_UTF16_UNITS {
+        return Err(WindowsClipboardError::PayloadTooLarge);
+    }
+    let unit_count = units
+        .len()
+        .checked_add(1)
+        .ok_or(WindowsClipboardError::PayloadTooLarge)?;
+    let byte_len = unit_count
+        .checked_mul(size_of::<u16>())
+        .ok_or(WindowsClipboardError::PayloadTooLarge)?;
+    let mut payload = Vec::new();
+    payload
+        .try_reserve_exact(byte_len)
+        .map_err(|_| WindowsClipboardError::PayloadTooLarge)?;
+    for unit in units.into_iter().chain(std::iter::once(0)) {
+        payload.extend_from_slice(&unit.to_le_bytes());
     }
     Ok(payload)
 }
@@ -239,6 +287,28 @@ mod tests {
         assert_eq!(
             dropfiles_payload(path),
             Err(WindowsClipboardError::PathContainsNul)
+        );
+    }
+
+    #[test]
+    fn unicode_text_payload_is_nul_terminated_bounded_and_rejects_embedded_nul() {
+        let payload = unicode_text_payload("https://clips.example/c/snowman-☃").unwrap();
+        let units: Vec<u16> = payload
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes(pair.try_into().unwrap()))
+            .collect();
+        assert_eq!(units.last(), Some(&0));
+        assert_eq!(
+            String::from_utf16(&units[..units.len() - 1]).unwrap(),
+            "https://clips.example/c/snowman-☃"
+        );
+        assert_eq!(
+            unicode_text_payload("https://clips.example/c/bad\0suffix"),
+            Err(WindowsClipboardError::TextContainsNul)
+        );
+        assert_eq!(
+            unicode_text_payload(&"x".repeat(MAX_CLIPBOARD_TEXT_UTF16_UNITS + 1)),
+            Err(WindowsClipboardError::PayloadTooLarge)
         );
     }
 

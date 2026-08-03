@@ -309,6 +309,17 @@ pub fn rejected_effect_result(
             expected: ExpectedResultOwner::CloudThumbnail(owner),
         });
     }
+    if let CatalogEffect::OpenInBrowser { token, .. }
+    | CatalogEffect::CopyPublicLink { token, .. } = effect
+    {
+        return Some(OwnedCatalogResult {
+            result: CatalogResult::ForegroundFeedback {
+                token: token.window,
+                message,
+            },
+            expected: ExpectedResultOwner::Window(token.window),
+        });
+    }
     effect
         .operation_owner()
         .ok()

@@ -292,6 +292,139 @@ fn seed_cloud(controller: &mut CatalogController, account: &str) -> CatalogItemI
     }
 }
 
+#[test]
+fn cloud_menu_copies_only_a_public_link_and_opens_every_exact_remote_identity() {
+    let mut controller = controller();
+    seed_local(&mut controller, vec![local_item(0)]);
+    let owner = cloud_owner("account-a", 1);
+    controller.set_cloud_owner(Some(owner.clone())).unwrap();
+    let (token, revision, page) = only_cloud_refresh(
+        controller
+            .dispatch(CatalogAction::SetSource {
+                source: CatalogSource::Cloud,
+            })
+            .unwrap(),
+    );
+    let public = cloud_item("public");
+    let mut private = cloud_item("private");
+    private.visibility = "private".into();
+    private.upload_status = "uploaded_private".into();
+    let mut processing = cloud_item("processing");
+    processing.upload_status = "uploaded_processing".into();
+    let mut unlisted = cloud_item("unlisted");
+    unlisted.visibility = "unlisted".into();
+    controller
+        .accept(CatalogResult::CloudPage(
+            CloudListPageCompletion::page(
+                token,
+                revision,
+                page,
+                vec![public, private, processing, unlisted],
+                Vec::new(),
+            )
+            .unwrap(),
+        ))
+        .unwrap();
+    let public_id = CatalogItemIdentity::Cloud {
+        account_key: owner.account_key.clone(),
+        account_generation: owner.account_generation,
+        remote_clip_id: RemoteClipId::new("public").unwrap(),
+    };
+    let private_id = CatalogItemIdentity::Cloud {
+        account_key: owner.account_key.clone(),
+        account_generation: owner.account_generation,
+        remote_clip_id: RemoteClipId::new("private").unwrap(),
+    };
+    let processing_id = CatalogItemIdentity::Cloud {
+        account_key: owner.account_key.clone(),
+        account_generation: owner.account_generation,
+        remote_clip_id: RemoteClipId::new("processing").unwrap(),
+    };
+    let unlisted_id = CatalogItemIdentity::Cloud {
+        account_key: owner.account_key,
+        account_generation: owner.account_generation,
+        remote_clip_id: RemoteClipId::new("unlisted").unwrap(),
+    };
+
+    controller
+        .dispatch(CatalogAction::OpenContext {
+            item: public_id.clone(),
+        })
+        .unwrap();
+    let menu = controller.state().menu.as_ref().unwrap();
+    assert!(menu.can_copy_link);
+    assert!(menu.can_open_browser);
+    assert!(matches!(
+        only_effect(
+            controller
+                .dispatch(CatalogAction::CopyPublicLink {
+                    item: public_id.clone(),
+                })
+                .unwrap()
+        ),
+        CatalogEffect::CopyPublicLink { url, .. }
+            if url == "https://clips.example/c/public"
+    ));
+    assert!(matches!(
+        only_effect(
+            controller
+                .dispatch(CatalogAction::OpenInBrowser { item: public_id })
+                .unwrap()
+        ),
+        CatalogEffect::OpenInBrowser { .. }
+    ));
+
+    controller
+        .dispatch(CatalogAction::OpenContext {
+            item: private_id.clone(),
+        })
+        .unwrap();
+    let menu = controller.state().menu.as_ref().unwrap();
+    assert!(!menu.can_copy_link);
+    assert!(menu.can_open_browser);
+    assert!(controller
+        .dispatch(CatalogAction::CopyPublicLink {
+            item: private_id.clone(),
+        })
+        .is_err());
+    assert!(matches!(
+        only_effect(
+            controller
+                .dispatch(CatalogAction::OpenInBrowser { item: private_id })
+                .unwrap()
+        ),
+        CatalogEffect::OpenInBrowser { .. }
+    ));
+
+    controller
+        .dispatch(CatalogAction::OpenContext {
+            item: processing_id.clone(),
+        })
+        .unwrap();
+    assert!(!controller.state().menu.as_ref().unwrap().can_copy_link);
+    assert!(controller
+        .dispatch(CatalogAction::CopyPublicLink {
+            item: processing_id,
+        })
+        .is_err());
+
+    controller
+        .dispatch(CatalogAction::OpenContext {
+            item: unlisted_id.clone(),
+        })
+        .unwrap();
+    assert!(controller.state().menu.as_ref().unwrap().can_copy_link);
+    assert!(matches!(
+        only_effect(
+            controller
+                .dispatch(CatalogAction::CopyPublicLink { item: unlisted_id })
+                .unwrap()
+        ),
+        CatalogEffect::CopyPublicLink { url, .. }
+            if url == "https://clips.example/c/unlisted"
+    ));
+}
+
 fn prepare_cloud_review(
     controller: &mut CatalogController,
     item: CatalogItemIdentity,

@@ -10,18 +10,20 @@ use clipline_library::ports::{
 };
 use clipline_library::{
     catalog_result_channel, CatalogAction, CatalogCloudPreferences, CatalogController,
-    CatalogEffect, CatalogOperationOwner, CatalogResult, CatalogRevision, CatalogSource,
-    CloudAccountGeneration, CloudAccountKey, CloudAccountSnapshot, CloudCatalogOwner,
-    CloudClipSummary, CloudListTransportRequest, CloudListTransportResponse, CloudPageNumber,
-    CloudPageOutcome, CloudProfileTransport, CloudServiceAccount, CloudWorkToken,
-    ExpectedResultOwner, ForegroundGeneration, LocalDay, LocalDayResolver, RequestGeneration,
-    WindowAttachmentGeneration, WindowWorkToken,
+    CatalogEffect, CatalogItemIdentity, CatalogOperationOwner, CatalogResult, CatalogRevision,
+    CatalogSource, CloudAccountGeneration, CloudAccountKey, CloudAccountSnapshot,
+    CloudCatalogOwner, CloudClipSummary, CloudListTransportRequest, CloudListTransportResponse,
+    CloudPageNumber, CloudPageOutcome, CloudProfileTransport, CloudServiceAccount, CloudWorkToken,
+    ExpectedResultOwner, ForegroundGeneration, LocalDay, LocalDayResolver, RemoteClipId,
+    RequestGeneration, WindowAttachmentGeneration, WindowWorkToken,
 };
 use clipline_settings::{AppSettings, SettingsProfile, SettingsStore};
 use clipline_slint_spike::catalog::{
     CatalogEffectExecutor, CatalogEffectHandler, CatalogResultWake, OwnedCatalogResult,
 };
-use clipline_slint_spike::cloud::{CatalogCloudLifetime, NativeCloudRuntime};
+use clipline_slint_spike::cloud::{
+    CatalogCloudLifetime, NativeCloudPlatformPort, NativeCloudRuntime,
+};
 use clipline_test_utils::TestDir;
 
 #[derive(Clone)]
@@ -177,6 +179,30 @@ struct NoopWake;
 
 impl CatalogResultWake for NoopWake {
     fn wake(&self) {}
+}
+
+#[derive(Default)]
+struct RecordingCloudPlatform {
+    opened: Mutex<Vec<(String, String)>>,
+    copied: Mutex<Vec<(String, String)>>,
+}
+
+impl NativeCloudPlatformPort for RecordingCloudPlatform {
+    fn open_browser(&self, url: &str, context: &str) -> Result<(), String> {
+        self.opened
+            .lock()
+            .unwrap()
+            .push((url.to_owned(), context.to_owned()));
+        Ok(())
+    }
+
+    fn copy_text(&self, text: &str, context: &str) -> Result<(), String> {
+        self.copied
+            .lock()
+            .unwrap()
+            .push((text.to_owned(), context.to_owned()));
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -348,6 +374,114 @@ fn composite_handler_delegates_local_effects_without_touching_cloud_ports() {
     assert_eq!(local.0.load(Ordering::SeqCst), 1);
     assert_eq!(credentials.reads.load(Ordering::SeqCst), 0);
     assert!(transport.requests.lock().unwrap().is_empty());
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn public_link_effects_resolve_the_exact_clip_page_and_copy_only_the_issued_url() {
+    let accounts = Arc::new(FakeAccount {
+        account: Arc::new(Mutex::new(service_account())),
+    });
+    let platform = Arc::new(RecordingCloudPlatform::default());
+    let runtime = NativeCloudRuntime::with_transport_and_platform(
+        accounts,
+        Arc::new(FakeCredential::default()),
+        Arc::new(FakeTransport::success()),
+        platform.clone(),
+    )
+    .unwrap();
+    runtime
+        .attach(
+            WindowAttachmentGeneration::new(3),
+            ForegroundGeneration::new(5),
+            Some(owner()),
+        )
+        .unwrap();
+    let handler = runtime.effect_handler(Arc::new(RejectLocal));
+    let item = CatalogItemIdentity::Cloud {
+        account_key: owner().account_key,
+        account_generation: owner().account_generation,
+        remote_clip_id: clipline_library::RemoteClipId::new("remote-1").unwrap(),
+    };
+
+    assert!(handler
+        .execute(CatalogEffect::OpenInBrowser {
+            token: token(20),
+            item: item.clone(),
+        })
+        .unwrap()
+        .is_none());
+    let copied = handler
+        .execute(CatalogEffect::CopyPublicLink {
+            token: token(21),
+            item: item.clone(),
+            url: "https://public.example/c/server-issued".into(),
+        })
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        copied.result,
+        CatalogResult::ForegroundFeedback { message, .. }
+            if message == "Cloud public link copied"
+    ));
+
+    assert_eq!(
+        platform.opened.lock().unwrap().as_slice(),
+        &[(
+            "https://clips.example/clip/remote-1".into(),
+            "cloud clip page".into()
+        )]
+    );
+    assert_eq!(
+        platform.copied.lock().unwrap().as_slice(),
+        &[(
+            "https://public.example/c/server-issued".into(),
+            "copy Cloud public link".into()
+        )]
+    );
+
+    let mut stale = token(22);
+    stale.window.foreground = ForegroundGeneration::new(99);
+    assert!(handler
+        .execute(CatalogEffect::OpenInBrowser {
+            token: stale.clone(),
+            item: item.clone(),
+        })
+        .unwrap()
+        .is_none());
+    assert!(handler
+        .execute(CatalogEffect::CopyPublicLink {
+            token: stale,
+            item: item.clone(),
+            url: "https://public.example/c/stale".into(),
+        })
+        .unwrap()
+        .is_none());
+    let mut stale_account = token(23);
+    stale_account.account_generation = CloudAccountGeneration::new(8);
+    let stale_account_item = CatalogItemIdentity::Cloud {
+        account_key: stale_account.account_key.clone(),
+        account_generation: stale_account.account_generation,
+        remote_clip_id: RemoteClipId::new("remote-1").unwrap(),
+    };
+    assert!(handler
+        .execute(CatalogEffect::CopyPublicLink {
+            token: stale_account,
+            item: stale_account_item,
+            url: "https://public.example/c/stale-account".into(),
+        })
+        .unwrap()
+        .is_none());
+    runtime.detach();
+    assert!(handler
+        .execute(CatalogEffect::OpenInBrowser {
+            token: token(23),
+            item,
+        })
+        .unwrap()
+        .is_none());
+    assert_eq!(platform.opened.lock().unwrap().len(), 1);
+    assert_eq!(platform.copied.lock().unwrap().len(), 1);
     runtime.shutdown().unwrap();
 }
 

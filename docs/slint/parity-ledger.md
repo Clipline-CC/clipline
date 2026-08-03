@@ -61,7 +61,7 @@ stable; the baseline commit preserves exact historical locations.
 | `command:cloud_user_profile` | `cloud.rs`; retrieve connected profile metadata. | M7 cloud controller | Account-generation fixture. | `not_started` |
 | `command:cloud_user_avatar` | `cloud.rs`; retrieve bounded avatar bytes. | M7 cloud controller | Bounds/cache/error test. | `not_started` |
 | `command:open_cloud_user_profile` | `cloud.rs`; open trusted profile URL. | M7 cloud controller | URL allowlist and shell test. | `not_started` |
-| `command:open_cloud_clip` | Slint routes an exact catalog owner through the shared cache and four-entry lease registry into dynamic native playback; stale/replaced opens release their lease. | M7 cloud controller | Generation/cancel/media-lease and replacement lifecycle tests. | `implemented` |
+| `command:open_cloud_clip` | Slint resolves an exact catalog owner through the shared Cloud service to a trusted canonical clip-page URL; the cache/media lease path remains independently fenced. | M7 cloud controller | Generation/cancel, trusted-URL, clipboard, media-lease, and replacement lifecycle tests. | `implemented` |
 | `command:osu_api_status` | `osu_api.rs`; report enrichment connection state. | M8 games | Credential/status fixture. | `not_started` |
 | `command:save_osu_api_settings` | `osu_api.rs`; persist osu! API credentials/settings. | M8 games | Validation/credential rollback test. | `not_started` |
 | `command:test_osu_api_connection` | `osu_api.rs`; cancellable live credential probe. | M8 games | Mock server success/failure test. | `not_started` |

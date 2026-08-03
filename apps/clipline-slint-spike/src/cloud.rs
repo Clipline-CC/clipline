@@ -32,7 +32,7 @@ use clipline_library::{
     CloudReviewMediaOwner, CloudReviewMediaRequest, CloudService, CloudServiceError,
     CloudThumbnailDescriptor, CloudThumbnailOwner, CloudThumbnailRequest, CloudWorkToken,
     ExpectedResultOwner, ForegroundGeneration, PosterStatus, PreparedCloudReviewMedia,
-    WindowAttachmentGeneration, MAX_CATALOG_PAGE_ROWS, MAX_CATALOG_STRING_BYTES,
+    WindowAttachmentGeneration, WindowWorkToken, MAX_CATALOG_PAGE_ROWS, MAX_CATALOG_STRING_BYTES,
     MAX_FOREGROUND_MESSAGE_BYTES,
 };
 #[cfg(windows)]
@@ -47,6 +47,41 @@ use crate::cloud_thumbnail::{
 
 const CLOUD_RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_NATIVE_CLOUD_MEDIA_LEASES: usize = 4;
+
+/// Reviewed platform boundary for Cloud browser and public-link actions.
+/// Tests inject a recorder; production uses only safe `clipline-shell` wrappers.
+pub trait NativeCloudPlatformPort: Send + Sync + 'static {
+    fn open_browser(&self, url: &str, context: &str) -> Result<(), String>;
+    fn copy_text(&self, text: &str, context: &str) -> Result<(), String>;
+}
+
+struct UnavailableCloudPlatform;
+
+impl NativeCloudPlatformPort for UnavailableCloudPlatform {
+    fn open_browser(&self, _url: &str, _context: &str) -> Result<(), String> {
+        Err("native Cloud browser integration is unavailable".to_owned())
+    }
+
+    fn copy_text(&self, _text: &str, _context: &str) -> Result<(), String> {
+        Err("native Cloud clipboard integration is unavailable".to_owned())
+    }
+}
+
+#[cfg(windows)]
+struct WindowsCloudPlatform;
+
+#[cfg(windows)]
+impl NativeCloudPlatformPort for WindowsCloudPlatform {
+    fn open_browser(&self, url: &str, context: &str) -> Result<(), String> {
+        clipline_shell::windows::shell_execute::open_browser_url(url, context)
+            .map_err(|error| error.to_string())
+    }
+
+    fn copy_text(&self, text: &str, _context: &str) -> Result<(), String> {
+        clipline_shell::windows::clipboard::copy_text_to_clipboard(text, 0)
+            .map_err(|error| error.to_string())
+    }
+}
 
 #[derive(Clone)]
 struct WindowOwner {
@@ -210,6 +245,28 @@ impl FenceRegistry {
                 request.token == *token && Arc::ptr_eq(&request.cancellation, cancellation)
             })
         })
+    }
+
+    fn is_window_current(&self, token: &CloudWorkToken) -> bool {
+        self.state
+            .lock()
+            .ok()
+            .is_some_and(|state| require_current_window(&state, token).is_ok())
+    }
+
+    fn run_if_window_current<T>(
+        &self,
+        token: &CloudWorkToken,
+        operation: impl FnOnce() -> Result<T, String>,
+    ) -> Result<Option<T>, String> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| "native Cloud fence lock is unavailable".to_owned())?;
+        if require_current_window(&state, token).is_err() {
+            return Ok(None);
+        }
+        operation().map(Some)
     }
 
     fn is_thumbnail_current(
@@ -452,6 +509,26 @@ impl CloudRequestFence for ExactCloudFence {
                 return;
             }
             self.cancellation.cancelled().await;
+        })
+    }
+}
+
+struct CurrentWindowCloudFence {
+    registry: Arc<FenceRegistry>,
+    token: CloudWorkToken,
+}
+
+impl CloudRequestFence for CurrentWindowCloudFence {
+    fn is_current(&self, token: &CloudWorkToken) -> bool {
+        self.token == *token && self.registry.is_window_current(token)
+    }
+
+    fn cancelled<'a>(&'a self, token: &'a CloudWorkToken) -> CloudCancellationFuture<'a> {
+        Box::pin(async move {
+            if self.token != *token || !self.registry.is_window_current(token) {
+                return;
+            }
+            std::future::pending::<()>().await;
         })
     }
 }
@@ -754,6 +831,7 @@ struct CloudShared {
     service: CloudService,
     fences: Arc<FenceRegistry>,
     cache_provider: Arc<dyn NativeCloudCacheProvider>,
+    platform: Arc<dyn NativeCloudPlatformPort>,
     media: NativeCloudMediaRegistry,
     handle: tokio::runtime::Handle,
 }
@@ -775,7 +853,13 @@ impl NativeCloudRuntime {
             store,
             Arc::clone(&credentials),
         ));
-        Self::with_transport_and_cache_provider(accounts, credentials, transport, cache_provider)
+        Self::with_transport_cache_and_platform(
+            accounts,
+            credentials,
+            transport,
+            cache_provider,
+            Arc::new(WindowsCloudPlatform),
+        )
     }
 
     pub fn with_transport(
@@ -791,11 +875,42 @@ impl NativeCloudRuntime {
         )
     }
 
+    pub fn with_transport_and_platform(
+        accounts: Arc<dyn CloudAccountPort>,
+        credentials: Arc<dyn CloudCredentialPort>,
+        transport: Arc<dyn CloudTransport>,
+        platform: Arc<dyn NativeCloudPlatformPort>,
+    ) -> Result<Self, String> {
+        Self::with_transport_cache_and_platform(
+            accounts,
+            credentials,
+            transport,
+            Arc::new(UnavailableCloudCacheProvider),
+            platform,
+        )
+    }
+
     pub fn with_transport_and_cache_provider(
         accounts: Arc<dyn CloudAccountPort>,
         credentials: Arc<dyn CloudCredentialPort>,
         transport: Arc<dyn CloudTransport>,
         cache_provider: Arc<dyn NativeCloudCacheProvider>,
+    ) -> Result<Self, String> {
+        Self::with_transport_cache_and_platform(
+            accounts,
+            credentials,
+            transport,
+            cache_provider,
+            Arc::new(UnavailableCloudPlatform),
+        )
+    }
+
+    pub fn with_transport_cache_and_platform(
+        accounts: Arc<dyn CloudAccountPort>,
+        credentials: Arc<dyn CloudCredentialPort>,
+        transport: Arc<dyn CloudTransport>,
+        cache_provider: Arc<dyn NativeCloudCacheProvider>,
+        platform: Arc<dyn NativeCloudPlatformPort>,
     ) -> Result<Self, String> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -811,6 +926,7 @@ impl NativeCloudRuntime {
             service,
             fences,
             cache_provider,
+            platform,
             media,
             handle: runtime.handle().clone(),
         });
@@ -1050,12 +1166,81 @@ impl CatalogEffectHandler for NativeCloudEffectHandler {
                 self.cloud.media.release_media(lease_id)?;
                 Ok(None)
             }
+            CatalogEffect::OpenInBrowser { token, item } => self.open_cloud_clip_page(token, item),
+            CatalogEffect::CopyPublicLink {
+                token,
+                item: _,
+                url,
+            } => self.copy_public_link(token, url),
             other => self.local.execute(other),
         }
     }
 }
 
 impl NativeCloudEffectHandler {
+    fn open_cloud_clip_page(
+        &self,
+        token: CloudWorkToken,
+        item: CatalogItemIdentity,
+    ) -> Result<Option<OwnedCatalogResult>, String> {
+        let CatalogItemIdentity::Cloud { remote_clip_id, .. } = item else {
+            return Err("native Cloud browser effect has a local identity".to_owned());
+        };
+        let fence = CurrentWindowCloudFence {
+            registry: Arc::clone(&self.cloud.fences),
+            token: token.clone(),
+        };
+        let effect = match self.cloud.service.open_clip_effect(
+            token.clone(),
+            &fence,
+            remote_clip_id.as_str(),
+        ) {
+            Ok(effect) => effect.value,
+            Err(CloudServiceError::StaleWork | CloudServiceError::AccountChanged) => {
+                return Ok(None);
+            }
+            Err(error) => {
+                return Ok(Some(foreground_feedback(
+                    token.window,
+                    format!("Open Cloud clip page: {error}"),
+                )));
+            }
+        };
+        match self.cloud.fences.run_if_window_current(&token, || {
+            self.cloud
+                .platform
+                .open_browser(&effect.url, &effect.context)
+        }) {
+            Ok(Some(())) | Ok(None) => Ok(None),
+            Err(error) => Ok(Some(foreground_feedback(
+                token.window,
+                format!("Open Cloud clip page: {error}"),
+            ))),
+        }
+    }
+
+    fn copy_public_link(
+        &self,
+        token: CloudWorkToken,
+        url: String,
+    ) -> Result<Option<OwnedCatalogResult>, String> {
+        match self.cloud.fences.run_if_window_current(&token, || {
+            self.cloud
+                .platform
+                .copy_text(&url, "copy Cloud public link")
+        }) {
+            Ok(Some(())) => Ok(Some(foreground_feedback(
+                token.window,
+                "Cloud public link copied".to_owned(),
+            ))),
+            Ok(None) => Ok(None),
+            Err(error) => Ok(Some(foreground_feedback(
+                token.window,
+                format!("Copy Cloud public link: {error}"),
+            ))),
+        }
+    }
+
     fn refresh_cloud(
         &self,
         token: CloudWorkToken,
@@ -1274,6 +1459,16 @@ impl NativeCloudEffectHandler {
             return Err(NativeCloudCacheProviderError::StaleAccount);
         }
         Ok(context)
+    }
+}
+
+fn foreground_feedback(token: WindowWorkToken, message: String) -> OwnedCatalogResult {
+    OwnedCatalogResult {
+        result: CatalogResult::ForegroundFeedback {
+            token,
+            message: bounded_message(message),
+        },
+        expected: ExpectedResultOwner::Window(token),
     }
 }
 

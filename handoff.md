@@ -4,6 +4,29 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-03): Slint replacement Milestone 7, Task 9 Cloud public actions
+
+The existing Slint Cloud context-menu callbacks now execute through the bounded catalog worker
+pool. Open-page actions no longer trust or reuse the server-returned public share URL: the native
+handler revalidates the exact window/account/item owner and asks the shared `CloudService` to
+construct the canonical `/clip/{remote-id}` page from the configured trusted Cloud base. The final
+platform call is linearized with detach/account replacement under the native Cloud fence.
+
+Copy-public-link remains available only when the accepted row has a non-empty server-issued public
+URL. Private, processing, or missing-link rows hide the action and the reducer independently
+rejects a forged direct request. Windows text transfer now uses the shared safe shell crate with a
+16,384-UTF-16-unit cap, embedded-NUL rejection, one moveable `CF_UNICODETEXT` allocation, bounded
+clipboard-open retries, and ownership transfer only after `SetClipboardData` succeeds.
+
+Browser/clipboard success and failure publish bounded foreground feedback owned by the exact
+window attachment and foreground generation. Queue rejection maps to the same typed feedback, and
+the shell displays it only while that owner remains current. Validation is green: library/shell
+tests, the complete standalone Slint suite, warning-denied workspace and standalone Clippy,
+formatting, and `git diff --check`.
+
+Next: implement the independently canceled profile and avatar lanes, retain exactly one bounded
+JPEG/PNG avatar image, and wire the accessible Cloud profile rail/open-profile callback.
+
 ## Checkpoint (2026-08-03): Slint replacement Milestone 7, Task 9 native Cloud thumbnails
 
 The Slint candidate now owns bounded native decoding and retention for Cloud thumbnails. One

@@ -297,11 +297,11 @@ mod windows_runtime {
     };
     use clipline_library::{
         catalog_result_channel, ActiveFileRegistry, CatalogDialogTextField, CatalogEffect,
-        CatalogItemIdentity, CatalogResultReceiver, CatalogResultSender, CatalogSource,
-        CatalogUploadVisibility, CloudCatalogOwner, CloudReviewMediaOwner, ForegroundGeneration,
-        LocalClipFilter, LocalClipGrouping, LocalClipSort, PlaybackSourceLease,
-        PreparedCloudReviewMedia, RequestGeneration, ResolvedLocalClip, ValidatedClipPath,
-        WindowAttachmentGeneration, WindowWorkToken, CATALOG_RESULT_CAPACITY,
+        CatalogItemIdentity, CatalogResult, CatalogResultReceiver, CatalogResultSender,
+        CatalogSource, CatalogUploadVisibility, CloudCatalogOwner, CloudReviewMediaOwner,
+        ForegroundGeneration, LocalClipFilter, LocalClipGrouping, LocalClipSort,
+        PlaybackSourceLease, PreparedCloudReviewMedia, RequestGeneration, ResolvedLocalClip,
+        ValidatedClipPath, WindowAttachmentGeneration, WindowWorkToken, CATALOG_RESULT_CAPACITY,
     };
     use clipline_playback::windows::{WindowsD3D11Publisher, WindowsVideoHost};
     use clipline_settings::LibraryConfig;
@@ -894,6 +894,7 @@ mod windows_runtime {
             let Some(result) = result else {
                 break;
             };
+            let feedback = current_catalog_feedback(runtime, &result);
             let (effects, result_changed) = {
                 let mut runtime_ref = runtime.borrow_mut();
                 let before = runtime_ref.catalog.revision();
@@ -905,6 +906,11 @@ mod windows_runtime {
             };
             changed |= result_changed;
             route_catalog_effects(runtime, effects)?;
+            if let Some(message) = feedback {
+                if let Some(resources) = runtime.borrow().window.as_ref() {
+                    resources.window.set_status_text(message.into());
+                }
+            }
         }
         if changed {
             publish_catalog_window(runtime)?;
@@ -1164,7 +1170,9 @@ mod windows_runtime {
             | CatalogEffect::RenameTitle { .. }
             | CatalogEffect::RenameFile { .. }
             | CatalogEffect::Delete { .. }
-            | CatalogEffect::Reveal { .. } => {
+            | CatalogEffect::Reveal { .. }
+            | CatalogEffect::OpenInBrowser { .. }
+            | CatalogEffect::CopyPublicLink { .. } => {
                 if matches!(&effect, CatalogEffect::OpenLocalReview { .. }) {
                     if let Some(resources) = runtime.borrow().window.as_ref() {
                         resources.window.set_review_visible(true);
@@ -1183,6 +1191,7 @@ mod windows_runtime {
                         &rejected,
                         "catalog executor queue is full",
                     ) {
+                        let feedback = current_catalog_feedback(runtime, &completion.result);
                         let followups = runtime
                             .borrow_mut()
                             .catalog
@@ -1190,6 +1199,11 @@ mod windows_runtime {
                             .map_err(|error| error.to_string())?;
                         publish_catalog_window(runtime)?;
                         route_catalog_effects(runtime, followups)?;
+                        if let Some(message) = feedback {
+                            if let Some(resources) = runtime.borrow().window.as_ref() {
+                                resources.window.set_status_text(message.into());
+                            }
+                        }
                     } else if matches!(&*rejected, CatalogEffect::OpenLocalReview { .. }) {
                         rollback_failed_review_open(runtime)?;
                         return Err("catalog executor queue is full".to_owned());
@@ -1206,6 +1220,20 @@ mod windows_runtime {
             }
         }
         Ok(())
+    }
+
+    fn current_catalog_feedback(
+        runtime: &Rc<RefCell<SlintShell>>,
+        result: &CatalogResult,
+    ) -> Option<String> {
+        let CatalogResult::ForegroundFeedback { token, message } = result else {
+            return None;
+        };
+        runtime.borrow().window.as_ref().and_then(|resources| {
+            (resources.catalog_attachment == token.attachment
+                && resources.catalog_foreground == token.foreground)
+                .then(|| message.clone())
+        })
     }
 
     fn defer_review_open(
