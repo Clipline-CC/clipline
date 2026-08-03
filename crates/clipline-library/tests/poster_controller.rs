@@ -24,6 +24,33 @@ fn item(index: usize) -> PosterPageItem {
     .unwrap()
 }
 
+#[test]
+fn retained_image_lookup_is_exact_and_bounded_by_the_decode_window() {
+    let mut controller = PosterController::<u64>::new();
+    let page: Vec<_> = (0..MAX_CATALOG_PAGE_ROWS).map(item).collect();
+    let identities: Vec<_> = page.iter().map(|item| item.identity.clone()).collect();
+    controller.replace_page(window(1, 2, 3), page).unwrap();
+
+    let queued = controller
+        .set_viewport(0, MAX_CATALOG_PAGE_ROWS, 0)
+        .unwrap()
+        .queued;
+    assert_eq!(queued.len(), MAX_DECODED_PAGE_IMAGES);
+    for (index, extract) in queued.iter().enumerate() {
+        let decode = controller.accept_extracted(extract, PosterCompletion::Ready(poster(index)));
+        let request = decode.queued.first().unwrap();
+        let _ = controller.accept_decoded(request, index as u64);
+    }
+
+    for (index, identity) in identities.iter().enumerate() {
+        assert_eq!(
+            controller.retained_image(identity).copied(),
+            (index < MAX_DECODED_PAGE_IMAGES).then_some(index as u64)
+        );
+    }
+    assert_eq!(controller.retained_image_count(), MAX_DECODED_PAGE_IMAGES);
+}
+
 fn poster(index: usize) -> PathBuf {
     PathBuf::from(format!(r"C:\clips\clip-{index}.poster.jpg"))
 }

@@ -1395,6 +1395,19 @@ impl<H> PosterController<H> {
             .count()
     }
 
+    /// Borrow the decoded image retained for one exact clip identity.
+    ///
+    /// Retained images only exist inside the bounded decoded-image window, so
+    /// callers cannot use this accessor to expand ownership beyond
+    /// [`MAX_DECODED_PAGE_IMAGES`].
+    #[must_use]
+    pub fn retained_image(&self, identity: &ClipPathIdentity) -> Option<&H> {
+        match self.slots.get(identity) {
+            Some(PosterSlot::Ready(handle)) => Some(handle),
+            Some(PosterSlot::Pending(_)) | None => None,
+        }
+    }
+
     #[must_use]
     pub fn queued_work_count(&self) -> usize {
         self.slots
