@@ -23,6 +23,31 @@ Codex review threads were answered and resolved before merge. Microsoft's curren
 Version download remains 150.0.4078.83, matching the staged standalone runtime, and its required
 review date was refreshed for this release.
 
+**Published** on the rolling `nightly` prerelease from `develop` commit `bd76a6e`, seven assets.
+Every asset was downloaded again from the GitHub release and matched the staged SHA-256 digest.
+Both downloaded manifests parse as version 0.1.44, point at their expected rolling release URLs,
+and contain the exact downloaded sidecar signatures. Both downloaded installers verify under the
+updater public key compiled into Clipline; crossing the standalone signature onto the regular
+installer is correctly rejected.
+
+| asset | bytes | sha256 |
+| --- | --- | --- |
+| `Clipline_0.1.44_x64-setup.exe` | 54,320,782 | `820df11c22acfbe93423685281d364d72c0e96e61b0affec5613ad79ea09c8fe` |
+| `Clipline_0.1.44_x64-standalone-setup.exe` | 277,012,373 | `4700e21da8b1f65b5d05501b7751e74d7bc4d13089f60a11a9c897c3969e17ca` |
+
+GitHub CI does not run on version-only pushes to `develop`; the release commit's application source
+is identical to CI-green merge `d149b50`. Its delta is limited to three version strings, WebView2
+review dates, and release documentation. Full workspace tests, a clean-cache warning-denied
+workspace Clippy run, both release-input preflights, manifest validation, and local updater
+signature verification passed before publication.
+
+The standalone installer was extracted without installation and launched against isolated app data.
+Its packaged 0.1.44 app and all six WebView2 children used the bundled 150.0.4078.83 runtime. It
+loaded a ten-second H.264 clip with separate output and microphone Opus tracks, prepared both audio
+previews, showed `2/2 selected`, and played through `ended` with no media, page, or global error.
+Runtime probing reported H.264 and AV1 support, correctly left HEVC unavailable on this machine, and
+found three encoders.
+
 ## Checkpoint (2026-08-02): valid redacted support JSON
 
 Plan: `docs/superpowers/plans/2026-08-02-support-log-json-redaction.md` (`4adecf7`).
