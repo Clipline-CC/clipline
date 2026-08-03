@@ -4,10 +4,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use clipline_desktop::{
-    ui_event_channel, CloudAccountOwner, CloudAccountScope, CloudUploadProgress,
-    CloudUploadUpdateKind, Generation, MicMonitor, RecorderEvent, Revision, UiEvent,
-    UiEventPublishOutcome, UiEventReceiveError, UiEventSendError, WindowLifecycleMode,
-    WindowLifecycleSnapshot, UI_EVENT_CAPACITY,
+    ui_event_channel, CatalogSummarySnapshot, CatalogSummarySource, CloudAccountOwner,
+    CloudAccountScope, CloudUploadProgress, CloudUploadUpdateKind, Generation, MicMonitor,
+    RecorderEvent, Revision, UiEvent, UiEventPublishOutcome, UiEventReceiveError, UiEventSendError,
+    WindowLifecycleMode, WindowLifecycleSnapshot, UI_EVENT_CAPACITY,
 };
 
 fn status(generation: u64, segments: usize) -> UiEvent {
@@ -24,6 +24,58 @@ fn status(generation: u64, segments: usize) -> UiEvent {
             capture_backend: String::new(),
         },
     }
+}
+
+fn catalog(revision: u64, source: CatalogSummarySource, active: bool) -> UiEvent {
+    UiEvent::CatalogSummaryChanged {
+        summary: CatalogSummarySnapshot {
+            revision: Revision::new(revision),
+            source,
+            active,
+        },
+    }
+}
+
+#[test]
+fn catalog_summaries_are_revision_fenced_and_coalesce_only_before_barriers() {
+    let (sender, receiver) = ui_event_channel();
+    assert_eq!(
+        sender.try_publish(catalog(1, CatalogSummarySource::Local, false)),
+        Ok(UiEventPublishOutcome::Queued)
+    );
+    assert_eq!(
+        sender.try_publish(catalog(2, CatalogSummarySource::Cloud, true)),
+        Ok(UiEventPublishOutcome::Replaced)
+    );
+    assert!(matches!(
+        sender.try_publish(catalog(1, CatalogSummarySource::Local, false)),
+        Err(UiEventSendError::StaleRevision { .. })
+    ));
+    assert!(matches!(
+        sender.try_publish(catalog(2, CatalogSummarySource::Local, false)),
+        Err(UiEventSendError::StaleRevision { .. })
+    ));
+    sender
+        .try_publish(UiEvent::UserError {
+            message: "barrier".into(),
+        })
+        .unwrap();
+    assert_eq!(
+        sender.try_publish(catalog(3, CatalogSummarySource::Local, false)),
+        Ok(UiEventPublishOutcome::Queued)
+    );
+    assert!(matches!(
+        receiver.try_recv().unwrap().event,
+        UiEvent::CatalogSummaryChanged { .. }
+    ));
+    assert!(matches!(
+        receiver.try_recv().unwrap().event,
+        UiEvent::UserError { .. }
+    ));
+    assert!(matches!(
+        receiver.try_recv().unwrap().event,
+        UiEvent::CatalogSummaryChanged { .. }
+    ));
 }
 
 fn cloud(generation: u64, id: impl Into<String>, received: u64) -> UiEvent {

@@ -4,6 +4,40 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-03): Slint replacement Milestone 7, Task 8 bounded catalog
+
+The framework-neutral Library surface now has one long-lived, transactional `CatalogController`.
+It retains a complete bounded 10,000-row local index, one exact-account Cloud page, local-only
+sorted selection, active/context/dialog state, poster and upload summaries, and one-in-flight plus
+latest-dirty refresh lanes. All UI actions use typed local or account-generation-owned Cloud
+identities; filesystem paths are resolved only from accepted controller metadata. Exact window,
+foreground, request, catalog, and account revisions fence every result. Malformed matching refresh
+completions preserve accepted data, fail the lane closed, and remain retryable rather than wedging.
+
+The pure projection publishes at most 60 fixed-shape rows with bounded group spans, badges, poster
+state, pagination truth, one menu, one dialog, and 16 upload summaries. Complete scans prune removed
+identity state; truncated scans never treat omitted rows as deletions. Poster retention is a
+120-entry FIFO and is pruned on complete scans. Local/Cloud switching preserves in-flight mutation
+ownership, signed-out Cloud is an explicit disconnected projection, mutation confirmation is
+single-flight, and Cloud review cache leases are released on every stale, failed, detached, or
+replaced path.
+
+`clipline-desktop` schema v4 adds only a fixed `{ revision, source, active }` catalog summary; no
+catalog rows or collections cross into desktop shell state. Summary events are revision-fenced and
+coalesce only before durable barriers. Notice messages reject whitespace before consuming bounded
+capacity. The controller acknowledges only the oldest exact notice, and the Slint adapter presents,
+acknowledges, and reprojects notices oldest-first through a 65-step bounded current-attachment loop
+without holding controller locks across Slint setters. The shipping Tauri adapter intentionally
+emits no invented legacy WebView event for this native-only summary.
+
+Fable independently audited the controller after its liveness/bounds fixes and the final desktop /
+notice slice; both returned GO with no P0/P1. Full workspace tests and warning-denied Clippy, plus
+standalone Slint all-target tests and warning-denied Clippy, are green for Task 8.
+
+Next: Task 9, wire the retained catalog controller to the live Slint window callbacks and bounded
+worker/effect executors, including native Local/Cloud page models, review transitions, and service
+shutdown/rebuild behavior.
+
 ## Checkpoint (2026-08-03): Slint replacement Milestone 7, Task 7 shipping cutover
 
 Cloud upload, remote status reconciliation, upload persistence, and foreground feedback now use

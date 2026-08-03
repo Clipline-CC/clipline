@@ -20,9 +20,9 @@ pub use event::{
     RecorderEvent, UiEvent, MAX_MIC_MONITOR_SAMPLES,
 };
 pub use snapshot::{
-    CloudAccountOwner, CloudAccountOwnerError, CloudAccountScope, CloudUploadSnapshot,
-    DesktopSnapshot, GameSnapshot, Generation, GenerationError, MediaRootSnapshot, MicrophonePhase,
-    MicrophoneSnapshot, Notice, NoticeKind, RecorderSnapshot, RecorderStatus, Revision,
-    SavedReplay, StorageStatus, WindowLifecycleMode, WindowLifecycleSnapshot,
-    MAX_CLOUD_ACCOUNT_KEY_BYTES,
+    CatalogSummarySnapshot, CatalogSummarySource, CloudAccountOwner, CloudAccountOwnerError,
+    CloudAccountScope, CloudUploadSnapshot, DesktopSnapshot, GameSnapshot, Generation,
+    GenerationError, MediaRootSnapshot, MicrophonePhase, MicrophoneSnapshot, Notice, NoticeKind,
+    RecorderSnapshot, RecorderStatus, Revision, SavedReplay, StorageStatus, WindowLifecycleMode,
+    WindowLifecycleSnapshot, MAX_CLOUD_ACCOUNT_KEY_BYTES,
 };

@@ -170,6 +170,10 @@ fn tauri_emissions(event: &UiEvent) -> Vec<TauriEmission> {
                 |payload| one(CLOUD_UPLOAD_PROGRESS_EVENT, payload),
             ),
         UiEvent::EnrichmentUpdated { .. } => one("osu-enrichment-updated", Value::Null),
+        // The compact catalog summary is native-shell state. The shipping
+        // WebView already owns its rich catalog model and has no legacy event
+        // contract for this migration-only projection.
+        UiEvent::CatalogSummaryChanged { .. } => Vec::new(),
         UiEvent::UserError { message } => one("error", Value::String(message.clone())),
     }
 }
@@ -177,8 +181,8 @@ fn tauri_emissions(event: &UiEvent) -> Vec<TauriEmission> {
 #[cfg(test)]
 mod tests {
     use clipline_desktop::{
-        GameDetection, Generation, RecorderEvent, Revision, UiEvent, WindowLifecycleMode,
-        WindowLifecycleSnapshot,
+        CatalogSummarySnapshot, CatalogSummarySource, GameDetection, Generation, RecorderEvent,
+        Revision, UiEvent, WindowLifecycleMode, WindowLifecycleSnapshot,
     };
     use serde_json::json;
 
@@ -309,5 +313,17 @@ mod tests {
         ] {
             assert!(source.contains(name), "missing Tauri mapping for {name}");
         }
+    }
+
+    #[test]
+    fn native_catalog_summary_does_not_invent_a_legacy_webview_event() {
+        assert!(tauri_emissions(&UiEvent::CatalogSummaryChanged {
+            summary: CatalogSummarySnapshot {
+                revision: Revision::new(1),
+                source: CatalogSummarySource::Cloud,
+                active: true,
+            },
+        })
+        .is_empty());
     }
 }

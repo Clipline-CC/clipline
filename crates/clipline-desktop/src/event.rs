@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{CloudAccountOwner, CloudAccountScope, Generation, WindowLifecycleSnapshot};
+use crate::{
+    CatalogSummarySnapshot, CloudAccountOwner, CloudAccountScope, Generation,
+    WindowLifecycleSnapshot,
+};
 
 pub const MAX_MIC_MONITOR_SAMPLES: usize = 4_096;
 
@@ -207,6 +210,9 @@ pub enum UiEvent {
     EnrichmentUpdated {
         generation: Generation,
     },
+    CatalogSummaryChanged {
+        summary: CatalogSummarySnapshot,
+    },
     UserError {
         message: String,
     },
@@ -225,6 +231,7 @@ impl UiEvent {
             | Self::EnrichmentUpdated { generation } => Some(*generation),
             Self::WindowLifecycle { .. }
             | Self::CloudAccountChanged { .. }
+            | Self::CatalogSummaryChanged { .. }
             | Self::UserError { .. } => None,
         }
     }

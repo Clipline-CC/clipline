@@ -298,6 +298,26 @@ pub struct Notice {
     pub account: Option<CloudAccountOwner>,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogSummarySource {
+    #[default]
+    Local,
+    Cloud,
+}
+
+/// Fixed-shape catalog state shared with the desktop shell.
+///
+/// Rich catalog rows and controller state remain in `clipline-library`; this
+/// summary only tells rebuildable shell surfaces which source and review mode
+/// are current at an exact catalog revision.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogSummarySnapshot {
+    pub revision: Revision,
+    pub source: CatalogSummarySource,
+    pub active: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DesktopSnapshot<S> {
     pub schema_version: u32,
@@ -315,6 +335,7 @@ pub struct DesktopSnapshot<S> {
     pub current_cloud_account: Option<CloudAccountOwner>,
     pub uploads: Vec<CloudUploadSnapshot>,
     pub library_revision: Revision,
+    pub catalog: CatalogSummarySnapshot,
     pub enrichment_generation: Generation,
     pub notices: Vec<Notice>,
     pub notice_sequence: u64,

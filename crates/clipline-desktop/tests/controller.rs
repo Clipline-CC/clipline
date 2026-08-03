@@ -1,9 +1,9 @@
 use clipline_desktop::{
-    ApplyEventOutcome, CloudAccountOwner, CloudAccountScope, CloudUploadProgress,
-    CloudUploadUpdateKind, ControllerError, DesktopController, GameDetection, Generation,
-    MicMonitor, MicrophonePhase, NoticeKind, RecorderEvent, Revision, UiAction, UiEffect, UiEvent,
-    WindowLifecycleMode, WindowLifecycleSnapshot, MAX_ACTIVE_UPLOADS, MAX_NOTICE_MESSAGE_BYTES,
-    MAX_PENDING_NOTICES,
+    ApplyEventOutcome, CatalogSummarySnapshot, CatalogSummarySource, CloudAccountOwner,
+    CloudAccountScope, CloudUploadProgress, CloudUploadUpdateKind, ControllerError,
+    DesktopController, GameDetection, Generation, MicMonitor, MicrophonePhase, NoticeKind,
+    RecorderEvent, Revision, UiAction, UiEffect, UiEvent, WindowLifecycleMode,
+    WindowLifecycleSnapshot, MAX_ACTIVE_UPLOADS, MAX_NOTICE_MESSAGE_BYTES, MAX_PENDING_NOTICES,
 };
 
 fn status(generation: u64, recording: bool, segments: usize) -> UiEvent {
@@ -184,7 +184,7 @@ fn fresh_snapshot_is_complete_and_keeps_exact_settings() {
         DesktopController::new(settings.clone(), vec!["capture fallback active".to_owned()])
             .unwrap();
     let snapshot = controller.snapshot();
-    assert_eq!(snapshot.schema_version, 3);
+    assert_eq!(snapshot.schema_version, 4);
     assert_eq!(snapshot.revision, Revision::INITIAL);
     assert_eq!(snapshot.settings, settings);
     assert_eq!(snapshot.settings_revision, Revision::INITIAL);
@@ -196,6 +196,7 @@ fn fresh_snapshot_is_complete_and_keeps_exact_settings() {
     assert!(snapshot.uploads.is_empty());
     assert_eq!(snapshot.current_cloud_account, None);
     assert_eq!(snapshot.library_revision, Revision::INITIAL);
+    assert_eq!(snapshot.catalog, CatalogSummarySnapshot::default());
     assert_eq!(snapshot.notices.len(), 1);
     assert_eq!(snapshot.notices[0].kind, NoticeKind::StartupWarning);
 }
@@ -359,6 +360,77 @@ fn notices_are_bounded_fail_atomically_and_acknowledge_idempotently() {
         .unwrap();
     assert!(!duplicate.changed);
     assert_eq!(controller.snapshot().revision, revision);
+}
+
+#[test]
+fn notices_reject_whitespace_and_only_the_oldest_can_be_acknowledged() {
+    assert!(matches!(
+        DesktopController::new((), vec!["  \t".into()]),
+        Err(ControllerError::NoticeEmpty)
+    ));
+    let mut controller = DesktopController::new((), vec!["first".into(), "second".into()]).unwrap();
+    let before = controller.snapshot();
+    let second = before.notices[1].id;
+    assert!(
+        !controller
+            .dispatch(UiAction::AcknowledgeNotice { notice_id: second })
+            .unwrap()
+            .changed
+    );
+    assert_eq!(controller.snapshot(), before);
+
+    assert!(matches!(
+        controller.apply_event(UiEvent::UserError {
+            message: " \n ".into(),
+        }),
+        Err(ControllerError::NoticeEmpty)
+    ));
+    assert_eq!(controller.snapshot(), before);
+}
+
+#[test]
+fn catalog_summary_accepts_only_a_strictly_newer_or_identical_revision() {
+    let mut controller = DesktopController::new((), Vec::new()).unwrap();
+    let cloud = CatalogSummarySnapshot {
+        revision: Revision::new(2),
+        source: CatalogSummarySource::Cloud,
+        active: true,
+    };
+    assert!(matches!(
+        controller
+            .apply_event(UiEvent::CatalogSummaryChanged { summary: cloud })
+            .unwrap(),
+        ApplyEventOutcome::Applied { .. }
+    ));
+    assert_eq!(controller.snapshot().catalog, cloud);
+    let before = controller.snapshot();
+    assert_eq!(
+        controller
+            .apply_event(UiEvent::CatalogSummaryChanged { summary: cloud })
+            .unwrap(),
+        ApplyEventOutcome::Unchanged
+    );
+    assert_eq!(controller.snapshot(), before);
+    for stale in [
+        CatalogSummarySnapshot {
+            revision: Revision::new(1),
+            source: CatalogSummarySource::Local,
+            active: false,
+        },
+        CatalogSummarySnapshot {
+            revision: Revision::new(2),
+            source: CatalogSummarySource::Local,
+            active: false,
+        },
+    ] {
+        assert_eq!(
+            controller
+                .apply_event(UiEvent::CatalogSummaryChanged { summary: stale })
+                .unwrap(),
+            ApplyEventOutcome::Stale
+        );
+        assert_eq!(controller.snapshot(), before);
+    }
 }
 
 #[test]

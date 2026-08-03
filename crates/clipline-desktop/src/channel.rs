@@ -5,8 +5,8 @@ use std::time::Duration;
 use thiserror::Error;
 
 use crate::{
-    CloudAccountOwner, CloudAccountScope, CloudUploadUpdateKind, Generation, RecorderEvent,
-    Revision, UiEvent, WindowLifecycleMode,
+    CatalogSummarySnapshot, CloudAccountOwner, CloudAccountScope, CloudUploadUpdateKind,
+    Generation, RecorderEvent, Revision, UiEvent, WindowLifecycleMode,
 };
 
 pub const UI_EVENT_CAPACITY: usize = 128;
@@ -82,6 +82,7 @@ enum CoalescingKey {
     GameDetection,
     CloudUpload(CloudAccountOwner, String),
     Enrichment,
+    CatalogSummary,
 }
 
 #[derive(Default)]
@@ -93,6 +94,7 @@ struct ChannelState {
     generations: HashMap<GenerationDomain, Generation>,
     microphone_terminal: Option<Generation>,
     lifecycle: Option<(Revision, WindowLifecycleMode)>,
+    catalog: Option<CatalogSummarySnapshot>,
     cloud_account_generation: CloudAccountScope,
     cloud_account: Option<CloudAccountOwner>,
 }
@@ -293,6 +295,7 @@ fn generation_domain(event: &UiEvent) -> Option<(GenerationDomain, Generation)> 
             Some((GenerationDomain::Enrichment, *generation))
         }
         UiEvent::WindowLifecycle { .. }
+        | UiEvent::CatalogSummaryChanged { .. }
         | UiEvent::CloudAccountChanged { .. }
         | UiEvent::UserError { .. } => None,
     }
@@ -312,6 +315,18 @@ fn validate_generation(state: &ChannelState, event: &UiEvent) -> Result<(), UiEv
                 return Err(UiEventSendError::StaleRevision {
                     current,
                     received: snapshot.revision,
+                });
+            }
+        }
+    }
+    if let UiEvent::CatalogSummaryChanged { summary } = event {
+        if let Some(current) = state.catalog {
+            if summary.revision < current.revision
+                || (summary.revision == current.revision && *summary != current)
+            {
+                return Err(UiEventSendError::StaleRevision {
+                    current: current.revision,
+                    received: summary.revision,
                 });
             }
         }
@@ -366,6 +381,9 @@ fn record_generation(state: &mut ChannelState, event: &UiEvent) {
     if let UiEvent::WindowLifecycle { snapshot } = event {
         state.lifecycle = Some((snapshot.revision, snapshot.mode));
     }
+    if let UiEvent::CatalogSummaryChanged { summary } = event {
+        state.catalog = Some(*summary);
+    }
     if let Some((domain, generation)) = generation_domain(event) {
         state.generations.insert(domain, generation);
     }
@@ -409,6 +427,7 @@ fn coalescing_key(event: &UiEvent) -> Option<CoalescingKey> {
             progress.local_clip_id.clone(),
         )),
         UiEvent::EnrichmentUpdated { .. } => Some(CoalescingKey::Enrichment),
+        UiEvent::CatalogSummaryChanged { .. } => Some(CoalescingKey::CatalogSummary),
         UiEvent::Recorder {
             event: RecorderEvent::Saved { .. } | RecorderEvent::Error { .. },
             ..

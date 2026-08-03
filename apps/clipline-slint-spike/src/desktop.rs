@@ -7,9 +7,9 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use clipline_desktop::{
-    ui_event_channel, ApplyEventOutcome, DesktopController, DesktopSnapshot, Revision, UiAction,
-    UiEvent, UiEventPublishOutcome, UiEventReceiver, UiEventSendError, UiEventSender,
-    MAX_ACTIVE_UPLOADS,
+    ui_event_channel, ApplyEventOutcome, CatalogSummarySource, DesktopController, DesktopSnapshot,
+    Revision, UiAction, UiEvent, UiEventPublishOutcome, UiEventReceiver, UiEventSendError,
+    UiEventSender, MAX_ACTIVE_UPLOADS, MAX_PENDING_NOTICES,
 };
 
 use crate::{CliplineSpike, DesktopUploadItem, SpikeTray};
@@ -24,6 +24,9 @@ pub struct DesktopUploadProjection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesktopProjection {
     pub revision: Revision,
+    pub catalog_revision: Revision,
+    pub catalog_source: CatalogSummarySource,
+    pub catalog_active: bool,
     pub recorder_label: String,
     pub notice: String,
     pub notice_id: Option<u64>,
@@ -47,7 +50,7 @@ impl DesktopProjection {
         } else {
             "STOPPED".to_owned()
         };
-        let pending_notice = snapshot.notices.last();
+        let pending_notice = snapshot.notices.first();
         let notice = pending_notice.map_or_else(String::new, |notice| notice.message.clone());
         let notice_id = pending_notice.map(|notice| notice.id);
         let uploads = snapshot
@@ -68,6 +71,9 @@ impl DesktopProjection {
             .collect();
         Self {
             revision: snapshot.revision,
+            catalog_revision: snapshot.catalog.revision,
+            catalog_source: snapshot.catalog.source,
+            catalog_active: snapshot.catalog.active,
             recorder_label,
             notice,
             notice_id,
@@ -187,6 +193,38 @@ where
     outcome.changed
 }
 
+/// Present one exact attachment revision, acknowledge its oldest notice only
+/// after successful presentation, then rebuild and continue oldest-first.
+/// The extra iteration presents the final notice-free projection.
+#[must_use]
+pub fn present_attached_projection_sequence<Present, Rebuild>(
+    gate: &AttachmentGate,
+    attachment: DesktopAttachment,
+    mut projection: DesktopProjection,
+    mut present: Present,
+    mut rebuild_after_ack: Rebuild,
+) -> usize
+where
+    Present: FnMut(&DesktopProjection) -> bool,
+    Rebuild: FnMut(Revision, u64) -> Option<DesktopProjection>,
+{
+    let mut presented = 0;
+    for _ in 0..=MAX_PENDING_NOTICES {
+        if !gate.is_current(attachment, projection.revision.get()) || !present(&projection) {
+            return presented;
+        }
+        presented += 1;
+        let Some(notice_id) = projection.notice_id else {
+            return presented;
+        };
+        let Some(next) = rebuild_after_ack(projection.revision, notice_id) else {
+            return presented;
+        };
+        projection = next;
+    }
+    presented
+}
+
 struct DesktopRuntimeState {
     controller: DesktopController<()>,
     attachment: Option<(DesktopAttachment, slint::Weak<CliplineSpike>)>,
@@ -257,24 +295,31 @@ impl SlintDesktopAdapter {
             state.attachment = Some((attachment, window));
             (attachment, projection)
         };
-        let presented_revision = projection.revision;
-        let notice_id = projection.notice_id;
-        apply_projection(&component, projection);
-        if let Some(notice_id) = notice_id {
-            let mut state = self
-                .state
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
-            if state.attachment.as_ref().map(|current| current.0) == Some(attachment) {
-                let _ = acknowledge_presented_notice(
-                    &mut state.controller,
-                    &self.gate,
-                    attachment,
-                    presented_revision,
-                    notice_id,
-                );
-            }
-        }
+        let state = Arc::clone(&self.state);
+        let _ = present_attached_projection_sequence(
+            &self.gate,
+            attachment,
+            projection,
+            |projection| {
+                apply_projection(&component, projection);
+                true
+            },
+            |presented_revision, notice_id| {
+                let mut state = state.lock().unwrap_or_else(|poison| poison.into_inner());
+                if state.attachment.as_ref().map(|current| current.0) != Some(attachment)
+                    || !acknowledge_presented_notice(
+                        &mut state.controller,
+                        &self.gate,
+                        attachment,
+                        presented_revision,
+                        notice_id,
+                    )
+                {
+                    return None;
+                }
+                Some(DesktopProjection::from_snapshot(&state.controller.snapshot()))
+            },
+        );
         Ok(attachment)
     }
 
@@ -363,24 +408,34 @@ fn spawn_consumer(
                             return;
                         }
                         if let Some(window) = weak.upgrade() {
-                            let notice_id = projection.notice_id;
-                            let presented_revision = projection.revision;
-                            apply_projection(&window, projection);
-                            if let Some(notice_id) = notice_id {
-                                let mut state =
-                                    state.lock().unwrap_or_else(|poison| poison.into_inner());
-                                if state.attachment.as_ref().map(|current| current.0)
-                                    == Some(attachment)
-                                {
-                                    let _ = acknowledge_presented_notice(
-                                        &mut state.controller,
-                                        &gate,
-                                        attachment,
-                                        presented_revision,
-                                        notice_id,
-                                    );
-                                }
-                            }
+                            let _ = present_attached_projection_sequence(
+                                &gate,
+                                attachment,
+                                projection,
+                                |projection| {
+                                    apply_projection(&window, projection);
+                                    true
+                                },
+                                |presented_revision, notice_id| {
+                                    let mut state =
+                                        state.lock().unwrap_or_else(|poison| poison.into_inner());
+                                    if state.attachment.as_ref().map(|current| current.0)
+                                        != Some(attachment)
+                                        || !acknowledge_presented_notice(
+                                            &mut state.controller,
+                                            &gate,
+                                            attachment,
+                                            presented_revision,
+                                            notice_id,
+                                        )
+                                    {
+                                        return None;
+                                    }
+                                    Some(DesktopProjection::from_snapshot(
+                                        &state.controller.snapshot(),
+                                    ))
+                                },
+                            );
                         }
                     }
                 })
@@ -398,17 +453,17 @@ fn apply_tray_projection(tray: &SpikeTray, projection: &DesktopProjection) {
     tray.set_recorder_state(projection.recorder_label.clone().into());
 }
 
-fn apply_projection(window: &CliplineSpike, projection: DesktopProjection) {
-    window.set_recorder_state(projection.recorder_label.into());
-    window.set_desktop_notice(projection.notice.into());
+fn apply_projection(window: &CliplineSpike, projection: &DesktopProjection) {
+    window.set_recorder_state(projection.recorder_label.clone().into());
+    window.set_desktop_notice(projection.notice.clone().into());
     let uploads = projection
         .uploads
-        .into_iter()
+        .iter()
         .take(MAX_ACTIVE_UPLOADS)
         .map(|upload| DesktopUploadItem {
-            local_clip_id: upload.local_clip_id.into(),
-            status: upload.status.into(),
-            progress: upload.progress.into(),
+            local_clip_id: upload.local_clip_id.clone().into(),
+            status: upload.status.clone().into(),
+            progress: upload.progress.clone().into(),
         })
         .collect::<Vec<_>>();
     window.set_desktop_uploads(slint::ModelRc::new(slint::VecModel::from(uploads)));

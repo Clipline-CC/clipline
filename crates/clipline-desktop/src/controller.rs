@@ -1,16 +1,17 @@
 use thiserror::Error;
 
 use crate::{
-    CloudAccountOwner, CloudAccountScope, CloudUploadSnapshot, CloudUploadUpdateKind,
-    DesktopSnapshot, GameSnapshot, Generation, GenerationError, MediaRootSnapshot, MicrophonePhase,
-    MicrophoneSnapshot, Notice, NoticeKind, RecorderEvent, RecorderSnapshot, RecorderStatus,
-    Revision, SavedReplay, StorageStatus, UiAction, UiEffect, UiEvent, WindowLifecycleSnapshot,
+    CatalogSummarySnapshot, CloudAccountOwner, CloudAccountScope, CloudUploadSnapshot,
+    CloudUploadUpdateKind, DesktopSnapshot, GameSnapshot, Generation, GenerationError,
+    MediaRootSnapshot, MicrophonePhase, MicrophoneSnapshot, Notice, NoticeKind, RecorderEvent,
+    RecorderSnapshot, RecorderStatus, Revision, SavedReplay, StorageStatus, UiAction, UiEffect,
+    UiEvent, WindowLifecycleSnapshot,
 };
 
 pub const MAX_PENDING_NOTICES: usize = 64;
 pub const MAX_NOTICE_MESSAGE_BYTES: usize = 64 * 1024;
 pub const MAX_ACTIVE_UPLOADS: usize = 16;
-pub const DESKTOP_SNAPSHOT_SCHEMA_VERSION: u32 = 3;
+pub const DESKTOP_SNAPSHOT_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApplyEventOutcome {
@@ -36,6 +37,8 @@ pub enum ControllerError {
     UploadsFull { capacity: usize },
     #[error("notice contains {actual} bytes; maximum is {maximum}")]
     NoticeTooLarge { actual: usize, maximum: usize },
+    #[error("notice message must not be empty")]
+    NoticeEmpty,
     #[error("invalid cloud progress: {0}")]
     InvalidCloudProgress(&'static str),
     #[error("invalid recorder metric")]
@@ -59,18 +62,12 @@ where
     S: Clone + PartialEq,
 {
     pub fn new(settings: S, startup_warnings: Vec<String>) -> Result<Self, ControllerError> {
+        for message in &startup_warnings {
+            validate_notice_message(message)?;
+        }
         if startup_warnings.len() > MAX_PENDING_NOTICES {
             return Err(ControllerError::NoticesFull {
                 capacity: MAX_PENDING_NOTICES,
-            });
-        }
-        if let Some(message) = startup_warnings
-            .iter()
-            .find(|message| message.len() > MAX_NOTICE_MESSAGE_BYTES)
-        {
-            return Err(ControllerError::NoticeTooLarge {
-                actual: message.len(),
-                maximum: MAX_NOTICE_MESSAGE_BYTES,
             });
         }
         let notices = startup_warnings
@@ -102,6 +99,7 @@ where
                 current_cloud_account: None,
                 uploads: Vec::new(),
                 library_revision: Revision::INITIAL,
+                catalog: CatalogSummarySnapshot::default(),
                 enrichment_generation: Generation::INITIAL,
                 notices,
                 notice_sequence,
@@ -123,14 +121,9 @@ where
         let effect = action.effect();
         let mut changed = false;
         if let UiAction::AcknowledgeNotice { notice_id } = action {
-            if let Some(index) = self
-                .snapshot
-                .notices
-                .iter()
-                .position(|notice| notice.id == notice_id)
-            {
+            if self.snapshot.notices.first().map(|notice| notice.id) == Some(notice_id) {
                 let revision = self.snapshot.revision.checked_next()?;
-                self.snapshot.notices.remove(index);
+                self.snapshot.notices.remove(0);
                 self.snapshot.revision = revision;
                 changed = true;
             }
@@ -327,6 +320,19 @@ where
                 } else {
                     next.enrichment_generation = generation;
                     next.library_revision = next.library_revision.checked_next()?;
+                    true
+                }
+            }
+            UiEvent::CatalogSummaryChanged { summary } => {
+                if summary.revision < next.catalog.revision
+                    || (summary.revision == next.catalog.revision && summary != next.catalog)
+                {
+                    return Ok(ApplyEventOutcome::Stale);
+                }
+                if summary == next.catalog {
+                    false
+                } else {
+                    next.catalog = summary;
                     true
                 }
             }
@@ -593,15 +599,10 @@ fn push_notice<S>(
     message: String,
     account: Option<CloudAccountOwner>,
 ) -> Result<(), ControllerError> {
+    validate_notice_message(&message)?;
     if snapshot.notices.len() >= MAX_PENDING_NOTICES {
         return Err(ControllerError::NoticesFull {
             capacity: MAX_PENDING_NOTICES,
-        });
-    }
-    if message.len() > MAX_NOTICE_MESSAGE_BYTES {
-        return Err(ControllerError::NoticeTooLarge {
-            actual: message.len(),
-            maximum: MAX_NOTICE_MESSAGE_BYTES,
         });
     }
     let id = snapshot
@@ -619,6 +620,19 @@ fn push_notice<S>(
     Ok(())
 }
 
+fn validate_notice_message(message: &str) -> Result<(), ControllerError> {
+    if message.trim().is_empty() {
+        return Err(ControllerError::NoticeEmpty);
+    }
+    if message.len() > MAX_NOTICE_MESSAGE_BYTES {
+        return Err(ControllerError::NoticeTooLarge {
+            actual: message.len(),
+            maximum: MAX_NOTICE_MESSAGE_BYTES,
+        });
+    }
+    Ok(())
+}
+
 fn validate_snapshot<S>(snapshot: &DesktopSnapshot<S>) -> Result<(), ControllerError> {
     if snapshot.schema_version != DESKTOP_SNAPSHOT_SCHEMA_VERSION {
         return Err(ControllerError::InvalidSnapshot(
@@ -631,10 +645,10 @@ fn validate_snapshot<S>(snapshot: &DesktopSnapshot<S>) -> Result<(), ControllerE
     if snapshot
         .notices
         .iter()
-        .any(|notice| notice.message.len() > MAX_NOTICE_MESSAGE_BYTES)
+        .any(|notice| validate_notice_message(&notice.message).is_err())
     {
         return Err(ControllerError::InvalidSnapshot(
-            "notice message exceeds its byte bound",
+            "notice message is empty or exceeds its byte bound",
         ));
     }
     if snapshot.uploads.len() > MAX_ACTIVE_UPLOADS {

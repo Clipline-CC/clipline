@@ -2,10 +2,14 @@ use std::fs;
 use std::path::PathBuf;
 
 use clipline_desktop::{
-    CloudAccountOwner, CloudAccountScope, CloudUploadProgress, CloudUploadUpdateKind,
-    DesktopController, Generation, RecorderEvent, UiEvent, MAX_ACTIVE_UPLOADS,
+    CatalogSummarySnapshot, CatalogSummarySource, CloudAccountOwner, CloudAccountScope,
+    CloudUploadProgress, CloudUploadUpdateKind, DesktopController, Generation, RecorderEvent,
+    Revision, UiEvent, MAX_ACTIVE_UPLOADS,
 };
-use clipline_slint_spike::desktop::{AttachmentGate, DesktopProjection};
+use clipline_slint_spike::desktop::{
+    acknowledge_presented_notice, present_attached_projection_sequence, AttachmentGate,
+    DesktopProjection,
+};
 
 fn spike_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -39,6 +43,15 @@ fn test_account() -> CloudAccountOwner {
 fn projection_is_revisioned_and_bounds_the_visible_upload_model() {
     let mut controller = DesktopController::new((), vec!["warning".into()]).unwrap();
     controller
+        .apply_event(UiEvent::CatalogSummaryChanged {
+            summary: CatalogSummarySnapshot {
+                revision: Revision::new(7),
+                source: CatalogSummarySource::Cloud,
+                active: true,
+            },
+        })
+        .unwrap();
+    controller
         .apply_event(UiEvent::CloudAccountChanged {
             generation: test_account().account_generation(),
             account: Some(test_account()),
@@ -71,8 +84,70 @@ fn projection_is_revisioned_and_bounds_the_visible_upload_model() {
     assert_eq!(projection.recorder_label, "RECORDING · H.264");
     assert_eq!(projection.notice, "warning");
     assert_eq!(projection.notice_id, Some(snapshot.notices[0].id));
+    assert_eq!(projection.catalog_revision, Revision::new(7));
+    assert_eq!(projection.catalog_source, CatalogSummarySource::Cloud);
+    assert!(projection.catalog_active);
     assert_eq!(projection.uploads.len(), MAX_ACTIVE_UPLOADS);
     assert_eq!(projection.uploads[0].local_clip_id, "clip-00");
+}
+
+#[test]
+fn attached_projection_drains_notices_oldest_first_and_stops_on_failure_or_stale_attachment() {
+    let mut controller =
+        DesktopController::new((), vec!["first".into(), "second".into(), "third".into()]).unwrap();
+    let gate = AttachmentGate::default();
+    let attachment = gate.attach(controller.snapshot().revision.get()).unwrap();
+    let initial = DesktopProjection::from_snapshot(&controller.snapshot());
+    let mut presented = Vec::new();
+    let count = present_attached_projection_sequence(
+        &gate,
+        attachment,
+        initial,
+        |projection| {
+            presented.push(projection.notice.clone());
+            true
+        },
+        |revision, notice_id| {
+            acknowledge_presented_notice(
+                &mut controller,
+                &gate,
+                attachment,
+                revision,
+                notice_id,
+            )
+            .then(|| DesktopProjection::from_snapshot(&controller.snapshot()))
+        },
+    );
+    assert_eq!(count, 4);
+    assert_eq!(presented, ["first", "second", "third", ""]);
+    assert!(controller.snapshot().notices.is_empty());
+
+    let failed = DesktopController::new((), vec!["retained".into()]).unwrap();
+    let failed_gate = AttachmentGate::default();
+    let failed_attachment = failed_gate.attach(failed.snapshot().revision.get()).unwrap();
+    assert_eq!(
+        present_attached_projection_sequence(
+            &failed_gate,
+            failed_attachment,
+            DesktopProjection::from_snapshot(&failed.snapshot()),
+            |_| false,
+            |_, _| panic!("failed projection must not acknowledge"),
+        ),
+        0
+    );
+    assert_eq!(failed.snapshot().notices.len(), 1);
+    failed_gate.detach(failed_attachment).unwrap();
+    assert_eq!(
+        present_attached_projection_sequence(
+            &failed_gate,
+            failed_attachment,
+            DesktopProjection::from_snapshot(&failed.snapshot()),
+            |_| true,
+            |_, _| panic!("stale attachment must not acknowledge"),
+        ),
+        0
+    );
+    assert_eq!(failed.snapshot().notices.len(), 1);
 }
 
 #[test]

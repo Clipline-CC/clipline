@@ -1,7 +1,8 @@
 use clipline_desktop::{
-    CloudAccountOwner, CloudAccountScope, CloudUploadProgress, CloudUploadUpdateKind,
-    GameDetection, Generation, GenerationError, MicMonitor, RecorderEvent, Revision, UiAction,
-    UiEffect, UiEvent, WindowLifecycleMode, WindowLifecycleSnapshot, MAX_CLOUD_ACCOUNT_KEY_BYTES,
+    CatalogSummarySnapshot, CatalogSummarySource, CloudAccountOwner, CloudAccountScope,
+    CloudUploadProgress, CloudUploadUpdateKind, DesktopController, GameDetection, Generation,
+    GenerationError, MicMonitor, RecorderEvent, Revision, UiAction, UiEffect, UiEvent,
+    WindowLifecycleMode, WindowLifecycleSnapshot, MAX_CLOUD_ACCOUNT_KEY_BYTES,
     MAX_MIC_MONITOR_SAMPLES,
 };
 use serde_json::json;
@@ -201,4 +202,30 @@ fn cloud_account_owners_are_bounded_exact_values() {
         "account_generation": 1
     }))
     .is_err());
+}
+
+#[test]
+fn desktop_catalog_summary_is_fixed_shape_and_contains_no_item_arrays() {
+    let summary = CatalogSummarySnapshot {
+        revision: Revision::new(9),
+        source: CatalogSummarySource::Cloud,
+        active: true,
+    };
+    assert_eq!(
+        serde_json::to_value(summary).unwrap(),
+        json!({ "revision": 9, "source": "cloud", "active": true })
+    );
+
+    let snapshot =
+        serde_json::to_value(DesktopController::new((), Vec::new()).unwrap().snapshot()).unwrap();
+    assert_eq!(snapshot["schema_version"], json!(4));
+    assert_eq!(
+        snapshot["catalog"],
+        json!({ "revision": 0, "source": "local", "active": false })
+    );
+    let catalog = snapshot["catalog"].as_object().unwrap();
+    assert_eq!(catalog.len(), 3);
+    for forbidden in ["items", "rows", "groups", "selected", "uploads"] {
+        assert!(!catalog.contains_key(forbidden));
+    }
 }
