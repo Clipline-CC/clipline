@@ -561,6 +561,7 @@ struct FailureRule {
 }
 
 type CollisionHook = Arc<Mutex<Option<(String, Vec<u8>)>>>;
+type LinkSwapHook = Arc<Mutex<Option<(String, PathBuf)>>>;
 
 #[derive(Clone, Default)]
 struct FaultFileSystem {
@@ -573,11 +574,12 @@ struct FaultFileSystem {
     rename_collision: CollisionHook,
     replace_collision: CollisionHook,
     replace_before_fence: Arc<Mutex<Option<Vec<u8>>>>,
-    read_link_swap: Arc<Mutex<Option<PathBuf>>>,
+    read_link_swap: LinkSwapHook,
     read_file_swap: CollisionHook,
     rename_source_swap: CollisionHook,
     remove_source_swap: CollisionHook,
     fail_after_move: Arc<Mutex<Option<String>>>,
+    retained_replaced_files: Arc<Mutex<Vec<std::fs::File>>>,
 }
 
 impl FaultFileSystem {
@@ -609,8 +611,9 @@ impl FaultFileSystem {
         *self.replace_before_fence.lock().unwrap() = Some(bytes.to_vec());
     }
 
-    fn swap_read_to_link(&self, target: &Path) {
-        *self.read_link_swap.lock().unwrap() = Some(target.to_path_buf());
+    fn swap_read_to_link(&self, source_name: &str, target: &Path) {
+        *self.read_link_swap.lock().unwrap() =
+            Some((source_name.to_owned(), target.to_path_buf()));
     }
 
     fn swap_read_file(&self, source_name: &str, bytes: &[u8]) {
@@ -643,6 +646,22 @@ impl FaultFileSystem {
             *hook = Some(name);
             false
         }
+    }
+
+    fn replace_file_with(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        let selected = clipline_shell::open_regular_file_nofollow(path)?;
+        std::fs::remove_file(path)?;
+        std::fs::write(path, bytes)?;
+        self.retained_replaced_files.lock().unwrap().push(selected);
+        Ok(())
+    }
+
+    fn replace_file_with_link(&self, path: &Path, target: &Path) -> io::Result<()> {
+        let selected = clipline_shell::open_regular_file_nofollow(path)?;
+        std::fs::remove_file(path)?;
+        create_file_symlink_result(target, path)?;
+        self.retained_replaced_files.lock().unwrap().push(selected);
+        Ok(())
     }
 
     fn operation(&self, operation: &'static str, from: &Path, to: Option<&Path>) -> io::Result<()> {
@@ -717,17 +736,22 @@ impl RepositoryFileSystem for FaultFileSystem {
         expected_identity: FileIdentity,
         maximum_bytes: u64,
     ) -> io::Result<Vec<u8>> {
-        if let Some(target) = self.read_link_swap.lock().unwrap().take() {
-            std::fs::remove_file(path)?;
-            create_file_symlink_result(&target, path)?;
+        if let Some((name, target)) = self.read_link_swap.lock().unwrap().take() {
+            if path
+                .file_name()
+                .is_some_and(|source| name_matches(&name, &source.to_string_lossy()))
+            {
+                self.replace_file_with_link(path, &target)?;
+            } else {
+                *self.read_link_swap.lock().unwrap() = Some((name, target));
+            }
         }
         if let Some((name, winner)) = self.read_file_swap.lock().unwrap().take() {
             if path
                 .file_name()
                 .is_some_and(|source| name_matches(&name, &source.to_string_lossy()))
             {
-                std::fs::remove_file(path)?;
-                std::fs::write(path, winner)?;
+                self.replace_file_with(path, &winner)?;
             } else {
                 *self.read_file_swap.lock().unwrap() = Some((name, winner));
             }
@@ -775,8 +799,7 @@ impl RepositoryFileSystem for FaultFileSystem {
         parent_identity: FileIdentity,
     ) -> io::Result<Box<dyn RepositoryMutationFence>> {
         if let Some(replacement) = self.replace_before_fence.lock().unwrap().take() {
-            std::fs::remove_file(path)?;
-            std::fs::write(path, replacement)?;
+            self.replace_file_with(path, &replacement)?;
         }
         let inner = self
             .standard
@@ -802,8 +825,8 @@ impl RepositoryFileSystem for FaultFileSystem {
                 .file_name()
                 .is_some_and(|source| name_matches(&name, &source.to_string_lossy()))
             {
-                std::fs::remove_file(from).map_err(FileMutationError::unchanged)?;
-                std::fs::write(from, winner).map_err(FileMutationError::unchanged)?;
+                self.replace_file_with(from, &winner)
+                    .map_err(FileMutationError::unchanged)?;
             } else {
                 *self.rename_source_swap.lock().unwrap() = Some((name, winner));
             }
@@ -839,8 +862,8 @@ impl RepositoryFileSystem for FaultFileSystem {
         let replace_collision = self.replace_collision.lock().unwrap().take();
         if let Some((name, winner)) = replace_collision {
             if to.file_name().is_some_and(|target| target == name.as_str()) {
-                std::fs::remove_file(to).map_err(FileMutationError::unchanged)?;
-                std::fs::write(to, winner).map_err(FileMutationError::unchanged)?;
+                self.replace_file_with(to, &winner)
+                    .map_err(FileMutationError::unchanged)?;
             } else {
                 *self.replace_collision.lock().unwrap() = Some((name, winner));
             }
@@ -862,8 +885,8 @@ impl RepositoryFileSystem for FaultFileSystem {
                 .file_name()
                 .is_some_and(|source| name_matches(&name, &source.to_string_lossy()))
             {
-                std::fs::remove_file(path).map_err(FileMutationError::unchanged)?;
-                std::fs::write(path, winner).map_err(FileMutationError::unchanged)?;
+                self.replace_file_with(path, &winner)
+                    .map_err(FileMutationError::unchanged)?;
             } else {
                 *self.remove_source_swap.lock().unwrap() = Some((name, winner));
             }
@@ -1356,7 +1379,7 @@ fn bounded_sidecar_read_refuses_a_link_swapped_in_after_entry_validation() {
     std::fs::remove_file(&probe).unwrap();
 
     let file_system = FaultFileSystem::default();
-    file_system.swap_read_to_link(&outside);
+    file_system.swap_read_to_link("session_1.osu-enrichment.json", &outside);
     let repository = fault_repository(&root, file_system, Arc::new(NoActiveMutationLease));
     let validated = repository
         .validate_clip_path(&clip.display().to_string())
