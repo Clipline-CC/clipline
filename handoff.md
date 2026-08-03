@@ -34,6 +34,12 @@ consumes each source track's own Opus pre-skip, tolerates normal 959/961-tick co
 quantization, preserves long gaps without encoding thousands of silent packets, and bounds decoded
 packet expansion before allocation. The fix is commit `5037755`.
 
+PR #133 review follow-up (`docs/superpowers/plans/2026-08-02-pr133-review-followup.md`,
+`fee4e01`) additionally rejects MP4 sample-table and decoded Opus duration mismatches beyond the
+supported ±1-tick quantization before PCM can be cropped or padded (`a11cf49`). Codex's separate
+commit-history comment required no rewrite: both original plan commits already precede their
+respective implementation commits and each fix retains its own rollback boundary.
+
 The exact staggered-track file regression, the complete `clipline-mp4` suite, full workspace tests,
 fresh-cache crate Clippy, and warning-denied workspace Clippy are green. The report's separately
 observed malformed redacted-log JSON is fixed by the checkpoint above.
