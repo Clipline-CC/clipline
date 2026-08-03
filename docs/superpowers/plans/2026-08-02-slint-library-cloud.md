@@ -663,8 +663,9 @@ lease, or if the 2,000-clip absolute memory/process bound fails.
 - Create: `scripts/measure-slint-library.ps1`
 - Create: `apps/clipline-slint-spike/examples/catalog_harness.rs`
 - Create: `docs/slint/native-library-protocol.md`
-- Modify: `scripts/measure-frontend-baseline.ps1`
-- Modify: `apps/clipline-slint-spike/tests/spike_contract.rs`
+- Modify: `scripts/test-frontend-baseline-tools.ps1`
+- Modify: `crates/clipline-library/src/poster.rs`
+- Modify: `crates/clipline-library/tests/poster.rs`
 
 **Test first**
 

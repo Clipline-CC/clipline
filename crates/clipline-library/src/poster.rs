@@ -14,8 +14,8 @@ use image::{ImageFormat, ImageReader, Limits};
 use thiserror::Error;
 
 use crate::{
-    ClipPathIdentity, DecodedImageWindow, DeterministicLru, GenerationError, PosterGeneration,
-    WindowWorkToken, MAX_CATALOG_PAGE_ROWS, MAX_DECODED_PAGE_IMAGES, MAX_POSTER_RESULT_ENTRIES,
+    ClipPathIdentity, DecodedImageWindow, DeterministicLru, GenerationError, MAX_CATALOG_PAGE_ROWS,
+    MAX_DECODED_PAGE_IMAGES, MAX_POSTER_RESULT_ENTRIES, PosterGeneration, WindowWorkToken,
 };
 
 pub const POSTER_WIDTH: u32 = 480;
@@ -249,6 +249,8 @@ pub struct PosterService {
     extractor: Arc<dyn PosterExtractor>,
     permits: Arc<PermitPool>,
     flights: Mutex<HashMap<PathBuf, Arc<ExtractionFlight>>>,
+    extraction_starts: AtomicU64,
+    single_flight_followers: AtomicU64,
 }
 
 impl PosterService {
@@ -258,6 +260,8 @@ impl PosterService {
             extractor,
             permits: process_poster_permits(),
             flights: Mutex::new(HashMap::new()),
+            extraction_starts: AtomicU64::new(0),
+            single_flight_followers: AtomicU64::new(0),
         }
     }
 
@@ -301,8 +305,10 @@ impl PosterService {
             }
         };
         if !leader {
+            saturating_increment(&self.single_flight_followers);
             return flight.wait();
         }
+        saturating_increment(&self.extraction_starts);
 
         let result = match self.permits.acquire() {
             Ok(_permit) => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -346,6 +352,22 @@ impl PosterService {
     pub fn peak_active_extractions(&self) -> usize {
         self.permits.peak()
     }
+
+    #[must_use]
+    pub fn extraction_starts(&self) -> u64 {
+        self.extraction_starts.load(Ordering::Relaxed)
+    }
+
+    #[must_use]
+    pub fn single_flight_followers(&self) -> u64 {
+        self.single_flight_followers.load(Ordering::Relaxed)
+    }
+}
+
+fn saturating_increment(counter: &AtomicU64) {
+    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+        Some(value.saturating_add(1))
+    });
 }
 
 #[must_use]
@@ -1567,15 +1589,18 @@ mod tests {
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
 
-        assert!(args
-            .windows(2)
-            .any(|pair| pair[0] == "-ss" && pair[1] == "0.000"));
-        assert!(args
-            .windows(2)
-            .any(|pair| pair[0] == "-vf" && pair[1] == "scale=480:-2:flags=bicubic"));
-        assert!(args
-            .windows(2)
-            .any(|pair| pair[0] == "-c:v" && pair[1] == "mjpeg"));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-ss" && pair[1] == "0.000")
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-vf" && pair[1] == "scale=480:-2:flags=bicubic")
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-c:v" && pair[1] == "mjpeg")
+        );
         assert_eq!(args.last().map(String::as_str), Some("pipe:1"));
         assert!(!args.iter().any(|arg| arg.ends_with(".poster.jpg")));
     }
@@ -1889,11 +1914,13 @@ mod tests {
         let error = extractor.extract(&canonical, 1.0).unwrap_err();
         assert!(error.contains("JPEG"));
         assert!(!poster_path(&canonical).exists());
-        assert!(std::fs::read_dir(&directory).unwrap().all(|entry| !entry
-            .unwrap()
-            .file_name()
-            .to_string_lossy()
-            .contains(".tmp.")));
+        assert!(std::fs::read_dir(&directory).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".tmp.")
+        }));
 
         let jpeg = test_jpeg();
         std::fs::write(&payload, &jpeg).unwrap();

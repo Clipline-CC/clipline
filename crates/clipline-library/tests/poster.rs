@@ -4,7 +4,7 @@ use std::sync::{Arc, Barrier};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clipline_library::{
-    cached_poster, poster_path, PosterExtractor, PosterService, MAX_CONCURRENT_POSTER_EXTRACTIONS,
+    MAX_CONCURRENT_POSTER_EXTRACTIONS, PosterExtractor, PosterService, cached_poster, poster_path,
 };
 
 struct TestDirectory(PathBuf);
@@ -132,6 +132,8 @@ fn canonical_path_single_flight_runs_one_extractor_and_shares_the_owned_result()
         .collect();
 
     assert_eq!(extractor.calls(), 1);
+    assert_eq!(service.extraction_starts(), 1);
+    assert_eq!(service.single_flight_followers(), 7);
     assert!(results.iter().all(|result| result == &results[0]));
     assert_eq!(std::fs::read(&results[0]).unwrap(), valid_jpeg());
     assert_eq!(cached_poster(&canonical), Some(results[0].clone()));
@@ -161,6 +163,8 @@ fn unique_paths_never_run_more_than_two_extractors_concurrently() {
     }
 
     assert_eq!(extractor.calls(), 6);
+    assert_eq!(service.extraction_starts(), 6);
+    assert_eq!(service.single_flight_followers(), 0);
     assert_eq!(extractor.peak(), MAX_CONCURRENT_POSTER_EXTRACTIONS);
     assert_eq!(
         service.peak_active_extractions(),

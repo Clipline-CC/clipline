@@ -96,7 +96,11 @@ if ($env:OS -eq 'Windows_NT') {
     Assert-True ($live.ThreadCount -gt 0) 'live thread count must be readable'
 }
 
-foreach ($scriptName in @('measure-frontend-baseline.ps1', 'drive-slint-spike.ps1')) {
+foreach ($scriptName in @(
+    'measure-frontend-baseline.ps1',
+    'drive-slint-spike.ps1',
+    'measure-slint-library.ps1'
+)) {
     $scriptPath = Join-Path $PSScriptRoot $scriptName
     $tokens = $null
     $parseErrors = $null
@@ -106,6 +110,143 @@ foreach ($scriptName in @('measure-frontend-baseline.ps1', 'drive-slint-spike.ps
         [ref]$parseErrors
     ) | Out-Null
     Assert-Equal 0 $parseErrors.Count "$scriptName must parse without PowerShell errors"
+}
+
+$libraryMeasurePath = Join-Path $PSScriptRoot 'measure-slint-library.ps1'
+$libraryTokens = $null
+$libraryErrors = $null
+$libraryAst = [System.Management.Automation.Language.Parser]::ParseFile(
+    $libraryMeasurePath,
+    [ref]$libraryTokens,
+    [ref]$libraryErrors
+)
+foreach ($name in @(
+    'Write-CliplineCreateNewText',
+    'Publish-CliplineCreateNewSignal',
+    'Resolve-LibraryFixture',
+    'Initialize-LibraryFixtureRoot',
+    'Assert-LibraryTelemetry'
+)) {
+    Import-TestedFunction -Ast $libraryAst -Name $name
+}
+$librarySource = Get-Content -LiteralPath $libraryMeasurePath -Raw
+foreach ($contract in @(
+    "'local-cold', 'local-warm', 'cloud-pages', 'selection-page-churn', 'reveal-close-100'",
+    "'ready', 'pageSettled', 'postersSettled', 'exerciseSettled', 'error', 'stop'",
+    "'create-new-atomic-rename'",
+    'excludedConcurrentCliplineProcesses',
+    'pwsGrowthMeasuredExternally',
+    'productionCredentialsLoaded',
+    'publishableAbsoluteEvidence',
+    'fullLifecyclePending',
+    'executedDuringMeasuredWindow',
+    "realGpuGate = 'pending-winit-software-does-not-exercise-the-native-video-path'",
+    "throw 'publishable Library evidence requires a clean tracked worktree'",
+    'Stop-LibraryOwnedTree -ObservedTree'
+)) {
+    Assert-True ($librarySource.Contains($contract)) "Slint Library sampler contract missing: $contract"
+}
+
+$libraryTestRoot = Join-Path ([System.IO.Path]::GetTempPath()) `
+    ("clipline-library-harness-test-{0}" -f [guid]::NewGuid())
+New-Item -ItemType Directory -Path $libraryTestRoot | Out-Null
+try {
+    $source = Join-Path $libraryTestRoot 'source.mp4'
+    [System.IO.File]::WriteAllBytes($source, [byte[]](1, 2, 3, 4, 5))
+    $hash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
+    $manifest = [pscustomobject]@{
+        schema_version = 1
+        suite = 'clipline-native-playback-v1'
+        fixtures = @([pscustomobject]@{
+            file = 'source.mp4'
+            artifact = [pscustomobject]@{ sha256 = $hash }
+        })
+        production_mux_oracles = @()
+    }
+    $manifest | ConvertTo-Json -Depth 8 |
+        Set-Content -LiteralPath (Join-Path $libraryTestRoot 'manifest.json') -Encoding UTF8
+    $fixture = Resolve-LibraryFixture -Directory $libraryTestRoot -RequestedPath 'source.mp4'
+    Assert-Equal $hash $fixture.sha256 'Library source fixture must be manifest hash-verified'
+    $links = Join-Path $libraryTestRoot 'links'
+    $corpus = Initialize-LibraryFixtureRoot -Root $links -Fixture $fixture -Count 50
+    Assert-Equal 50 $corpus.count 'Library fixture builder must create the requested exact count'
+    Assert-Equal 50 @(Get-ChildItem -LiteralPath $links -File).Count `
+        'Library fixture builder must create only exact hard-linked clips'
+    Assert-Equal $true $corpus.allSeedsHashVerified `
+        'Library fixture builder must hash-verify every bounded seed copy'
+    Assert-Equal 1 $corpus.seedCount '50 clips must use one bounded hard-link seed'
+
+    $createNew = Join-Path $libraryTestRoot 'create-new.txt'
+    Write-CliplineCreateNewText -Path $createNew -Text 'first'
+    $overwriteFailed = $false
+    try { Write-CliplineCreateNewText -Path $createNew -Text 'second' } catch {
+        $overwriteFailed = $true
+    }
+    Assert-True $overwriteFailed 'Library evidence writes must refuse to overwrite an existing path'
+    Assert-Equal 'first' (Get-Content -LiteralPath $createNew -Raw) `
+        'failed create-new publication must preserve existing evidence'
+
+    $signal = Join-Path $libraryTestRoot 'owned.stop'
+    Publish-CliplineCreateNewSignal -Path $signal
+    Assert-True (Test-Path -LiteralPath $signal -PathType Leaf) `
+        'owned stop signal must appear only as a closed regular file'
+    $signalOverwriteFailed = $false
+    try { Publish-CliplineCreateNewSignal -Path $signal } catch {
+        $signalOverwriteFailed = $true
+    }
+    Assert-True $signalOverwriteFailed 'owned stop signal publication must not overwrite'
+
+    $telemetryContract = [pscustomobject]@{
+        processId = 42; buildSha = 'test'; adapter = 'test'; scale = 1.0
+        fixtureSeedRoot = $corpus.seedRoot
+    }
+    $telemetry = [pscustomobject]@{
+        schemaVersion = 1; status = 'completed'; publication = 'create-new-atomic-rename'
+        scenario = 'reveal-close-100'; clipCount = 50
+        provenance = [pscustomobject]@{
+            processId = 42; processName = 'catalog_harness'; buildSha = 'test'
+            renderer = 'winit-software'; adapter = 'test'; scale = 1.0
+            fixtureSeedRoot = $corpus.seedRoot
+        }
+        sourceFixture = [pscustomobject]@{ path = $fixture.path; sha256 = $fixture.sha256 }
+        metrics = [pscustomobject]@{
+            firstUsablePageMs = 100; pageChangeP95Ms = 20; filterGroupP95Ms = 20
+            retainedRows = 50; retainedDecodedImages = 32; posterLruEntries = 32
+            posterCacheSize = 32; ffmpegChildPeak = 1; duplicateSameKeyExtractions = 0
+            posterExtractionStarts = 32; singleFlightFollowers = 1
+            offPageDecodedImagesAfterSettle = 0; offPageModelImagesAfterSettle = 0
+            stalePublications = 0; activeLeasesAfterClose = 0
+            pwsGrowthBytes = $null; pwsGrowthMeasuredExternally = $true
+        }
+        lifecycle = [pscustomobject]@{
+            attachmentsCreated = 101; attachmentsDropped = 101
+            imagesAccepted = 64; imagesReleased = 64
+            posterHandlesAccepted = 32; posterHandlesReleased = 32
+            modelImagesPublished = 32; modelImagesReplaced = 32
+            leasesAcquired = 0; leasesReleased = 0
+        }
+        safety = [pscustomobject]@{ productionCredentialsLoaded = $false; cloudNetworkRequests = 0 }
+        churn = [pscustomobject]@{}
+        reveal = [pscustomobject]@{
+            windowRevealCloseCycles = 100; windowRevealCloseCyclesPending = $false
+            windowCyclesExecutedDuringMeasuredWindow = $true
+            cloudMediaCycles = 0; cloudMediaCyclesPending = $true
+        }
+    }
+    Assert-LibraryTelemetry -Telemetry $telemetry -Fixture $fixture -Count 50 `
+        -ScenarioName 'reveal-close-100' -RendererName 'winit-software' `
+        -Contract $telemetryContract
+    $telemetry.reveal.windowRevealCloseCyclesPending = $true
+    $pendingWindowAccepted = $true
+    try {
+        Assert-LibraryTelemetry -Telemetry $telemetry -Fixture $fixture -Count 50 `
+            -ScenarioName 'reveal-close-100' -RendererName 'winit-software' `
+            -Contract $telemetryContract
+    } catch { $pendingWindowAccepted = $false }
+    Assert-Equal $false $pendingWindowAccepted `
+        'real window lifecycle may not use the Cloud-media pending escape hatch'
+} finally {
+    Remove-Item -LiteralPath $libraryTestRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 $measureSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'measure-frontend-baseline.ps1') -Raw
