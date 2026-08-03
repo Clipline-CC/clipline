@@ -443,13 +443,97 @@ lease, or if the 2,000-clip absolute memory/process bound fails.
 **Files**
 
 - Create: `crates/clipline-library/src/controller.rs`
-- Create: `crates/clipline-library/src/presentation.rs`
+- Modify: `crates/clipline-library/src/contract.rs`
+- Modify: `crates/clipline-library/src/channel.rs`
+- Modify: `crates/clipline-library/src/gallery.rs`
+- Modify: `crates/clipline-library/src/presentation.rs`
+- Modify: `crates/clipline-library/src/scan.rs`
+- Modify: `crates/clipline-library/src/lib.rs`
 - Create: `crates/clipline-library/tests/controller.rs`
-- Create: `crates/clipline-library/tests/presentation.rs`
-- Modify: `crates/clipline-desktop/src/action.rs`
+- Modify: `crates/clipline-library/tests/channel.rs`
+- Modify: `crates/clipline-library/tests/contract.rs`
+- Modify: `crates/clipline-library/tests/gallery.rs`
+- Modify: `crates/clipline-library/tests/local_scan.rs`
+- Modify: `crates/clipline-library/tests/presentation.rs`
 - Modify: `crates/clipline-desktop/src/snapshot.rs`
+- Modify: `crates/clipline-desktop/src/controller.rs`
+- Modify: `crates/clipline-desktop/src/event.rs`
+- Modify: `crates/clipline-desktop/src/channel.rs`
+- Modify: `crates/clipline-desktop/src/lib.rs`
+- Modify: corresponding desktop controller/channel/schema tests
 - Modify: `apps/clipline-slint-spike/src/desktop.rs`
 - Modify: `apps/clipline-slint-spike/tests/desktop_adapter.rs`
+
+**Execution correction pinned before implementation**
+
+- The authoritative local completion is a full `LocalIndexCompletion`, not the existing 60-row
+  `CatalogResult::LocalPage`. It carries one exact `WindowWorkToken`, catalog revision, a structured
+  `truncated` bit, no more than 10,000 compact `LocalClipItem` rows, and no more than 256 bounded
+  warnings. The controller validates and reserves the complete replacement before one atomic swap;
+  a 60-row page can never be treated as proof that off-page identities disappeared. Expose the
+  scanner's structured truncation bit to the native completion without adding a field to the exact
+  shipping Tauri `{ clips, warnings }` JSON envelope. Full local-index results coalesce by exact
+  window token only up to the next non-coalescable barrier; bounds tests pin both the 128-result
+  queue and its aggregate worst-case full-index bytes rather than counting entries alone.
+- Keep one long-lived `CatalogController` beside `DesktopController`. It owns the bounded local
+  index, the current Cloud server page, query/filter/sort/group/page state, selected identities,
+  active item, one context target, one dialog, refresh generations, and one dirty refresh target.
+  It owns no Slint images, filesystem/network handles, upload service, or media lease. A window is
+  only an attachment; detach drops page resources while the controller state survives.
+- Use a typed stable item identity throughout actions and state: local items use
+  `ClipPathIdentity`; Cloud-only items use exact account key/generation plus bounded remote clip ID.
+  Resolve display paths from accepted controller metadata before emitting effects. Do not accept a
+  UI-supplied raw path as mutation authority.
+- Extend the existing `CatalogAction`, presentation module, and tests rather than creating parallel
+  reducers or duplicate formatting code. Rich catalog actions/effects remain in
+  `clipline-library` for Task 8; do not route them through the small `clipline-desktop::UiAction`
+  enum yet. `DesktopSnapshot` gains only a compact revision/source/active catalog summary, never
+  item arrays. Task 9 owns the deliberate Slint callback/worker routing layer.
+- Pin bounded typed effects before the reducer: full local refresh, exact-account Cloud page,
+  clip-detail load, local/cloud review open, close review, rename title/file, delete, upload/cancel,
+  reveal, browser open, and link copy. Results add full local index and clip-detail completions,
+  exact `RenamedClipInfo`, and bounded `DeletedClipsReport`; the existing generic
+  `MutationReport` is not sufficient to migrate active/selected/context identity after file rename.
+  Every window-scoped effect carries the current `WindowWorkToken`; Cloud effects also carry the
+  exact account owner, while admitted uploads become durable and window-independent.
+- Local refresh is one-in-flight plus one latest dirty target. A burst while work is running never
+  queues another effect; an obsolete completion preserves accepted data and launches exactly one
+  refresh for the latest requested revision. Cloud results additionally require the exact current
+  account owner. A valid `PastEnd` retains the preceding page and only disables speculative Next.
+  Keep local zero-based pages distinct from one-based bounded `CloudPageNumber`; no shared untyped
+  page integer may silently cross those contracts.
+- Selection is local-only, Windows-equivalent, and independently bounded at 10,000 identities;
+  new selections must resolve against the accepted local index. It survives page/filter/sort/group/
+  projection rebuilds, unions only the current visible page for Select All, and prunes only after a
+  complete non-truncated authoritative scan. A truncated scan may therefore retain bounded selected,
+  active, context, or dialog identities that are not in its newest-10,000 replacement. Explicitly
+  switching to Cloud clears local selection and exits select mode, matching the shipping frontend.
+- Projection is a pure fallible build that publishes at most 60 rows, fixed bounded badge/poster
+  fields, bounded group spans, pagination/range text, one menu, one dialog, and at most 16 upload
+  summaries. It stages every allocation before publication. Add an injected reservation seam for
+  deterministic allocation-failure tests; real 10,000-row allocations cannot honestly force OOM.
+- Define the pure projection over a plain-data `CatalogProjectionInput` in slice 2 so 50/500/2,000
+  snapshot tests do not depend on the slice-3 controller. Preserve the compact marker-summary path:
+  Gallery search includes `MarkerSidecarSummary::search_text` as a deliberate safe superset of the
+  shipping JS haystack (which checks `champion_name` only); do not claim byte-for-byte JS search
+  parity. Presentation formats aggregate play outcomes directly and never reconstructs fictitious
+  per-play vectors.
+- Close the Task 7 notice follow-up while changing the desktop adapter: Slint presents the oldest
+  pending notice, acknowledges it only after successful current-attachment projection, then
+  reprojects the next until the bounded queue is empty. Reject whitespace-only notice messages
+  before they consume capacity. Do not acknowledge only the newest notice and strand older ones.
+
+**Commit slices**
+
+1. `feat(library): pin bounded catalog controller contracts` — full-index completion, typed
+   identities/actions/effects, result-channel ownership, structured truncation, and entry/byte
+   bounds tests including the 10,000-row truncated boundary.
+2. `feat(library): add deterministic catalog projection` — bounded search behavior, fixed
+   row/badge/poster shapes, group/dialog/page projections, and 50/500/2,000-row snapshots.
+3. `feat(library): add bounded catalog controller` — transactional local/Cloud state, selection,
+   active/context/dialog behavior, refresh coalescing, detach/recreate, and allocation-failure seam.
+4. `feat(desktop): persist compact catalog summary` — desktop schema/controller and Slint summary
+   adapter tests; no catalog item arrays cross the desktop snapshot.
 
 **Test first**
 
@@ -459,13 +543,16 @@ lease, or if the 2,000-clip absolute memory/process bound fails.
 - Keep complete metadata bounded by the catalog cap but publish at most 60 presentation rows. Rows
   carry stable identity, visible strings/badges, selection/active booleans, and poster state; they do
   not own selected/active state or service handles.
-- Selection survives page/filter/render changes, prunes only when the authoritative local scan
-  removes paths, and uses Windows-equivalent identity. Cloud source exits local multi-select.
+- Selection survives page/filter/render changes, prunes only when a complete non-truncated
+  authoritative local scan removes paths, and uses Windows-equivalent identity. Cloud source exits
+  local multi-select. Escape priority follows parity-ledger row `shortcut:escape-context` and the
+  retained JS handler order.
   Select All touches only current visible local rows. Escape closes modal/menu, clears selection,
   exits select mode, then returns from Review in the current documented priority order.
 - Refresh/results are transactional: validate token/account and the entire replacement before
-  swapping. Stale, truncated-policy, invalid row, and allocation errors preserve the prior state
-  byte-for-byte.
+  swapping. Stale, ambiguous truncated-policy, invalid row, and allocation errors preserve the
+  prior state byte-for-byte. A valid truncated scan may replace visible metadata but must not prune
+  selected/active/context/dialog identities solely because the bounded scan omitted them.
 - A Library revision or enrichment event requests a current-generation refresh; bursts coalesce.
   Destroy/recreate preserves durable controller state and produces the same active page without
   replaying events. Hiding drops page image handles while retaining metadata/selection/active ID.
