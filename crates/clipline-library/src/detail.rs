@@ -450,6 +450,37 @@ impl ClipDetailResult {
     }
 
     #[must_use]
+    pub(crate) fn estimated_owned_bytes(&self) -> usize {
+        let detail = &self.detail;
+        std::mem::size_of::<Self>()
+            .saturating_add(self.owner.item().owned_capacity())
+            .saturating_add(
+                detail
+                    .marker_ticks
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<MarkerTick>()),
+            )
+            .saturating_add(detail.marker_digest.capacity())
+            .saturating_add(
+                detail
+                    .audio_tracks
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<ClipDetailAudioTrack>()),
+            )
+            .saturating_add(
+                detail
+                    .audio_tracks
+                    .iter()
+                    .map(|track| track.id.capacity().saturating_add(track.label.capacity()))
+                    .fold(0_usize, usize::saturating_add),
+            )
+            .saturating_add(detail.upload.title.capacity())
+            .saturating_add(detail.upload.description.capacity())
+            .saturating_add(detail.upload.marker_summary.capacity())
+            .saturating_add(detail.upload.audio_summary.capacity())
+    }
+
+    #[must_use]
     pub fn into_detail(self) -> ClipDetail {
         self.detail
     }

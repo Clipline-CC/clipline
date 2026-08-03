@@ -1,11 +1,12 @@
 use clipline_library::{
-    catalog_result_channel, CatalogPage, CatalogResult, CatalogResultPublishOutcome,
-    CatalogRevision, CatalogSource, ClipPathIdentity, CloudAccountGeneration, CloudAccountKey,
-    CloudLibraryItem, CloudListPageCompletion, CloudNextPage, CloudPageNumber, CloudPageOutcome,
-    CloudWorkToken, DurableUploadToken, ExpectedResultOwner, ForegroundGeneration, LocalClipId,
-    LocalClipItem, MutationReport, PosterGeneration, PosterResult, PosterStatus, PosterWorkToken,
-    RequestGeneration, ResultPortError, UploadGeneration, UploadSummary,
-    WindowAttachmentGeneration, WindowWorkToken, CATALOG_RESULT_CAPACITY,
+    catalog_result_channel, CatalogResult, CatalogResultPublishOutcome, CatalogRevision,
+    ClipDetail, ClipDetailRequest, ClipDetailResult, ClipPathIdentity, CloudAccountGeneration,
+    CloudAccountKey, CloudLibraryItem, CloudListPageCompletion, CloudNextPage, CloudPageNumber,
+    CloudPageOutcome, CloudWorkToken, DeletedClipsReport, DurableUploadToken, ExpectedResultOwner,
+    ForegroundGeneration, LocalClipId, LocalClipItem, LocalIndexCompletion, PosterGeneration,
+    PosterResult, PosterStatus, PosterWorkToken, RequestGeneration, ResultPortError,
+    UploadDialogSummary, UploadGeneration, UploadSummary, WindowAttachmentGeneration,
+    WindowWorkToken, CATALOG_RESULT_BYTE_CAPACITY, CATALOG_RESULT_CAPACITY,
 };
 
 fn window(request: u64) -> WindowWorkToken {
@@ -34,20 +35,32 @@ fn upload(account: &str, account_generation: u64, generation: u64) -> DurableUpl
     }
 }
 
-fn empty_local_page(token: WindowWorkToken, page: u32) -> CatalogResult {
-    CatalogResult::LocalPage {
-        token,
-        page: CatalogPage {
-            source: CatalogSource::Local,
-            revision: CatalogRevision::new(1),
-            page,
-            page_size: 60,
-            total: 0,
-            has_next: false,
-            truncated: false,
-            items: Vec::new(),
-            warnings: Vec::new(),
-        },
+fn empty_local_index(token: WindowWorkToken, revision: u64) -> CatalogResult {
+    CatalogResult::LocalIndex(
+        LocalIndexCompletion::new(
+            token,
+            CatalogRevision::new(revision),
+            false,
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap(),
+    )
+}
+
+fn local_item(index: usize, size_mb: f64) -> LocalClipItem {
+    LocalClipItem {
+        path: format!(r"C:\Clips\{index}.mp4"),
+        name: format!("{index}.mp4"),
+        title: None,
+        kind: "replay".into(),
+        session: None,
+        size_mb,
+        modified_unix: index as u64,
+        duration_s: Some(1.0),
+        marker_count: 0,
+        game: None,
+        marker_summary: Default::default(),
     }
 }
 
@@ -100,20 +113,58 @@ fn cloud_page(token: CloudWorkToken, page: u32, item_count: usize) -> CatalogRes
     )
 }
 
+fn clip_detail(request: &ClipDetailRequest, digest: &str) -> CatalogResult {
+    let upload = UploadDialogSummary::new("", "", "", "").unwrap();
+    let detail = ClipDetail::new(0, Vec::new(), digest, Vec::new(), upload).unwrap();
+    CatalogResult::ClipDetail(ClipDetailResult::new(request, detail))
+}
+
+fn large_local_index(token: WindowWorkToken, revision: u64) -> CatalogResult {
+    let field = "x".repeat(1_024);
+    let items = (0..1_600)
+        .map(|index| LocalClipItem {
+            path: format!(r"C:\{index}\{field}.mp4"),
+            name: field.clone(),
+            title: Some(field.clone()),
+            kind: field.clone(),
+            session: Some(field.clone()),
+            size_mb: 1.0,
+            modified_unix: index,
+            duration_s: Some(1.0),
+            marker_count: 0,
+            game: Some(clipline_library::ClipGame {
+                id: field.clone(),
+                name: field.clone(),
+            }),
+            marker_summary: Default::default(),
+        })
+        .collect();
+    CatalogResult::LocalIndex(
+        LocalIndexCompletion::new(
+            token,
+            CatalogRevision::new(revision),
+            false,
+            items,
+            Vec::new(),
+        )
+        .unwrap(),
+    )
+}
+
 #[test]
 fn coalescable_results_replace_only_the_same_exact_key_before_a_barrier() {
     let (sender, receiver) = catalog_result_channel();
     let token = window(3);
     assert_eq!(
         sender.try_send(
-            empty_local_page(token, 1),
+            empty_local_index(token, 1),
             ExpectedResultOwner::Window(token)
         ),
         Ok(CatalogResultPublishOutcome::Queued)
     );
     assert_eq!(
         sender.try_send(
-            empty_local_page(token, 2),
+            empty_local_index(token, 2),
             ExpectedResultOwner::Window(token)
         ),
         Ok(CatalogResultPublishOutcome::Replaced)
@@ -121,27 +172,27 @@ fn coalescable_results_replace_only_the_same_exact_key_before_a_barrier() {
     assert_eq!(receiver.len(), 1);
     assert!(matches!(
         receiver.try_recv(),
-        Some(CatalogResult::LocalPage { page, .. }) if page.page == 2
+        Some(CatalogResult::LocalIndex(completion)) if completion.revision == CatalogRevision::new(2)
     ));
 
     sender
         .try_send(
-            empty_local_page(token, 3),
+            empty_local_index(token, 3),
             ExpectedResultOwner::Window(token),
         )
         .unwrap();
     sender
         .try_send(
-            CatalogResult::MutationCompleted {
+            CatalogResult::DeleteCompleted {
                 token,
-                report: MutationReport::default(),
+                report: DeletedClipsReport::default(),
             },
             ExpectedResultOwner::Window(token),
         )
         .unwrap();
     assert_eq!(
         sender.try_send(
-            empty_local_page(token, 4),
+            empty_local_index(token, 4),
             ExpectedResultOwner::Window(token)
         ),
         Ok(CatalogResultPublishOutcome::Queued)
@@ -189,6 +240,34 @@ fn poster_replacement_is_scoped_to_token_and_path() {
 }
 
 #[test]
+fn clip_detail_replacement_is_scoped_to_the_exact_item_and_window() {
+    let (sender, receiver) = catalog_result_channel();
+    let request = ClipDetailRequest::new(
+        ClipPathIdentity::from_text(r"C:\Clips\One.mp4").unwrap(),
+        window(40),
+    );
+    let owner = request.owner().clone();
+    sender
+        .try_send(
+            clip_detail(&request, "first"),
+            ExpectedResultOwner::Detail(owner.clone()),
+        )
+        .unwrap();
+    assert_eq!(
+        sender.try_send(
+            clip_detail(&request, "replacement"),
+            ExpectedResultOwner::Detail(owner),
+        ),
+        Ok(CatalogResultPublishOutcome::Replaced)
+    );
+    assert!(matches!(
+        receiver.try_recv(),
+        Some(CatalogResult::ClipDetail(result))
+            if result.detail().marker_digest() == "replacement"
+    ));
+}
+
+#[test]
 fn cloud_progress_never_coalesces_across_accounts_or_upload_generations() {
     let (sender, receiver) = catalog_result_channel();
     let account_a_one = upload("account-a", 1, 7);
@@ -231,7 +310,7 @@ fn stale_account_changed_and_disconnected_are_distinct() {
     let new_window = window(2);
     assert_eq!(
         sender.try_send(
-            empty_local_page(old_window, 1),
+            empty_local_index(old_window, 1),
             ExpectedResultOwner::Window(new_window),
         ),
         Err(ResultPortError::Stale)
@@ -248,7 +327,7 @@ fn stale_account_changed_and_disconnected_are_distinct() {
     drop(receiver);
     assert_eq!(
         sender.try_send(
-            empty_local_page(new_window, 1),
+            empty_local_index(new_window, 1),
             ExpectedResultOwner::Window(new_window),
         ),
         Err(ResultPortError::Disconnected)
@@ -322,20 +401,69 @@ fn durable_results_fill_the_fixed_capacity_and_never_drop_silently() {
 }
 
 #[test]
+fn aggregate_result_bytes_are_bounded_and_released_on_receive() {
+    let (sender, receiver) = catalog_result_channel();
+    let first = large_local_index(window(51), 1);
+    let second = large_local_index(window(52), 1);
+    let third = large_local_index(window(53), 1);
+    assert!(first.estimated_byte_size() * 2 < CATALOG_RESULT_BYTE_CAPACITY);
+    assert!(first.estimated_byte_size() * 3 > CATALOG_RESULT_BYTE_CAPACITY);
+
+    sender
+        .try_send(first, ExpectedResultOwner::Window(window(51)))
+        .unwrap();
+    sender
+        .try_send(second, ExpectedResultOwner::Window(window(52)))
+        .unwrap();
+    assert_eq!(
+        sender.try_send(third.clone(), ExpectedResultOwner::Window(window(53))),
+        Err(ResultPortError::ByteCapacity {
+            capacity: CATALOG_RESULT_BYTE_CAPACITY,
+        })
+    );
+
+    assert!(receiver.try_recv().is_some());
+    assert_eq!(
+        sender.try_send(third, ExpectedResultOwner::Window(window(53))),
+        Ok(CatalogResultPublishOutcome::Queued)
+    );
+}
+
+#[test]
+fn queue_byte_cap_charges_spare_string_capacity_not_only_visible_length() {
+    let (sender, receiver) = catalog_result_channel();
+    let token = window(54);
+    let mut message = String::with_capacity(CATALOG_RESULT_BYTE_CAPACITY + 1);
+    message.push('x');
+    assert_eq!(
+        sender.try_send(
+            CatalogResult::ForegroundFeedback { token, message },
+            ExpectedResultOwner::Window(token),
+        ),
+        Err(ResultPortError::ByteCapacity {
+            capacity: CATALOG_RESULT_BYTE_CAPACITY,
+        })
+    );
+    assert!(receiver.is_empty());
+}
+
+#[test]
 fn oversized_results_are_rejected_before_the_queue_changes() {
     let (sender, receiver) = catalog_result_channel();
     let token = window(10);
-    let mut result = empty_local_page(token, 1);
-    let CatalogResult::LocalPage { page, .. } = &mut result else {
-        unreachable!();
-    };
-    page.page_size = 61;
+    let result = CatalogResult::LocalIndex(LocalIndexCompletion {
+        token,
+        revision: CatalogRevision::new(1),
+        truncated: false,
+        items: (0..=10_000).map(|index| local_item(index, 1.0)).collect(),
+        warnings: Vec::new(),
+    });
     assert_eq!(
         sender.try_send(result, ExpectedResultOwner::Window(token)),
         Err(ResultPortError::PayloadTooLarge {
-            field: "page_size",
-            actual: 61,
-            maximum: 60,
+            field: "local_index.items",
+            actual: 10_001,
+            maximum: 10_000,
         })
     );
     assert!(receiver.is_empty());
@@ -372,20 +500,13 @@ fn inconsistent_pages_and_invalid_numeric_items_fail_closed() {
         game: None,
         marker_summary: Default::default(),
     };
-    let result = CatalogResult::LocalPage {
+    let result = CatalogResult::LocalIndex(LocalIndexCompletion {
         token,
-        page: CatalogPage {
-            source: CatalogSource::Local,
-            revision: CatalogRevision::new(1),
-            page: 1,
-            page_size: 1,
-            total: 1,
-            has_next: false,
-            truncated: false,
-            items: vec![invalid_local],
-            warnings: Vec::new(),
-        },
-    };
+        revision: CatalogRevision::new(1),
+        truncated: false,
+        items: vec![invalid_local],
+        warnings: Vec::new(),
+    });
     assert_eq!(
         sender.try_send(result, ExpectedResultOwner::Window(token)),
         Err(ResultPortError::InvalidPayload {
@@ -427,32 +548,22 @@ fn inconsistent_pages_and_invalid_numeric_items_fail_closed() {
     );
     assert!(receiver.is_empty());
 
-    let mut result = empty_local_page(token, 1);
-    let CatalogResult::LocalPage { page, .. } = &mut result else {
-        unreachable!();
-    };
-    page.page_size = 1;
-    page.total = 0;
-    page.items.push(LocalClipItem {
-        path: r"C:\Clips\One.mp4".into(),
-        name: "One.mp4".into(),
-        title: None,
-        kind: "replay".into(),
-        session: None,
-        size_mb: 1.0,
-        modified_unix: 1,
-        duration_s: Some(1.0),
-        marker_count: 0,
-        game: None,
-        marker_summary: Default::default(),
-    });
-    assert_eq!(
-        sender.try_send(result, ExpectedResultOwner::Window(token)),
-        Err(ResultPortError::InvalidPayload {
-            field: "page.items_exceed_total"
-        })
-    );
-    assert!(receiver.is_empty());
+    sender
+        .try_send(
+            CatalogResult::LocalIndex(
+                LocalIndexCompletion::new(
+                    token,
+                    CatalogRevision::new(2),
+                    false,
+                    vec![local_item(2, 1.0)],
+                    Vec::new(),
+                )
+                .unwrap(),
+            ),
+            ExpectedResultOwner::Window(token),
+        )
+        .unwrap();
+    assert_eq!(receiver.len(), 1);
 }
 
 #[test]

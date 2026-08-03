@@ -2,9 +2,11 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    ClipPathIdentity, MarkerSidecarSummary, PosterWorkToken, MAX_CATALOG_IDENTITY_BYTES,
-    MAX_CLIP_DETAIL_AUDIO_TRACKS, MAX_CLIP_DETAIL_FIELD_BYTES, MAX_CLIP_DETAIL_MARKERS,
-    MAX_CLIP_SIDECAR_PLAYS,
+    ClipDetailRequest, ClipDetailResult, ClipPathIdentity, DeletedClipsReport, LocalClipFilter,
+    LocalClipGrouping, LocalClipSort, MarkerSidecarSummary, PosterWorkToken, RenamedClipInfo,
+    MAX_CATALOG_IDENTITY_BYTES, MAX_CLIP_DETAIL_AUDIO_TRACKS, MAX_CLIP_DETAIL_FIELD_BYTES,
+    MAX_CLIP_DETAIL_MARKERS, MAX_CLIP_SIDECAR_PLAYS, MAX_UPLOAD_DESCRIPTION_UTF16,
+    MAX_UPLOAD_TITLE_UTF16,
 };
 
 pub const MAX_CATALOG_PAGE_ROWS: usize = 60;
@@ -17,8 +19,15 @@ pub const MAX_UPLOAD_SUMMARIES: usize = 16;
 pub const MAX_CATALOG_WARNINGS: usize = 256;
 pub const MAX_MUTATION_ITEMS: usize = MAX_LOCAL_INDEX_ROWS;
 pub const MAX_MUTATION_PATH_BYTES: usize = 1024 * 1024;
+pub const MAX_MUTATION_ERROR_BYTES: usize = 1024 * 1024;
 pub const MAX_CATALOG_STRING_BYTES: usize = MAX_CATALOG_IDENTITY_BYTES;
 pub const MAX_FOREGROUND_MESSAGE_BYTES: usize = 64 * 1024;
+/// Maximum owned memory attributed to one authoritative local-index completion.
+///
+/// This is intentionally smaller than the theoretical sum of every per-field
+/// bound. It prevents 10,000 individually valid rows from producing an
+/// unbounded aggregate allocation.
+pub const MAX_LOCAL_INDEX_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 
 const _: () = assert!(MAX_DECODED_PAGE_IMAGES <= MAX_CATALOG_PAGE_ROWS);
 const _: () = assert!(MAX_CATALOG_PAGE_ROWS <= MAX_POSTER_RESULT_ENTRIES);
@@ -180,6 +189,7 @@ macro_rules! bounded_id {
 bounded_id!(CloudAccountKey, "cloud_account_key");
 bounded_id!(LocalClipId, "local_clip_id");
 bounded_id!(ClientClipId, "client_clip_id");
+bounded_id!(RemoteClipId, "remote_clip_id");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WindowWorkToken {
@@ -204,11 +214,96 @@ pub struct DurableUploadToken {
     pub source_path: ClipPathIdentity,
 }
 
+/// Stable catalog identity accepted from the UI.
+///
+/// Local authority is the validated path identity captured by the scan. Cloud
+/// authority includes the exact account generation so reconnecting the same
+/// account cannot make a stale row current again.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum CatalogItemIdentity {
+    Local {
+        path: ClipPathIdentity,
+    },
+    Cloud {
+        account_key: CloudAccountKey,
+        account_generation: CloudAccountGeneration,
+        remote_clip_id: RemoteClipId,
+    },
+}
+
+impl CatalogItemIdentity {
+    #[must_use]
+    pub const fn source(&self) -> CatalogSource {
+        match self {
+            Self::Local { .. } => CatalogSource::Local,
+            Self::Cloud { .. } => CatalogSource::Cloud,
+        }
+    }
+
+    #[must_use]
+    pub const fn local_path(&self) -> Option<&ClipPathIdentity> {
+        match self {
+            Self::Local { path } => Some(path),
+            Self::Cloud { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub fn matches_cloud_owner(&self, token: &CloudWorkToken) -> bool {
+        matches!(
+            self,
+            Self::Cloud {
+                account_key,
+                account_generation,
+                ..
+            } if account_key == &token.account_key
+                && *account_generation == token.account_generation
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CatalogSource {
     Local,
     Cloud,
+}
+
+/// A zero-based page in the bounded local projection.
+///
+/// Cloud pages use the distinct one-based [`CloudPageNumber`] type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct LocalPageIndex(u32);
+
+impl LocalPageIndex {
+    pub fn new(value: u32) -> Result<Self, PayloadBoundsError> {
+        let maximum = MAX_LOCAL_INDEX_ROWS.saturating_sub(1) / MAX_CATALOG_PAGE_ROWS;
+        if value as usize > maximum {
+            return Err(PayloadBoundsError::TooLarge {
+                field: "local_page.index",
+                actual: value as usize,
+                maximum,
+            });
+        }
+        Ok(Self(value))
+    }
+
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for LocalPageIndex {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = u32::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -241,6 +336,11 @@ impl LocalClipItem {
 
     fn validate_bounds(&self) -> Result<(), PayloadBoundsError> {
         check_string("local.path", &self.path)?;
+        if self.path_identity().is_none() {
+            return Err(PayloadBoundsError::Invalid {
+                field: "local.path_identity",
+            });
+        }
         check_string("local.name", &self.name)?;
         if let Some(title) = &self.title {
             check_string("local.title", title)?;
@@ -301,6 +401,27 @@ impl LocalClipItem {
         }
         Ok(())
     }
+
+    fn estimated_byte_size(&self) -> usize {
+        let game_bytes = self.game.as_ref().map_or(0, |game| {
+            game.id.capacity().saturating_add(game.name.capacity())
+        });
+        let player_bytes = self
+            .marker_summary
+            .player_summary
+            .as_ref()
+            .map_or(0, |summary| summary.champion_name.capacity());
+        std::mem::size_of::<Self>()
+            .saturating_add(self.path.capacity())
+            .saturating_add(self.name.capacity())
+            .saturating_add(self.title.as_ref().map_or(0, String::capacity))
+            .saturating_add(self.kind.capacity())
+            .saturating_add(self.session.as_ref().map_or(0, String::capacity))
+            .saturating_add(game_bytes)
+            .saturating_add(self.marker_summary.marker_digest.capacity())
+            .saturating_add(self.marker_summary.search_text.capacity())
+            .saturating_add(player_bytes)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -327,6 +448,11 @@ impl CloudLibraryItem {
 
     fn validate_bounds(&self) -> Result<(), PayloadBoundsError> {
         check_string("cloud.remote_clip_id", &self.remote_clip_id)?;
+        if RemoteClipId::new(self.remote_clip_id.clone()).is_err() {
+            return Err(PayloadBoundsError::Invalid {
+                field: "cloud.remote_clip_id",
+            });
+        }
         if let Some(local_clip_id) = &self.local_clip_id {
             check_string("cloud.local_clip_id", local_clip_id)?;
         }
@@ -349,6 +475,18 @@ impl CloudLibraryItem {
             });
         }
         Ok(())
+    }
+
+    fn estimated_byte_size(&self) -> usize {
+        std::mem::size_of::<Self>()
+            .saturating_add(self.remote_clip_id.capacity())
+            .saturating_add(self.local_clip_id.as_ref().map_or(0, String::capacity))
+            .saturating_add(self.path.capacity())
+            .saturating_add(self.title.capacity())
+            .saturating_add(self.remote_url.capacity())
+            .saturating_add(self.visibility.capacity())
+            .saturating_add(self.upload_status.capacity())
+            .saturating_add(self.source_type.as_ref().map_or(0, String::capacity))
     }
 }
 
@@ -387,6 +525,131 @@ pub struct CatalogWarning {
     pub path: Option<String>,
 }
 
+impl CatalogWarning {
+    fn validate_bounds(&self) -> Result<(), PayloadBoundsError> {
+        check_string("warning.code", &self.code)?;
+        check_string("warning.message", &self.message)?;
+        if let Some(path) = &self.path {
+            check_string("warning.path", path)?;
+        }
+        Ok(())
+    }
+
+    fn estimated_byte_size(&self) -> usize {
+        std::mem::size_of::<Self>()
+            .saturating_add(self.code.capacity())
+            .saturating_add(self.message.capacity())
+            .saturating_add(self.path.as_ref().map_or(0, String::capacity))
+    }
+}
+
+/// Complete authoritative local scan result.
+///
+/// This deliberately differs from a presentation page: consumers may prune
+/// vanished identities only after accepting one non-truncated completion.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LocalIndexCompletion {
+    pub token: WindowWorkToken,
+    pub revision: CatalogRevision,
+    pub truncated: bool,
+    pub items: Vec<LocalClipItem>,
+    pub warnings: Vec<CatalogWarning>,
+}
+
+impl LocalIndexCompletion {
+    pub fn new(
+        token: WindowWorkToken,
+        revision: CatalogRevision,
+        truncated: bool,
+        items: Vec<LocalClipItem>,
+        warnings: Vec<CatalogWarning>,
+    ) -> Result<Self, PayloadBoundsError> {
+        let completion = Self {
+            token,
+            revision,
+            truncated,
+            items,
+            warnings,
+        };
+        completion.validate_bounds()?;
+        Ok(completion)
+    }
+
+    pub fn validate_bounds(&self) -> Result<(), PayloadBoundsError> {
+        check_len("local_index.items", self.items.len(), MAX_LOCAL_INDEX_ROWS)?;
+        check_len(
+            "local_index.warnings",
+            self.warnings.len(),
+            MAX_CATALOG_WARNINGS,
+        )?;
+        for item in &self.items {
+            item.validate_bounds()?;
+        }
+        for warning in &self.warnings {
+            warning.validate_bounds()?;
+        }
+        check_len(
+            "local_index.payload_bytes",
+            self.estimated_byte_size(),
+            MAX_LOCAL_INDEX_PAYLOAD_BYTES,
+        )
+    }
+
+    #[must_use]
+    pub fn estimated_byte_size(&self) -> usize {
+        let live = self
+            .items
+            .iter()
+            .fold(std::mem::size_of::<Self>(), |total, item| {
+                total.saturating_add(item.estimated_byte_size())
+            })
+            .saturating_add(
+                self.warnings
+                    .iter()
+                    .map(CatalogWarning::estimated_byte_size)
+                    .fold(0_usize, usize::saturating_add),
+            );
+        live.saturating_add(
+            self.items
+                .capacity()
+                .saturating_sub(self.items.len())
+                .saturating_mul(std::mem::size_of::<LocalClipItem>()),
+        )
+        .saturating_add(
+            self.warnings
+                .capacity()
+                .saturating_sub(self.warnings.len())
+                .saturating_mul(std::mem::size_of::<CatalogWarning>()),
+        )
+    }
+}
+
+impl<'de> Deserialize<'de> for LocalIndexCompletion {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawCompletion {
+            token: WindowWorkToken,
+            revision: CatalogRevision,
+            truncated: bool,
+            items: Vec<LocalClipItem>,
+            warnings: Vec<CatalogWarning>,
+        }
+
+        let raw = RawCompletion::deserialize(deserializer)?;
+        Self::new(
+            raw.token,
+            raw.revision,
+            raw.truncated,
+            raw.items,
+            raw.warnings,
+        )
+        .map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CatalogPage<T> {
     pub source: CatalogSource,
@@ -401,7 +664,7 @@ pub struct CatalogPage<T> {
 }
 
 impl<T> CatalogPage<T> {
-    fn validate_shape(&self, maximum_total: usize) -> Result<(), PayloadBoundsError> {
+    pub fn validate_shape(&self, maximum_total: usize) -> Result<(), PayloadBoundsError> {
         if self.page_size == 0 {
             return Err(PayloadBoundsError::Invalid { field: "page_size" });
         }
@@ -675,7 +938,72 @@ pub struct MutationReport {
     pub failed: Vec<MutationFailure>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// A local item after the controller resolved its accepted display path.
+/// UI actions never construct this value; filesystem adapters still perform
+/// canonical containment validation before use.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ResolvedLocalClip {
+    pub identity: ClipPathIdentity,
+    pub path: String,
+}
+
+impl ResolvedLocalClip {
+    pub fn new(
+        identity: ClipPathIdentity,
+        path: impl Into<String>,
+    ) -> Result<Self, PayloadBoundsError> {
+        let target = Self {
+            identity,
+            path: path.into(),
+        };
+        target.validate_bounds()?;
+        Ok(target)
+    }
+
+    fn validate_bounds(&self) -> Result<(), PayloadBoundsError> {
+        check_string("resolved_local.path", &self.path)?;
+        if ClipPathIdentity::from_text(&self.path).as_ref() != Some(&self.identity) {
+            return Err(PayloadBoundsError::Invalid {
+                field: "resolved_local.identity",
+            });
+        }
+        Ok(())
+    }
+}
+
+impl<'de> Deserialize<'de> for ResolvedLocalClip {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawTarget {
+            identity: ClipPathIdentity,
+            path: String,
+        }
+
+        let raw = RawTarget::deserialize(deserializer)?;
+        Self::new(raw.identity, raw.path).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogDialogTextField {
+    Title,
+    FileName,
+    Description,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogUploadVisibility {
+    Private,
+    Public,
+    Unlisted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CatalogAction {
     Refresh,
@@ -685,78 +1013,429 @@ pub enum CatalogAction {
     SetQuery {
         query: String,
     },
-    SetPage {
-        page: u32,
+    SetLocalFilter {
+        filter: LocalClipFilter,
     },
-    OpenClip {
-        source: CatalogSource,
-        path: String,
+    SetLocalSort {
+        sort: LocalClipSort,
     },
-    SelectClip {
-        path: ClipPathIdentity,
+    SetLocalGrouping {
+        grouping: LocalClipGrouping,
+    },
+    SetLocalPage {
+        page: LocalPageIndex,
+    },
+    PreviousPage,
+    NextPage,
+    EnterSelection,
+    ExitSelection,
+    ToggleSelection {
+        item: CatalogItemIdentity,
+    },
+    SelectVisiblePage,
+    ClearSelection,
+    OpenItem {
+        item: CatalogItemIdentity,
+    },
+    CloseActive,
+    OpenContext {
+        item: CatalogItemIdentity,
+    },
+    CloseContext,
+    OpenRenameTitle {
+        item: CatalogItemIdentity,
+    },
+    OpenRenameFile {
+        item: CatalogItemIdentity,
+    },
+    OpenDelete {
+        item: CatalogItemIdentity,
+    },
+    OpenUpload {
+        item: CatalogItemIdentity,
+    },
+    SetDialogText {
+        field: CatalogDialogTextField,
+        value: String,
+    },
+    SetUploadVisibility {
+        visibility: CatalogUploadVisibility,
+    },
+    SetUploadAudioTrack {
+        track_id: String,
         selected: bool,
     },
-    RenameTitle {
-        path: String,
-        title: String,
+    SetDeleteLocalAfterUpload {
+        enabled: bool,
     },
-    RenameFile {
-        path: String,
-        file_name: String,
-    },
-    Delete {
-        paths: Vec<String>,
-    },
+    ConfirmDialog,
+    CancelDialog,
     Reveal {
-        path: String,
+        item: CatalogItemIdentity,
     },
-    Upload {
-        path: String,
+    OpenInBrowser {
+        item: CatalogItemIdentity,
+    },
+    CopyPublicLink {
+        item: CatalogItemIdentity,
     },
     CancelUpload {
-        local_clip_id: String,
+        token: DurableUploadToken,
     },
+    Escape,
+}
+
+#[derive(Deserialize)]
+#[serde(remote = "CatalogAction", tag = "kind", rename_all = "snake_case")]
+enum CatalogActionDef {
+    Refresh,
+    SetSource {
+        source: CatalogSource,
+    },
+    SetQuery {
+        query: String,
+    },
+    SetLocalFilter {
+        filter: LocalClipFilter,
+    },
+    SetLocalSort {
+        sort: LocalClipSort,
+    },
+    SetLocalGrouping {
+        grouping: LocalClipGrouping,
+    },
+    SetLocalPage {
+        page: LocalPageIndex,
+    },
+    PreviousPage,
+    NextPage,
+    EnterSelection,
+    ExitSelection,
+    ToggleSelection {
+        item: CatalogItemIdentity,
+    },
+    SelectVisiblePage,
+    ClearSelection,
+    OpenItem {
+        item: CatalogItemIdentity,
+    },
+    CloseActive,
+    OpenContext {
+        item: CatalogItemIdentity,
+    },
+    CloseContext,
+    OpenRenameTitle {
+        item: CatalogItemIdentity,
+    },
+    OpenRenameFile {
+        item: CatalogItemIdentity,
+    },
+    OpenDelete {
+        item: CatalogItemIdentity,
+    },
+    OpenUpload {
+        item: CatalogItemIdentity,
+    },
+    SetDialogText {
+        field: CatalogDialogTextField,
+        value: String,
+    },
+    SetUploadVisibility {
+        visibility: CatalogUploadVisibility,
+    },
+    SetUploadAudioTrack {
+        track_id: String,
+        selected: bool,
+    },
+    SetDeleteLocalAfterUpload {
+        enabled: bool,
+    },
+    ConfirmDialog,
+    CancelDialog,
+    Reveal {
+        item: CatalogItemIdentity,
+    },
+    OpenInBrowser {
+        item: CatalogItemIdentity,
+    },
+    CopyPublicLink {
+        item: CatalogItemIdentity,
+    },
+    CancelUpload {
+        token: DurableUploadToken,
+    },
+    Escape,
+}
+
+impl<'de> Deserialize<'de> for CatalogAction {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let action = CatalogActionDef::deserialize(deserializer)?;
+        action.validate_bounds().map_err(serde::de::Error::custom)?;
+        Ok(action)
+    }
 }
 
 impl CatalogAction {
     pub fn validate_bounds(&self) -> Result<(), PayloadBoundsError> {
         match self {
-            Self::Refresh | Self::SetSource { .. } | Self::SetPage { .. } => Ok(()),
+            Self::Refresh
+            | Self::SetSource { .. }
+            | Self::SetLocalFilter { .. }
+            | Self::SetLocalSort { .. }
+            | Self::SetLocalGrouping { .. }
+            | Self::SetLocalPage { .. }
+            | Self::PreviousPage
+            | Self::NextPage
+            | Self::EnterSelection
+            | Self::ExitSelection
+            | Self::ToggleSelection { .. }
+            | Self::SelectVisiblePage
+            | Self::ClearSelection
+            | Self::OpenItem { .. }
+            | Self::CloseActive
+            | Self::OpenContext { .. }
+            | Self::CloseContext
+            | Self::OpenRenameTitle { .. }
+            | Self::OpenRenameFile { .. }
+            | Self::OpenDelete { .. }
+            | Self::OpenUpload { .. }
+            | Self::SetUploadVisibility { .. }
+            | Self::SetDeleteLocalAfterUpload { .. }
+            | Self::ConfirmDialog
+            | Self::CancelDialog
+            | Self::Reveal { .. }
+            | Self::OpenInBrowser { .. }
+            | Self::CopyPublicLink { .. }
+            | Self::CancelUpload { .. }
+            | Self::Escape => Ok(()),
             Self::SetQuery { query } => check_string("query", query),
-            Self::OpenClip { path, .. } | Self::Reveal { path } | Self::Upload { path } => {
-                check_string("path", path)
-            }
-            Self::SelectClip { .. } => Ok(()),
-            Self::RenameTitle { path, title } => {
-                check_string("rename_title.path", path)?;
-                check_string("rename_title.title", title)
-            }
-            Self::RenameFile { path, file_name } => {
-                check_string("rename_file.path", path)?;
-                check_string("rename_file.file_name", file_name)
-            }
-            Self::Delete { paths } => {
-                check_len("delete.paths", paths.len(), MAX_MUTATION_ITEMS)?;
-                let mut path_bytes = 0_usize;
-                for path in paths {
-                    check_string("delete.path", path)?;
-                    path_bytes =
-                        path_bytes
-                            .checked_add(path.len())
-                            .ok_or(PayloadBoundsError::TooLarge {
-                                field: "delete.path_bytes",
-                                actual: usize::MAX,
-                                maximum: MAX_MUTATION_PATH_BYTES,
-                            })?;
-                }
-                check_len("delete.path_bytes", path_bytes, MAX_MUTATION_PATH_BYTES)?;
-                Ok(())
-            }
-            Self::CancelUpload { local_clip_id } => {
-                check_string("cancel_upload.local_clip_id", local_clip_id)
+            Self::SetDialogText { value, .. } => check_string("dialog.value", value),
+            Self::SetUploadAudioTrack { track_id, .. } => {
+                check_string("dialog.audio_track_id", track_id)
             }
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CatalogUploadOptions {
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub visibility: CatalogUploadVisibility,
+    pub audio_track_ids: Vec<String>,
+    pub delete_local_after_upload: bool,
+}
+
+impl CatalogUploadOptions {
+    fn validate_bounds(&self) -> Result<(), PayloadBoundsError> {
+        if let Some(title) = &self.title {
+            check_len(
+                "upload_options.title_utf16",
+                title.encode_utf16().count(),
+                MAX_UPLOAD_TITLE_UTF16,
+            )?;
+            check_len(
+                "upload_options.title",
+                title.len(),
+                MAX_CLIP_DETAIL_FIELD_BYTES,
+            )?;
+        }
+        if let Some(description) = &self.description {
+            check_len(
+                "upload_options.description_utf16",
+                description.encode_utf16().count(),
+                MAX_UPLOAD_DESCRIPTION_UTF16,
+            )?;
+            check_len(
+                "upload_options.description",
+                description.len(),
+                MAX_CLIP_DETAIL_FIELD_BYTES,
+            )?;
+        }
+        check_len(
+            "upload_options.audio_track_ids",
+            self.audio_track_ids.len(),
+            MAX_CLIP_DETAIL_AUDIO_TRACKS,
+        )?;
+        let mut unique = std::collections::BTreeSet::new();
+        for id in &self.audio_track_ids {
+            if id.trim().is_empty() {
+                return Err(PayloadBoundsError::Invalid {
+                    field: "upload_options.audio_track_id",
+                });
+            }
+            check_len(
+                "upload_options.audio_track_id",
+                id.len(),
+                MAX_CLIP_DETAIL_FIELD_BYTES,
+            )?;
+            if !unique.insert(id.as_str()) {
+                return Err(PayloadBoundsError::Invalid {
+                    field: "upload_options.duplicate_audio_track_id",
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Side effects emitted only after the reducer resolves stable identities
+/// against accepted catalog metadata.
+/// Reducer output. Executors receive this value directly and validate it before
+/// performing work; it is intentionally not a deserialization boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CatalogEffect {
+    RefreshLocal {
+        token: WindowWorkToken,
+        revision: CatalogRevision,
+    },
+    RefreshCloud {
+        token: CloudWorkToken,
+        revision: CatalogRevision,
+        page: CloudPageNumber,
+        query: String,
+    },
+    LoadClipDetail {
+        token: WindowWorkToken,
+        request: ClipDetailRequest,
+        target: ResolvedLocalClip,
+    },
+    OpenLocalReview {
+        token: WindowWorkToken,
+        target: ResolvedLocalClip,
+    },
+    OpenCloudReview {
+        token: CloudWorkToken,
+        item: CatalogItemIdentity,
+        media_path: String,
+    },
+    CloseReview {
+        token: WindowWorkToken,
+    },
+    RenameTitle {
+        token: WindowWorkToken,
+        target: ResolvedLocalClip,
+        title: String,
+    },
+    RenameFile {
+        token: WindowWorkToken,
+        target: ResolvedLocalClip,
+        file_name: String,
+    },
+    Delete {
+        token: WindowWorkToken,
+        targets: Vec<ResolvedLocalClip>,
+    },
+    StartUpload {
+        token: WindowWorkToken,
+        target: ResolvedLocalClip,
+        options: CatalogUploadOptions,
+    },
+    CancelUpload {
+        token: DurableUploadToken,
+    },
+    Reveal {
+        token: WindowWorkToken,
+        target: ResolvedLocalClip,
+    },
+    OpenInBrowser {
+        token: CloudWorkToken,
+        item: CatalogItemIdentity,
+        url: String,
+    },
+    CopyPublicLink {
+        token: CloudWorkToken,
+        item: CatalogItemIdentity,
+        url: String,
+    },
+}
+
+impl CatalogEffect {
+    pub fn validate_bounds(&self) -> Result<(), PayloadBoundsError> {
+        match self {
+            Self::RefreshLocal { .. } | Self::CloseReview { .. } | Self::CancelUpload { .. } => {
+                Ok(())
+            }
+            Self::RefreshCloud { query, .. } => check_string("cloud_refresh.query", query),
+            Self::LoadClipDetail {
+                token,
+                request,
+                target,
+            } => {
+                target.validate_bounds()?;
+                if request.item() != &target.identity || request.owner().window() != *token {
+                    return Err(PayloadBoundsError::Invalid {
+                        field: "clip_detail.owner",
+                    });
+                }
+                Ok(())
+            }
+            Self::OpenLocalReview { target, .. } | Self::Reveal { target, .. } => {
+                target.validate_bounds()
+            }
+            Self::OpenCloudReview {
+                token,
+                item,
+                media_path,
+            } => {
+                validate_cloud_item_owner(item, token)?;
+                check_string("cloud_review.media_path", media_path)
+            }
+            Self::RenameTitle { target, title, .. } => {
+                target.validate_bounds()?;
+                check_string("rename_title.title", title)
+            }
+            Self::RenameFile {
+                target, file_name, ..
+            } => {
+                target.validate_bounds()?;
+                check_string("rename_file.file_name", file_name)
+            }
+            Self::Delete { targets, .. } => validate_resolved_targets(targets),
+            Self::StartUpload {
+                target, options, ..
+            } => {
+                target.validate_bounds()?;
+                options.validate_bounds()
+            }
+            Self::OpenInBrowser { token, item, url }
+            | Self::CopyPublicLink { token, item, url } => {
+                validate_cloud_item_owner(item, token)?;
+                check_string("cloud_link.url", url)
+            }
+        }
+    }
+}
+
+fn validate_cloud_item_owner(
+    item: &CatalogItemIdentity,
+    token: &CloudWorkToken,
+) -> Result<(), PayloadBoundsError> {
+    if item.matches_cloud_owner(token) {
+        Ok(())
+    } else {
+        Err(PayloadBoundsError::Invalid {
+            field: "cloud_item.owner",
+        })
+    }
+}
+
+fn validate_resolved_targets(targets: &[ResolvedLocalClip]) -> Result<(), PayloadBoundsError> {
+    check_len("mutation.targets", targets.len(), MAX_MUTATION_ITEMS)?;
+    let mut path_bytes = 0_usize;
+    for target in targets {
+        target.validate_bounds()?;
+        path_bytes = path_bytes.saturating_add(target.path.len());
+    }
+    check_len(
+        "mutation.target_path_bytes",
+        path_bytes,
+        MAX_MUTATION_PATH_BYTES,
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -777,11 +1456,9 @@ pub struct PosterResult {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CatalogResult {
-    LocalPage {
-        token: WindowWorkToken,
-        page: CatalogPage<LocalClipItem>,
-    },
+    LocalIndex(LocalIndexCompletion),
     CloudPage(CloudListPageCompletion),
+    ClipDetail(ClipDetailResult),
     Poster {
         token: PosterWorkToken,
         poster: PosterResult,
@@ -790,9 +1467,13 @@ pub enum CatalogResult {
         token: DurableUploadToken,
         progress: UploadSummary,
     },
-    MutationCompleted {
+    RenameCompleted {
         token: WindowWorkToken,
-        report: MutationReport,
+        result: RenamedClipInfo,
+    },
+    DeleteCompleted {
+        token: WindowWorkToken,
+        report: DeletedClipsReport,
     },
     UploadCompleted {
         token: DurableUploadToken,
@@ -809,7 +1490,8 @@ impl CatalogResult {
     pub const fn is_barrier(&self) -> bool {
         matches!(
             self,
-            Self::MutationCompleted { .. }
+            Self::RenameCompleted { .. }
+                | Self::DeleteCompleted { .. }
                 | Self::UploadCompleted { .. }
                 | Self::ForegroundFeedback { .. }
         )
@@ -817,14 +1499,9 @@ impl CatalogResult {
 
     pub fn validate_bounds(&self) -> Result<(), PayloadBoundsError> {
         match self {
-            Self::LocalPage { page, .. } => {
-                page.validate_shape(MAX_LOCAL_INDEX_ROWS)?;
-                for item in &page.items {
-                    item.validate_bounds()?;
-                }
-                Ok(())
-            }
+            Self::LocalIndex(completion) => completion.validate_bounds(),
             Self::CloudPage(completion) => completion.validate_bounds(),
+            Self::ClipDetail(_) => Ok(()),
             Self::Poster { token, poster } => {
                 if poster.path != token.path {
                     return Err(PayloadBoundsError::Invalid {
@@ -867,14 +1544,8 @@ impl CatalogResult {
                 }
                 Ok(())
             }
-            Self::MutationCompleted { report, .. } => {
-                let actual = report.succeeded.len().saturating_add(report.failed.len());
-                check_len("mutation.items", actual, MAX_MUTATION_ITEMS)?;
-                for failure in &report.failed {
-                    check_string("mutation.failure", &failure.message)?;
-                }
-                Ok(())
-            }
+            Self::RenameCompleted { result, .. } => validate_renamed_clip(result),
+            Self::DeleteCompleted { report, .. } => validate_deleted_report(report),
             Self::ForegroundFeedback { message, .. } => check_len(
                 "foreground_feedback.message",
                 message.len(),
@@ -882,4 +1553,168 @@ impl CatalogResult {
             ),
         }
     }
+
+    /// Non-allocating estimate of memory owned by this queued result.
+    ///
+    /// The queue combines this estimate with an entry cap. Every dynamic field
+    /// is either counted directly here or already constrained by its neutral
+    /// contract constructor.
+    #[must_use]
+    pub fn estimated_byte_size(&self) -> usize {
+        let payload = match self {
+            Self::LocalIndex(completion) => completion.estimated_byte_size(),
+            Self::CloudPage(completion) => estimated_cloud_completion_bytes(completion),
+            Self::ClipDetail(completion) => estimated_clip_detail_bytes(completion),
+            Self::Poster { token, poster } => token
+                .path
+                .owned_capacity()
+                .saturating_add(poster.path.owned_capacity())
+                .saturating_add(match &poster.status {
+                    PosterStatus::Ready { path } => path.capacity(),
+                    PosterStatus::Failed { message } => message.capacity(),
+                    PosterStatus::Queued | PosterStatus::Missing => 0,
+                }),
+            Self::UploadByteProgress { token, progress }
+            | Self::UploadCompleted {
+                token,
+                result: progress,
+            } => estimated_upload_summary_bytes(token, progress),
+            Self::RenameCompleted { result, .. } => result
+                .old_path
+                .capacity()
+                .saturating_add(result.path.capacity())
+                .saturating_add(result.name.capacity())
+                .saturating_add(result.title.as_ref().map_or(0, String::capacity))
+                .saturating_add(result.kind.capacity()),
+            Self::DeleteCompleted { report, .. } => report
+                .deleted
+                .iter()
+                .map(String::capacity)
+                .chain(
+                    report
+                        .failed
+                        .iter()
+                        .map(|(path, message)| path.capacity().saturating_add(message.capacity())),
+                )
+                .fold(0_usize, usize::saturating_add)
+                .saturating_add(
+                    report
+                        .deleted
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<String>()),
+                )
+                .saturating_add(
+                    report
+                        .failed
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<(String, String)>()),
+                ),
+            Self::ForegroundFeedback { message, .. } => message.capacity(),
+        };
+        std::mem::size_of::<Self>().saturating_add(payload)
+    }
+}
+
+fn validate_renamed_clip(result: &RenamedClipInfo) -> Result<(), PayloadBoundsError> {
+    check_string("rename_result.old_path", &result.old_path)?;
+    check_string("rename_result.path", &result.path)?;
+    check_string("rename_result.name", &result.name)?;
+    if let Some(title) = &result.title {
+        check_string("rename_result.title", title)?;
+    }
+    check_string("rename_result.kind", &result.kind)?;
+    if ClipPathIdentity::from_text(&result.old_path).is_none()
+        || ClipPathIdentity::from_text(&result.path).is_none()
+    {
+        return Err(PayloadBoundsError::Invalid {
+            field: "rename_result.path_identity",
+        });
+    }
+    Ok(())
+}
+
+fn validate_deleted_report(report: &DeletedClipsReport) -> Result<(), PayloadBoundsError> {
+    let items = report.deleted.len().saturating_add(report.failed.len());
+    check_len("delete_result.items", items, MAX_MUTATION_ITEMS)?;
+    let mut path_bytes = 0_usize;
+    let mut error_bytes = 0_usize;
+    for path in &report.deleted {
+        check_string("delete_result.path", path)?;
+        if ClipPathIdentity::from_text(path).is_none() {
+            return Err(PayloadBoundsError::Invalid {
+                field: "delete_result.path_identity",
+            });
+        }
+        path_bytes = path_bytes.saturating_add(path.len());
+    }
+    for (path, message) in &report.failed {
+        check_string("delete_result.path", path)?;
+        check_string("delete_result.error", message)?;
+        if ClipPathIdentity::from_text(path).is_none() {
+            return Err(PayloadBoundsError::Invalid {
+                field: "delete_result.path_identity",
+            });
+        }
+        path_bytes = path_bytes.saturating_add(path.len());
+        error_bytes = error_bytes.saturating_add(message.len());
+    }
+    check_len(
+        "delete_result.path_bytes",
+        path_bytes,
+        MAX_MUTATION_PATH_BYTES,
+    )?;
+    check_len(
+        "delete_result.error_bytes",
+        error_bytes,
+        MAX_MUTATION_ERROR_BYTES,
+    )
+}
+
+fn estimated_cloud_completion_bytes(completion: &CloudListPageCompletion) -> usize {
+    let items = match &completion.outcome {
+        CloudPageOutcome::Page { items, .. } => items
+            .iter()
+            .map(CloudLibraryItem::estimated_byte_size)
+            .fold(0_usize, usize::saturating_add)
+            .saturating_add(
+                items
+                    .capacity()
+                    .saturating_sub(items.len())
+                    .saturating_mul(std::mem::size_of::<CloudLibraryItem>()),
+            ),
+        CloudPageOutcome::PastEnd { .. } => 0,
+    };
+    let warnings = completion
+        .warnings
+        .iter()
+        .map(CatalogWarning::estimated_byte_size)
+        .fold(0_usize, usize::saturating_add);
+    std::mem::size_of::<CloudListPageCompletion>()
+        .saturating_add(completion.token.account_key.0.capacity())
+        .saturating_add(items)
+        .saturating_add(warnings)
+        .saturating_add(
+            completion
+                .warnings
+                .capacity()
+                .saturating_sub(completion.warnings.len())
+                .saturating_mul(std::mem::size_of::<CatalogWarning>()),
+        )
+}
+
+fn estimated_clip_detail_bytes(completion: &ClipDetailResult) -> usize {
+    completion.estimated_owned_bytes()
+}
+
+fn estimated_upload_summary_bytes(token: &DurableUploadToken, summary: &UploadSummary) -> usize {
+    std::mem::size_of::<UploadSummary>()
+        .saturating_add(token.account_key.0.capacity())
+        .saturating_add(token.local_clip_id.0.capacity())
+        .saturating_add(token.source_path.owned_capacity())
+        .saturating_add(summary.local_clip_id.capacity())
+        .saturating_add(summary.path.capacity())
+        .saturating_add(summary.upload_status.capacity())
+        .saturating_add(summary.remote_clip_id.as_ref().map_or(0, String::capacity))
+        .saturating_add(summary.remote_url.as_ref().map_or(0, String::capacity))
+        .saturating_add(summary.error.as_ref().map_or(0, String::capacity))
 }

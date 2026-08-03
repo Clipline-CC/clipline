@@ -71,6 +71,11 @@ impl ClipPathIdentity {
         &self.0
     }
 
+    #[must_use]
+    pub(crate) fn owned_capacity(&self) -> usize {
+        self.0.capacity()
+    }
+
     fn from_serialized_key(key: String) -> Option<Self> {
         if key.is_empty() || key.len() > MAX_CATALOG_IDENTITY_BYTES {
             return None;

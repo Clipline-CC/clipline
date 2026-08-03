@@ -120,6 +120,7 @@ fn scans_root_and_one_session_level_mp4_only_newest_first() {
     assert!(scan.clips[1].path.ends_with("legacy.mp4"));
     assert_eq!(scan.clips[1].session, None);
     assert!(scan.warnings.is_empty(), "{:?}", scan.warnings);
+    assert!(!scan.truncated);
 }
 
 #[test]
@@ -267,6 +268,7 @@ fn compatibility_projection_preserves_exact_json_and_filtered_marker_duration() 
         envelope.keys().map(String::as_str).collect::<Vec<_>>(),
         vec!["clips", "warnings"]
     );
+    assert!(json.get("truncated").is_none());
     let row = json["clips"][0].as_object().unwrap();
     assert_eq!(
         row.keys().map(String::as_str).collect::<Vec<_>>(),
@@ -398,6 +400,7 @@ fn shipping_scan_retains_only_the_deterministic_newest_ten_thousand() {
         .iter()
         .any(|clip| clip.path.ends_with("clip-00000.mp4")));
     assert_eq!(scan.warnings, vec![LOCAL_LIBRARY_TRUNCATED_WARNING]);
+    assert!(scan.truncated);
 }
 
 #[test]

@@ -1,15 +1,19 @@
 use std::path::PathBuf;
 
 use clipline_library::{
-    CatalogAction, CatalogPage, CatalogResult, CatalogRevision, CatalogSource, ClipGame,
+    CatalogAction, CatalogEffect, CatalogItemIdentity, CatalogPage, CatalogResult, CatalogRevision,
+    CatalogSource, CatalogUploadOptions, CatalogUploadVisibility, ClipDetailRequest, ClipGame,
     ClipPathIdentity, CloudAccountGeneration, CloudAccountKey, CloudAccountSnapshot,
     CloudLibraryItem, CloudListPageCompletion, CloudNextPage, CloudPageNumber, CloudPageOutcome,
-    CloudWorkToken, DurableUploadToken, ForegroundGeneration, GenerationError, LocalClipId,
-    LocalClipItem, MutationFailure, MutationReport, PayloadBoundsError, PosterGeneration,
-    PresentationRow, RequestGeneration, UploadGeneration, UploadSummary,
-    WindowAttachmentGeneration, WindowWorkToken, MAX_CATALOG_IDENTITY_BYTES, MAX_CATALOG_PAGE_ROWS,
-    MAX_CLOUD_INDEX_ROWS, MAX_CLOUD_SERVER_PAGE, MAX_DECODED_PAGE_IMAGES, MAX_LOCAL_INDEX_ROWS,
-    MAX_MUTATION_PATH_BYTES, MAX_POSTER_RESULT_ENTRIES, MAX_UPLOAD_SUMMARIES,
+    CloudWorkToken, DurableUploadToken, ForegroundGeneration, GenerationError, LocalClipFilter,
+    LocalClipGrouping, LocalClipId, LocalClipItem, LocalClipSort, LocalIndexCompletion,
+    LocalPageIndex, MutationFailure, MutationReport, PayloadBoundsError, PosterGeneration,
+    PresentationRow, RemoteClipId, RequestGeneration, ResolvedLocalClip, UploadGeneration,
+    UploadSummary, WindowAttachmentGeneration, WindowWorkToken, MAX_CATALOG_IDENTITY_BYTES,
+    MAX_CATALOG_PAGE_ROWS, MAX_CLOUD_INDEX_ROWS, MAX_CLOUD_SERVER_PAGE, MAX_DECODED_PAGE_IMAGES,
+    MAX_LOCAL_INDEX_PAYLOAD_BYTES, MAX_LOCAL_INDEX_ROWS, MAX_MUTATION_PATH_BYTES,
+    MAX_POSTER_RESULT_ENTRIES, MAX_UPLOAD_DESCRIPTION_UTF16, MAX_UPLOAD_SUMMARIES,
+    MAX_UPLOAD_TITLE_UTF16,
 };
 
 #[test]
@@ -129,6 +133,11 @@ fn deserialization_preserves_identity_invariants() {
         serde_json::from_value::<LocalClipId>(serde_json::json!("x".repeat(16 * 1024 + 1)))
             .is_err()
     );
+    assert!(serde_json::from_value::<RemoteClipId>(serde_json::json!("   ")).is_err());
+    assert!(serde_json::from_value::<RemoteClipId>(serde_json::json!(
+        "x".repeat(MAX_CATALOG_IDENTITY_BYTES + 1)
+    ))
+    .is_err());
 }
 
 #[test]
@@ -246,11 +255,23 @@ fn page_action_upload_mutation_and_presentation_are_serializable() {
         5
     );
 
-    let action = CatalogAction::OpenClip {
-        source: CatalogSource::Local,
-        path: r"C:\Clips\One.mp4".into(),
+    let action = CatalogAction::OpenItem {
+        item: CatalogItemIdentity::Local {
+            path: ClipPathIdentity::from_text(r"C:\Clips\One.mp4").unwrap(),
+        },
     };
-    assert_eq!(serde_json::to_value(&action).unwrap()["kind"], "open_clip");
+    let action_json = serde_json::to_value(&action).unwrap();
+    assert_eq!(action_json["kind"], "open_item");
+    assert_eq!(action_json["item"]["source"], "local");
+    assert_eq!(action_json["item"]["path"], r"windows:c:\clips\one.mp4");
+    assert!(serde_json::from_value::<CatalogAction>(serde_json::json!({
+        "kind": "open_item",
+        "item": {
+            "source": "local",
+            "path": r"C:\Clips\One.mp4"
+        }
+    }))
+    .is_err());
 
     let identity = ClipPathIdentity::from_text(r"C:\Clips\One.mp4").unwrap();
     let report = MutationReport {
@@ -333,6 +354,22 @@ fn cloud_page_items(count: usize) -> Vec<CloudLibraryItem> {
             source_type: Some("replay".into()),
         })
         .collect()
+}
+
+fn local_index_item(index: usize) -> LocalClipItem {
+    LocalClipItem {
+        path: format!(r"C:\Clips\{index}.mp4"),
+        name: format!("{index}.mp4"),
+        title: None,
+        kind: "replay".into(),
+        session: None,
+        size_mb: 1.0,
+        modified_unix: index as u64,
+        duration_s: Some(1.0),
+        marker_count: 0,
+        game: None,
+        marker_summary: Default::default(),
+    }
 }
 
 #[test]
@@ -471,42 +508,6 @@ fn cloud_page_numbers_and_shapes_fail_closed() {
 
 #[test]
 fn action_collection_and_string_bounds_are_enforced() {
-    let too_many = CatalogAction::Delete {
-        paths: (0..=MAX_LOCAL_INDEX_ROWS)
-            .map(|index| format!(r"C:\Clips\{index}.mp4"))
-            .collect(),
-    };
-    assert_eq!(
-        too_many.validate_bounds(),
-        Err(PayloadBoundsError::TooLarge {
-            field: "delete.paths",
-            actual: MAX_LOCAL_INDEX_ROWS + 1,
-            maximum: MAX_LOCAL_INDEX_ROWS,
-        })
-    );
-
-    let cross_page = CatalogAction::Delete {
-        paths: (0..(MAX_CATALOG_PAGE_ROWS + 1))
-            .map(|index| format!(r"C:\Clips\{index}.mp4"))
-            .collect(),
-    };
-    assert_eq!(cross_page.validate_bounds(), Ok(()));
-
-    let per_path_bytes = MAX_MUTATION_PATH_BYTES / MAX_LOCAL_INDEX_ROWS + 1;
-    let aggregate_too_large = CatalogAction::Delete {
-        paths: (0..MAX_LOCAL_INDEX_ROWS)
-            .map(|_| "x".repeat(per_path_bytes))
-            .collect(),
-    };
-    assert_eq!(
-        aggregate_too_large.validate_bounds(),
-        Err(PayloadBoundsError::TooLarge {
-            field: "delete.path_bytes",
-            actual: per_path_bytes * MAX_LOCAL_INDEX_ROWS,
-            maximum: MAX_MUTATION_PATH_BYTES,
-        })
-    );
-
     let long_query = CatalogAction::SetQuery {
         query: "x".repeat(16 * 1024 + 1),
     };
@@ -516,6 +517,245 @@ fn action_collection_and_string_bounds_are_enforced() {
             field: "query",
             actual: 16 * 1024 + 1,
             maximum: 16 * 1024,
+        })
+    );
+    assert!(serde_json::from_value::<CatalogAction>(serde_json::json!({
+        "kind": "set_query",
+        "query": "x".repeat(16 * 1024 + 1),
+    }))
+    .is_err());
+    assert!(serde_json::from_value::<CatalogAction>(serde_json::json!({
+        "kind": "set_dialog_text",
+        "field": "description",
+        "value": "x".repeat(16 * 1024 + 1),
+    }))
+    .is_err());
+
+    assert!(LocalPageIndex::new(0).is_ok());
+    assert!(
+        LocalPageIndex::new((MAX_LOCAL_INDEX_ROWS / MAX_CATALOG_PAGE_ROWS) as u32 + 1).is_err()
+    );
+
+    for action in [
+        CatalogAction::SetLocalFilter {
+            filter: LocalClipFilter::Marked,
+        },
+        CatalogAction::SetLocalSort {
+            sort: LocalClipSort::Largest,
+        },
+        CatalogAction::SetLocalGrouping {
+            grouping: LocalClipGrouping::Game,
+        },
+        CatalogAction::PreviousPage,
+        CatalogAction::NextPage,
+        CatalogAction::EnterSelection,
+        CatalogAction::SelectVisiblePage,
+        CatalogAction::Escape,
+    ] {
+        assert_eq!(action.validate_bounds(), Ok(()));
+    }
+}
+
+#[test]
+fn full_local_index_pins_row_numeric_and_aggregate_byte_bounds() {
+    let token = cloud_page_token().window;
+    let items = (0..MAX_LOCAL_INDEX_ROWS)
+        .map(local_index_item)
+        .collect::<Vec<_>>();
+    let completion = LocalIndexCompletion::new(
+        token,
+        CatalogRevision::new(7),
+        true,
+        items.clone(),
+        Vec::new(),
+    )
+    .unwrap();
+    assert!(completion.truncated);
+    assert_eq!(completion.items.len(), MAX_LOCAL_INDEX_ROWS);
+    assert!(completion.estimated_byte_size() <= MAX_LOCAL_INDEX_PAYLOAD_BYTES);
+    assert!(matches!(
+        LocalIndexCompletion::new(
+            token,
+            CatalogRevision::new(8),
+            false,
+            items
+                .into_iter()
+                .chain(std::iter::once(local_index_item(MAX_LOCAL_INDEX_ROWS)))
+                .collect(),
+            Vec::new(),
+        ),
+        Err(PayloadBoundsError::TooLarge {
+            field: "local_index.items",
+            actual,
+            maximum: MAX_LOCAL_INDEX_ROWS,
+        }) if actual == MAX_LOCAL_INDEX_ROWS + 1
+    ));
+
+    let mut invalid_numeric = local_index_item(0);
+    invalid_numeric.size_mb = f64::NAN;
+    assert_eq!(
+        LocalIndexCompletion::new(
+            token,
+            CatalogRevision::new(9),
+            false,
+            vec![invalid_numeric],
+            Vec::new(),
+        ),
+        Err(PayloadBoundsError::Invalid {
+            field: "local.size_mb"
+        })
+    );
+
+    let oversized = (0..1_024)
+        .map(|index| {
+            let mut item = local_index_item(index);
+            item.name = "x".repeat(MAX_CATALOG_IDENTITY_BYTES);
+            item
+        })
+        .collect();
+    assert!(matches!(
+        LocalIndexCompletion::new(
+            token,
+            CatalogRevision::new(10),
+            false,
+            oversized,
+            Vec::new(),
+        ),
+        Err(PayloadBoundsError::TooLarge {
+            field: "local_index.payload_bytes",
+            actual,
+            maximum: MAX_LOCAL_INDEX_PAYLOAD_BYTES,
+        }) if actual > MAX_LOCAL_INDEX_PAYLOAD_BYTES
+    ));
+
+    let mut huge_capacity_name = String::with_capacity(MAX_LOCAL_INDEX_PAYLOAD_BYTES + 1);
+    huge_capacity_name.push('x');
+    let mut capacity_item = local_index_item(0);
+    capacity_item.name = huge_capacity_name;
+    assert!(matches!(
+        LocalIndexCompletion::new(
+            token,
+            CatalogRevision::new(11),
+            false,
+            vec![capacity_item],
+            Vec::new(),
+        ),
+        Err(PayloadBoundsError::TooLarge {
+            field: "local_index.payload_bytes",
+            ..
+        })
+    ));
+
+    let spare_rows = MAX_LOCAL_INDEX_PAYLOAD_BYTES / std::mem::size_of::<LocalClipItem>() + 1;
+    let spare_capacity_items = Vec::with_capacity(spare_rows);
+    assert!(matches!(
+        LocalIndexCompletion::new(
+            token,
+            CatalogRevision::new(12),
+            false,
+            spare_capacity_items,
+            Vec::new(),
+        ),
+        Err(PayloadBoundsError::TooLarge {
+            field: "local_index.payload_bytes",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn typed_effects_pin_exact_owners_and_resolved_paths() {
+    let cloud = cloud_page_token();
+    let window = cloud.window;
+    let identity = ClipPathIdentity::from_text(r"C:\Clips\One.mp4").unwrap();
+    let target = ResolvedLocalClip::new(identity.clone(), r"C:\Clips\One.mp4").unwrap();
+    let request = ClipDetailRequest::new(identity, window);
+    let detail = CatalogEffect::LoadClipDetail {
+        token: window,
+        request: request.clone(),
+        target: target.clone(),
+    };
+    assert_eq!(detail.validate_bounds(), Ok(()));
+    let detail_json = serde_json::to_value(detail).unwrap();
+    assert_eq!(detail_json["token"]["request"], 3);
+    assert_eq!(detail_json["target"]["path"], r"C:\Clips\One.mp4");
+
+    let stale_window = WindowWorkToken {
+        request: RequestGeneration::new(99),
+        ..window
+    };
+    assert_eq!(
+        CatalogEffect::LoadClipDetail {
+            token: stale_window,
+            request,
+            target: target.clone(),
+        }
+        .validate_bounds(),
+        Err(PayloadBoundsError::Invalid {
+            field: "clip_detail.owner"
+        })
+    );
+
+    let cloud_item = CatalogItemIdentity::Cloud {
+        account_key: cloud.account_key.clone(),
+        account_generation: cloud.account_generation,
+        remote_clip_id: RemoteClipId::new("remote-1").unwrap(),
+    };
+    assert_eq!(
+        CatalogEffect::OpenInBrowser {
+            token: cloud.clone(),
+            item: cloud_item.clone(),
+            url: "https://clips.example/c/remote-1".into(),
+        }
+        .validate_bounds(),
+        Ok(())
+    );
+    let mut stale_cloud = cloud;
+    stale_cloud.account_generation = CloudAccountGeneration::new(5);
+    assert_eq!(
+        CatalogEffect::CopyPublicLink {
+            token: stale_cloud,
+            item: cloud_item,
+            url: "https://clips.example/c/remote-1".into(),
+        }
+        .validate_bounds(),
+        Err(PayloadBoundsError::Invalid {
+            field: "cloud_item.owner"
+        })
+    );
+
+    let valid_options = CatalogUploadOptions {
+        title: Some("x".repeat(MAX_UPLOAD_TITLE_UTF16)),
+        description: Some("x".repeat(MAX_UPLOAD_DESCRIPTION_UTF16)),
+        visibility: CatalogUploadVisibility::Private,
+        audio_track_ids: vec!["track-1".into(), "track-2".into()],
+        delete_local_after_upload: false,
+    };
+    assert_eq!(
+        CatalogEffect::StartUpload {
+            token: window,
+            target: target.clone(),
+            options: valid_options,
+        }
+        .validate_bounds(),
+        Ok(())
+    );
+    let duplicate_audio = CatalogUploadOptions {
+        title: None,
+        description: None,
+        visibility: CatalogUploadVisibility::Unlisted,
+        audio_track_ids: vec!["same".into(), "same".into()],
+        delete_local_after_upload: false,
+    };
+    assert_eq!(
+        CatalogEffect::StartUpload {
+            token: window,
+            target,
+            options: duplicate_audio,
+        }
+        .validate_bounds(),
+        Err(PayloadBoundsError::Invalid {
+            field: "upload_options.duplicate_audio_track_id"
         })
     );
 }

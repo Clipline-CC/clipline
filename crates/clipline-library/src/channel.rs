@@ -5,15 +5,17 @@ use std::time::Duration;
 use thiserror::Error;
 
 use crate::{
-    CatalogResult, CloudWorkToken, DurableUploadToken, GenerationError, PosterWorkToken,
-    WindowWorkToken,
+    CatalogResult, ClipDetailOwner, CloudWorkToken, DurableUploadToken, GenerationError,
+    PosterWorkToken, WindowWorkToken,
 };
 
 pub const CATALOG_RESULT_CAPACITY: usize = 128;
+pub const CATALOG_RESULT_BYTE_CAPACITY: usize = 32 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExpectedResultOwner {
     Window(WindowWorkToken),
+    Detail(ClipDetailOwner),
     Poster(PosterWorkToken),
     Cloud(CloudWorkToken),
     Upload(DurableUploadToken),
@@ -29,6 +31,8 @@ pub enum CatalogResultPublishOutcome {
 pub enum ResultPortError {
     #[error("catalog result queue is full at capacity {capacity}")]
     Full { capacity: usize },
+    #[error("catalog result queue is full at byte capacity {capacity}")]
+    ByteCapacity { capacity: usize },
     #[error("{field} contains {actual} bytes or entries; maximum is {maximum}")]
     PayloadTooLarge {
         field: &'static str,
@@ -72,7 +76,8 @@ impl From<crate::PayloadBoundsError> for ResultPortError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CoalesceKey {
-    LocalPage(WindowWorkToken),
+    LocalIndex(WindowWorkToken),
+    ClipDetail(ClipDetailOwner),
     CloudPage(CloudWorkToken),
     Poster(PosterWorkToken),
     UploadBytes(DurableUploadToken),
@@ -80,7 +85,8 @@ enum CoalesceKey {
 
 fn coalesce_key(result: &CatalogResult) -> Option<CoalesceKey> {
     match result {
-        CatalogResult::LocalPage { token, .. } => Some(CoalesceKey::LocalPage(*token)),
+        CatalogResult::LocalIndex(completion) => Some(CoalesceKey::LocalIndex(completion.token)),
+        CatalogResult::ClipDetail(result) => Some(CoalesceKey::ClipDetail(result.owner().clone())),
         CatalogResult::CloudPage(completion) => {
             Some(CoalesceKey::CloudPage(completion.token.clone()))
         }
@@ -88,7 +94,8 @@ fn coalesce_key(result: &CatalogResult) -> Option<CoalesceKey> {
         CatalogResult::UploadByteProgress { token, .. } => {
             Some(CoalesceKey::UploadBytes(token.clone()))
         }
-        CatalogResult::MutationCompleted { .. }
+        CatalogResult::RenameCompleted { .. }
+        | CatalogResult::DeleteCompleted { .. }
         | CatalogResult::UploadCompleted { .. }
         | CatalogResult::ForegroundFeedback { .. } => None,
     }
@@ -100,13 +107,19 @@ fn validate_owner(
 ) -> Result<(), ResultPortError> {
     match (result, expected) {
         (
-            CatalogResult::LocalPage { token, .. }
-            | CatalogResult::MutationCompleted { token, .. }
+            CatalogResult::LocalIndex(crate::LocalIndexCompletion { token, .. })
+            | CatalogResult::RenameCompleted { token, .. }
+            | CatalogResult::DeleteCompleted { token, .. }
             | CatalogResult::ForegroundFeedback { token, .. },
             ExpectedResultOwner::Window(expected),
         ) => (*token == *expected)
             .then_some(())
             .ok_or(ResultPortError::Stale),
+        (CatalogResult::ClipDetail(result), ExpectedResultOwner::Detail(expected)) => {
+            (result.owner() == expected)
+                .then_some(())
+                .ok_or(ResultPortError::Stale)
+        }
         (CatalogResult::Poster { token, .. }, ExpectedResultOwner::Poster(expected)) => (token
             == expected)
             .then_some(())
@@ -148,6 +161,7 @@ fn validate_owner(
 
 struct ChannelState {
     queue: VecDeque<CatalogResult>,
+    queue_bytes: usize,
     receiver_connected: bool,
     sender_count: usize,
 }
@@ -170,6 +184,7 @@ pub fn catalog_result_channel() -> (CatalogResultSender, CatalogResultReceiver) 
     let shared = Arc::new(Shared {
         state: Mutex::new(ChannelState {
             queue: VecDeque::with_capacity(CATALOG_RESULT_CAPACITY),
+            queue_bytes: 0,
             receiver_connected: true,
             sender_count: 1,
         }),
@@ -202,6 +217,7 @@ impl CatalogResultSender {
     ) -> Result<CatalogResultPublishOutcome, ResultPortError> {
         validate_owner(&result, &expected)?;
         result.validate_bounds()?;
+        let result_bytes = result.estimated_byte_size();
         let key = coalesce_key(&result);
         let mut state = self
             .shared
@@ -229,6 +245,19 @@ impl CatalogResultSender {
             });
         }
 
+        let replaced_bytes = replacement
+            .and_then(|index| state.queue.get(index))
+            .map_or(0, CatalogResult::estimated_byte_size);
+        let projected_bytes = state
+            .queue_bytes
+            .saturating_sub(replaced_bytes)
+            .saturating_add(result_bytes);
+        if projected_bytes > CATALOG_RESULT_BYTE_CAPACITY {
+            return Err(ResultPortError::ByteCapacity {
+                capacity: CATALOG_RESULT_BYTE_CAPACITY,
+            });
+        }
+
         let outcome = if let Some(index) = replacement {
             state.queue.remove(index);
             state.queue.push_back(result);
@@ -237,6 +266,7 @@ impl CatalogResultSender {
             state.queue.push_back(result);
             CatalogResultPublishOutcome::Queued
         };
+        state.queue_bytes = projected_bytes;
         drop(state);
         self.shared.ready.notify_one();
         Ok(outcome)
@@ -255,11 +285,13 @@ impl Drop for CatalogResultSender {
 impl CatalogResultReceiver {
     #[must_use]
     pub fn try_recv(&self) -> Option<CatalogResult> {
-        self.shared
-            .state
-            .lock()
-            .ok()
-            .and_then(|mut state| state.queue.pop_front())
+        self.shared.state.lock().ok().and_then(|mut state| {
+            let result = state.queue.pop_front()?;
+            state.queue_bytes = state
+                .queue_bytes
+                .saturating_sub(result.estimated_byte_size());
+            Some(result)
+        })
     }
 
     pub fn wait_recv(&self, timeout: Duration) -> Result<Option<CatalogResult>, ResultPortError> {
@@ -277,6 +309,9 @@ impl CatalogResultReceiver {
                 .0;
         }
         if let Some(result) = state.queue.pop_front() {
+            state.queue_bytes = state
+                .queue_bytes
+                .saturating_sub(result.estimated_byte_size());
             Ok(Some(result))
         } else if state.sender_count == 0 {
             Err(ResultPortError::Disconnected)
@@ -304,6 +339,7 @@ impl Drop for CatalogResultReceiver {
         if let Ok(mut state) = self.shared.state.lock() {
             state.receiver_connected = false;
             state.queue.clear();
+            state.queue_bytes = 0;
         }
         self.shared.ready.notify_all();
     }

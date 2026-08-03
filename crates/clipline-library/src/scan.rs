@@ -28,6 +28,8 @@ pub const MAX_SESSION_GAME_BYTES: usize = 64 * 1024;
 pub struct LocalScan<T> {
     pub clips: Vec<T>,
     pub warnings: Vec<String>,
+    #[serde(skip_serializing)]
+    pub truncated: bool,
 }
 
 /// Exact shipping Tauri row shape. The native compact projection never stores
@@ -348,7 +350,8 @@ impl LocalLibraryScanner {
         let mut warnings = WarningSink::default();
         let mut candidates = CandidateSet::default();
         self.scan_root(&mut candidates, &mut warnings)?;
-        if candidates.truncated() {
+        let truncated = candidates.truncated();
+        if truncated {
             warnings.push_required(LOCAL_LIBRARY_TRUNCATED_WARNING.to_string());
         }
 
@@ -365,6 +368,7 @@ impl LocalLibraryScanner {
         Ok(LocalScan {
             clips,
             warnings: warnings.finish(),
+            truncated,
         })
     }
 
