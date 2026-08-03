@@ -4,6 +4,20 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-02): valid redacted support JSON
+
+Plan: `docs/superpowers/plans/2026-08-02-support-log-json-redaction.md` (`4adecf7`).
+
+Support report log entries remain valid JSONL when diagnostic strings contain Windows drive paths.
+The shared path regex previously consumed only the first backslash of JSON's doubled `\\` path
+separator, leaving an invalid escape such as `\U` in the redacted line. Path separators now consume
+one or more adjacent backslashes, covering both plain diagnostic text and JSON-escaped strings while
+preserving the existing redaction and bundle structure. The fix and exact parse-after-redaction
+regression are commit `e386e64`.
+
+The focused red/green regression, complete application suite, full workspace suite, fresh-cache app
+Clippy, warning-denied workspace Clippy, formatting, and diff checks are green.
+
 ## Checkpoint (2026-08-02): staggered selected-audio mixing
 
 Plan: `docs/superpowers/plans/2026-08-02-staggered-audio-mix.md` (`7e71a86`).
@@ -21,9 +35,8 @@ quantization, preserves long gaps without encoding thousands of silent packets, 
 packet expansion before allocation. The fix is commit `5037755`.
 
 The exact staggered-track file regression, the complete `clipline-mp4` suite, full workspace tests,
-fresh-cache crate Clippy, and warning-denied workspace Clippy are green. Separately,
-the report exposed malformed JSON in some redacted log lines when Windows path replacement leaves
-invalid backslash escapes; that diagnostics issue is not part of this media fix.
+fresh-cache crate Clippy, and warning-denied workspace Clippy are green. The report's separately
+observed malformed redacted-log JSON is fixed by the checkpoint above.
 
 ## Checkpoint (2026-07-29): Nightly 0.1.43
 
