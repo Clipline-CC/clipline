@@ -4,6 +4,66 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-02): Slint replacement Milestone 7, Task 4
+
+Plan: `docs/superpowers/plans/2026-08-02-slint-library-cloud.md`. The complete local Library
+inventory/detail/naming/mutation authority now lives in the framework-neutral
+`crates/clipline-library` crate. Synchronous scans retain only the deterministic newest 10,000
+root or one-session-level MP4s, preserve the exact shipping JSON projection, and report explicit
+bounded partial/truncation warnings. Marker/play/audio detail parsing has byte, nesting, decoded
+string, collection, and hostile-timeline limits; compact scan rows keep summaries only, while
+active detail requests are separately token-fenced. An injected per-session `read_dir` failure
+proves readable root/sibling results remain identically ordered across repeated scans.
+
+The shared repository validates original and canonical paths, rejects traversal, symlinks,
+Windows reparse points, deep children, and replaced file/parent identities, and retains canonical
+I/O authority separately from display spelling. Destructive transactions acquire the existing
+file-identity upload/mutation exclusion plus a kernel mutation fence. On Windows the fence holds
+the source and containing directory without delete sharing, verifies both selected identities,
+and renames/deletes the primary by handle; every other move uses a true no-replace primitive.
+Linux uses `renameat2(RENAME_NOREPLACE)` relative to the retained parent handle and an identity-
+checked tombstone unlink; strict Linux cross-target compilation prevents the Windows build from
+hiding a fallback regression. Title rename now participates in the same lease. Five-file MP4/
+markers/metadata/pending-osu/poster rename remains transactional with reverse-order rollback,
+delete owns exactly the sidecars selected at preflight, bulk delete enforces both item and aggregate
+path-byte bounds, and serialized pending records are rechecked after rewriting. Sidecar reads open
+the final component no-follow and validate the same handle. Synced metadata publication separates
+absent no-replace targets from existing identity-selected targets; staged/sidecar cleanup and
+rollback delete only exact owned identities, never a collision winner or later replacement.
+Adversarial tests cover hard-link aliases, orphan/racing destinations, source and destination
+replacement after preflight, raced links, partial-create and pending-restore collisions, every
+forward/rollback failure point, and Windows case-only rename.
+
+Existing metadata replacement is crash-safe as well as race-safe. Linux/macOS use an atomic
+`RENAME_EXCHANGE` when supported; Windows and the portable fallback durably create a bounded
+write-ahead journal before staging the old target. Repository open recovers the root plus one
+session level under one retained no-follow root authority: Unix enumeration, journal I/O, identity
+checks, moves, deletes, creation, and directory sync are handle-relative, while Windows retains
+non-delete-sharing directory handles. The whole traversal is capped at 100,000 examined entries
+and 128 journals. Foreign/ambiguous or individually unreadable artifacts are preserved and
+reported rather than disabling the Library. Recovery syncs a safe namespace before removing its
+journal and syncs the removal again, so every crash point is idempotent and no foreign winner is
+used as rollback authority. The split between Unix exchange and Windows journal recovery follows
+the independent Fable architecture review of the platform constraints.
+
+The shipping Tauri command names, arguments, result JSON, error precedence, asset-protocol scope,
+and Cloud path reconciliation remain intact. List/delete/rename/reveal/folder-open now delegate to
+the shared service on the adapter-owned blocking executor; renamed assets are authorized from the
+repository's canonical root, and Cloud records reconcile all legacy Windows path aliases through
+`ClipPathIdentity`. Upload and destructive mutation acquisition is atomic by stable file identity,
+including hard links. The old app-local scan/mutation algorithms were removed rather than forked.
+
+Task 4 validation is green: CI-mode full-workspace tests, all `clipline-library` targets (including
+42 mutation, 10 local-scan, and eight crash-recovery vectors), 407 Tauri unit tests, 93 UI
+contracts, all Tauri integration targets, warning-denied workspace Clippy, and warning-denied
+Linux cross-target Clippy for both `clipline-shell` and `clipline-library`. Independent adapter and
+filesystem-security re-audits are GO with no P0/P1. The installed Clipline process/profile remained
+untouched. Local commits remain ahead of PR #132 because the HTTPS OAuth token still lacks GitHub's
+`workflow` scope; implementation can continue safely and each push is retried after committing.
+
+Next: Task 5, extract the bounded poster service and native image ownership/controller without
+changing the shipping Tauri poster contract or advancing parity before live Slint evidence exists.
+
 ## Checkpoint (2026-08-02): Slint replacement Milestone 7, Tasks 1--3
 
 Plan: `docs/superpowers/plans/2026-08-02-slint-library-cloud.md`. Task 1 added the neutral,

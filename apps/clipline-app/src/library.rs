@@ -4,10 +4,7 @@
 
 #[path = "library/naming.rs"]
 mod naming;
-use naming::{
-    inferred_clip_kind_for_path, is_reserved_windows_file_name, normalized_clip_file_name,
-    normalized_clip_title,
-};
+use naming::is_reserved_windows_file_name;
 
 use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -19,6 +16,12 @@ use std::time::{Duration, Instant};
 
 use clipline_capture::{Codec, EncoderBackend};
 use clipline_events::{is_review_event, ClipMarker, ClipMarkers, ClipPlay};
+pub use clipline_library::{ClipGame, DeletedClipsReport, RenamedClipInfo};
+use clipline_library::{
+    ClipPathIdentity, CompatibilityClipProjection, CompatibilityLocalClipScan,
+    KnownGameIdentityResolver, LocalLibraryRepository, LocalLibraryScanner,
+    Mp4LegacyAudioTrackProbe, PlatformEffect, StandardRepositoryFileSystem,
+};
 use clipline_mp4::{
     media_video_codecs_file, remux_with_mixed_audio_track_file,
     remux_with_selected_audio_tracks_file, trim_keyframe_aligned_file, MediaTrackCounts,
@@ -82,35 +85,7 @@ impl StorageSettings {
     }
 }
 
-/// The game a clip's session folder is attributed to (see
-/// `clipline-session.json`). Drives the library's per-clip game icon.
-#[derive(serde::Serialize, serde::Deserialize, Clone)]
-pub struct ClipGame {
-    pub id: String,
-    pub name: String,
-}
-
-#[derive(serde::Serialize)]
-pub struct ClipInfo {
-    pub path: String,
-    pub name: String,
-    pub title: Option<String>,
-    pub kind: String,
-    /// Session folder name; None for legacy clips at the library root.
-    pub session: Option<String>,
-    pub size_mb: f64,
-    pub modified_unix: u64,
-    pub duration_s: Option<f64>,
-    pub markers: Option<ClipMarkers>,
-    /// Game this clip's session belongs to, if recorded under a detected game.
-    pub game: Option<ClipGame>,
-}
-
-#[derive(serde::Serialize)]
-pub struct LocalClipScan {
-    pub clips: Vec<ClipInfo>,
-    pub warnings: Vec<String>,
-}
+type LocalClipScan = CompatibilityLocalClipScan;
 
 #[derive(serde::Serialize)]
 pub struct StorageInfo {
@@ -132,23 +107,6 @@ pub struct ExportedClipInfo {
     pub aligned_end_s: f64,
     pub duration_s: f64,
     pub markers: Option<ClipMarkers>,
-}
-
-#[derive(serde::Serialize)]
-pub struct RenamedClipInfo {
-    pub old_path: String,
-    pub path: String,
-    pub name: String,
-    pub title: Option<String>,
-    pub kind: String,
-}
-
-#[derive(Default, serde::Serialize, serde::Deserialize, Clone)]
-struct ClipMetadata {
-    #[serde(default)]
-    title: Option<String>,
-    #[serde(default)]
-    kind: Option<String>,
 }
 
 const AUDIO_PREVIEW_CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -244,11 +202,16 @@ pub async fn list_clips<R: Runtime>(
             tracing::warn!(event = "library_osu_enrichment_retry_failed", error = %e);
         }
     });
-    let scope_root = dir.clone();
-    let scan = tauri::async_runtime::spawn_blocking(move || list_clips_from_dir(dir))
-        .await
-        .map_err(|e| format!("list clips task: {e}"))??;
-    let canonical_scope_root = canonical_media_root(&scope_root)?;
+    let (scan, canonical_scope_root) = tauri::async_runtime::spawn_blocking(move || {
+        let scanner = LocalLibraryScanner::open(&dir)?;
+        let canonical_scope_root = scanner.canonical_root().to_path_buf();
+        let probe = Mp4LegacyAudioTrackProbe;
+        let games = KnownGameIdentityResolver;
+        let scan = scanner.scan(&CompatibilityClipProjection::new(&probe, &games))?;
+        Ok::<_, String>((scan, canonical_scope_root))
+    })
+    .await
+    .map_err(|e| format!("list clips task: {e}"))??;
     for clip in &scan.clips {
         allow_local_clip_asset_from_canonical_root(
             &app,
@@ -257,127 +220,6 @@ pub async fn list_clips<R: Runtime>(
         )?;
     }
     Ok(scan)
-}
-
-fn list_clips_from_dir(dir: PathBuf) -> Result<LocalClipScan, String> {
-    list_clips_from_dir_with_child_reader(dir, push_clips_from)
-}
-
-fn list_clips_from_dir_with_child_reader(
-    dir: PathBuf,
-    mut read_child: impl FnMut(&Path, Option<String>, &mut Vec<ClipInfo>) -> Result<(), String>,
-) -> Result<LocalClipScan, String> {
-    let mut clips = Vec::new();
-    let mut warnings = Vec::new();
-    push_clips_from(&dir, None, &mut clips)?;
-    for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())? {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(error) => {
-                warnings.push(format!("Skipped an unreadable Library entry: {error}"));
-                continue;
-            }
-        };
-        let session = entry.file_name().to_string_lossy().into_owned();
-        let is_dir = match entry.metadata() {
-            Ok(metadata) => metadata.is_dir(),
-            Err(error) => {
-                warnings.push(format!(
-                    "Skipped Library entry \"{session}\" because its metadata is unavailable: {error}"
-                ));
-                continue;
-            }
-        };
-        if is_dir {
-            if let Err(error) = read_child(&entry.path(), Some(session.clone()), &mut clips) {
-                warnings.push(format!(
-                    "Skipped Library session \"{session}\" because it could not be read: {error}"
-                ));
-            }
-        }
-    }
-    for warning in &warnings {
-        tracing::warn!(event = "library_scan_partial", message = %warning);
-    }
-    clips.sort_by_key(|c| std::cmp::Reverse(c.modified_unix));
-    Ok(LocalClipScan { clips, warnings })
-}
-
-fn push_clips_from(
-    dir: &Path,
-    session: Option<String>,
-    clips: &mut Vec<ClipInfo>,
-) -> Result<(), String> {
-    // One game tag per session folder, shared by every clip inside it.
-    let session_game: Option<ClipGame> = std::fs::read_to_string(dir.join("clipline-session.json"))
-        .ok()
-        .and_then(|json| serde_json::from_str::<ClipGame>(&json).ok());
-    for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
-        let Ok(entry) = entry else { continue };
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("mp4") {
-            continue;
-        }
-        let meta = entry.metadata().ok();
-        if meta.as_ref().is_some_and(|m| !m.is_file()) {
-            continue;
-        }
-        let modified_unix = meta
-            .as_ref()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let size_mb = meta
-            .map(|m| m.len() as f64 / (1024.0 * 1024.0))
-            .unwrap_or(0.0);
-        let raw_markers = util::read_markers_raw(&path).map(filter_review_markers);
-        let clip_metadata = read_clip_metadata(&path).unwrap_or_default();
-        let duration_s = raw_markers
-            .as_ref()
-            .map(|markers| markers.duration_s)
-            .filter(|duration| duration.is_finite() && *duration >= 0.0);
-        let markers = util::markers_with_inferred_audio_tracks(&path, raw_markers);
-        let title = clip_title_from_metadata(&clip_metadata);
-        let kind = clip_kind_from_metadata(&path, &clip_metadata).to_string();
-        // Prefer the session sidecar; fall back to the game named in markers
-        // so clips recorded before session tagging still show an icon.
-        let game = session_game
-            .clone()
-            .or_else(|| game_from_markers(markers.as_ref()));
-        clips.push(ClipInfo {
-            path: path.display().to_string(),
-            name: path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-            title,
-            kind,
-            session: session.clone(),
-            size_mb,
-            modified_unix,
-            duration_s,
-            markers,
-            game,
-        });
-    }
-    Ok(())
-}
-
-/// Fall back to the game named in a clip's markers when its session folder has
-/// no game sidecar (clips recorded before session tagging existed). Only games
-/// with a matching plugin resolve to an icon in the UI.
-fn game_from_markers(markers: Option<&ClipMarkers>) -> Option<ClipGame> {
-    let game_id = markers?.markers.first()?.event.game_id;
-    let plugin_id = crate::game_plugins::plugin_id_for_game_id(game_id);
-    let name = crate::game_plugins::all()
-        .iter()
-        .find(|plugin| plugin.id() == plugin_id)
-        .map(|plugin| plugin.manifest.name.clone())?;
-    Some(ClipGame {
-        id: plugin_id.to_string(),
-        name,
-    })
 }
 
 /// Only two heavyweight ffmpeg poster children may exist at once.
@@ -649,79 +491,33 @@ fn poster_seek_seconds(clip: &Path) -> f64 {
 
 #[tauri::command]
 pub fn delete_clip(path: String, settings: tauri::State<StorageSettings>) -> Result<(), String> {
-    let target = validate_clip_path(&settings, &path)?;
-    remove_clip_files(&target)
+    let repository = mutation_repository(&settings.clips_dir()?)?;
+    let clip = repository
+        .validate_clip_path(&path)
+        .map_err(|error| error.to_string())?;
+    repository.delete(&clip).map_err(|error| error.to_string())
 }
 
 pub(crate) fn clip_sidecar_paths(target: &Path) -> [PathBuf; 4] {
-    [
-        target.with_extension("markers.json"),
-        clip_metadata_path(target),
-        crate::osu_enrichment::pending_path(target),
-        crate::poster::poster_path(target),
-    ]
+    clipline_library::clip_sidecar_paths(target).into_array()
 }
 
-fn remove_clip_files(target: &Path) -> Result<(), String> {
-    if let Some(error) = crate::cloud_upload::active_upload_source_error(target) {
-        return Err(error);
-    }
-    std::fs::remove_file(target).map_err(|error| {
-        crate::cloud_upload::active_upload_source_error(target).unwrap_or_else(|| error.to_string())
-    })?;
-    for sidecar in clip_sidecar_paths(target) {
-        let _ = std::fs::remove_file(sidecar);
-    }
-    Ok(())
-}
-
-/// A bulk-delete result: the paths that were removed and the (path, reason)
-/// pairs that could not be. Surface `failed` to the UI so partial success is
-/// visible rather than silently swallowed.
-#[derive(serde::Serialize)]
-pub struct DeletedClipsReport {
-    pub deleted: Vec<String>,
-    pub failed: Vec<(String, String)>,
-}
-
-/// Testable core of [`delete_clips`]: deletes each already-validated clip plus
-/// its four sidecars (best effort), recording any removal failures. `failed`
-/// carries inputs that already failed validation so the caller's report stays
-/// complete in one place.
-fn delete_clips_impl(
-    validated: Vec<(String, PathBuf)>,
-    mut failed: Vec<(String, String)>,
-) -> DeletedClipsReport {
-    let mut deleted = Vec::new();
-    for (path, target) in validated {
-        match remove_clip_files(&target) {
-            Ok(_) => deleted.push(path),
-            Err(e) => failed.push((path, e.to_string())),
-        }
-    }
-    DeletedClipsReport { deleted, failed }
-}
-
-/// Delete many clips in one round trip. Validation runs up front while the
-/// `StorageSettings` borrow is live; owned `PathBuf`s then move into a single
-/// blocking task so the UI does not pay N async hops.
+/// Delete many clips in one round trip. Root resolution stays in the adapter;
+/// validation and deletion run together in one blocking repository task so
+/// the UI does not pay N async hops.
 #[tauri::command]
 pub async fn delete_clips(
     paths: Vec<String>,
     settings: tauri::State<'_, StorageSettings>,
 ) -> Result<DeletedClipsReport, String> {
-    let mut validated: Vec<(String, PathBuf)> = Vec::with_capacity(paths.len());
-    let mut failed: Vec<(String, String)> = Vec::new();
-    for path in paths {
-        match validate_clip_path(&settings, &path) {
-            Ok(target) => validated.push((path, target)),
-            Err(e) => failed.push((path, e)),
-        }
-    }
-    let result = tauri::async_runtime::spawn_blocking(move || delete_clips_impl(validated, failed))
-        .await
-        .map_err(|e| format!("delete clips task: {e}"))?;
-    Ok(result)
+    let root = settings.clips_dir()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        mutation_repository(&root)?
+            .delete_many(&paths)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|e| format!("delete clips task: {e}"))?
 }
 
 #[tauri::command]
@@ -731,272 +527,59 @@ pub async fn rename_clip(
     settings: tauri::State<'_, StorageSettings>,
     _state: tauri::State<'_, crate::app::RuntimeState>,
 ) -> Result<RenamedClipInfo, String> {
-    let source = validate_clip_path(&settings, &path)?;
-    let title = normalized_clip_title(&name)?;
-    let old_path = path.clone();
-    tauri::async_runtime::spawn_blocking(move || rename_clip_title(source, old_path, title))
-        .await
-        .map_err(|e| format!("rename clip task: {e}"))?
+    let root = settings.clips_dir()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let repository = mutation_repository(&root)?;
+        let clip = repository
+            .validate_clip_path(&path)
+            .map_err(|error| error.to_string())?;
+        repository
+            .rename_title(&clip, &name)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|e| format!("rename clip task: {e}"))?
 }
 
 #[tauri::command]
-pub async fn rename_clip_file(
+pub async fn rename_clip_file<R: Runtime>(
+    app: AppHandle<R>,
     path: String,
     name: String,
     settings: tauri::State<'_, StorageSettings>,
     state: tauri::State<'_, crate::app::RuntimeState>,
 ) -> Result<RenamedClipInfo, String> {
-    let source = validate_clip_path(&settings, &path)?;
-    let target_name = normalized_clip_file_name(&name)?;
-    let old_path = path.clone();
-    let renamed = tauri::async_runtime::spawn_blocking(move || {
-        rename_clip_files(source, old_path, target_name)
+    let root = settings.clips_dir()?;
+    let task_path = path.clone();
+    let (renamed, canonical_scope_root) = tauri::async_runtime::spawn_blocking(move || {
+        let repository = mutation_repository(&root)?;
+        let clip = repository
+            .validate_clip_path(&task_path)
+            .map_err(|error| error.to_string())?;
+        let renamed = repository
+            .rename_file(&clip, &name)
+            .map_err(|error| error.to_string())?;
+        Ok::<_, String>((renamed, repository.canonical_root().to_path_buf()))
     })
     .await
     .map_err(|e| format!("rename clip task: {e}"))??;
 
     update_cloud_record_paths(&state, &path, &renamed.path);
+    allow_local_clip_asset_from_canonical_root(
+        &app,
+        &canonical_scope_root,
+        Path::new(&renamed.path),
+    )?;
     Ok(renamed)
 }
 
-fn rename_clip_title(
-    source: PathBuf,
-    old_path: String,
-    title: String,
-) -> Result<RenamedClipInfo, String> {
-    let mut metadata = read_clip_metadata(&source).unwrap_or_default();
-    let kind = clip_kind_from_metadata(&source, &metadata).to_string();
-    metadata.title = Some(title.clone());
-    metadata.kind = Some(kind.clone());
-    write_clip_metadata(&source, &metadata)?;
-    let name = source
-        .file_name()
-        .map(|value| value.to_string_lossy().to_string())
-        .unwrap_or_default();
-    Ok(RenamedClipInfo {
-        old_path: old_path.clone(),
-        path: old_path,
-        name,
-        title: Some(title),
-        kind,
-    })
-}
-
-fn same_existing_path(first: &Path, second: &Path) -> bool {
-    match (first.canonicalize(), second.canonicalize()) {
-        (Ok(first), Ok(second)) => first == second,
-        _ => first == second,
-    }
-}
-
-struct PreparedOsuSidecarMove {
-    source: PathBuf,
-    target: PathBuf,
-    staged: PathBuf,
-    backup: PathBuf,
-}
-
-impl PreparedOsuSidecarMove {
-    fn stage(source_clip: &Path, target_clip: &Path) -> Result<Option<Self>, String> {
-        let source = crate::osu_enrichment::pending_path(source_clip);
-        if !source.exists() {
-            return Ok(None);
-        }
-        let target = crate::osu_enrichment::pending_path(target_clip);
-        let target_is_source = same_existing_path(&target, &source);
-        if target.exists() && !target_is_source {
-            return Err("an osu! enrichment sidecar with that name already exists".into());
-        }
-        let bytes = std::fs::read(&source)
-            .map_err(|error| format!("read osu! enrichment sidecar {source:?}: {error}"))?;
-        let mut pending: crate::osu_enrichment::OsuPendingEnrichment =
-            serde_json::from_slice(&bytes)
-                .map_err(|error| format!("parse osu! enrichment sidecar {source:?}: {error}"))?;
-        pending.clip_path = target_clip.display().to_string();
-        let staged = target.with_extension("osu-enrichment.rename.tmp");
-        let backup = source.with_extension("osu-enrichment.rename.backup");
-        if staged.exists() {
-            return Err(format!(
-                "staged osu! enrichment path already exists: {staged:?}"
-            ));
-        }
-        if backup.exists() {
-            return Err(format!(
-                "backup osu! enrichment path already exists: {backup:?}"
-            ));
-        }
-        let json = serde_json::to_vec_pretty(&pending)
-            .map_err(|error| format!("serialize osu! enrichment sidecar: {error}"))?;
-        std::fs::write(&staged, json)
-            .map_err(|error| format!("stage osu! enrichment sidecar {staged:?}: {error}"))?;
-        Ok(Some(Self {
-            source,
-            target,
-            staged,
-            backup,
-        }))
-    }
-
-    fn commit(&self) -> Result<(), String> {
-        std::fs::rename(&self.source, &self.backup)
-            .map_err(|error| format!("stage old osu! enrichment sidecar: {error}"))?;
-        std::fs::rename(&self.staged, &self.target).map_err(|error| {
-            let _ = std::fs::rename(&self.backup, &self.source);
-            format!("install renamed osu! enrichment sidecar: {error}")
-        })?;
-        Ok(())
-    }
-
-    fn finish(&self) {
-        let _ = std::fs::remove_file(&self.backup);
-    }
-
-    fn rollback(&self) {
-        let _ = std::fs::remove_file(&self.target);
-        if self.backup.exists() && !self.source.exists() {
-            let _ = std::fs::rename(&self.backup, &self.source);
-        }
-        let _ = std::fs::remove_file(&self.staged);
-    }
-}
-
-impl Drop for PreparedOsuSidecarMove {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.staged);
-    }
-}
-
-fn rename_clip_files(
-    source: PathBuf,
-    old_path: String,
-    target_name: String,
-) -> Result<RenamedClipInfo, String> {
-    if let Some(error) = crate::cloud_upload::active_upload_source_error(&source) {
-        return Err(error);
-    }
-    let parent = source
-        .parent()
-        .ok_or_else(|| "clip has no containing folder".to_string())?;
-    let target = parent.join(&target_name);
-    let source_metadata = clip_metadata_path(&source);
-    let target_metadata = clip_metadata_path(&target);
-    let metadata = read_clip_metadata(&source).unwrap_or_default();
-    let title = clip_title_from_metadata(&metadata);
-    let kind = clip_kind_from_metadata(&source, &metadata).to_string();
-
-    let target_is_same_file = same_existing_path(&target, &source);
-    if target.exists() && !target_is_same_file {
-        return Err("a clip with that name already exists".into());
-    }
-
-    let source_markers = source.with_extension("markers.json");
-    let target_markers = target.with_extension("markers.json");
-    let target_markers_same_file = same_existing_path(&target_markers, &source_markers);
-    if source_markers.exists() && target_markers.exists() && !target_markers_same_file {
-        return Err("a marker sidecar with that name already exists".into());
-    }
-
-    let target_metadata_same_file = same_existing_path(&target_metadata, &source_metadata);
-    if source_metadata.exists() && target_metadata.exists() && !target_metadata_same_file {
-        return Err("a clip metadata sidecar with that name already exists".into());
-    }
-
-    let pending_osu_move = PreparedOsuSidecarMove::stage(&source, &target)?;
-
-    if source != target {
-        std::fs::rename(&source, &target).map_err(|error| {
-            crate::cloud_upload::active_upload_source_error(&source)
-                .unwrap_or_else(|| format!("rename clip: {error}"))
-        })?;
-    }
-    if source_markers.exists() && source_markers != target_markers {
-        if let Err(error) = std::fs::rename(&source_markers, &target_markers) {
-            let _ = std::fs::rename(&target, &source);
-            return Err(format!("rename clip markers: {error}"));
-        }
-    }
-    let moved_metadata = source_metadata.exists() && source_metadata != target_metadata;
-    if moved_metadata {
-        if let Err(error) = std::fs::rename(&source_metadata, &target_metadata) {
-            let _ = std::fs::rename(&target_markers, &source_markers);
-            let _ = std::fs::rename(&target, &source);
-            return Err(format!("rename clip metadata: {error}"));
-        }
-    }
-
-    if let Some(pending) = &pending_osu_move {
-        if let Err(error) = pending.commit() {
-            rollback_renamed_clip_files(
-                &source,
-                &target,
-                &source_markers,
-                &target_markers,
-                moved_metadata.then_some((source_metadata.as_path(), target_metadata.as_path())),
-            );
-            return Err(error);
-        }
-    }
-
-    let mut target_metadata_value = read_clip_metadata(&target).unwrap_or(metadata);
-    target_metadata_value.title = title.clone();
-    target_metadata_value.kind = Some(kind.clone());
-    if let Err(error) = write_clip_metadata(&target, &target_metadata_value) {
-        if let Some(pending) = &pending_osu_move {
-            pending.rollback();
-        }
-        rollback_renamed_clip_files(
-            &source,
-            &target,
-            &source_markers,
-            &target_markers,
-            moved_metadata.then_some((source_metadata.as_path(), target_metadata.as_path())),
-        );
-        return Err(error);
-    }
-    if let Some(pending) = &pending_osu_move {
-        pending.finish();
-    }
-
-    // The poster is a regenerable cache, not user data: move it alongside the
-    // clip when we can, otherwise drop the stale one so it rebuilds on demand.
-    let source_poster = crate::poster::poster_path(&source);
-    if source_poster.exists() {
-        let target_poster = crate::poster::poster_path(&target);
-        if source_poster != target_poster
-            && std::fs::rename(&source_poster, &target_poster).is_err()
-        {
-            let _ = std::fs::remove_file(&source_poster);
-        }
-    }
-
-    let new_path = display_renamed_clip_path(&old_path, &target_name, parent);
-    Ok(RenamedClipInfo {
-        old_path,
-        path: new_path,
-        name: target_name,
-        title,
-        kind,
-    })
-}
-
-fn rollback_renamed_clip_files(
-    source: &Path,
-    target: &Path,
-    source_markers: &Path,
-    target_markers: &Path,
-    metadata: Option<(&Path, &Path)>,
-) {
-    if let Some((source_metadata, target_metadata)) = metadata {
-        if target_metadata.exists() && source_metadata != target_metadata {
-            let _ = std::fs::rename(target_metadata, source_metadata);
-        }
-    }
-    if target_markers.exists() && source_markers != target_markers {
-        let _ = std::fs::rename(target_markers, source_markers);
-    }
-    if target.exists() && source != target {
-        let _ = std::fs::rename(target, source);
-    }
+fn mutation_repository(root: &Path) -> Result<LocalLibraryRepository, String> {
+    LocalLibraryRepository::with_seams(
+        root,
+        Arc::new(StandardRepositoryFileSystem),
+        Arc::new(crate::cloud_upload::UploadMutationLease),
+    )
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -2061,25 +1644,34 @@ pub(crate) fn validate_clip_path(
     settings: &StorageSettings,
     path: &str,
 ) -> Result<PathBuf, String> {
-    let dir = settings
-        .clips_dir()?
-        .canonicalize()
-        .map_err(|e| e.to_string())?;
-    let target = Path::new(path).canonicalize().map_err(|e| e.to_string())?;
-    // Legacy clips sit at the root; session clips one folder down.
-    let parent_ok = target.parent() == Some(dir.as_path())
-        || target.parent().and_then(Path::parent) == Some(dir.as_path());
-    if !parent_ok || target.extension().and_then(|e| e.to_str()) != Some("mp4") {
-        return Err("refusing to access a clip outside the clips directory".into());
-    }
-    Ok(target)
+    let repository =
+        LocalLibraryRepository::open(settings.clips_dir()?).map_err(|error| error.to_string())?;
+    repository
+        .validate_clip_path(path)
+        .map(|clip| clip.canonical_path().to_path_buf())
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 pub fn reveal_clip(path: String, settings: tauri::State<StorageSettings>) -> Result<(), String> {
-    let target = validate_clip_path(&settings, &path)?;
-    clipline_shell::windows::shell_execute::reveal_in_explorer(&target, "reveal clip in Explorer")
-        .map_err(|error| error.to_string())
+    let repository =
+        LocalLibraryRepository::open(settings.clips_dir()?).map_err(|error| error.to_string())?;
+    let clip = repository
+        .validate_clip_path(&path)
+        .map_err(|error| error.to_string())?;
+    match repository
+        .reveal_effect(&clip)
+        .map_err(|error| error.to_string())?
+    {
+        PlatformEffect::RevealClip(target) => {
+            clipline_shell::windows::shell_execute::reveal_in_explorer(
+                &target,
+                "reveal clip in Explorer",
+            )
+            .map_err(|error| error.to_string())
+        }
+        PlatformEffect::OpenFolder(_) => Err("Library returned an invalid reveal effect".into()),
+    }
 }
 
 #[tauri::command]
@@ -2106,114 +1698,25 @@ pub async fn copy_clip_to_clipboard(
 
 #[tauri::command]
 pub fn open_media_folder(settings: tauri::State<StorageSettings>) -> Result<(), String> {
-    let dir = settings.clips_dir()?;
-    clipline_shell::windows::shell_execute::open_folder(&dir, "open media folder")
-        .map_err(|error| error.to_string())
-}
-
-fn clip_metadata_path(path: &Path) -> PathBuf {
-    path.with_extension("clipline.json")
-}
-
-fn read_clip_metadata(path: &Path) -> Option<ClipMetadata> {
-    std::fs::read_to_string(clip_metadata_path(path))
-        .ok()
-        .and_then(|json| serde_json::from_str(&json).ok())
-}
-
-fn write_clip_metadata(path: &Path, metadata: &ClipMetadata) -> Result<(), String> {
-    let target = clip_metadata_path(path);
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("create clip metadata folder: {e}"))?;
-    }
-    let json =
-        serde_json::to_vec_pretty(metadata).map_err(|e| format!("serialize clip metadata: {e}"))?;
-    let tmp = target.with_extension("clipline.json.tmp");
-    std::fs::write(&tmp, json).map_err(|e| format!("write clip metadata: {e}"))?;
-    replace_clip_metadata(&tmp, &target)
-}
-
-fn replace_clip_metadata(tmp: &Path, target: &Path) -> Result<(), String> {
-    match std::fs::rename(tmp, target) {
-        Ok(()) => Ok(()),
-        Err(error) if target.is_file() => replace_existing_clip_metadata(tmp, target, error),
-        Err(error) => {
-            let _ = std::fs::remove_file(tmp);
-            Err(format!("replace clip metadata: {error}"))
+    let repository =
+        LocalLibraryRepository::open(settings.clips_dir()?).map_err(|error| error.to_string())?;
+    match repository.open_folder_effect() {
+        PlatformEffect::OpenFolder(directory) => {
+            clipline_shell::windows::shell_execute::open_folder(&directory, "open media folder")
+                .map_err(|error| error.to_string())
+        }
+        PlatformEffect::RevealClip(_) => {
+            Err("Library returned an invalid open-folder effect".into())
         }
     }
-}
-
-fn replace_existing_clip_metadata(
-    tmp: &Path,
-    target: &Path,
-    original_error: std::io::Error,
-) -> Result<(), String> {
-    let backup = target.with_extension(format!("json.{}.bak", std::process::id()));
-    if backup.exists() {
-        if let Err(error) = std::fs::remove_file(&backup) {
-            let _ = std::fs::remove_file(tmp);
-            return Err(format!(
-                "replace clip metadata: {original_error}; remove stale clip metadata backup: {error}"
-            ));
-        }
-    }
-    if let Err(error) = std::fs::rename(target, &backup) {
-        let _ = std::fs::remove_file(tmp);
-        return Err(format!(
-            "replace clip metadata: {original_error}; backup existing clip metadata: {error}"
-        ));
-    }
-    if let Err(error) = std::fs::rename(tmp, target) {
-        let _ = std::fs::rename(&backup, target);
-        let _ = std::fs::remove_file(tmp);
-        return Err(format!("replace clip metadata: {error}"));
-    }
-    let _ = std::fs::remove_file(backup);
-    Ok(())
-}
-
-fn clip_title_from_metadata(metadata: &ClipMetadata) -> Option<String> {
-    metadata
-        .title
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
 }
 
 pub(crate) fn clip_title_for_path(path: &Path) -> String {
-    let metadata = read_clip_metadata(path).unwrap_or_default();
-    clip_title_from_metadata(&metadata).unwrap_or_else(|| {
-        path.file_stem()
-            .or_else(|| path.file_name())
-            .map(|value| value.to_string_lossy().to_string())
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "Clipline clip".to_string())
-    })
-}
-
-fn clip_kind_from_metadata<'a>(path: &'a Path, metadata: &'a ClipMetadata) -> &'a str {
-    metadata
-        .kind
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| matches!(*value, "replay" | "session" | "trim"))
-        .unwrap_or_else(|| inferred_clip_kind_for_path(path))
+    clipline_library::compatibility_clip_title(path)
 }
 
 pub(crate) fn clip_kind_for_path(path: &Path) -> String {
-    let metadata = read_clip_metadata(path).unwrap_or_default();
-    clip_kind_from_metadata(path, &metadata).to_string()
-}
-
-fn display_renamed_clip_path(old_path: &str, name: &str, fallback_parent: &Path) -> String {
-    Path::new(old_path)
-        .parent()
-        .map(|parent| parent.join(name))
-        .unwrap_or_else(|| fallback_parent.join(name))
-        .display()
-        .to_string()
+    clipline_library::compatibility_clip_kind(path)
 }
 
 fn update_cloud_record_paths(state: &crate::app::RuntimeState, old_path: &str, new_path: &str) {
@@ -2221,13 +1724,21 @@ fn update_cloud_record_paths(state: &crate::app::RuntimeState, old_path: &str, n
         return;
     }
     if let Err(error) = state.update_cloud(|cloud| {
-        for record in cloud.uploads.values_mut() {
-            if record.path == old_path {
-                record.path = new_path.to_string();
-            }
-        }
+        rewrite_cloud_record_paths(cloud, old_path, new_path);
     }) {
         tracing::warn!(event = "renamed_clip_cloud_record_update_failed", error = %error);
+    }
+}
+
+fn rewrite_cloud_record_paths(
+    cloud: &mut crate::settings::CloudSettings,
+    old_path: &str,
+    new_path: &str,
+) {
+    for record in cloud.uploads.values_mut() {
+        if ClipPathIdentity::same(&record.path, old_path) {
+            record.path = new_path.to_string();
+        }
     }
 }
 
@@ -2381,6 +1892,7 @@ fn export_title_stem(title: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use std::io::Cursor;
 
     use clipline_events::{ClipAudioTrack, ClipPlay, EventKind, GameEvent, GameId, PlayerSummary};
@@ -2389,6 +1901,41 @@ mod tests {
     };
     use clipline_test_utils::TestDir;
     use shiguredo_opus::{Encoder, EncoderConfig};
+
+    #[test]
+    fn cloud_rename_reconciliation_matches_windows_path_aliases() {
+        let record = crate::settings::CloudUploadRecord {
+            local_clip_id: "local-1".into(),
+            path: r"C:\Clips\Session_1.mp4".into(),
+            remote_clip_id: None,
+            remote_url: None,
+            visibility: "private".into(),
+            upload_status: "uploading".into(),
+            error: None,
+            updated_at_unix: 1,
+        };
+        let untouched = crate::settings::CloudUploadRecord {
+            local_clip_id: "local-2".into(),
+            path: r"C:\Other\Session_1.mp4".into(),
+            ..record.clone()
+        };
+        let mut cloud = crate::settings::CloudSettings {
+            uploads: BTreeMap::from([
+                (record.local_clip_id.clone(), record),
+                (untouched.local_clip_id.clone(), untouched),
+            ]),
+            ..crate::settings::CloudSettings::default()
+        };
+
+        rewrite_cloud_record_paths(
+            &mut cloud,
+            "c:/clips/session_1.MP4",
+            r"C:\Clips\Ranked win.mp4",
+        );
+
+        assert_eq!(cloud.uploads["local-1"].path, r"C:\Clips\Ranked win.mp4");
+        assert_eq!(cloud.uploads["local-2"].path, r"C:\Other\Session_1.mp4");
+    }
 
     fn marker(t_s: f64) -> ClipMarker {
         marker_with(t_s, EventKind::ChampionKill, true)
@@ -3655,66 +3202,6 @@ mod tests {
     }
 
     #[test]
-    fn list_clips_uses_marker_duration_without_parsing_mp4() {
-        let dir = TestDir::new("clipline-library", "list-marker-duration");
-        let media = dir.path().join("media");
-        let clip = media.join("broken-but-listed.mp4");
-        touch_mp4(&clip);
-        let markers = ClipMarkers {
-            recording_start_s: 0.0,
-            duration_s: 42.5,
-            player_summary: None,
-            audio_tracks: Vec::new(),
-            plays: Vec::new(),
-            markers: vec![marker(1.0)],
-        };
-        std::fs::write(
-            clip.with_extension("markers.json"),
-            serde_json::to_string(&markers).unwrap(),
-        )
-        .unwrap();
-
-        let clips = list_clips_from_dir(media).unwrap().clips;
-
-        assert_eq!(clips.len(), 1);
-        assert_eq!(clips[0].duration_s, Some(42.5));
-        assert_eq!(clips[0].markers.as_ref().unwrap().markers.len(), 1);
-    }
-
-    #[test]
-    fn local_library_scan_keeps_readable_sessions_and_warns_about_denied_children() {
-        let dir = TestDir::new("clipline-library", "partial-session-scan");
-        let media = dir.path().join("media");
-        let readable = media.join("readable-session");
-        let denied = media.join("denied-session");
-        touch_mp4(&readable.join("kept.mp4"));
-        std::fs::create_dir_all(&denied).unwrap();
-
-        let result = list_clips_from_dir_with_child_reader(media, |path, session, clips| {
-            if path.ends_with("denied-session") {
-                Err("access denied by test".into())
-            } else {
-                push_clips_from(path, session, clips)
-            }
-        })
-        .unwrap();
-
-        assert_eq!(result.clips.len(), 1);
-        assert_eq!(result.clips[0].name, "kept.mp4");
-        assert_eq!(result.warnings.len(), 1);
-        assert!(result.warnings[0].contains("denied-session"));
-        assert!(result.warnings[0].contains("access denied by test"));
-    }
-
-    #[test]
-    fn local_library_scan_keeps_root_failures_fatal() {
-        let dir = TestDir::new("clipline-library", "missing-root-scan");
-        let missing = dir.path().join("missing");
-
-        assert!(list_clips_from_dir(missing).is_err());
-    }
-
-    #[test]
     fn poster_diagnostics_classify_failures_without_retaining_paths_or_stderr() {
         assert_eq!(
             poster_failure_kind("ffmpeg is not available for poster extraction"),
@@ -3911,626 +3398,6 @@ mod tests {
         assert_eq!(peak.load(Ordering::SeqCst), 2);
     }
 
-    #[test]
-    fn list_clips_infers_audio_tracks_for_legacy_multitrack_clip() {
-        let dir = TestDir::new("clipline-library", "list-infer-audio-tracks");
-        let clip = dir.path().join("legacy.mp4");
-        std::fs::write(&clip, two_real_opus_audio_mp4()).unwrap();
-
-        let mut clips = Vec::new();
-        push_clips_from(dir.path(), None, &mut clips).unwrap();
-
-        assert_eq!(clips[0].duration_s, None);
-        let tracks = &clips[0]
-            .markers
-            .as_ref()
-            .expect("legacy clip gets inferred audio metadata")
-            .audio_tracks;
-        assert_eq!(tracks.len(), 2);
-        assert_eq!(tracks[0].id, "audio:0");
-        assert_eq!(tracks[0].track_index, 0);
-        assert_eq!(tracks[0].label, "Audio Track 1");
-        assert_eq!(tracks[1].id, "audio:1");
-        assert_eq!(tracks[1].track_index, 1);
-        assert_eq!(tracks[1].label, "Audio Track 2");
-    }
-
-    #[test]
-    fn normalized_clip_file_name_adds_mp4_and_preserves_valid_text() {
-        assert_eq!(
-            normalized_clip_file_name("Ranked win").unwrap(),
-            "Ranked win.mp4"
-        );
-        assert_eq!(
-            normalized_clip_file_name("Ranked win.Mp4").unwrap(),
-            "Ranked win.mp4"
-        );
-        assert_eq!(
-            normalized_clip_file_name("solo.queue.vod").unwrap(),
-            "solo.queue.vod.mp4"
-        );
-    }
-
-    #[test]
-    fn normalized_clip_file_name_rejects_paths_reserved_names_and_invalid_chars() {
-        for name in [
-            "",
-            "..",
-            "folder/clip",
-            r"folder\clip",
-            "bad:name",
-            "clip?",
-            "clip.",
-            "CON",
-            "LPT1.mp4",
-        ] {
-            assert!(
-                normalized_clip_file_name(name).is_err(),
-                "{name:?} should be rejected"
-            );
-        }
-    }
-
-    #[test]
-    fn remove_clip_files_deletes_clip_metadata_sidecar() {
-        let dir = TestDir::new("clipline-library", "delete-clip-metadata");
-        let clip = dir.path().join("clip.mp4");
-        touch_mp4(&clip);
-        std::fs::write(clip.with_extension("markers.json"), b"{}").unwrap();
-        std::fs::write(clip_metadata_path(&clip), br#"{"title":"Old title"}"#).unwrap();
-
-        remove_clip_files(&clip).unwrap();
-
-        assert!(!clip.exists());
-        assert!(!clip.with_extension("markers.json").exists());
-        assert!(!clip_metadata_path(&clip).exists());
-    }
-
-    #[test]
-    fn inferred_clip_kind_only_matches_generated_filename_patterns() {
-        assert_eq!(
-            inferred_clip_kind_for_path(Path::new("trimming-practice.mp4")),
-            "replay"
-        );
-        assert_eq!(
-            inferred_clip_kind_for_path(Path::new("obsession.mp4")),
-            "replay"
-        );
-        assert_eq!(
-            inferred_clip_kind_for_path(Path::new("clip_1_trim_001000_002000.mp4")),
-            "trim"
-        );
-        assert_eq!(
-            inferred_clip_kind_for_path(Path::new("session_1781377615.mp4")),
-            "session"
-        );
-    }
-
-    #[test]
-    fn write_clip_metadata_replaces_existing_sidecar() {
-        let dir = TestDir::new("clipline-library", "replace-clip-metadata");
-        let clip = dir.path().join("clip.mp4");
-        touch_mp4(&clip);
-
-        write_clip_metadata(
-            &clip,
-            &ClipMetadata {
-                title: Some("First title".to_string()),
-                kind: Some("replay".to_string()),
-            },
-        )
-        .unwrap();
-        write_clip_metadata(
-            &clip,
-            &ClipMetadata {
-                title: Some("Second title".to_string()),
-                kind: Some("session".to_string()),
-            },
-        )
-        .unwrap();
-
-        let metadata = read_clip_metadata(&clip).unwrap();
-        assert_eq!(metadata.title.as_deref(), Some("Second title"));
-        assert_eq!(metadata.kind.as_deref(), Some("session"));
-    }
-
-    #[test]
-    fn rename_clip_updates_title_metadata_without_moving_file() {
-        let dir = TestDir::new("clipline-library", "rename-title-metadata");
-        let root = dir.path().join("media");
-        let clip = root.join("2026-07-02").join("session_123.mp4");
-        touch_mp4(&clip);
-
-        let result = rename_clip_title(
-            clip.clone(),
-            clip.display().to_string(),
-            "Ranked win vs Lux".to_string(),
-        )
-        .unwrap();
-
-        assert_eq!(result.old_path, result.path);
-        assert_eq!(result.name, "session_123.mp4");
-        assert_eq!(result.title.as_deref(), Some("Ranked win vs Lux"));
-        assert_eq!(result.kind, "session");
-        assert!(clip.exists(), "display title rename must not move the MP4");
-
-        let clips = list_clips_from_dir(root).unwrap().clips;
-        assert_eq!(clips.len(), 1);
-        assert_eq!(clips[0].name, "session_123.mp4");
-        assert_eq!(clips[0].title.as_deref(), Some("Ranked win vs Lux"));
-        assert_eq!(clips[0].kind, "session");
-    }
-
-    #[test]
-    fn rename_clip_file_preserves_kind_and_moves_sidecars() {
-        let dir = TestDir::new("clipline-library", "rename-file-sidecars");
-        let root = dir.path().join("media");
-        let source = root.join("session_123.mp4");
-        let target = root.join("Ranked win.mp4");
-        touch_mp4(&source);
-        std::fs::write(source.with_extension("markers.json"), b"{}").unwrap();
-        std::fs::write(crate::poster::poster_path(&source), b"poster").unwrap();
-
-        let result = rename_clip_files(
-            source.clone(),
-            source.display().to_string(),
-            normalized_clip_file_name("Ranked win").unwrap(),
-        )
-        .unwrap();
-
-        assert_eq!(result.old_path, source.display().to_string());
-        assert_eq!(result.path, target.display().to_string());
-        assert_eq!(result.name, "Ranked win.mp4");
-        assert_eq!(result.title, None);
-        assert_eq!(result.kind, "session");
-        assert!(!source.exists(), "source MP4 should move");
-        assert!(target.exists(), "target MP4 should exist");
-        assert!(!source.with_extension("markers.json").exists());
-        assert!(target.with_extension("markers.json").exists());
-        assert!(!crate::poster::poster_path(&source).exists());
-        assert!(crate::poster::poster_path(&target).exists());
-
-        let clips = list_clips_from_dir(root).unwrap().clips;
-        assert_eq!(clips.len(), 1);
-        assert_eq!(clips[0].name, "Ranked win.mp4");
-        assert_eq!(clips[0].title, None);
-        assert_eq!(clips[0].kind, "session");
-    }
-
-    fn pending_osu_enrichment(clip: &Path) -> crate::osu_enrichment::OsuPendingEnrichment {
-        crate::osu_enrichment::OsuPendingEnrichment {
-            schema_version: 1,
-            clip_path: clip.display().to_string(),
-            recording_start_unix: 10,
-            recording_end_unix: 20,
-            clip_duration_s: 10.0,
-            status: crate::osu_enrichment::OsuEnrichmentStatus::Pending,
-            attempts: 0,
-            pagination_ceiling_reached: false,
-            title_events: Vec::new(),
-            message: None,
-        }
-    }
-
-    #[test]
-    fn prepared_osu_sidecar_move_commit_then_rollback_restores_exact_source() {
-        let dir = TestDir::new("clipline-library", "prepared-osu-rollback");
-        let source_clip = dir.path().join("session_1.mp4");
-        let target_clip = dir.path().join("Ranked win.mp4");
-        let source = crate::osu_enrichment::pending_path(&source_clip);
-        let target = crate::osu_enrichment::pending_path(&target_clip);
-        let original = serde_json::to_vec(&pending_osu_enrichment(&source_clip)).unwrap();
-        std::fs::write(&source, &original).unwrap();
-
-        let prepared = PreparedOsuSidecarMove::stage(&source_clip, &target_clip)
-            .unwrap()
-            .expect("source pending sidecar should prepare a move");
-        let staged = prepared.staged.clone();
-        let backup = prepared.backup.clone();
-
-        assert_eq!(std::fs::read(&source).unwrap(), original);
-        assert!(staged.exists());
-        assert!(!target.exists());
-        assert!(!backup.exists());
-
-        prepared.commit().unwrap();
-
-        assert!(!source.exists());
-        assert!(target.exists());
-        assert!(!staged.exists());
-        assert!(backup.exists());
-        let moved: crate::osu_enrichment::OsuPendingEnrichment =
-            serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
-        assert_eq!(moved.clip_path, target_clip.display().to_string());
-
-        prepared.rollback();
-
-        assert!(source.exists());
-        assert_eq!(std::fs::read(&source).unwrap(), original);
-        assert!(!target.exists());
-        assert!(!staged.exists());
-        assert!(!backup.exists());
-    }
-
-    #[test]
-    fn prepared_osu_sidecar_move_commit_then_finish_cleans_backup() {
-        let dir = TestDir::new("clipline-library", "prepared-osu-finish");
-        let source_clip = dir.path().join("session_1.mp4");
-        let target_clip = dir.path().join("Ranked win.mp4");
-        let source = crate::osu_enrichment::pending_path(&source_clip);
-        let target = crate::osu_enrichment::pending_path(&target_clip);
-        std::fs::write(
-            &source,
-            serde_json::to_vec_pretty(&pending_osu_enrichment(&source_clip)).unwrap(),
-        )
-        .unwrap();
-
-        let prepared = PreparedOsuSidecarMove::stage(&source_clip, &target_clip)
-            .unwrap()
-            .expect("source pending sidecar should prepare a move");
-        let staged = prepared.staged.clone();
-        let backup = prepared.backup.clone();
-        prepared.commit().unwrap();
-
-        assert!(target.exists());
-        assert!(backup.exists());
-        prepared.finish();
-
-        let moved: crate::osu_enrichment::OsuPendingEnrichment =
-            serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
-        assert_eq!(moved.clip_path, target_clip.display().to_string());
-        assert!(!source.exists());
-        assert!(!staged.exists());
-        assert!(!backup.exists());
-    }
-
-    #[test]
-    fn prepared_osu_sidecar_move_rejects_staging_path_collision_without_mutation() {
-        let dir = TestDir::new("clipline-library", "prepared-osu-staged-collision");
-        let source_clip = dir.path().join("session_1.mp4");
-        let target_clip = dir.path().join("Ranked win.mp4");
-        let source = crate::osu_enrichment::pending_path(&source_clip);
-        let target = crate::osu_enrichment::pending_path(&target_clip);
-        let staged = target.with_extension("osu-enrichment.rename.tmp");
-        let backup = source.with_extension("osu-enrichment.rename.backup");
-        let original = serde_json::to_vec(&pending_osu_enrichment(&source_clip)).unwrap();
-        std::fs::write(&source, &original).unwrap();
-        std::fs::write(&staged, b"occupied staged path").unwrap();
-
-        let error = match PreparedOsuSidecarMove::stage(&source_clip, &target_clip) {
-            Ok(_) => panic!("occupied staging path must stop preparation"),
-            Err(error) => error,
-        };
-
-        assert!(error.contains("staged osu! enrichment path"), "{error}");
-        assert_eq!(std::fs::read(&source).unwrap(), original);
-        assert_eq!(std::fs::read(&staged).unwrap(), b"occupied staged path");
-        assert!(!target.exists());
-        assert!(!backup.exists());
-    }
-
-    #[test]
-    fn prepared_osu_sidecar_move_rejects_backup_path_collision_without_mutation() {
-        let dir = TestDir::new("clipline-library", "prepared-osu-backup-collision");
-        let source_clip = dir.path().join("session_1.mp4");
-        let target_clip = dir.path().join("Ranked win.mp4");
-        let source = crate::osu_enrichment::pending_path(&source_clip);
-        let target = crate::osu_enrichment::pending_path(&target_clip);
-        let staged = target.with_extension("osu-enrichment.rename.tmp");
-        let backup = source.with_extension("osu-enrichment.rename.backup");
-        let original = serde_json::to_vec(&pending_osu_enrichment(&source_clip)).unwrap();
-        std::fs::write(&source, &original).unwrap();
-        std::fs::write(&backup, b"occupied backup path").unwrap();
-
-        let error = match PreparedOsuSidecarMove::stage(&source_clip, &target_clip) {
-            Ok(_) => panic!("occupied backup path must stop preparation"),
-            Err(error) => error,
-        };
-
-        assert!(error.contains("backup osu! enrichment path"), "{error}");
-        assert_eq!(std::fs::read(&source).unwrap(), original);
-        assert_eq!(std::fs::read(&backup).unwrap(), b"occupied backup path");
-        assert!(!target.exists());
-        assert!(!staged.exists());
-    }
-
-    #[test]
-    fn prepared_osu_sidecar_move_install_failure_restores_source_and_drop_cleans_stage() {
-        let dir = TestDir::new("clipline-library", "prepared-osu-install-failure");
-        let source_clip = dir.path().join("session_1.mp4");
-        let target_clip = dir.path().join("Ranked win.mp4");
-        let source = crate::osu_enrichment::pending_path(&source_clip);
-        let target = crate::osu_enrichment::pending_path(&target_clip);
-        let original = serde_json::to_vec(&pending_osu_enrichment(&source_clip)).unwrap();
-        std::fs::write(&source, &original).unwrap();
-
-        let prepared = PreparedOsuSidecarMove::stage(&source_clip, &target_clip)
-            .unwrap()
-            .expect("source pending sidecar should prepare a move");
-        let staged = prepared.staged.clone();
-        let backup = prepared.backup.clone();
-        std::fs::create_dir(&target).unwrap();
-
-        let error = prepared.commit().unwrap_err();
-
-        assert!(
-            error.contains("install renamed osu! enrichment sidecar"),
-            "{error}"
-        );
-        assert_eq!(std::fs::read(&source).unwrap(), original);
-        assert!(target.is_dir());
-        assert!(staged.exists());
-        assert!(!backup.exists());
-
-        drop(prepared);
-
-        assert_eq!(std::fs::read(&source).unwrap(), original);
-        assert!(target.is_dir());
-        assert!(!staged.exists());
-        assert!(!backup.exists());
-    }
-
-    #[test]
-    fn prepared_osu_sidecar_move_backup_rename_failure_preserves_source_and_drop_cleans_stage() {
-        let dir = TestDir::new("clipline-library", "prepared-osu-backup-rename-failure");
-        let source_clip = dir.path().join("session_1.mp4");
-        let target_clip = dir.path().join("Ranked win.mp4");
-        let source = crate::osu_enrichment::pending_path(&source_clip);
-        let target = crate::osu_enrichment::pending_path(&target_clip);
-        let original = serde_json::to_vec(&pending_osu_enrichment(&source_clip)).unwrap();
-        std::fs::write(&source, &original).unwrap();
-
-        let prepared = PreparedOsuSidecarMove::stage(&source_clip, &target_clip)
-            .unwrap()
-            .expect("source pending sidecar should prepare a move");
-        let staged = prepared.staged.clone();
-        let backup = prepared.backup.clone();
-        std::fs::create_dir(&backup).unwrap();
-
-        let error = prepared.commit().unwrap_err();
-
-        assert!(
-            error.contains("stage old osu! enrichment sidecar"),
-            "{error}"
-        );
-        assert_eq!(std::fs::read(&source).unwrap(), original);
-        assert!(!target.exists());
-        assert!(staged.exists());
-        assert!(backup.is_dir());
-
-        drop(prepared);
-
-        assert_eq!(std::fs::read(&source).unwrap(), original);
-        assert!(!target.exists());
-        assert!(!staged.exists());
-        assert!(backup.is_dir());
-        std::fs::remove_dir(&backup).unwrap();
-    }
-
-    #[test]
-    fn prepared_osu_sidecar_move_drop_cleans_uncommitted_stage_without_mutation() {
-        let dir = TestDir::new("clipline-library", "prepared-osu-drop");
-        let source_clip = dir.path().join("session_1.mp4");
-        let target_clip = dir.path().join("Ranked win.mp4");
-        let source = crate::osu_enrichment::pending_path(&source_clip);
-        let target = crate::osu_enrichment::pending_path(&target_clip);
-        let original = serde_json::to_vec(&pending_osu_enrichment(&source_clip)).unwrap();
-        std::fs::write(&source, &original).unwrap();
-
-        let staged;
-        let backup;
-        {
-            let prepared = PreparedOsuSidecarMove::stage(&source_clip, &target_clip)
-                .unwrap()
-                .expect("source pending sidecar should prepare a move");
-            staged = prepared.staged.clone();
-            backup = prepared.backup.clone();
-            assert!(staged.exists());
-            assert_eq!(std::fs::read(&source).unwrap(), original);
-            assert!(!target.exists());
-            assert!(!backup.exists());
-        }
-
-        assert_eq!(std::fs::read(&source).unwrap(), original);
-        assert!(!target.exists());
-        assert!(!staged.exists());
-        assert!(!backup.exists());
-    }
-
-    #[test]
-    fn rename_clip_file_moves_pending_osu_sidecar_and_rewrites_clip_path() {
-        let dir = TestDir::new("clipline-library", "rename-osu-pending");
-        let source = dir.path().join("session_1.mp4");
-        let target = dir.path().join("Ranked win.mp4");
-        touch_mp4(&source);
-        std::fs::write(
-            crate::osu_enrichment::pending_path(&source),
-            serde_json::to_vec_pretty(&pending_osu_enrichment(&source)).unwrap(),
-        )
-        .unwrap();
-
-        rename_clip_files(
-            source.clone(),
-            source.display().to_string(),
-            normalized_clip_file_name("Ranked win").unwrap(),
-        )
-        .unwrap();
-
-        assert!(!crate::osu_enrichment::pending_path(&source).exists());
-        let moved: crate::osu_enrichment::OsuPendingEnrichment = serde_json::from_slice(
-            &std::fs::read(crate::osu_enrichment::pending_path(&target)).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(moved.clip_path, target.display().to_string());
-    }
-
-    #[test]
-    fn rename_clip_file_rejects_malformed_pending_osu_before_moving_mp4() {
-        let dir = TestDir::new("clipline-library", "rename-osu-malformed");
-        let source = dir.path().join("session_1.mp4");
-        touch_mp4(&source);
-        std::fs::write(crate::osu_enrichment::pending_path(&source), b"not json").unwrap();
-
-        let error = match rename_clip_files(
-            source.clone(),
-            source.display().to_string(),
-            normalized_clip_file_name("Ranked win").unwrap(),
-        ) {
-            Ok(_) => panic!("malformed pending enrichment must stop the rename"),
-            Err(error) => error,
-        };
-
-        assert!(error.contains("osu! enrichment"), "{error}");
-        assert!(source.exists());
-        assert!(crate::osu_enrichment::pending_path(&source).exists());
-        assert!(!dir.path().join("Ranked win.mp4").exists());
-    }
-
-    #[test]
-    fn rename_clip_file_rejects_pending_osu_destination_collision() {
-        let dir = TestDir::new("clipline-library", "rename-osu-collision");
-        let source = dir.path().join("session_1.mp4");
-        let target = dir.path().join("Ranked win.mp4");
-        touch_mp4(&source);
-        let source_pending = crate::osu_enrichment::pending_path(&source);
-        let target_pending = crate::osu_enrichment::pending_path(&target);
-        let original = serde_json::to_vec(&pending_osu_enrichment(&source)).unwrap();
-        std::fs::write(&source_pending, &original).unwrap();
-        std::fs::write(&target_pending, b"occupied").unwrap();
-
-        let error = match rename_clip_files(
-            source.clone(),
-            source.display().to_string(),
-            normalized_clip_file_name("Ranked win").unwrap(),
-        ) {
-            Ok(_) => panic!("pending enrichment destination collision must stop the rename"),
-            Err(error) => error,
-        };
-
-        assert!(error.contains("osu! enrichment sidecar"), "{error}");
-        assert!(source.exists());
-        assert!(!target.exists());
-        assert_eq!(std::fs::read(&source_pending).unwrap(), original);
-        assert_eq!(std::fs::read(&target_pending).unwrap(), b"occupied");
-        assert!(!target_pending
-            .with_extension("osu-enrichment.rename.tmp")
-            .exists());
-        assert!(!source_pending
-            .with_extension("osu-enrichment.rename.backup")
-            .exists());
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn rename_clip_file_case_only_moves_mp4_and_rewrites_pending_osu_path() {
-        let dir = TestDir::new("clipline-library", "rename-osu-case-only");
-        let source = dir.path().join("session_1.mp4");
-        let target = dir.path().join("Session_1.mp4");
-        let source_markers = source.with_extension("markers.json");
-        let target_markers = target.with_extension("markers.json");
-        let source_metadata = clip_metadata_path(&source);
-        let target_metadata = clip_metadata_path(&target);
-        let marker_bytes = br#"{"marker":"case-only-marker"}"#;
-        touch_mp4(&source);
-        std::fs::write(&source_markers, marker_bytes).unwrap();
-        write_clip_metadata(
-            &source,
-            &ClipMetadata {
-                title: Some("Case-only metadata".to_string()),
-                kind: Some("session".to_string()),
-            },
-        )
-        .unwrap();
-        let metadata_bytes = std::fs::read(&source_metadata).unwrap();
-        std::fs::write(
-            crate::osu_enrichment::pending_path(&source),
-            serde_json::to_vec_pretty(&pending_osu_enrichment(&source)).unwrap(),
-        )
-        .unwrap();
-        let result = rename_clip_files(
-            source.clone(),
-            source.display().to_string(),
-            normalized_clip_file_name("Session_1").unwrap(),
-        )
-        .unwrap();
-
-        assert_eq!(result.path, target.display().to_string());
-        let names: Vec<String> = std::fs::read_dir(dir.path())
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        assert!(names.iter().any(|name| name == "Session_1.mp4"));
-        assert!(!names.iter().any(|name| name == "session_1.mp4"));
-        assert!(names.iter().any(|name| name == "Session_1.markers.json"));
-        assert!(!names.iter().any(|name| name == "session_1.markers.json"));
-        assert!(names.iter().any(|name| name == "Session_1.clipline.json"));
-        assert!(!names.iter().any(|name| name == "session_1.clipline.json"));
-        assert!(names
-            .iter()
-            .any(|name| name == "Session_1.osu-enrichment.json"));
-        assert!(!names
-            .iter()
-            .any(|name| name == "session_1.osu-enrichment.json"));
-        assert_eq!(std::fs::read(&target_markers).unwrap(), marker_bytes);
-        assert_eq!(std::fs::read(&target_metadata).unwrap(), metadata_bytes);
-
-        let moved: crate::osu_enrichment::OsuPendingEnrichment = serde_json::from_slice(
-            &std::fs::read(crate::osu_enrichment::pending_path(&target)).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(moved.clip_path, target.display().to_string());
-        assert!(!crate::osu_enrichment::pending_path(&target)
-            .with_extension("osu-enrichment.rename.tmp")
-            .exists());
-        assert!(!crate::osu_enrichment::pending_path(&source)
-            .with_extension("osu-enrichment.rename.backup")
-            .exists());
-        assert!(!target_metadata.with_extension("clipline.json.tmp").exists());
-        assert!(!names.iter().any(|name| name.contains(".rename.")));
-    }
-
-    #[test]
-    fn rename_clip_file_rolls_back_when_final_metadata_write_fails() {
-        let dir = TestDir::new("clipline-library", "rename-file-metadata-rollback");
-        let root = dir.path().join("media");
-        let source = root.join("session_123.mp4");
-        let target = root.join("Ranked win.mp4");
-        touch_mp4(&source);
-        let original_pending = pending_osu_enrichment(&source);
-        std::fs::write(
-            crate::osu_enrichment::pending_path(&source),
-            serde_json::to_vec_pretty(&original_pending).unwrap(),
-        )
-        .unwrap();
-        std::fs::write(source.with_extension("markers.json"), b"{}").unwrap();
-        std::fs::create_dir_all(clip_metadata_path(&target)).unwrap();
-
-        let err = match rename_clip_files(
-            source.clone(),
-            source.display().to_string(),
-            normalized_clip_file_name("Ranked win").unwrap(),
-        ) {
-            Ok(_) => panic!("metadata write failure should roll back moved clip files"),
-            Err(error) => error,
-        };
-
-        assert!(
-            err.contains("clip metadata"),
-            "unexpected rename error: {err}"
-        );
-        assert!(source.exists(), "source MP4 should be restored");
-        assert!(source.with_extension("markers.json").exists());
-        assert!(!target.exists(), "target MP4 should be rolled back");
-        assert!(!target.with_extension("markers.json").exists());
-        assert!(crate::osu_enrichment::pending_path(&source).exists());
-        assert!(!crate::osu_enrichment::pending_path(&target).exists());
-        let restored: crate::osu_enrichment::OsuPendingEnrichment = serde_json::from_slice(
-            &std::fs::read(crate::osu_enrichment::pending_path(&source)).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(restored.clip_path, source.display().to_string());
-    }
-
     fn touch_mp4(path: &Path) {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).unwrap();
@@ -4603,123 +3470,5 @@ mod tests {
                 }
             })
             .collect()
-    }
-
-    #[test]
-    fn validate_clip_path_accepts_root_and_session_clips() {
-        let dir = TestDir::new("clipline-library", "validate-accept");
-        let root = dir.path().join("media");
-        let settings = StorageSettings::new(None, root.clone());
-
-        let legacy = root.join("clip.mp4");
-        touch_mp4(&legacy);
-        let session = root.join("2026-06-12").join("clip.mp4");
-        touch_mp4(&session);
-
-        assert!(validate_clip_path(&settings, legacy.to_str().unwrap()).is_ok());
-        assert!(validate_clip_path(&settings, session.to_str().unwrap()).is_ok());
-    }
-
-    #[test]
-    fn validate_clip_path_rejects_escapes_and_non_mp4() {
-        let dir = TestDir::new("clipline-library", "validate-reject");
-        let root = dir.path().join("media");
-        std::fs::create_dir_all(&root).unwrap();
-        let settings = StorageSettings::new(None, root.clone());
-
-        // Two folders below the root — deeper than a session clip.
-        let too_deep = root.join("a").join("b").join("clip.mp4");
-        touch_mp4(&too_deep);
-        assert!(validate_clip_path(&settings, too_deep.to_str().unwrap()).is_err());
-
-        // A sibling directory outside the configured root.
-        let outside = dir.path().join("elsewhere").join("clip.mp4");
-        touch_mp4(&outside);
-        assert!(validate_clip_path(&settings, outside.to_str().unwrap()).is_err());
-
-        // Correct location, wrong extension.
-        let not_mp4 = root.join("clip.txt");
-        touch_mp4(&not_mp4);
-        assert!(validate_clip_path(&settings, not_mp4.to_str().unwrap()).is_err());
-    }
-
-    #[test]
-    fn delete_clips_impl_handles_partial_success_and_sidecars() {
-        let dir = TestDir::new("clipline-library", "delete-clips-impl");
-        let root = dir.path().join("media");
-        std::fs::create_dir_all(&root).unwrap();
-
-        // Two real clips, each with all four sidecars.
-        let a = root.join("a.mp4");
-        let b = root.join("b.mp4");
-        touch_mp4(&a);
-        touch_mp4(&b);
-        std::fs::write(a.with_extension("markers.json"), b"{}").unwrap();
-        std::fs::write(b.with_extension("markers.json"), b"{}").unwrap();
-        std::fs::write(clip_metadata_path(&a), b"{}").unwrap();
-        std::fs::write(clip_metadata_path(&b), b"{}").unwrap();
-        std::fs::write(a.with_extension("osu-enrichment.json"), b"{}").unwrap();
-        std::fs::write(b.with_extension("osu-enrichment.json"), b"{}").unwrap();
-        std::fs::write(crate::poster::poster_path(&a), b"poster").unwrap();
-        std::fs::write(crate::poster::poster_path(&b), b"poster").unwrap();
-
-        // A third clip that should be left untouched (not in the deleted set).
-        let c = root.join("c.mp4");
-        touch_mp4(&c);
-        std::fs::write(c.with_extension("markers.json"), b"{}").unwrap();
-        std::fs::write(clip_metadata_path(&c), b"{}").unwrap();
-        std::fs::write(c.with_extension("osu-enrichment.json"), b"{}").unwrap();
-
-        let validated = vec![
-            (a.to_str().unwrap().to_string(), a.clone()),
-            (b.to_str().unwrap().to_string(), b.clone()),
-        ];
-        // One path already failed validation upstream — passed through as failed.
-        let failed_in = vec![("bogus".to_string(), "refused".to_string())];
-
-        let report = delete_clips_impl(validated, failed_in);
-
-        assert_eq!(report.deleted.len(), 2);
-        assert_eq!(report.failed.len(), 1);
-        assert_eq!(report.failed[0].0, "bogus");
-        assert!(!a.exists(), "a.mp4 should be removed");
-        assert!(!b.exists(), "b.mp4 should be removed");
-        assert!(
-            !a.with_extension("markers.json").exists(),
-            "a.mp4 markers sidecar should be removed"
-        );
-        assert!(
-            !crate::poster::poster_path(&b).exists(),
-            "b.mp4 poster should be removed"
-        );
-        assert!(
-            !clip_metadata_path(&a).exists(),
-            "a.mp4 clip metadata should be removed"
-        );
-        assert!(
-            !clip_metadata_path(&b).exists(),
-            "b.mp4 clip metadata should be removed"
-        );
-        assert!(
-            !a.with_extension("osu-enrichment.json").exists(),
-            "a.mp4 pending osu! sidecar should be removed"
-        );
-        assert!(
-            !b.with_extension("osu-enrichment.json").exists(),
-            "b.mp4 pending osu! sidecar should be removed"
-        );
-        assert!(c.exists(), "c.mp4 must be left untouched");
-        assert!(
-            c.with_extension("markers.json").exists(),
-            "c.mp4 markers sidecar must be left untouched"
-        );
-        assert!(
-            clip_metadata_path(&c).exists(),
-            "c.mp4 clip metadata must be left untouched"
-        );
-        assert!(
-            c.with_extension("osu-enrichment.json").exists(),
-            "c.mp4 pending osu! sidecar must be left untouched"
-        );
     }
 }

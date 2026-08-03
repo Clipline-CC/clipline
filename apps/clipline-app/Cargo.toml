@@ -13,6 +13,7 @@ clipline-desktop = { path = "../../crates/clipline-desktop" }
 clipline-shell = { path = "../../crates/clipline-shell" }
 clipline-events = { path = "../../crates/clipline-events" }
 clipline-lol = { path = "../../crates/clipline-lol" }
+clipline-library = { path = "../../crates/clipline-library" }
 clipline-mp4 = { path = "../../crates/clipline-mp4" }
 clipline-storage = { path = "../../crates/clipline-storage" }
 clipline-settings = { path = "../../crates/clipline-settings" }
@@ -70,7 +71,6 @@ tauri-build = { version = "2", features = [] }
 [dev-dependencies]
 shiguredo_opus = { workspace = true }
 boa_engine = "0.21.1"
-clipline-library = { path = "../../crates/clipline-library" }
 clipline-test-utils = { path = "../../crates/clipline-test-utils" }
 httpmock = { workspace = true }
 png = "0.17"

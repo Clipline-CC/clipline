@@ -5,9 +5,13 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+clipline-events = { path = "../clipline-events" }
+clipline-mp4 = { path = "../clipline-mp4" }
+clipline-shell = { path = "../clipline-shell" }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
 boa_engine = "0.21.1"
-serde_json = { workspace = true }
+clipline-test-utils = { path = "../clipline-test-utils" }

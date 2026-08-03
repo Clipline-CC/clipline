@@ -52,9 +52,8 @@ fn neutral_library_contract_has_no_framework_or_platform_escape_hatches() {
         );
     }
 
-    let spike_manifest =
-        fs::read_to_string(root.join("apps/clipline-slint-spike/Cargo.toml"))
-            .expect("read Slint candidate manifest");
+    let spike_manifest = fs::read_to_string(root.join("apps/clipline-slint-spike/Cargo.toml"))
+        .expect("read Slint candidate manifest");
     assert!(
         !spike_manifest.contains("clipline-app"),
         "Slint candidate must not depend on the Tauri application binary"

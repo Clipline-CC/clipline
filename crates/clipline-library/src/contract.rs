@@ -1,7 +1,11 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{ClipPathIdentity, MAX_CATALOG_IDENTITY_BYTES};
+use crate::{
+    ClipPathIdentity, MarkerSidecarSummary, MAX_CATALOG_IDENTITY_BYTES,
+    MAX_CLIP_DETAIL_AUDIO_TRACKS, MAX_CLIP_DETAIL_FIELD_BYTES, MAX_CLIP_DETAIL_MARKERS,
+    MAX_CLIP_SIDECAR_PLAYS,
+};
 
 pub const MAX_CATALOG_PAGE_ROWS: usize = 60;
 pub const MAX_DECODED_PAGE_IMAGES: usize = 32;
@@ -222,6 +226,8 @@ pub struct LocalClipItem {
     pub duration_s: Option<f64>,
     pub marker_count: usize,
     pub game: Option<ClipGame>,
+    #[serde(default, skip_serializing_if = "MarkerSidecarSummary::is_empty")]
+    pub marker_summary: MarkerSidecarSummary,
 }
 
 impl LocalClipItem {
@@ -255,6 +261,39 @@ impl LocalClipItem {
         {
             return Err(PayloadBoundsError::Invalid {
                 field: "local.duration_s",
+            });
+        }
+        if self.marker_count > MAX_CLIP_DETAIL_MARKERS
+            || self.marker_summary.review_marker_count > MAX_CLIP_DETAIL_MARKERS
+            || self.marker_summary.audio_track_count > MAX_CLIP_DETAIL_AUDIO_TRACKS
+            || self.marker_summary.plays.total > MAX_CLIP_SIDECAR_PLAYS
+            || self.marker_summary.plays.passed > self.marker_summary.plays.total
+            || self.marker_summary.plays.failed > self.marker_summary.plays.total
+            || self.marker_summary.plays.incomplete > self.marker_summary.plays.total
+            || self
+                .marker_summary
+                .plays
+                .passed
+                .saturating_add(self.marker_summary.plays.failed)
+                .saturating_add(self.marker_summary.plays.incomplete)
+                != self.marker_summary.plays.total
+        {
+            return Err(PayloadBoundsError::Invalid {
+                field: "local.marker_summary",
+            });
+        }
+        if !self.marker_summary.duration_s.is_finite()
+            || self.marker_summary.duration_s < 0.0
+            || self.marker_summary.marker_digest.len() > MAX_CLIP_DETAIL_FIELD_BYTES
+            || self.marker_summary.search_text.len() > MAX_CLIP_DETAIL_FIELD_BYTES
+            || self
+                .marker_summary
+                .player_summary
+                .as_ref()
+                .is_some_and(|summary| summary.champion_name.len() > MAX_CLIP_DETAIL_FIELD_BYTES)
+        {
+            return Err(PayloadBoundsError::Invalid {
+                field: "local.marker_summary",
             });
         }
         Ok(())

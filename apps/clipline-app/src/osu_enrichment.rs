@@ -13,7 +13,6 @@ use crate::util::unix_now_i64;
 
 const PENDING_SCHEMA_VERSION: u32 = 1;
 const SESSION_META_FILE: &str = "clipline-session.json";
-const PENDING_EXTENSION: &str = "osu-enrichment.json";
 const UTC_SKEW_TOLERANCE_S: f64 = 15.0;
 const PASSED_RESULTS_SCREEN_PADDING_S: f64 = 1.0;
 const TITLE_EVENT_FALLBACK_LOOKBACK_S: i64 = 15 * 60;
@@ -34,36 +33,7 @@ pub struct OsuSavedClip {
     pub title_events: Vec<OsuTitleEvent>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OsuTitleEvent {
-    pub unix_s: i64,
-    pub title: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OsuEnrichmentStatus {
-    Pending,
-    Complete,
-    Failed,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct OsuPendingEnrichment {
-    pub schema_version: u32,
-    pub clip_path: String,
-    pub recording_start_unix: i64,
-    pub recording_end_unix: i64,
-    pub clip_duration_s: f64,
-    pub status: OsuEnrichmentStatus,
-    pub attempts: u32,
-    #[serde(default)]
-    pub pagination_ceiling_reached: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub title_events: Vec<OsuTitleEvent>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-}
+pub use clipline_library::{OsuEnrichmentStatus, OsuPendingEnrichment, OsuTitleEvent};
 
 /// A pending record bound to the filesystem objects from which it was
 /// discovered. The serialized `clip_path` is validated for consistency but
@@ -171,7 +141,7 @@ pub struct OsuMappedPlays {
 }
 
 pub fn pending_path(path: &Path) -> PathBuf {
-    path.with_extension(PENDING_EXTENSION)
+    clipline_library::clip_sidecar_paths(path).pending_osu
 }
 
 struct OwnedSidecarTemp {

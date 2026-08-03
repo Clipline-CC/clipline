@@ -19,6 +19,8 @@ use clipline_cloud_api::{
     CloudApiError, CloudApiResult, CloudClient, CreateUploadRequest, CreateUploadResponse,
     DiscoveryResponse, PartUploadResponse, UploadProgressResponse,
 };
+use clipline_library::{MutationLease, MutationPermit};
+use clipline_shell::FileIdentity;
 use reqwest::{header, StatusCode};
 use serde::Deserialize;
 use serde_json::Value;
@@ -28,7 +30,8 @@ use tokio_util::io::ReaderStream;
 use windows_sys::Win32::{
     Foundation::HANDLE,
     Storage::FileSystem::{
-        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_SHARE_READ,
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE,
     },
 };
 
@@ -40,7 +43,7 @@ const MAX_UPLOAD_PART_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_CONCURRENT_UPLOADS: usize = 2;
 static UPLOAD_PERMITS: tokio::sync::Semaphore =
     tokio::sync::Semaphore::const_new(MAX_CONCURRENT_UPLOADS);
-static ACTIVE_UPLOAD_SOURCES: OnceLock<Mutex<HashMap<UploadSourceIdentity, usize>>> =
+static ACTIVE_UPLOAD_SOURCES: OnceLock<Mutex<HashMap<UploadSourceIdentity, SourceActivity>>> =
     OnceLock::new();
 const ACTIVE_UPLOAD_MUTATION_ERROR: &str = "clip is uploading; wait for the upload to finish";
 
@@ -48,6 +51,12 @@ const ACTIVE_UPLOAD_MUTATION_ERROR: &str = "clip is uploading; wait for the uplo
 struct UploadSourceIdentity {
     volume_serial_number: u32,
     file_index: u64,
+}
+
+#[derive(Debug, Default)]
+struct SourceActivity {
+    uploads: usize,
+    mutation: bool,
 }
 
 pub async fn upload_mp4_file_with_progress<F>(
@@ -138,14 +147,39 @@ impl UploadSourceLease {
             .get_or_init(|| Mutex::new(HashMap::new()))
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let identity_probe = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .open(path)
+            .map_err(|error| upload_file_error("lease upload source", path, error))?;
+        let source_identity = opened_file_identity(&identity_probe)
+            .map_err(|error| upload_file_error("identify upload source", path, error))?;
+        if sources
+            .get(&source_identity)
+            .is_some_and(|activity| activity.mutation)
+        {
+            return Err(CloudApiError::InvalidUpload(
+                "clip is being modified; retry the upload".to_string(),
+            ));
+        }
+
+        // Acquire the restrictive kernel lease only after the identity-scoped
+        // mutation check. Keeping the registry lock across both steps makes
+        // either the mutation permit or the upload lease the atomic winner.
         let file = OpenOptions::new()
             .read(true)
             .share_mode(FILE_SHARE_READ)
             .open(path)
             .map_err(|error| upload_file_error("lease upload source", path, error))?;
-        let source_identity = opened_file_identity(&file)
-            .map_err(|error| upload_file_error("identify upload source", path, error))?;
-        *sources.entry(source_identity).or_default() += 1;
+        let leased_identity = opened_file_identity(&file)
+            .map_err(|error| upload_file_error("identify leased upload source", path, error))?;
+        if leased_identity != source_identity {
+            return Err(CloudApiError::InvalidUpload(
+                "clip changed while acquiring the upload lease; retry the upload".to_string(),
+            ));
+        }
+        let activity = sources.entry(source_identity).or_default();
+        activity.uploads = activity.uploads.saturating_add(1);
         Ok(Self {
             file: Some(file),
             source_identity,
@@ -165,14 +199,12 @@ impl Drop for UploadSourceLease {
         let mut sources = sources
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let remove = match sources.get_mut(&self.source_identity) {
-            Some(count) if *count > 1 => {
-                *count -= 1;
-                false
-            }
-            Some(_) => true,
-            None => false,
-        };
+        let remove = sources
+            .get_mut(&self.source_identity)
+            .is_some_and(|activity| {
+                activity.uploads = activity.uploads.saturating_sub(1);
+                activity.uploads == 0 && !activity.mutation
+            });
         if remove {
             sources.remove(&self.source_identity);
         }
@@ -203,14 +235,74 @@ pub(crate) fn is_active_upload_source(path: &Path) -> bool {
     }
     let identity = OpenOptions::new()
         .read(true)
-        .share_mode(FILE_SHARE_READ)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
         .open(path)
         .and_then(|file| opened_file_identity(&file));
-    identity.is_ok_and(|identity| sources.contains_key(&identity))
+    identity.is_ok_and(|identity| {
+        sources
+            .get(&identity)
+            .is_some_and(|activity| activity.uploads != 0)
+    })
 }
 
+#[cfg(test)]
 pub(crate) fn active_upload_source_error(path: &Path) -> Option<String> {
     is_active_upload_source(path).then(|| ACTIVE_UPLOAD_MUTATION_ERROR.to_string())
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct UploadMutationLease;
+
+#[derive(Debug)]
+struct UploadMutationPermit {
+    source_identity: UploadSourceIdentity,
+}
+
+impl MutationPermit for UploadMutationPermit {}
+
+impl Drop for UploadMutationPermit {
+    fn drop(&mut self) {
+        let Some(sources) = ACTIVE_UPLOAD_SOURCES.get() else {
+            return;
+        };
+        let mut sources = sources
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let remove = sources
+            .get_mut(&self.source_identity)
+            .is_some_and(|activity| {
+                activity.mutation = false;
+                activity.uploads == 0
+            });
+        if remove {
+            sources.remove(&self.source_identity);
+        }
+    }
+}
+
+impl MutationLease for UploadMutationLease {
+    fn acquire(
+        &self,
+        _canonical_path: &Path,
+        identity: FileIdentity,
+    ) -> Result<Box<dyn MutationPermit>, String> {
+        let volume_serial_number = u32::try_from(identity.device())
+            .map_err(|_| "identify clip mutation source: volume id is out of range".to_string())?;
+        let source_identity = UploadSourceIdentity {
+            volume_serial_number,
+            file_index: identity.file(),
+        };
+        let mut sources = ACTIVE_UPLOAD_SOURCES
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let activity = sources.entry(source_identity).or_default();
+        if activity.uploads != 0 || activity.mutation {
+            return Err(ACTIVE_UPLOAD_MUTATION_ERROR.to_string());
+        }
+        activity.mutation = true;
+        Ok(Box::new(UploadMutationPermit { source_identity }))
+    }
 }
 
 #[cfg(test)]
@@ -1367,6 +1459,40 @@ mod tests {
         assert!(is_active_upload_source(&alias));
         drop(lease);
         assert!(!is_active_upload_source(&alias));
+    }
+
+    #[test]
+    fn upload_and_mutation_leases_are_atomic_for_one_file_identity() {
+        let dir = TestDir::new("clipline-cloud-upload", "source-mutation-lease");
+        let path = dir.path().join("clip.mp4");
+        let alias = dir.path().join("clip-alias.mp4");
+        std::fs::write(&path, b"original").unwrap();
+        std::fs::hard_link(&path, &alias).unwrap();
+        let identity = clipline_shell::file_identity(&alias).unwrap();
+        let mutation_lease = UploadMutationLease;
+
+        let upload = UploadSourceLease::acquire(&path).unwrap();
+        let mutation_error = match mutation_lease.acquire(&path, identity) {
+            Ok(_) => panic!("an active upload must win over a mutation"),
+            Err(error) => error,
+        };
+        assert_eq!(mutation_error, ACTIVE_UPLOAD_MUTATION_ERROR);
+        drop(upload);
+
+        let mutation = mutation_lease.acquire(&path, identity).unwrap();
+        let upload_error = match UploadSourceLease::acquire(&alias) {
+            Ok(_) => panic!("an active mutation must win over an upload"),
+            Err(error) => error,
+        };
+        assert!(
+            upload_error.to_string().contains("clip is being modified"),
+            "{upload_error}"
+        );
+        drop(mutation);
+
+        let upload = UploadSourceLease::acquire(&path)
+            .expect("upload must acquire after the mutation permit is released");
+        drop(upload);
     }
 
     #[tokio::test]

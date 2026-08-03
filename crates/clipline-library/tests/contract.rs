@@ -167,6 +167,7 @@ fn dto_json_keeps_shipping_field_names_and_owned_values() {
             id: "lol".into(),
             name: "League of Legends".into(),
         }),
+        marker_summary: Default::default(),
     };
     let local_json = serde_json::to_value(&local).unwrap();
     for field in [

@@ -2066,23 +2066,29 @@ fn library_refresh_starts_osu_enrichment_retry() {
 }
 
 #[test]
-fn library_refresh_canonicalizes_the_media_root_once_before_scoping_clips() {
+fn library_refresh_uses_the_shared_canonical_root_before_scoping_clips() {
     let library = library_rs();
     let list_start = library
         .find("pub async fn list_clips<R: Runtime>")
         .expect("list_clips command");
     let list_end = library[list_start..]
-        .find("\nfn list_clips_from_dir")
+        .find("\n/// Only two heavyweight ffmpeg poster children")
         .map(|offset| list_start + offset)
-        .expect("list_clips helper follows command");
+        .expect("poster service follows list_clips");
     let list = &library[list_start..list_end];
 
-    assert!(list.contains("let canonical_scope_root = canonical_media_root(&scope_root)?;"));
+    assert!(list.contains("let scanner = LocalLibraryScanner::open(&dir)?;"));
+    assert!(list.contains("let canonical_scope_root = scanner.canonical_root().to_path_buf();"));
+    assert!(list.contains("scanner.scan(&CompatibilityClipProjection::new(&probe, &games))?"));
     assert!(list.contains("allow_local_clip_asset_from_canonical_root("));
     assert_eq!(
-        list.matches("canonical_media_root(&scope_root)").count(),
+        list.matches("scanner.canonical_root()").count(),
         1,
-        "the unchanging media root should be resolved once per Library refresh"
+        "the shared scanner's canonical root should be reused for asset scoping"
+    );
+    assert!(
+        !list.contains("canonical_media_root("),
+        "the adapter must not independently recanonicalize the scanner's root"
     );
 }
 
@@ -4134,10 +4140,10 @@ fn gallery_supports_multi_select_bulk_actions() {
 
     assert!(
         library.contains("pub async fn delete_clips")
-            && library.contains("fn delete_clips_impl")
-            && library.contains("fn remove_clip_files")
+            && library.contains("mutation_repository(&root)?")
+            && library.contains(".delete_many(&paths)")
             && library.contains("DeletedClipsReport"),
-        "library.rs must expose a shared deletion helper, batch delete command, testable core, and report struct"
+        "library.rs must keep the exact batch command/report while delegating deletion to the shared repository"
     );
     assert!(
         app.contains("crate::library::delete_clips"),
@@ -4233,20 +4239,20 @@ fn gallery_supports_multi_select_bulk_actions() {
     let delete_clip_rs = library
         .split("pub fn delete_clip")
         .nth(1)
-        .and_then(|rest| rest.split("pub struct DeletedClipsReport").next())
+        .and_then(|rest| rest.split("pub(crate) fn clip_sidecar_paths").next())
         .expect("delete_clip command body exists");
     assert!(
-        delete_clip_rs.contains("remove_clip_files(&target)"),
-        "single delete should call the same file-removal helper as bulk delete"
+        delete_clip_rs.contains("repository.delete(&clip)"),
+        "single delete should delegate to the shared repository"
     );
-    let delete_clips_impl_rs = library
-        .split("fn delete_clips_impl")
+    let delete_clips_rs = library
+        .split("pub async fn delete_clips")
         .nth(1)
-        .and_then(|rest| rest.split("pub async fn delete_clips").next())
-        .expect("delete_clips_impl body exists");
+        .and_then(|rest| rest.split("pub async fn rename_clip").next())
+        .expect("delete_clips command body exists");
     assert!(
-        delete_clips_impl_rs.contains("remove_clip_files(&target)"),
-        "bulk delete should call the shared file-removal helper"
+        delete_clips_rs.contains(".delete_many(&paths)"),
+        "bulk delete should delegate to the same shared repository"
     );
 }
 
@@ -4273,6 +4279,64 @@ fn returning_to_no_preview_selection_clears_stale_audio_status() {
     assert!(
         key_assign < status_clear,
         "setDeckStatus must appear after currentReviewAudioKey is updated so the label reflects the new selection"
+    );
+}
+
+#[test]
+fn rename_adapters_preserve_validation_order_asset_scope_and_alias_reconciliation() {
+    let library = library_rs();
+    let rename_title = library
+        .split("pub async fn rename_clip(")
+        .nth(1)
+        .and_then(|rest| rest.split("pub async fn rename_clip_file").next())
+        .expect("rename_clip command body exists");
+    let title_path_validation = rename_title
+        .find(".validate_clip_path(&path)")
+        .expect("title rename validates the selected path");
+    let title_name_validation = rename_title
+        .find(".rename_title(&clip, &name)")
+        .expect("title rename delegates name validation to the repository");
+    assert!(
+        title_path_validation < title_name_validation,
+        "path/root validation must retain precedence over title errors"
+    );
+
+    let rename_file = library
+        .split("pub async fn rename_clip_file")
+        .nth(1)
+        .and_then(|rest| rest.split("fn mutation_repository").next())
+        .expect("rename_clip_file command body exists");
+    let file_path_validation = rename_file
+        .find(".validate_clip_path(&task_path)")
+        .expect("file rename validates the selected path");
+    let file_name_validation = rename_file
+        .find(".rename_file(&clip, &name)")
+        .expect("file rename delegates name validation to the repository");
+    assert!(
+        file_path_validation < file_name_validation,
+        "path/root validation must retain precedence over filename errors"
+    );
+    for required in [
+        "repository.canonical_root().to_path_buf()",
+        "update_cloud_record_paths(&state, &path, &renamed.path)",
+        "allow_local_clip_asset_from_canonical_root(",
+        "&canonical_scope_root",
+        "Path::new(&renamed.path)",
+    ] {
+        assert!(
+            rename_file.contains(required),
+            "renamed assets must retain canonical-root authorization through `{required}`"
+        );
+    }
+
+    let reconciliation = library
+        .split("fn rewrite_cloud_record_paths")
+        .nth(1)
+        .and_then(|rest| rest.split("fn filter_review_markers").next())
+        .expect("cloud path reconciliation helper exists");
+    assert!(
+        reconciliation.contains("ClipPathIdentity::same(&record.path, old_path)"),
+        "Cloud records must reconcile legacy Windows path aliases, not only exact strings"
     );
 }
 

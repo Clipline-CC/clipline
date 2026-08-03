@@ -17,6 +17,7 @@ fn clip(path: &str, name: &str, modified_unix: u64) -> LocalClipItem {
         duration_s: Some(3.0),
         marker_count: 0,
         game: None,
+        marker_summary: Default::default(),
     }
 }
 

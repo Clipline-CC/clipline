@@ -308,6 +308,7 @@ fn inconsistent_pages_and_invalid_numeric_items_fail_closed() {
         duration_s: Some(-1.0),
         marker_count: 0,
         game: None,
+        marker_summary: Default::default(),
     };
     let result = CatalogResult::LocalPage {
         token,
@@ -385,6 +386,7 @@ fn inconsistent_pages_and_invalid_numeric_items_fail_closed() {
         duration_s: Some(1.0),
         marker_count: 0,
         game: None,
+        marker_summary: Default::default(),
     });
     assert_eq!(
         sender.try_send(result, ExpectedResultOwner::Window(token)),

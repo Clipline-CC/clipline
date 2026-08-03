@@ -997,6 +997,10 @@ name = "clipline-library"
 version = "0.1.0"
 dependencies = [
  "boa_engine",
+ "clipline-events",
+ "clipline-mp4",
+ "clipline-shell",
+ "clipline-test-utils",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -1051,6 +1055,7 @@ dependencies = [
 name = "clipline-shell"
 version = "0.1.0"
 dependencies = [
+ "rustix",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

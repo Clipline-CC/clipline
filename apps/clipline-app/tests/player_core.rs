@@ -3146,7 +3146,10 @@ fn only_user_repositions_force_a_sidecar_realignment() {
         "true"
     );
     assert_eq!(
-        eval(&mut ctx, "PlayerCore.sidecarRealignmentForced('assignment')"),
+        eval(
+            &mut ctx,
+            "PlayerCore.sidecarRealignmentForced('assignment')"
+        ),
         "false"
     );
     // Nothing confirmed: an incidental `seeked` forces nothing.
