@@ -147,6 +147,7 @@ pub enum CatalogProjectionSource<'a> {
         items: &'a [CloudLibraryItem],
         has_next: bool,
     },
+    CloudDisconnected,
 }
 
 /// Plain-data input for rebuilding the complete visible catalog projection.
@@ -202,6 +203,7 @@ pub fn build_catalog_projection<R: ProjectionReservation + ?Sized>(
             items,
             has_next,
         } => build_cloud_projection(input, owner, page, items, has_next, reservation)?,
+        CatalogProjectionSource::CloudDisconnected => disconnected_cloud_projection(),
     };
 
     let mut uploads = Vec::new();
@@ -317,11 +319,20 @@ fn validate_projection_input(input: &CatalogProjectionInput<'_>) -> Result<(), P
 
     let source = match input.source {
         CatalogProjectionSource::Local { .. } => CatalogSource::Local,
-        CatalogProjectionSource::Cloud { .. } => CatalogSource::Cloud,
+        CatalogProjectionSource::Cloud { .. } | CatalogProjectionSource::CloudDisconnected => {
+            CatalogSource::Cloud
+        }
     };
     if matches!(source, CatalogSource::Cloud) && !input.selected.is_empty() {
         return Err(PresentationError::Invalid {
             field: "projection.cloud_selection",
+        });
+    }
+    if matches!(input.source, CatalogProjectionSource::CloudDisconnected)
+        && (input.active.is_some() || input.menu.is_some() || input.dialog.is_some())
+    {
+        return Err(PresentationError::Invalid {
+            field: "projection.disconnected_cloud_target",
         });
     }
     for identity in input
@@ -344,6 +355,29 @@ fn validate_projection_input(input: &CatalogProjectionInput<'_>) -> Result<(), P
         }
     }
     Ok(())
+}
+
+fn disconnected_cloud_projection() -> (
+    CatalogSource,
+    Vec<PresentationRow>,
+    Vec<CatalogGroupProjection>,
+    CatalogPageProjection,
+) {
+    (
+        CatalogSource::Cloud,
+        Vec::new(),
+        Vec::new(),
+        CatalogPageProjection {
+            page: 1,
+            page_count: None,
+            total: None,
+            start: 0,
+            end: 0,
+            has_previous: false,
+            has_next: false,
+            range_text: "0".to_owned(),
+        },
+    )
 }
 
 fn build_local_projection<R: ProjectionReservation + ?Sized>(

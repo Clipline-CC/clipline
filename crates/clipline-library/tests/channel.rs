@@ -1,12 +1,14 @@
 use clipline_library::{
-    catalog_result_channel, CatalogResult, CatalogResultPublishOutcome, CatalogRevision,
-    ClipDetail, ClipDetailRequest, ClipDetailResult, ClipPathIdentity, CloudAccountGeneration,
-    CloudAccountKey, CloudLibraryItem, CloudListPageCompletion, CloudNextPage, CloudPageNumber,
-    CloudPageOutcome, CloudWorkToken, DeletedClipsReport, DurableUploadToken, ExpectedResultOwner,
-    ForegroundGeneration, LocalClipId, LocalClipItem, LocalIndexCompletion, PosterGeneration,
-    PosterResult, PosterStatus, PosterWorkToken, RequestGeneration, ResultPortError,
-    UploadDialogSummary, UploadGeneration, UploadSummary, WindowAttachmentGeneration,
-    WindowWorkToken, CATALOG_RESULT_BYTE_CAPACITY, CATALOG_RESULT_CAPACITY,
+    catalog_result_channel, CatalogItemIdentity, CatalogOperationOwner, CatalogResult,
+    CatalogResultPublishOutcome, CatalogRevision, ClipDetail, ClipDetailRequest, ClipDetailResult,
+    ClipPathIdentity, CloudAccountGeneration, CloudAccountKey, CloudLibraryItem,
+    CloudListPageCompletion, CloudMediaLeaseId, CloudNextPage, CloudPageNumber, CloudPageOutcome,
+    CloudReviewMediaOwner, CloudWorkToken, DeletedClipsReport, DurableUploadToken,
+    ExpectedResultOwner, ForegroundGeneration, LocalClipId, LocalClipItem, LocalIndexCompletion,
+    PosterGeneration, PosterResult, PosterStatus, PosterWorkToken, PreparedCloudReviewMedia,
+    RemoteClipId, RequestGeneration, ResultPortError, UploadDialogSummary, UploadGeneration,
+    UploadSummary, WindowAttachmentGeneration, WindowWorkToken, CATALOG_RESULT_BYTE_CAPACITY,
+    CATALOG_RESULT_CAPACITY,
 };
 
 fn window(request: u64) -> WindowWorkToken {
@@ -332,6 +334,133 @@ fn stale_account_changed_and_disconnected_are_distinct() {
         ),
         Err(ResultPortError::Disconnected)
     );
+}
+
+#[test]
+fn operation_failures_are_exact_terminal_barriers_and_report_account_changes() {
+    let (sender, receiver) = catalog_result_channel();
+    let owner = CatalogOperationOwner::LocalRefresh {
+        token: window(30),
+        revision: CatalogRevision::new(4),
+    };
+    let failure = || CatalogResult::OperationFailed {
+        owner: owner.clone(),
+        message: "scan failed".into(),
+    };
+    assert_eq!(
+        sender.try_send(failure(), ExpectedResultOwner::Operation(owner.clone())),
+        Ok(CatalogResultPublishOutcome::Queued)
+    );
+    assert_eq!(
+        sender.try_send(failure(), ExpectedResultOwner::Operation(owner.clone())),
+        Ok(CatalogResultPublishOutcome::Queued),
+        "terminal failures are barriers and must never replace one another"
+    );
+    assert_eq!(receiver.len(), 2);
+
+    let stale = CatalogOperationOwner::LocalRefresh {
+        token: window(31),
+        revision: CatalogRevision::new(4),
+    };
+    assert_eq!(
+        sender.try_send(failure(), ExpectedResultOwner::Operation(stale)),
+        Err(ResultPortError::Stale)
+    );
+
+    let cloud_owner = CatalogOperationOwner::CloudRefresh {
+        token: cloud("account-a", 1, 32),
+        revision: CatalogRevision::new(5),
+        page: CloudPageNumber::new(1).unwrap(),
+    };
+    let replacement_account = CatalogOperationOwner::CloudRefresh {
+        token: cloud("account-a", 2, 32),
+        revision: CatalogRevision::new(5),
+        page: CloudPageNumber::new(1).unwrap(),
+    };
+    assert_eq!(
+        sender.try_send(
+            CatalogResult::OperationFailed {
+                owner: cloud_owner,
+                message: "offline".into(),
+            },
+            ExpectedResultOwner::Operation(replacement_account),
+        ),
+        Err(ResultPortError::AccountChanged)
+    );
+}
+
+#[test]
+fn prepared_cloud_media_is_accepted_only_for_the_exact_item_window_and_account() {
+    let (sender, receiver) = catalog_result_channel();
+    let token = cloud("account-a", 1, 40);
+    let item = CatalogItemIdentity::Cloud {
+        account_key: token.account_key.clone(),
+        account_generation: token.account_generation,
+        remote_clip_id: RemoteClipId::new("remote-a").unwrap(),
+    };
+    let owner = CloudReviewMediaOwner::new(token, item).unwrap();
+    let result = || CatalogResult::CloudReviewMediaPrepared {
+        owner: owner.clone(),
+        media: PreparedCloudReviewMedia::new(
+            r"C:\Cache\remote-a.mp4",
+            CloudMediaLeaseId::new(9).unwrap(),
+        )
+        .unwrap(),
+    };
+
+    let mut stale_window = owner.clone();
+    stale_window.token.window.request = RequestGeneration::new(41);
+    assert_eq!(
+        sender.try_send(
+            result(),
+            ExpectedResultOwner::CloudReviewMedia(stale_window),
+        ),
+        Err(ResultPortError::Stale)
+    );
+
+    let other_item = CatalogItemIdentity::Cloud {
+        account_key: owner.token.account_key.clone(),
+        account_generation: owner.token.account_generation,
+        remote_clip_id: RemoteClipId::new("remote-b").unwrap(),
+    };
+    let other_item_owner = CloudReviewMediaOwner::new(owner.token.clone(), other_item).unwrap();
+    assert_eq!(
+        sender.try_send(
+            result(),
+            ExpectedResultOwner::CloudReviewMedia(other_item_owner),
+        ),
+        Err(ResultPortError::Stale)
+    );
+
+    let replacement_token = cloud("account-a", 2, 40);
+    let replacement_item = CatalogItemIdentity::Cloud {
+        account_key: replacement_token.account_key.clone(),
+        account_generation: replacement_token.account_generation,
+        remote_clip_id: RemoteClipId::new("remote-a").unwrap(),
+    };
+    let replacement_owner =
+        CloudReviewMediaOwner::new(replacement_token, replacement_item).unwrap();
+    assert_eq!(
+        sender.try_send(
+            result(),
+            ExpectedResultOwner::CloudReviewMedia(replacement_owner),
+        ),
+        Err(ResultPortError::AccountChanged)
+    );
+
+    assert_eq!(
+        sender.try_send(
+            result(),
+            ExpectedResultOwner::CloudReviewMedia(owner.clone()),
+        ),
+        Ok(CatalogResultPublishOutcome::Queued)
+    );
+    assert_eq!(
+        sender.try_send(result(), ExpectedResultOwner::CloudReviewMedia(owner)),
+        Ok(CatalogResultPublishOutcome::Queued),
+        "prepared-media completions are lease-bearing barriers"
+    );
+    assert_eq!(receiver.len(), 2);
 }
 
 #[test]

@@ -889,6 +889,64 @@ fn an_empty_nonfirst_cloud_page_is_not_projected_as_accepted_data() {
 }
 
 #[test]
+fn disconnected_cloud_projection_is_empty_and_rejects_owned_targets() {
+    let selected = Vec::new();
+    let posters = BTreeMap::new();
+    let projection = build_catalog_projection(
+        &CatalogProjectionInput {
+            revision: CatalogRevision::new(1),
+            source: CatalogProjectionSource::CloudDisconnected,
+            gallery: &GalleryPresentation::default(),
+            selected: &selected,
+            active: None,
+            posters: &posters,
+            menu: None,
+            dialog: None,
+            uploads: &[],
+            load_state: CatalogLoadState::Disconnected,
+        },
+        &TestDays,
+        &SystemProjectionReservation,
+    )
+    .unwrap();
+    assert_eq!(projection.source, clipline_library::CatalogSource::Cloud);
+    assert_eq!(projection.load_state, CatalogLoadState::Disconnected);
+    assert!(projection.rows.is_empty());
+    assert_eq!(projection.page.range_text, "0");
+
+    let owner = CloudCatalogOwner {
+        account_key: CloudAccountKey::new("account-a").unwrap(),
+        account_generation: CloudAccountGeneration::new(1),
+    };
+    let target = CatalogItemIdentity::Cloud {
+        account_key: owner.account_key,
+        account_generation: owner.account_generation,
+        remote_clip_id: clipline_library::RemoteClipId::new("remote-a").unwrap(),
+    };
+    assert!(matches!(
+        build_catalog_projection(
+            &CatalogProjectionInput {
+                revision: CatalogRevision::new(2),
+                source: CatalogProjectionSource::CloudDisconnected,
+                gallery: &GalleryPresentation::default(),
+                selected: &selected,
+                active: Some(&target),
+                posters: &posters,
+                menu: None,
+                dialog: None,
+                uploads: &[],
+                load_state: CatalogLoadState::Disconnected,
+            },
+            &TestDays,
+            &SystemProjectionReservation,
+        ),
+        Err(PresentationError::Invalid {
+            field: "projection.disconnected_cloud_target"
+        })
+    ));
+}
+
+#[test]
 fn projection_rejects_invalid_bounds_and_injected_reservation_failure_atomically() {
     let mut invalid = local_clip(0);
     invalid.path.clear();

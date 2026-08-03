@@ -1,19 +1,20 @@
 use std::path::PathBuf;
 
 use clipline_library::{
-    CatalogAction, CatalogEffect, CatalogItemIdentity, CatalogPage, CatalogResult, CatalogRevision,
-    CatalogSource, CatalogUploadOptions, CatalogUploadVisibility, ClipDetailRequest, ClipGame,
-    ClipPathIdentity, CloudAccountGeneration, CloudAccountKey, CloudAccountSnapshot,
-    CloudCatalogOwner, CloudLibraryItem, CloudListPageCompletion, CloudNextPage, CloudPageNumber,
-    CloudPageOutcome, CloudWorkToken, DurableUploadToken, ForegroundGeneration, GenerationError,
-    LocalClipFilter, LocalClipGrouping, LocalClipId, LocalClipItem, LocalClipSort,
-    LocalIndexCompletion, LocalPageIndex, MutationFailure, MutationReport, PayloadBoundsError,
-    PosterGeneration, PresentationRow, RemoteClipId, RequestGeneration, ResolvedLocalClip,
+    CatalogAction, CatalogEffect, CatalogItemIdentity, CatalogOperationOwner, CatalogPage,
+    CatalogResult, CatalogRevision, CatalogSource, CatalogUploadOptions, CatalogUploadVisibility,
+    ClipDetailRequest, ClipGame, ClipPathIdentity, CloudAccountGeneration, CloudAccountKey,
+    CloudAccountSnapshot, CloudCatalogOwner, CloudLibraryItem, CloudListPageCompletion,
+    CloudMediaLeaseId, CloudNextPage, CloudPageNumber, CloudPageOutcome, CloudReviewMediaOwner,
+    CloudWorkToken, DurableUploadToken, ForegroundGeneration, GenerationError, LocalClipFilter,
+    LocalClipGrouping, LocalClipId, LocalClipItem, LocalClipSort, LocalIndexCompletion,
+    LocalPageIndex, MutationFailure, MutationReport, PayloadBoundsError, PosterGeneration,
+    PreparedCloudReviewMedia, PresentationRow, RemoteClipId, RequestGeneration, ResolvedLocalClip,
     UploadGeneration, UploadSummary, WindowAttachmentGeneration, WindowWorkToken,
     MAX_CATALOG_IDENTITY_BYTES, MAX_CATALOG_PAGE_ROWS, MAX_CLOUD_INDEX_ROWS, MAX_CLOUD_SERVER_PAGE,
     MAX_DECODED_PAGE_IMAGES, MAX_LOCAL_INDEX_PAYLOAD_BYTES, MAX_LOCAL_INDEX_ROWS,
-    MAX_MUTATION_PATH_BYTES, MAX_POSTER_RESULT_ENTRIES, MAX_UPLOAD_DESCRIPTION_UTF16,
-    MAX_UPLOAD_SUMMARIES, MAX_UPLOAD_TITLE_UTF16,
+    MAX_MUTATION_ITEMS, MAX_MUTATION_PATH_BYTES, MAX_POSTER_RESULT_ENTRIES,
+    MAX_UPLOAD_DESCRIPTION_UTF16, MAX_UPLOAD_SUMMARIES, MAX_UPLOAD_TITLE_UTF16,
 };
 
 #[test]
@@ -566,10 +567,18 @@ fn action_collection_and_string_bounds_are_enforced() {
         CatalogAction::NextPage,
         CatalogAction::EnterSelection,
         CatalogAction::SelectVisiblePage,
+        CatalogAction::OpenDeleteSelection,
         CatalogAction::Escape,
     ] {
         assert_eq!(action.validate_bounds(), Ok(()));
+        let round_trip: CatalogAction =
+            serde_json::from_value(serde_json::to_value(&action).unwrap()).unwrap();
+        assert_eq!(round_trip, action);
     }
+    assert_eq!(
+        serde_json::to_value(CatalogAction::OpenDeleteSelection).unwrap()["kind"],
+        "open_delete_selection"
+    );
 }
 
 #[test]
@@ -774,4 +783,290 @@ fn typed_effects_pin_exact_owners_and_resolved_paths() {
             field: "upload_options.duplicate_audio_track_id"
         })
     );
+}
+
+#[test]
+fn fallible_effects_derive_exact_typed_operation_owners() {
+    let cloud = cloud_page_token();
+    let window = cloud.window;
+    let path = ClipPathIdentity::from_text(r"C:\Clips\One.mp4").unwrap();
+    let target = ResolvedLocalClip::new(path.clone(), r"C:\Clips\One.mp4").unwrap();
+    let revision = CatalogRevision::new(7);
+    let page = CloudPageNumber::new(3).unwrap();
+
+    assert_eq!(
+        CatalogEffect::RefreshLocal {
+            token: window,
+            revision,
+        }
+        .operation_owner(),
+        Ok(Some(CatalogOperationOwner::LocalRefresh {
+            token: window,
+            revision,
+        }))
+    );
+    assert_eq!(
+        CatalogEffect::RefreshCloud {
+            token: cloud.clone(),
+            revision,
+            page,
+            query: "marked".into(),
+        }
+        .operation_owner(),
+        Ok(Some(CatalogOperationOwner::CloudRefresh {
+            token: cloud.clone(),
+            revision,
+            page,
+        }))
+    );
+
+    let detail_request = ClipDetailRequest::new(path.clone(), window);
+    assert_eq!(
+        CatalogEffect::LoadClipDetail {
+            token: window,
+            request: detail_request.clone(),
+            target: target.clone(),
+        }
+        .operation_owner(),
+        Ok(Some(CatalogOperationOwner::ClipDetail {
+            owner: detail_request.owner().clone(),
+        }))
+    );
+    assert_eq!(
+        CatalogEffect::RenameTitle {
+            token: window,
+            target: target.clone(),
+            title: "One".into(),
+        }
+        .operation_owner(),
+        Ok(Some(CatalogOperationOwner::RenameTitle {
+            token: window,
+            target: path.clone(),
+        }))
+    );
+    assert_eq!(
+        CatalogEffect::RenameFile {
+            token: window,
+            target: target.clone(),
+            file_name: "One renamed.mp4".into(),
+        }
+        .operation_owner(),
+        Ok(Some(CatalogOperationOwner::RenameFile {
+            token: window,
+            target: path.clone(),
+        }))
+    );
+    assert_eq!(
+        CatalogEffect::Delete {
+            token: window,
+            targets: vec![target],
+        }
+        .operation_owner(),
+        Ok(Some(CatalogOperationOwner::Delete {
+            token: window,
+            targets: vec![path],
+        }))
+    );
+}
+
+#[test]
+fn cloud_review_media_requires_exact_account_window_item_and_lease() {
+    let cloud = cloud_page_token();
+    let item = CatalogItemIdentity::Cloud {
+        account_key: cloud.account_key.clone(),
+        account_generation: cloud.account_generation,
+        remote_clip_id: RemoteClipId::new("remote-review").unwrap(),
+    };
+    let owner = CloudReviewMediaOwner::new(cloud.clone(), item.clone()).unwrap();
+    assert_eq!(
+        owner.stable_catalog_owner(),
+        CloudCatalogOwner::from_work_token(&cloud)
+    );
+
+    let prepare = CatalogEffect::PrepareCloudReviewMedia {
+        owner: owner.clone(),
+    };
+    assert_eq!(prepare.validate_bounds(), Ok(()));
+    assert_eq!(
+        prepare.operation_owner(),
+        Ok(Some(CatalogOperationOwner::CloudReviewMedia {
+            owner: owner.clone(),
+        }))
+    );
+
+    let lease_id = CloudMediaLeaseId::new(41).unwrap();
+    let media = PreparedCloudReviewMedia::new(r"C:\Cache\remote-review.mp4", lease_id).unwrap();
+    assert_eq!(media.lease_id.get(), 41);
+    for effect in [
+        CatalogEffect::OpenPreparedCloudReview {
+            owner: owner.clone(),
+            media: media.clone(),
+        },
+        CatalogEffect::ReleaseCloudReviewMedia { lease_id },
+    ] {
+        assert_eq!(effect.validate_bounds(), Ok(()));
+    }
+
+    let prepared = CatalogResult::CloudReviewMediaPrepared {
+        owner: owner.clone(),
+        media: media.clone(),
+    };
+    assert_eq!(prepared.validate_bounds(), Ok(()));
+    assert!(prepared.is_barrier());
+    let prepared_json = serde_json::to_value(&prepared).unwrap();
+    assert_eq!(prepared_json["kind"], "cloud_review_media_prepared");
+    assert_eq!(prepared_json["media"]["lease_id"], 41);
+    let prepared_round_trip: CatalogResult = serde_json::from_value(prepared_json).unwrap();
+    assert_eq!(prepared_round_trip, prepared);
+
+    let mut wrong_account = cloud.clone();
+    wrong_account.account_generation = CloudAccountGeneration::new(99);
+    assert_eq!(
+        CloudReviewMediaOwner::new(wrong_account.clone(), item.clone()),
+        Err(PayloadBoundsError::Invalid {
+            field: "cloud_item.owner"
+        })
+    );
+    let invalid_prepared = CatalogResult::CloudReviewMediaPrepared {
+        owner: CloudReviewMediaOwner {
+            token: wrong_account,
+            item: item.clone(),
+        },
+        media: media.clone(),
+    };
+    assert_eq!(
+        invalid_prepared.validate_bounds(),
+        Err(PayloadBoundsError::Invalid {
+            field: "cloud_item.owner"
+        })
+    );
+    assert_eq!(
+        CloudReviewMediaOwner::new(
+            cloud.clone(),
+            CatalogItemIdentity::Local {
+                path: ClipPathIdentity::from_text(r"C:\Clips\One.mp4").unwrap(),
+            },
+        ),
+        Err(PayloadBoundsError::Invalid {
+            field: "cloud_item.owner"
+        })
+    );
+    let mut wrong_window = cloud;
+    wrong_window.window.request = RequestGeneration::new(99);
+    let wrong_window_owner = CloudReviewMediaOwner::new(wrong_window, item).unwrap();
+    assert_ne!(wrong_window_owner, owner);
+
+    assert_eq!(
+        PreparedCloudReviewMedia::new(" ", lease_id),
+        Err(PayloadBoundsError::Invalid {
+            field: "cloud_media.path"
+        })
+    );
+    assert_eq!(
+        CloudMediaLeaseId::new(0),
+        Err(PayloadBoundsError::Invalid {
+            field: "cloud_media.lease_id"
+        })
+    );
+    assert!(
+        serde_json::from_value::<PreparedCloudReviewMedia>(serde_json::json!({
+            "path": r"C:\Cache\remote-review.mp4",
+            "lease_id": 0,
+        }))
+        .is_err()
+    );
+    assert!(matches!(
+        PreparedCloudReviewMedia::new("x".repeat(MAX_CATALOG_IDENTITY_BYTES + 1), lease_id),
+        Err(PayloadBoundsError::TooLarge {
+            field: "cloud_media.path",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn operation_failures_are_bounded_barriers_with_exact_kind_and_owner() {
+    let cloud = cloud_page_token();
+    let window = cloud.window;
+    let path = ClipPathIdentity::from_text(r"C:\Clips\One.mp4").unwrap();
+    let owners = [
+        CatalogOperationOwner::LocalRefresh {
+            token: window,
+            revision: CatalogRevision::new(1),
+        },
+        CatalogOperationOwner::CloudRefresh {
+            token: cloud,
+            revision: CatalogRevision::new(2),
+            page: CloudPageNumber::new(1).unwrap(),
+        },
+        CatalogOperationOwner::ClipDetail {
+            owner: ClipDetailRequest::new(path.clone(), window).owner().clone(),
+        },
+        CatalogOperationOwner::RenameTitle {
+            token: window,
+            target: path.clone(),
+        },
+        CatalogOperationOwner::RenameFile {
+            token: window,
+            target: path.clone(),
+        },
+        CatalogOperationOwner::Delete {
+            token: window,
+            targets: vec![path],
+        },
+    ];
+
+    for owner in owners {
+        assert_eq!(owner.validate_bounds(), Ok(()));
+        let failure = CatalogResult::OperationFailed {
+            owner,
+            message: "operation failed".into(),
+        };
+        assert_eq!(failure.validate_bounds(), Ok(()));
+        assert!(failure.is_barrier());
+        let json = serde_json::to_value(&failure).unwrap();
+        assert_eq!(json["kind"], "operation_failed");
+        let round_trip: CatalogResult = serde_json::from_value(json).unwrap();
+        assert_eq!(round_trip, failure);
+    }
+
+    assert_eq!(
+        CatalogOperationOwner::Delete {
+            token: window,
+            targets: Vec::new(),
+        }
+        .validate_bounds(),
+        Err(PayloadBoundsError::Invalid {
+            field: "operation.delete.targets"
+        })
+    );
+    let too_many = CatalogOperationOwner::Delete {
+        token: window,
+        targets: vec![
+            ClipPathIdentity::from_text(r"C:\Clips\One.mp4").unwrap();
+            MAX_MUTATION_ITEMS + 1
+        ],
+    };
+    assert!(matches!(
+        too_many.validate_bounds(),
+        Err(PayloadBoundsError::TooLarge {
+            field: "operation.delete.targets",
+            actual,
+            maximum: MAX_MUTATION_ITEMS,
+        }) if actual == MAX_MUTATION_ITEMS + 1
+    ));
+    let oversized_message = CatalogResult::OperationFailed {
+        owner: CatalogOperationOwner::LocalRefresh {
+            token: window,
+            revision: CatalogRevision::new(1),
+        },
+        message: "x".repeat(64 * 1024 + 1),
+    };
+    assert!(matches!(
+        oversized_message.validate_bounds(),
+        Err(PayloadBoundsError::TooLarge {
+            field: "operation_failure.message",
+            ..
+        })
+    ));
 }

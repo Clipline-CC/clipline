@@ -5,8 +5,8 @@ use std::time::Duration;
 use thiserror::Error;
 
 use crate::{
-    CatalogResult, ClipDetailOwner, CloudWorkToken, DurableUploadToken, GenerationError,
-    PosterWorkToken, WindowWorkToken,
+    CatalogOperationOwner, CatalogResult, ClipDetailOwner, CloudReviewMediaOwner, CloudWorkToken,
+    DurableUploadToken, GenerationError, PosterWorkToken, WindowWorkToken,
 };
 
 pub const CATALOG_RESULT_CAPACITY: usize = 128;
@@ -19,6 +19,8 @@ pub enum ExpectedResultOwner {
     Poster(PosterWorkToken),
     Cloud(CloudWorkToken),
     Upload(DurableUploadToken),
+    Operation(CatalogOperationOwner),
+    CloudReviewMedia(CloudReviewMediaOwner),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,7 +96,12 @@ fn coalesce_key(result: &CatalogResult) -> Option<CoalesceKey> {
         CatalogResult::UploadByteProgress { token, .. } => {
             Some(CoalesceKey::UploadBytes(token.clone()))
         }
-        CatalogResult::RenameCompleted { .. }
+        // Terminal completions and failures are barriers. They deliberately do
+        // not coalesce, so a later result can never replace one across a state
+        // transition even when it carries the same exact operation owner.
+        CatalogResult::OperationFailed { .. }
+        | CatalogResult::CloudReviewMediaPrepared { .. }
+        | CatalogResult::RenameCompleted { .. }
         | CatalogResult::DeleteCompleted { .. }
         | CatalogResult::UploadCompleted { .. }
         | CatalogResult::ForegroundFeedback { .. } => None,
@@ -120,6 +127,14 @@ fn validate_owner(
                 .then_some(())
                 .ok_or(ResultPortError::Stale)
         }
+        (
+            CatalogResult::OperationFailed { owner, .. },
+            ExpectedResultOwner::Operation(expected),
+        ) => validate_operation_owner(owner, expected),
+        (
+            CatalogResult::CloudReviewMediaPrepared { owner, .. },
+            ExpectedResultOwner::CloudReviewMedia(expected),
+        ) => validate_cloud_review_media_owner(owner, expected),
         (CatalogResult::Poster { token, .. }, ExpectedResultOwner::Poster(expected)) => (token
             == expected)
             .then_some(())
@@ -156,6 +171,37 @@ fn validate_owner(
             ExpectedResultOwner::Cloud(_),
         ) => Err(ResultPortError::AccountChanged),
         _ => Err(ResultPortError::Stale),
+    }
+}
+
+fn validate_operation_owner(
+    actual: &CatalogOperationOwner,
+    expected: &CatalogOperationOwner,
+) -> Result<(), ResultPortError> {
+    match (actual.cloud_token(), expected.cloud_token()) {
+        (Some(actual), Some(expected))
+            if actual.account_key != expected.account_key
+                || actual.account_generation != expected.account_generation =>
+        {
+            Err(ResultPortError::AccountChanged)
+        }
+        _ if actual == expected => Ok(()),
+        _ => Err(ResultPortError::Stale),
+    }
+}
+
+fn validate_cloud_review_media_owner(
+    actual: &CloudReviewMediaOwner,
+    expected: &CloudReviewMediaOwner,
+) -> Result<(), ResultPortError> {
+    if actual.token.account_key != expected.token.account_key
+        || actual.token.account_generation != expected.token.account_generation
+    {
+        Err(ResultPortError::AccountChanged)
+    } else if actual == expected {
+        Ok(())
+    } else {
+        Err(ResultPortError::Stale)
     }
 }
 

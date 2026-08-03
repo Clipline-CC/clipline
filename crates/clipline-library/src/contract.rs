@@ -2,11 +2,11 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    ClipDetailRequest, ClipDetailResult, ClipPathIdentity, DeletedClipsReport, LocalClipFilter,
-    LocalClipGrouping, LocalClipSort, MarkerSidecarSummary, PosterWorkToken, RenamedClipInfo,
-    MAX_CATALOG_IDENTITY_BYTES, MAX_CLIP_DETAIL_AUDIO_TRACKS, MAX_CLIP_DETAIL_FIELD_BYTES,
-    MAX_CLIP_DETAIL_MARKERS, MAX_CLIP_SIDECAR_PLAYS, MAX_UPLOAD_DESCRIPTION_UTF16,
-    MAX_UPLOAD_TITLE_UTF16,
+    ClipDetailOwner, ClipDetailRequest, ClipDetailResult, ClipPathIdentity, DeletedClipsReport,
+    LocalClipFilter, LocalClipGrouping, LocalClipSort, MarkerSidecarSummary, PosterWorkToken,
+    RenamedClipInfo, MAX_CATALOG_IDENTITY_BYTES, MAX_CLIP_DETAIL_AUDIO_TRACKS,
+    MAX_CLIP_DETAIL_FIELD_BYTES, MAX_CLIP_DETAIL_MARKERS, MAX_CLIP_SIDECAR_PLAYS,
+    MAX_UPLOAD_DESCRIPTION_UTF16, MAX_UPLOAD_TITLE_UTF16,
 };
 
 pub const MAX_CATALOG_PAGE_ROWS: usize = 60;
@@ -224,6 +224,39 @@ impl CloudCatalogOwner {
     }
 }
 
+/// Opaque registry handle that keeps one accepted Cloud media cache entry
+/// protected for playback. Zero is reserved so a missing lease cannot be
+/// confused with an owned path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct CloudMediaLeaseId(u64);
+
+impl CloudMediaLeaseId {
+    pub fn new(value: u64) -> Result<Self, PayloadBoundsError> {
+        if value == 0 {
+            Err(PayloadBoundsError::Invalid {
+                field: "cloud_media.lease_id",
+            })
+        } else {
+            Ok(Self(value))
+        }
+    }
+
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for CloudMediaLeaseId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Self::new(u64::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DurableUploadToken {
     pub account_key: CloudAccountKey,
@@ -292,6 +325,185 @@ impl CatalogItemIdentity {
             } if account_key == &owner.account_key
                 && *account_generation == owner.account_generation
         )
+    }
+}
+
+/// Exact ownership fence for downloading, accepting, and opening one Cloud
+/// clip. The window request prevents a late download from opening after the
+/// foreground changes; the account fields prevent a replacement login from
+/// inheriting the result.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CloudReviewMediaOwner {
+    pub token: CloudWorkToken,
+    pub item: CatalogItemIdentity,
+}
+
+impl CloudReviewMediaOwner {
+    pub fn new(
+        token: CloudWorkToken,
+        item: CatalogItemIdentity,
+    ) -> Result<Self, PayloadBoundsError> {
+        let owner = Self { token, item };
+        owner.validate_bounds()?;
+        Ok(owner)
+    }
+
+    pub fn validate_bounds(&self) -> Result<(), PayloadBoundsError> {
+        validate_cloud_item_owner(&self.item, &self.token)
+    }
+
+    #[must_use]
+    pub fn stable_catalog_owner(&self) -> CloudCatalogOwner {
+        CloudCatalogOwner::from_work_token(&self.token)
+    }
+}
+
+/// A cache path whose eviction protection is held by the executor under the
+/// opaque lease id. The controller must emit `ReleaseCloudReviewMedia` when a
+/// prepared result is stale or when playback stops retaining the path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreparedCloudReviewMedia {
+    pub path: String,
+    pub lease_id: CloudMediaLeaseId,
+}
+
+impl PreparedCloudReviewMedia {
+    pub fn new(
+        path: impl Into<String>,
+        lease_id: CloudMediaLeaseId,
+    ) -> Result<Self, PayloadBoundsError> {
+        let media = Self {
+            path: path.into(),
+            lease_id,
+        };
+        media.validate_bounds()?;
+        Ok(media)
+    }
+
+    pub fn validate_bounds(&self) -> Result<(), PayloadBoundsError> {
+        if self.path.trim().is_empty() {
+            return Err(PayloadBoundsError::Invalid {
+                field: "cloud_media.path",
+            });
+        }
+        check_string("cloud_media.path", &self.path)
+    }
+}
+
+/// Exact owner of a fallible catalog operation. Each variant contains every
+/// fence needed to terminate only the request that emitted the corresponding
+/// effect; failures never clear newer work.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CatalogOperationOwner {
+    LocalRefresh {
+        token: WindowWorkToken,
+        revision: CatalogRevision,
+    },
+    CloudRefresh {
+        token: CloudWorkToken,
+        revision: CatalogRevision,
+        page: CloudPageNumber,
+    },
+    ClipDetail {
+        owner: ClipDetailOwner,
+    },
+    RenameTitle {
+        token: WindowWorkToken,
+        target: ClipPathIdentity,
+    },
+    RenameFile {
+        token: WindowWorkToken,
+        target: ClipPathIdentity,
+    },
+    Delete {
+        token: WindowWorkToken,
+        targets: Vec<ClipPathIdentity>,
+    },
+    CloudReviewMedia {
+        owner: CloudReviewMediaOwner,
+    },
+}
+
+impl CatalogOperationOwner {
+    pub fn validate_bounds(&self) -> Result<(), PayloadBoundsError> {
+        match self {
+            Self::LocalRefresh { .. }
+            | Self::CloudRefresh { .. }
+            | Self::ClipDetail { .. }
+            | Self::RenameTitle { .. }
+            | Self::RenameFile { .. } => Ok(()),
+            Self::Delete { targets, .. } => {
+                if targets.is_empty() {
+                    return Err(PayloadBoundsError::Invalid {
+                        field: "operation.delete.targets",
+                    });
+                }
+                check_len(
+                    "operation.delete.targets",
+                    targets.len(),
+                    MAX_MUTATION_ITEMS,
+                )?;
+                let path_bytes = targets.iter().fold(0_usize, |total, path| {
+                    total.saturating_add(path.as_str().len())
+                });
+                check_len(
+                    "operation.delete.target_path_bytes",
+                    path_bytes,
+                    MAX_MUTATION_PATH_BYTES,
+                )
+            }
+            Self::CloudReviewMedia { owner } => owner.validate_bounds(),
+        }
+    }
+
+    #[must_use]
+    pub const fn cloud_token(&self) -> Option<&CloudWorkToken> {
+        match self {
+            Self::CloudRefresh { token, .. } => Some(token),
+            Self::CloudReviewMedia { owner } => Some(&owner.token),
+            Self::LocalRefresh { .. }
+            | Self::ClipDetail { .. }
+            | Self::RenameTitle { .. }
+            | Self::RenameFile { .. }
+            | Self::Delete { .. } => None,
+        }
+    }
+
+    fn estimated_byte_size(&self) -> usize {
+        match self {
+            Self::Delete { targets, .. } => targets
+                .iter()
+                .map(ClipPathIdentity::owned_capacity)
+                .fold(0_usize, usize::saturating_add)
+                .saturating_add(
+                    targets
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<ClipPathIdentity>()),
+                ),
+            Self::CloudRefresh { token, .. } => token.account_key.0.capacity(),
+            Self::RenameTitle { target, .. } | Self::RenameFile { target, .. } => {
+                target.owned_capacity()
+            }
+            Self::CloudReviewMedia { owner } => owner
+                .token
+                .account_key
+                .0
+                .capacity()
+                .saturating_add(match &owner.item {
+                    CatalogItemIdentity::Cloud {
+                        account_key,
+                        remote_clip_id,
+                        ..
+                    } => account_key
+                        .0
+                        .capacity()
+                        .saturating_add(remote_clip_id.0.capacity()),
+                    CatalogItemIdentity::Local { path } => path.owned_capacity(),
+                }),
+            Self::ClipDetail { owner } => owner.item().owned_capacity(),
+            Self::LocalRefresh { .. } => 0,
+        }
     }
 }
 
@@ -1118,6 +1330,7 @@ pub enum CatalogAction {
     OpenDelete {
         item: CatalogItemIdentity,
     },
+    OpenDeleteSelection,
     OpenUpload {
         item: CatalogItemIdentity,
     },
@@ -1200,6 +1413,7 @@ enum CatalogActionDef {
     OpenDelete {
         item: CatalogItemIdentity,
     },
+    OpenDeleteSelection,
     OpenUpload {
         item: CatalogItemIdentity,
     },
@@ -1268,6 +1482,7 @@ impl CatalogAction {
             | Self::OpenRenameTitle { .. }
             | Self::OpenRenameFile { .. }
             | Self::OpenDelete { .. }
+            | Self::OpenDeleteSelection
             | Self::OpenUpload { .. }
             | Self::SetUploadVisibility { .. }
             | Self::SetDeleteLocalAfterUpload { .. }
@@ -1375,10 +1590,15 @@ pub enum CatalogEffect {
         token: WindowWorkToken,
         target: ResolvedLocalClip,
     },
-    OpenCloudReview {
-        token: CloudWorkToken,
-        item: CatalogItemIdentity,
-        media_path: String,
+    PrepareCloudReviewMedia {
+        owner: CloudReviewMediaOwner,
+    },
+    OpenPreparedCloudReview {
+        owner: CloudReviewMediaOwner,
+        media: PreparedCloudReviewMedia,
+    },
+    ReleaseCloudReviewMedia {
+        lease_id: CloudMediaLeaseId,
     },
     CloseReview {
         token: WindowWorkToken,
@@ -1422,11 +1642,66 @@ pub enum CatalogEffect {
 }
 
 impl CatalogEffect {
+    /// Derives the exact owner executors must echo in `OperationFailed`.
+    /// Effects without controller-owned fallible work return `None`.
+    pub fn operation_owner(&self) -> Result<Option<CatalogOperationOwner>, PayloadBoundsError> {
+        self.validate_bounds()?;
+        Ok(match self {
+            Self::RefreshLocal { token, revision } => Some(CatalogOperationOwner::LocalRefresh {
+                token: *token,
+                revision: *revision,
+            }),
+            Self::RefreshCloud {
+                token,
+                revision,
+                page,
+                ..
+            } => Some(CatalogOperationOwner::CloudRefresh {
+                token: token.clone(),
+                revision: *revision,
+                page: *page,
+            }),
+            Self::LoadClipDetail { request, .. } => Some(CatalogOperationOwner::ClipDetail {
+                owner: request.owner().clone(),
+            }),
+            Self::PrepareCloudReviewMedia { owner } => {
+                Some(CatalogOperationOwner::CloudReviewMedia {
+                    owner: owner.clone(),
+                })
+            }
+            Self::RenameTitle { token, target, .. } => Some(CatalogOperationOwner::RenameTitle {
+                token: *token,
+                target: target.identity.clone(),
+            }),
+            Self::RenameFile { token, target, .. } => Some(CatalogOperationOwner::RenameFile {
+                token: *token,
+                target: target.identity.clone(),
+            }),
+            Self::Delete { token, targets } => Some(CatalogOperationOwner::Delete {
+                token: *token,
+                targets: targets
+                    .iter()
+                    .map(|target| target.identity.clone())
+                    .collect(),
+            }),
+            Self::OpenLocalReview { .. }
+            | Self::OpenPreparedCloudReview { .. }
+            | Self::ReleaseCloudReviewMedia { .. }
+            | Self::CloseReview { .. }
+            | Self::StartUpload { .. }
+            | Self::CancelUpload { .. }
+            | Self::Reveal { .. }
+            | Self::OpenInBrowser { .. }
+            | Self::CopyPublicLink { .. } => None,
+        })
+    }
+
     pub fn validate_bounds(&self) -> Result<(), PayloadBoundsError> {
         match self {
-            Self::RefreshLocal { .. } | Self::CloseReview { .. } | Self::CancelUpload { .. } => {
-                Ok(())
-            }
+            Self::RefreshLocal { .. }
+            | Self::CloseReview { .. }
+            | Self::CancelUpload { .. }
+            | Self::ReleaseCloudReviewMedia { .. } => Ok(()),
             Self::RefreshCloud { query, .. } => check_string("cloud_refresh.query", query),
             Self::LoadClipDetail {
                 token,
@@ -1444,13 +1719,10 @@ impl CatalogEffect {
             Self::OpenLocalReview { target, .. } | Self::Reveal { target, .. } => {
                 target.validate_bounds()
             }
-            Self::OpenCloudReview {
-                token,
-                item,
-                media_path,
-            } => {
-                validate_cloud_item_owner(item, token)?;
-                check_string("cloud_review.media_path", media_path)
+            Self::PrepareCloudReviewMedia { owner } => owner.validate_bounds(),
+            Self::OpenPreparedCloudReview { owner, media } => {
+                owner.validate_bounds()?;
+                media.validate_bounds()
             }
             Self::RenameTitle { target, title, .. } => {
                 target.validate_bounds()?;
@@ -1526,6 +1798,14 @@ pub enum CatalogResult {
     LocalIndex(LocalIndexCompletion),
     CloudPage(CloudListPageCompletion),
     ClipDetail(ClipDetailResult),
+    OperationFailed {
+        owner: CatalogOperationOwner,
+        message: String,
+    },
+    CloudReviewMediaPrepared {
+        owner: CloudReviewMediaOwner,
+        media: PreparedCloudReviewMedia,
+    },
     Poster {
         token: PosterWorkToken,
         poster: PosterResult,
@@ -1557,7 +1837,9 @@ impl CatalogResult {
     pub const fn is_barrier(&self) -> bool {
         matches!(
             self,
-            Self::RenameCompleted { .. }
+            Self::OperationFailed { .. }
+                | Self::CloudReviewMediaPrepared { .. }
+                | Self::RenameCompleted { .. }
                 | Self::DeleteCompleted { .. }
                 | Self::UploadCompleted { .. }
                 | Self::ForegroundFeedback { .. }
@@ -1569,6 +1851,18 @@ impl CatalogResult {
             Self::LocalIndex(completion) => completion.validate_bounds(),
             Self::CloudPage(completion) => completion.validate_bounds(),
             Self::ClipDetail(_) => Ok(()),
+            Self::OperationFailed { owner, message } => {
+                owner.validate_bounds()?;
+                check_len(
+                    "operation_failure.message",
+                    message.len(),
+                    MAX_FOREGROUND_MESSAGE_BYTES,
+                )
+            }
+            Self::CloudReviewMediaPrepared { owner, media } => {
+                owner.validate_bounds()?;
+                media.validate_bounds()
+            }
             Self::Poster { token, poster } => {
                 if poster.path != token.path {
                     return Err(PayloadBoundsError::Invalid {
@@ -1632,6 +1926,26 @@ impl CatalogResult {
             Self::LocalIndex(completion) => completion.estimated_byte_size(),
             Self::CloudPage(completion) => estimated_cloud_completion_bytes(completion),
             Self::ClipDetail(completion) => estimated_clip_detail_bytes(completion),
+            Self::OperationFailed { owner, message } => owner
+                .estimated_byte_size()
+                .saturating_add(message.capacity()),
+            Self::CloudReviewMediaPrepared { owner, media } => owner
+                .token
+                .account_key
+                .0
+                .capacity()
+                .saturating_add(match &owner.item {
+                    CatalogItemIdentity::Cloud {
+                        account_key,
+                        remote_clip_id,
+                        ..
+                    } => account_key
+                        .0
+                        .capacity()
+                        .saturating_add(remote_clip_id.0.capacity()),
+                    CatalogItemIdentity::Local { path } => path.owned_capacity(),
+                })
+                .saturating_add(media.path.capacity()),
             Self::Poster { token, poster } => token
                 .path
                 .owned_capacity()
