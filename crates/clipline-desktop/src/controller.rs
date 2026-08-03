@@ -1,16 +1,16 @@
 use thiserror::Error;
 
 use crate::{
-    CloudAccountOwner, CloudUploadSnapshot, CloudUploadUpdateKind, DesktopSnapshot, GameSnapshot,
-    Generation, GenerationError, MediaRootSnapshot, MicrophonePhase, MicrophoneSnapshot, Notice,
-    NoticeKind, RecorderEvent, RecorderSnapshot, RecorderStatus, Revision, SavedReplay,
-    StorageStatus, UiAction, UiEffect, UiEvent, WindowLifecycleSnapshot,
+    CloudAccountOwner, CloudAccountScope, CloudUploadSnapshot, CloudUploadUpdateKind,
+    DesktopSnapshot, GameSnapshot, Generation, GenerationError, MediaRootSnapshot, MicrophonePhase,
+    MicrophoneSnapshot, Notice, NoticeKind, RecorderEvent, RecorderSnapshot, RecorderStatus,
+    Revision, SavedReplay, StorageStatus, UiAction, UiEffect, UiEvent, WindowLifecycleSnapshot,
 };
 
 pub const MAX_PENDING_NOTICES: usize = 64;
 pub const MAX_NOTICE_MESSAGE_BYTES: usize = 64 * 1024;
 pub const MAX_ACTIVE_UPLOADS: usize = 16;
-pub const DESKTOP_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
+pub const DESKTOP_SNAPSHOT_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApplyEventOutcome {
@@ -98,6 +98,7 @@ where
                 latest_saved: None,
                 game: GameSnapshot::default(),
                 microphone: MicrophoneSnapshot::default(),
+                cloud_account_generation: CloudAccountScope::INITIAL,
                 current_cloud_account: None,
                 uploads: Vec::new(),
                 library_revision: Revision::INITIAL,
@@ -244,10 +245,30 @@ where
                     true
                 }
             }
-            UiEvent::CloudAccountChanged { account } => {
-                if next.current_cloud_account == account {
+            UiEvent::CloudAccountChanged {
+                generation,
+                account,
+            } => {
+                if generation < next.cloud_account_generation
+                    || (generation == next.cloud_account_generation
+                        && next.current_cloud_account != account)
+                {
+                    return Ok(ApplyEventOutcome::Stale);
+                }
+                if account
+                    .as_ref()
+                    .is_some_and(|owner| owner.account_generation() != generation)
+                {
+                    return Err(ControllerError::InvalidCloudProgress(
+                        "cloud account owner generation does not match its event",
+                    ));
+                }
+                if next.current_cloud_account == account
+                    && next.cloud_account_generation == generation
+                {
                     false
                 } else {
+                    next.cloud_account_generation = generation;
                     next.current_cloud_account.clone_from(&account);
                     next.uploads
                         .retain(|upload| account.as_ref() == Some(&upload.account));
@@ -618,6 +639,15 @@ fn validate_snapshot<S>(snapshot: &DesktopSnapshot<S>) -> Result<(), ControllerE
     }
     if snapshot.uploads.len() > MAX_ACTIVE_UPLOADS {
         return Err(ControllerError::InvalidSnapshot("too many uploads"));
+    }
+    if snapshot
+        .current_cloud_account
+        .as_ref()
+        .is_some_and(|account| account.account_generation() != snapshot.cloud_account_generation)
+    {
+        return Err(ControllerError::InvalidSnapshot(
+            "cloud account generation is inconsistent",
+        ));
     }
     if snapshot.notices.iter().any(|notice| {
         notice.id > snapshot.notice_sequence

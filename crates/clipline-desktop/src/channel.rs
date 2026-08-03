@@ -5,8 +5,8 @@ use std::time::Duration;
 use thiserror::Error;
 
 use crate::{
-    CloudAccountOwner, CloudUploadUpdateKind, Generation, RecorderEvent, Revision, UiEvent,
-    WindowLifecycleMode,
+    CloudAccountOwner, CloudAccountScope, CloudUploadUpdateKind, Generation, RecorderEvent,
+    Revision, UiEvent, WindowLifecycleMode,
 };
 
 pub const UI_EVENT_CAPACITY: usize = 128;
@@ -41,6 +41,13 @@ pub enum UiEventSendError {
     },
     #[error("UI event belongs to a replaced cloud account")]
     AccountChanged,
+    #[error("stale cloud account generation {received:?}; current is {current:?}")]
+    StaleAccount {
+        current: CloudAccountScope,
+        received: CloudAccountScope,
+    },
+    #[error("cloud account owner generation does not match its event")]
+    InvalidAccountGeneration,
     #[error("UI event sequence is exhausted")]
     SequenceExhausted,
 }
@@ -84,6 +91,7 @@ struct ChannelState {
     generations: HashMap<GenerationDomain, Generation>,
     microphone_terminal: Option<Generation>,
     lifecycle: Option<(Revision, WindowLifecycleMode)>,
+    cloud_account_generation: CloudAccountScope,
     cloud_account: Option<CloudAccountOwner>,
 }
 
@@ -306,6 +314,26 @@ fn validate_generation(state: &ChannelState, event: &UiEvent) -> Result<(), UiEv
             return Err(UiEventSendError::AccountChanged);
         }
     }
+    if let UiEvent::CloudAccountChanged {
+        generation,
+        account,
+    } = event
+    {
+        if account
+            .as_ref()
+            .is_some_and(|owner| owner.account_generation() != *generation)
+        {
+            return Err(UiEventSendError::InvalidAccountGeneration);
+        }
+        if *generation < state.cloud_account_generation
+            || (*generation == state.cloud_account_generation && &state.cloud_account != account)
+        {
+            return Err(UiEventSendError::StaleAccount {
+                current: state.cloud_account_generation,
+                received: *generation,
+            });
+        }
+    }
     let Some((domain, received)) = generation_domain(event) else {
         return Ok(());
     };
@@ -334,7 +362,12 @@ fn record_generation(state: &mut ChannelState, event: &UiEvent) {
     if let Some((domain, generation)) = generation_domain(event) {
         state.generations.insert(domain, generation);
     }
-    if let UiEvent::CloudAccountChanged { account } = event {
+    if let UiEvent::CloudAccountChanged {
+        generation,
+        account,
+    } = event
+    {
+        state.cloud_account_generation = *generation;
         state.cloud_account.clone_from(account);
         state
             .generations

@@ -311,6 +311,7 @@ pub struct DesktopSnapshot<S> {
     pub latest_saved: Option<SavedReplay>,
     pub game: GameSnapshot,
     pub microphone: MicrophoneSnapshot,
+    pub cloud_account_generation: CloudAccountScope,
     pub current_cloud_account: Option<CloudAccountOwner>,
     pub uploads: Vec<CloudUploadSnapshot>,
     pub library_revision: Revision,

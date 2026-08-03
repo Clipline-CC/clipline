@@ -31,7 +31,7 @@ fn upload(generation: u64, id: &str) -> UiEvent {
 }
 
 fn test_account() -> CloudAccountOwner {
-    CloudAccountOwner::new("account", CloudAccountScope::INITIAL).unwrap()
+    CloudAccountOwner::new("account", CloudAccountScope::new(1)).unwrap()
 }
 
 #[test]
@@ -39,6 +39,7 @@ fn projection_is_revisioned_and_bounds_the_visible_upload_model() {
     let mut controller = DesktopController::new((), vec!["warning".into()]).unwrap();
     controller
         .apply_event(UiEvent::CloudAccountChanged {
+            generation: test_account().account_generation(),
             account: Some(test_account()),
         })
         .unwrap();

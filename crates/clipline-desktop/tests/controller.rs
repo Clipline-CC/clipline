@@ -55,7 +55,15 @@ fn owner(key: &str, generation: u64) -> CloudAccountOwner {
 
 fn account_changed(account: CloudAccountOwner) -> UiEvent {
     UiEvent::CloudAccountChanged {
+        generation: account.account_generation(),
         account: Some(account),
+    }
+}
+
+fn disconnected(generation: u64) -> UiEvent {
+    UiEvent::CloudAccountChanged {
+        generation: CloudAccountScope::new(generation),
+        account: None,
     }
 }
 
@@ -146,13 +154,35 @@ fn account_change_prunes_old_progress_and_rejects_delayed_completion() {
 }
 
 #[test]
+fn controller_rejects_stale_account_disconnect_and_reconnect_events() {
+    let mut controller = DesktopController::new((), Vec::new()).unwrap();
+    let current = owner("account-b", 4);
+    controller
+        .apply_event(account_changed(current.clone()))
+        .unwrap();
+    let snapshot = controller.snapshot();
+    assert_eq!(
+        controller.apply_event(disconnected(3)).unwrap(),
+        ApplyEventOutcome::Stale
+    );
+    assert_eq!(controller.snapshot(), snapshot);
+    assert_eq!(
+        controller
+            .apply_event(account_changed(owner("account-a", 2)))
+            .unwrap(),
+        ApplyEventOutcome::Stale
+    );
+    assert_eq!(controller.snapshot(), snapshot);
+}
+
+#[test]
 fn fresh_snapshot_is_complete_and_keeps_exact_settings() {
     let settings = vec!["persisted", "settings"];
     let controller =
         DesktopController::new(settings.clone(), vec!["capture fallback active".to_owned()])
             .unwrap();
     let snapshot = controller.snapshot();
-    assert_eq!(snapshot.schema_version, 2);
+    assert_eq!(snapshot.schema_version, 3);
     assert_eq!(snapshot.revision, Revision::INITIAL);
     assert_eq!(snapshot.settings, settings);
     assert_eq!(snapshot.settings_revision, Revision::INITIAL);

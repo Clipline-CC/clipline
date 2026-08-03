@@ -194,11 +194,15 @@ fn desktop_cloud_account_owner(
 
 fn publish_desktop_cloud_account<R: Runtime>(
     app: &AppHandle<R>,
+    generation: u64,
     account: Option<CloudAccountOwner>,
 ) -> Result<(), String> {
     app.state::<crate::desktop::tauri_sink::TauriUiEventSink>()
         .inner()
-        .try_publish(UiEvent::CloudAccountChanged { account })
+        .try_publish(UiEvent::CloudAccountChanged {
+            generation: CloudAccountScope::new(generation),
+            account,
+        })
         .map(|_| ())
         .map_err(|error| error.to_string())
 }
@@ -981,10 +985,11 @@ pub async fn cloud_connect(
     if let Err(error) = reconcile_cloud_credential_cleanup(&state) {
         tracing::warn!(event = "cloud_old_credential_reconcile_failed", error = %error);
     }
-    let (_, generation) = state.cloud_settings_generation()?;
+    let (committed_cloud, generation) = state.cloud_settings_generation()?;
     publish_desktop_cloud_account(
         &app,
-        Some(desktop_cloud_account_owner(&settings.cloud, generation)?),
+        generation,
+        Some(desktop_cloud_account_owner(&committed_cloud, generation)?),
     )?;
 
     Ok(connection_status(&settings.cloud))
@@ -1007,7 +1012,8 @@ pub fn cloud_disconnect(
     if let Err(error) = reconcile_cloud_credential_cleanup(&state) {
         tracing::warn!(event = "cloud_disconnected_credential_reconcile_failed", error = %error);
     }
-    publish_desktop_cloud_account(&app, None)?;
+    let (_, generation) = state.cloud_settings_generation()?;
+    publish_desktop_cloud_account(&app, generation, None)?;
     Ok(connection_status(&settings.cloud))
 }
 
@@ -1089,7 +1095,6 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
         .state::<crate::desktop::tauri_sink::TauriUiEventSink>()
         .inner()
         .clone();
-    publish_desktop_cloud_account(&app, Some(account_owner.clone()))?;
     let token_target = cloud
         .credential_target
         .clone()

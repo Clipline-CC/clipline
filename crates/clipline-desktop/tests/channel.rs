@@ -36,8 +36,35 @@ fn owner(key: &str, generation: u64) -> CloudAccountOwner {
 
 fn account_changed(account: CloudAccountOwner) -> UiEvent {
     UiEvent::CloudAccountChanged {
+        generation: account.account_generation(),
         account: Some(account),
     }
+}
+
+fn disconnected(generation: u64) -> UiEvent {
+    UiEvent::CloudAccountChanged {
+        generation: CloudAccountScope::new(generation),
+        account: None,
+    }
+}
+
+#[test]
+fn delayed_connect_or_disconnect_cannot_reorder_account_ownership() {
+    let (sender, receiver) = ui_event_channel();
+    let current = owner("account-b", 4);
+    sender
+        .try_publish(account_changed(current.clone()))
+        .unwrap();
+    assert!(matches!(
+        sender.try_publish(disconnected(3)),
+        Err(UiEventSendError::StaleAccount { .. })
+    ));
+    assert!(matches!(
+        sender.try_publish(account_changed(owner("account-a", 2))),
+        Err(UiEventSendError::StaleAccount { .. })
+    ));
+    sender.try_publish(disconnected(5)).unwrap();
+    assert_eq!(receiver.len(), 2);
 }
 
 fn cloud_bytes(

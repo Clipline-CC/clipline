@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{CloudAccountOwner, Generation, WindowLifecycleSnapshot};
+use crate::{CloudAccountOwner, CloudAccountScope, Generation, WindowLifecycleSnapshot};
 
 pub const MAX_MIC_MONITOR_SAMPLES: usize = 4_096;
 
@@ -156,6 +156,7 @@ pub enum UiEvent {
         detection: GameDetection,
     },
     CloudAccountChanged {
+        generation: CloudAccountScope,
         account: Option<CloudAccountOwner>,
     },
     CloudUploadProgress {
