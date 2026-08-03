@@ -393,6 +393,12 @@ fn thumbnail_invalidation_preserves_a_foreign_replacement() {
         .unwrap()
         .unwrap();
     let path = cached.path().to_path_buf();
+    // Keep the original filesystem object alive while replacing its directory
+    // entry. Unix filesystems may otherwise immediately reuse the unlinked
+    // inode, making a dev+ino identity comparison unable to distinguish the
+    // replacement and turning this race test into a platform-dependent coin
+    // flip.
+    let _original = std::fs::File::open(&path).unwrap();
     std::fs::remove_file(&path).unwrap();
     std::fs::write(&path, b"foreign replacement").unwrap();
 
