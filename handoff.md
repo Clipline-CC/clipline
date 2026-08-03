@@ -4,6 +4,47 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-03): Slint replacement Milestone 7, Task 9 native Cloud uploads
+
+The Slint candidate now starts and cancels Cloud uploads through one process-owned
+`NativeUploadRuntime` built on the shared permissively licensed upload service. The upload dialog's
+bounded title, description, visibility, selected-audio, and delete-local options become the exact
+shared `UploadIntent`; source admission revalidates the controller-owned canonical path and file
+identity before acquiring the process-wide active-file lease. Credential reads, endpoint creation,
+repository validation, and admission run on the existing two-worker bounded catalog executor, so
+the Slint event loop never performs upload I/O and queue pressure returns exact foreground feedback.
+
+Durable settings CAS remains the source of truth. Only after a record transition commits does a
+bounded nonblocking fanout offer it independently to the catalog and desktop reducers. The fanout
+owns at most 48 exact upload slots and 32 MiB: the proved worst-case union of 16 visible durable
+rows, 16 disjoint restart-status candidates, and all 16 active jobs. It coalesces byte progress
+without overwriting a pending state barrier, distinguishes nonterminal state from terminal
+completion, and publishes exact
+generation removals to both contracts. Catalog presentation remains capped at 16 upload summaries.
+Compatibility records may contain 64 KiB URLs/errors; the native projection omits an oversized
+non-actionable URL and UTF-8-truncates display errors to the catalog's 16 KiB field bound.
+
+Restart hydration is fail-closed and bounded. Newest terminal records are immediately visible;
+orphaned queued/uploading records are not misrepresented as cancelable live jobs. Up to 16 records
+with authenticated remote identity are status candidates, including a restart-time Processing row.
+The shared two-observation 404 reconciler preserves the first not-found observation, removes only
+after the second exact observation, and rejects stale account/record CAS. Tauri's compatibility
+status command now uses that same neutral service instead of retaining a parallel algorithm.
+
+Shutdown first closes catalog executor admission and joins its workers, then cancels and joins all
+status tasks, irreversibly shuts down upload admission, waits boundedly for upload jobs to release
+their source leases, and only then stops the process-owned Cloud Tokio runtime. Every phase is
+best-effort, so an earlier join error cannot skip later ownership teardown.
+
+Focused fanout and catalog-admission regressions are green. The final snapshot also passes the full
+workspace test suite, standalone Slint all-target suite, warning-denied workspace and standalone
+Clippy, formatting, and `git diff --check`. A Fable medium final audit returned GO with no P0/P1;
+its full-downstream finding is closed by the proved 48-slot union regression, which retains and
+later delivers all 16 active terminal transitions while both downstream queues are saturated.
+
+Next: run the Milestone 7 large-library, repeated window lifecycle, live Cloud compatibility, and
+matched memory gates.
+
 ## Checkpoint (2026-08-03): Slint replacement Milestone 7, Task 9 Cloud profile rail
 
 The native Slint shell now shows the connected Clipline Cloud account immediately from its durable

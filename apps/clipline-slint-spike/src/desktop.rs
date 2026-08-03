@@ -351,6 +351,13 @@ impl SlintDesktopAdapter {
         self.sender.try_publish(event)
     }
 
+    /// Cloneable process-owned producer used by native services whose work
+    /// survives individual Slint window attachments.
+    #[must_use]
+    pub fn event_sender(&self) -> UiEventSender {
+        self.sender.clone()
+    }
+
     #[must_use]
     pub fn consumer_alive(&self) -> bool {
         self.consumer_alive.load(Ordering::Acquire)

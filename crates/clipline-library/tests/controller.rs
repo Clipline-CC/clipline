@@ -2282,6 +2282,9 @@ fn upload_projection_retains_exact_tokens_updates_badges_and_maps_cancel_by_inde
         &mut controller,
         (0..=MAX_UPLOAD_SUMMARIES).map(local_item).collect(),
     );
+    controller
+        .set_cloud_owner(Some(cloud_owner("account-a", 9)))
+        .unwrap();
 
     for index in 0..=MAX_UPLOAD_SUMMARIES {
         controller
@@ -2367,4 +2370,82 @@ fn upload_projection_retains_exact_tokens_updates_badges_and_maps_cancel_by_inde
         only_effect(controller.dispatch(cancel).unwrap()),
         CatalogEffect::CancelUpload { token: replacement }
     );
+}
+
+#[test]
+fn upload_results_are_account_fenced_and_exact_removal_clears_the_cancel_dialog() {
+    let mut controller = controller();
+    seed_local(&mut controller, vec![local_item(0)]);
+    controller
+        .set_cloud_owner(Some(cloud_owner("account-a", 9)))
+        .unwrap();
+
+    let exact = upload_token(0, 1);
+    controller
+        .accept(CatalogResult::UploadByteProgress {
+            token: exact.clone(),
+            progress: upload_summary(0, "uploading"),
+        })
+        .unwrap();
+    controller
+        .dispatch(CatalogAction::OpenContext {
+            item: local_identity(0),
+        })
+        .unwrap();
+    controller
+        .dispatch(CatalogAction::OpenCancelUpload {
+            token: exact.clone(),
+        })
+        .unwrap();
+    assert_eq!(controller.state().projection.uploads.len(), 1);
+    assert!(controller.state().dialog.is_some());
+
+    let mut foreign = upload_token(0, 2);
+    foreign.account_key = CloudAccountKey::new("account-b").unwrap();
+    foreign.account_generation = CloudAccountGeneration::new(10);
+    assert!(controller
+        .accept(CatalogResult::UploadByteProgress {
+            token: foreign,
+            progress: upload_summary(0, "uploading"),
+        })
+        .unwrap()
+        .is_empty());
+    assert_eq!(controller.state().projection.uploads.len(), 1);
+
+    controller
+        .accept(CatalogResult::UploadRemoved {
+            token: exact.clone(),
+        })
+        .unwrap();
+    assert!(controller.state().projection.uploads.is_empty());
+    assert!(controller.state().dialog.is_none());
+
+    controller
+        .accept(CatalogResult::UploadRemoved { token: exact })
+        .unwrap();
+    assert!(controller.state().projection.uploads.is_empty());
+}
+
+#[test]
+fn replacing_or_disconnect_cloud_account_drops_old_upload_authority() {
+    let mut controller = controller();
+    seed_local(&mut controller, vec![local_item(0)]);
+    controller
+        .set_cloud_owner(Some(cloud_owner("account-a", 9)))
+        .unwrap();
+    controller
+        .accept(CatalogResult::UploadCompleted {
+            token: upload_token(0, 1),
+            result: upload_summary(0, "uploaded_private"),
+        })
+        .unwrap();
+    assert_eq!(controller.state().projection.uploads.len(), 1);
+
+    controller
+        .set_cloud_owner(Some(cloud_owner("account-b", 10)))
+        .unwrap();
+    assert!(controller.state().projection.uploads.is_empty());
+
+    controller.set_cloud_owner(None).unwrap();
+    assert!(controller.state().projection.uploads.is_empty());
 }

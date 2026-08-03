@@ -207,6 +207,11 @@ pub enum UiEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         notice: Option<String>,
     },
+    CloudUploadRemoved {
+        account: CloudAccountOwner,
+        generation: Generation,
+        local_clip_id: String,
+    },
     EnrichmentUpdated {
         generation: Generation,
     },
@@ -228,6 +233,7 @@ impl UiEvent {
             | Self::MicTestStopped { generation }
             | Self::GameDetection { generation, .. }
             | Self::CloudUploadProgress { generation, .. }
+            | Self::CloudUploadRemoved { generation, .. }
             | Self::EnrichmentUpdated { generation } => Some(*generation),
             Self::WindowLifecycle { .. }
             | Self::CloudAccountChanged { .. }

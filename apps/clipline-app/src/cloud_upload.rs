@@ -16,11 +16,12 @@ use clipline_desktop::{
 use clipline_library::{
     account_key, ActiveFileRegistry, ClientClipId, ClipPathIdentity, CloudAccountFields,
     CloudAccountGeneration, DurableUploadToken, LocalClipId, LocalLibraryRepository,
-    ReqwestUploadRemote, ReqwestUploadTransport, StandardRepositoryFileSystem,
-    StandardUploadPreparation, UploadAccountFence, UploadAccountOwner, UploadDeletePermit,
-    UploadDeletionPort, UploadEventKind, UploadEventPort, UploadEventPortError, UploadGeneration,
-    UploadPhase, UploadRecord, UploadRecordCursor, UploadRecordError, UploadRecordErrorKind,
-    UploadRecordPort, UploadService, UploadServiceEvent, UploadWorkError, MAX_ACTIVE_UPLOAD_JOBS,
+    ReqwestUploadRemote, ReqwestUploadStatusRemote, ReqwestUploadTransport,
+    StandardRepositoryFileSystem, StandardUploadPreparation, UploadAccountFence,
+    UploadAccountOwner, UploadDeletePermit, UploadDeletionPort, UploadEventKind, UploadEventPort,
+    UploadEventPortError, UploadGeneration, UploadPhase, UploadRecord, UploadRecordCursor,
+    UploadRecordError, UploadRecordErrorKind, UploadRecordPort, UploadService, UploadServiceEvent,
+    UploadStatusSyncService, UploadWorkError, MAX_ACTIVE_UPLOAD_JOBS,
 };
 use clipline_settings::{
     cloud_paths_equivalent, CloudAccountIdentity, CloudRecordCas, CloudRecordCasKind,
@@ -38,6 +39,7 @@ use crate::desktop::tauri_sink::TauriUiEventSink;
 /// service only after the shell's reversible quiescence has reached idle.
 pub(crate) struct TauriUploadState {
     service: UploadService,
+    status: UploadStatusSyncService,
 }
 
 impl std::fmt::Debug for TauriUploadState {
@@ -73,12 +75,21 @@ impl TauriUploadState {
             records.clone(),
             Arc::new(TauriUploadEventPort::new(sink)),
         );
-        Ok(Self { service })
+        let status = UploadStatusSyncService::new(
+            service.clone(),
+            Arc::new(ReqwestUploadStatusRemote::new()),
+        );
+        Ok(Self { service, status })
     }
 
     #[must_use]
     pub(crate) const fn service(&self) -> &UploadService {
         &self.service
+    }
+
+    #[must_use]
+    pub(crate) const fn status(&self) -> &UploadStatusSyncService {
+        &self.status
     }
 
     pub(crate) fn shutdown(&self) {

@@ -30,7 +30,8 @@ use clipline_library::{
     account_key as shared_account_key, CloudAccountFields,
     CloudAccountGeneration as LibraryAccountGeneration, CloudAccountSnapshot, CloudBrowserEffect,
     CloudService, CloudServiceAccount, CloudUserProfile as SharedCloudUserProfile, CloudWorkToken,
-    ForegroundGeneration, RequestGeneration, WindowAttachmentGeneration, WindowWorkToken,
+    ForegroundGeneration, RequestGeneration, UploadCancellation, UploadEndpoint,
+    UploadStatusSyncOutcome, WindowAttachmentGeneration, WindowWorkToken,
 };
 use clipline_shell::windows::credential::CredentialStore;
 use serde::{Deserialize, Serialize};
@@ -42,7 +43,6 @@ use crate::settings::{normalize_cloud_visibility, CloudSettings, CloudUploadReco
 use crate::util::unix_now;
 
 const DEFAULT_DEVICE_NAME: &str = "Clipline Desktop";
-const REMOTE_NOT_FOUND_SYNC_MARKER: &str = "remote clip not found during status sync";
 const CLOUD_CREDENTIALS: CredentialStore = CredentialStore::new("cloud token");
 static CLOUD_COMPAT_REQUEST_GENERATION: AtomicU64 = AtomicU64::new(0);
 static CLOUD_MEDIA_LEASE_GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -839,113 +839,51 @@ pub async fn sync_cloud_clip_status(
     );
     let local_clip_id = clipline_library::LocalClipId::new(durable.local_clip_id.clone())
         .map_err(|error| error.to_string())?;
-    let Some(cursor) = uploads
-        .service()
-        .status_cursor(&owner, &local_clip_id)
-        .map_err(|error| error.to_string())?
-    else {
+    if durable.remote_clip_id.is_none() {
         return Ok(CloudClipStatusSyncResult {
             path: request.path,
             record: Some(durable),
             removed: false,
         });
-    };
-    let Some(remote_clip_id) = cursor.record.remote_clip_id.as_deref() else {
-        return Ok(CloudClipStatusSyncResult {
-            path: request.path,
-            record: Some(crate::cloud_upload::cloud_record_from_upload(
-                &cursor.record,
-            )),
-            removed: false,
-        });
-    };
+    }
     let credential_target = snapshot
         .document
         .cloud
         .credential_target
         .as_deref()
         .ok_or_else(|| "connect to Clipline Cloud first".to_string())?;
-    let credential = read_credential(credential_target)?;
-    let protocol = connected_protocol_client(&snapshot.document.cloud)?;
-
-    match protocol.get_clip(&credential, remote_clip_id).await {
-        Ok(clip) => {
-            let mut replacement = cursor.record.clone();
-            replacement.visibility = clip.visibility.clone();
-            replacement.remote_clip_id = Some(clip.id.clone());
-            replacement.remote_url = if clip.visibility == "private" {
-                None
-            } else {
-                clip.public_url.clone()
-            };
-            if clip.status == "ready" {
-                replacement.phase = clipline_library::UploadPhase::Completed;
-                replacement.upload_status = if clip.visibility == "private" {
-                    "uploaded_private".into()
-                } else {
-                    "uploaded_public".into()
-                };
-                replacement.error = None;
-            } else if clip.status == "failed" {
-                replacement.phase = clipline_library::UploadPhase::Failed;
-                replacement.upload_status = "failed".into();
-                replacement.error = Some("cloud media processing failed".into());
-            } else {
-                replacement.phase = clipline_library::UploadPhase::Abandoned;
-                replacement.upload_status = "uploaded_processing".into();
-                replacement.error = None;
-            }
-            replacement.updated_at_unix = unix_now();
-            let committed = uploads
-                .service()
-                .commit_status_sync(&cursor, replacement)
-                .map_err(|error| error.to_string())?;
+    let endpoint = UploadEndpoint::new(
+        owner,
+        CloudApiBase::parse(&snapshot.document.cloud.host_url, true)
+            .map_err(cloud_protocol_error)?,
+        CloudCredential::new(read_credential(credential_target)?),
+    );
+    let outcome = uploads
+        .status()
+        .sync(&endpoint, &local_clip_id, &UploadCancellation::default())
+        .await
+        .map_err(|error| error.to_string())?;
+    match outcome {
+        UploadStatusSyncOutcome::MissingRecord => Ok(CloudClipStatusSyncResult {
+            path: request.path,
+            record: None,
+            // The command resolved a compatibility record above, but the
+            // exact durable slot disappeared before status work began. Let
+            // the JS expected-record fence remove only that stale mirror.
+            removed: true,
+        }),
+        UploadStatusSyncOutcome::Unchanged(record) | UploadStatusSyncOutcome::Updated(record) => {
             Ok(CloudClipStatusSyncResult {
                 path: request.path,
-                record: Some(crate::cloud_upload::cloud_record_from_upload(
-                    &committed.record,
-                )),
+                record: Some(crate::cloud_upload::cloud_record_from_upload(&record)),
                 removed: false,
             })
         }
-        Err(error) if error.is_not_found() => {
-            let current = crate::cloud_upload::cloud_record_from_upload(&cursor.record);
-            match missing_remote_sync_action(&current) {
-                MissingRemoteSyncAction::Keep => Ok(CloudClipStatusSyncResult {
-                    path: request.path,
-                    record: Some(current),
-                    removed: false,
-                }),
-                MissingRemoteSyncAction::ConfirmMissing => {
-                    let mut replacement = cursor.record.clone();
-                    replacement.error = Some(REMOTE_NOT_FOUND_SYNC_MARKER.into());
-                    replacement.updated_at_unix = unix_now();
-                    let committed = uploads
-                        .service()
-                        .commit_status_sync(&cursor, replacement)
-                        .map_err(|error| error.to_string())?;
-                    Ok(CloudClipStatusSyncResult {
-                        path: request.path,
-                        record: Some(crate::cloud_upload::cloud_record_from_upload(
-                            &committed.record,
-                        )),
-                        removed: false,
-                    })
-                }
-                MissingRemoteSyncAction::Remove => {
-                    uploads
-                        .service()
-                        .remove_status_sync(&cursor)
-                        .map_err(|error| error.to_string())?;
-                    Ok(CloudClipStatusSyncResult {
-                        path: request.path,
-                        record: None,
-                        removed: true,
-                    })
-                }
-            }
-        }
-        Err(error) => Err(cloud_protocol_error(error)),
+        UploadStatusSyncOutcome::Removed { .. } => Ok(CloudClipStatusSyncResult {
+            path: request.path,
+            record: None,
+            removed: true,
+        }),
     }
 }
 
@@ -1199,13 +1137,6 @@ fn connection_status(cloud: &CloudSettings) -> CloudConnectionStatus {
         auto_upload_rules: cloud.auto_upload_rules,
     }
 }
-fn connected_protocol_client(cloud: &CloudSettings) -> Result<ReqwestCloudProtocol, String> {
-    if !cloud.connected() {
-        return Err("connect to Clipline Cloud first".into());
-    }
-    let base_url = CloudApiBase::parse(&cloud.host_url, true).map_err(cloud_protocol_error)?;
-    ReqwestCloudProtocol::new(base_url).map_err(cloud_protocol_error)
-}
 fn windows_clip_path_key(path: &str) -> Option<String> {
     let mut normalized = path.trim().replace('/', "\\");
     let lower = normalized.to_ascii_lowercase();
@@ -1260,25 +1191,6 @@ fn cloud_record_for_path(cloud: &CloudSettings, path: &str) -> Option<CloudUploa
         .filter(|record| clip_paths_equal(&record.path, path))
         .max_by_key(|record| record.updated_at_unix)
         .cloned()
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MissingRemoteSyncAction {
-    Keep,
-    ConfirmMissing,
-    Remove,
-}
-
-fn missing_remote_sync_action(record: &CloudUploadRecord) -> MissingRemoteSyncAction {
-    if !record.upload_status.starts_with("uploaded_")
-        || record.upload_status == "uploaded_processing"
-    {
-        return MissingRemoteSyncAction::Keep;
-    }
-    if record.error.as_deref() == Some(REMOTE_NOT_FOUND_SYNC_MARKER) {
-        MissingRemoteSyncAction::Remove
-    } else {
-        MissingRemoteSyncAction::ConfirmMissing
-    }
 }
 fn credential_target(host_url: &str, user_id: &str) -> String {
     clipline_settings::cloud::cloud_credential_target(host_url, user_id)
@@ -1448,54 +1360,6 @@ mod tests {
         assert_eq!(
             cloud_user_avatar_data_url("image/png", b"\x01\x02\x03"),
             "data:image/png;base64,AQID"
-        );
-    }
-
-    #[test]
-    fn missing_remote_clip_keeps_unconfirmed_and_processing_records() {
-        assert_eq!(
-            missing_remote_sync_action(&upload_record(
-                "local",
-                "D:\\Videos\\clip.mp4",
-                "uploaded_public",
-                10
-            )),
-            MissingRemoteSyncAction::ConfirmMissing
-        );
-        assert_eq!(
-            missing_remote_sync_action(&upload_record(
-                "local",
-                "D:\\Videos\\clip.mp4",
-                "uploaded_processing",
-                10
-            )),
-            MissingRemoteSyncAction::Keep
-        );
-        assert_eq!(
-            missing_remote_sync_action(&upload_record(
-                "local",
-                "D:\\Videos\\clip.mp4",
-                "processing",
-                10
-            )),
-            MissingRemoteSyncAction::Keep
-        );
-    }
-
-    #[test]
-    fn missing_remote_clip_requires_confirmation_before_removing_finalized_record() {
-        let mut record = upload_record("local", "D:\\Videos\\clip.mp4", "uploaded_public", 10);
-
-        assert_eq!(
-            missing_remote_sync_action(&record),
-            MissingRemoteSyncAction::ConfirmMissing
-        );
-
-        record.error = Some(REMOTE_NOT_FOUND_SYNC_MARKER.to_string());
-
-        assert_eq!(
-            missing_remote_sync_action(&record),
-            MissingRemoteSyncAction::Remove
         );
     }
 

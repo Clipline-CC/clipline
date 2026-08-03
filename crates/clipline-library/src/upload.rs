@@ -5,8 +5,10 @@
 //! persistence, and optional local deletion without depending on a UI runtime.
 
 mod service;
+mod status;
 
 pub use service::*;
+pub use status::*;
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};

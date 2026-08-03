@@ -1079,6 +1079,20 @@ impl UploadService {
             .map_or(MAX_ACTIVE_UPLOAD_JOBS, |active| active.jobs.len())
     }
 
+    /// Whether this process still owns the exact durable upload generation.
+    ///
+    /// Foreground status reconciliation uses this to avoid terminalizing a
+    /// live job. A restarted process has no active entry, so orphaned durable
+    /// `processing` records remain eligible for recovery.
+    #[must_use]
+    pub fn is_active_token(&self, token: &DurableUploadToken) -> bool {
+        let key = JobKey::from_token(token);
+        self.inner
+            .active
+            .lock()
+            .is_ok_and(|active| active.jobs.get(&key).is_some_and(|job| job.token == *token))
+    }
+
     /// Commit a delayed status-sync result against its exact prior cursor.
     /// A newer upload or newer sync makes this return `Superseded` without an
     /// event or mutation.

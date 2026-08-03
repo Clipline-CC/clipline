@@ -13,6 +13,7 @@ use clipline_library::cache::{
     CloudAssetRequest, CloudCache, CloudCacheError, CloudCancellation, CloudMediaLease,
 };
 use clipline_library::cache_identity::{CloudAccountFence, CloudAssetKey, CloudAssetKind};
+use clipline_library::cloud::protocol::CloudApiBase;
 #[cfg(windows)]
 use clipline_library::cloud::settings::{
     cloud_cache_account_fence_from_service_account, SettingsAccountPublicationGuard,
@@ -20,20 +21,20 @@ use clipline_library::cloud::settings::{
 };
 #[cfg(windows)]
 use clipline_library::http::{ReqwestAssetDownload, ReqwestCloudTransport};
-use clipline_library::ports::{
-    CloudAccountPort, CloudCancellationFuture, CloudCredentialPort, CloudRequestFence,
-    CloudTransport,
-};
 #[cfg(windows)]
-use clipline_library::ports::{CloudCredential, PortError};
+use clipline_library::ports::PortError;
+use clipline_library::ports::{
+    CloudAccountPort, CloudCancellationFuture, CloudCredential, CloudCredentialPort,
+    CloudRequestFence, CloudTransport,
+};
 use clipline_library::{
     CatalogCloudPreferences, CatalogEffect, CatalogItemIdentity, CatalogOperationOwner,
     CatalogResult, CatalogUploadVisibility, CloudCatalogOwner, CloudListQuery, CloudMediaLeaseId,
     CloudReviewMediaOwner, CloudReviewMediaRequest, CloudService, CloudServiceError,
     CloudThumbnailDescriptor, CloudThumbnailOwner, CloudThumbnailRequest, CloudWorkToken,
     ExpectedResultOwner, ForegroundGeneration, PosterStatus, PreparedCloudReviewMedia,
-    WindowAttachmentGeneration, WindowWorkToken, MAX_CATALOG_PAGE_ROWS, MAX_CATALOG_STRING_BYTES,
-    MAX_FOREGROUND_MESSAGE_BYTES,
+    UploadAccountOwner, UploadEndpoint, WindowAttachmentGeneration, WindowWorkToken,
+    MAX_CATALOG_PAGE_ROWS, MAX_CATALOG_STRING_BYTES, MAX_FOREGROUND_MESSAGE_BYTES,
 };
 #[cfg(windows)]
 use clipline_settings::SettingsStore;
@@ -48,6 +49,7 @@ use crate::cloud_profile::{
 use crate::cloud_thumbnail::{
     decode_cached_cloud_thumbnail, CloudThumbnailDecodeOutcome, CloudThumbnailDecodePort,
 };
+use crate::cloud_upload::NativeUploadRuntime;
 
 const CLOUD_RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_NATIVE_CLOUD_MEDIA_LEASES: usize = 4;
@@ -832,6 +834,7 @@ impl NativeCloudMediaRegistry {
 
 struct CloudShared {
     accounts: Arc<dyn CloudAccountPort>,
+    credentials: Arc<dyn CloudCredentialPort>,
     service: CloudService,
     fences: Arc<FenceRegistry>,
     cache_provider: Arc<dyn NativeCloudCacheProvider>,
@@ -922,11 +925,12 @@ impl NativeCloudRuntime {
             .thread_name("clipline-cloud")
             .build()
             .map_err(|error| format!("start native Cloud runtime: {error}"))?;
-        let service = CloudService::new(Arc::clone(&accounts), credentials, transport);
+        let service = CloudService::new(Arc::clone(&accounts), Arc::clone(&credentials), transport);
         let fences = Arc::new(FenceRegistry::default());
         let media = NativeCloudMediaRegistry::new(Arc::clone(&fences));
         let shared = Arc::new(CloudShared {
             accounts,
+            credentials,
             service,
             fences,
             cache_provider,
@@ -961,6 +965,29 @@ impl NativeCloudRuntime {
             account_generation: account.snapshot.generation,
         });
         Ok((owner, preferences))
+    }
+
+    /// Rebuild credential-bearing upload authority from the current durable
+    /// account and reject any catalog owner captured before replacement.
+    pub fn upload_endpoint(&self, owner: &CloudCatalogOwner) -> Result<UploadEndpoint, String> {
+        upload_endpoint_from_shared(&self.shared, owner)
+    }
+
+    #[must_use]
+    pub fn runtime_handle(&self) -> tokio::runtime::Handle {
+        self.shared.handle.clone()
+    }
+
+    pub fn effect_handler_with_uploads(
+        &self,
+        local: Arc<dyn CatalogEffectHandler>,
+        uploads: Arc<NativeUploadRuntime>,
+    ) -> Arc<dyn CatalogEffectHandler> {
+        Arc::new(NativeCloudEffectHandler {
+            cloud: Arc::clone(&self.shared),
+            local,
+            uploads: Some(uploads),
+        })
     }
 
     pub fn profile_seed(&self, window: WindowWorkToken) -> Result<Option<CloudRailSeed>, String> {
@@ -1028,6 +1055,7 @@ impl NativeCloudRuntime {
         Arc::new(NativeCloudEffectHandler {
             cloud: Arc::clone(&self.shared),
             local,
+            uploads: None,
         })
     }
 
@@ -1065,6 +1093,37 @@ impl NativeCloudRuntime {
         runtime.shutdown_timeout(CLOUD_RUNTIME_SHUTDOWN_TIMEOUT);
         Ok(())
     }
+}
+
+fn upload_endpoint_from_shared(
+    cloud: &CloudShared,
+    owner: &CloudCatalogOwner,
+) -> Result<UploadEndpoint, String> {
+    let account = cloud
+        .accounts
+        .snapshot()
+        .map_err(|error| error.to_string())?;
+    if !account.snapshot.connected
+        || account.snapshot.account_key != owner.account_key
+        || account.snapshot.generation != owner.account_generation
+    {
+        return Err("native upload belongs to a replaced Cloud account".into());
+    }
+    let target = account
+        .credential_target
+        .as_deref()
+        .ok_or_else(|| "native Cloud credential target is unavailable".to_owned())?;
+    let credential = cloud
+        .credentials
+        .read(target)
+        .map_err(|error| error.to_string())?;
+    let api =
+        CloudApiBase::parse(&account.snapshot.host_url, true).map_err(|error| error.to_string())?;
+    Ok(UploadEndpoint::new(
+        UploadAccountOwner::new(owner.account_key.clone(), owner.account_generation),
+        api,
+        credential,
+    ))
 }
 
 struct NativeCloudThumbnailDecoder {
@@ -1263,6 +1322,19 @@ impl CatalogCloudLifetime {
         }
         first_error.map_or(Ok(()), Err)
     }
+
+    pub fn shutdown_executor(&mut self) -> Result<(), String> {
+        self.cloud.as_ref().map(NativeCloudRuntime::detach);
+        self.executor
+            .take()
+            .map_or(Ok(()), CatalogEffectExecutor::shutdown)
+    }
+
+    pub fn shutdown_cloud(&mut self) -> Result<(), String> {
+        self.cloud
+            .take()
+            .map_or(Ok(()), NativeCloudRuntime::shutdown)
+    }
 }
 
 impl Drop for CatalogCloudLifetime {
@@ -1274,6 +1346,7 @@ impl Drop for CatalogCloudLifetime {
 struct NativeCloudEffectHandler {
     cloud: Arc<CloudShared>,
     local: Arc<dyn CatalogEffectHandler>,
+    uploads: Option<Arc<NativeUploadRuntime>>,
 }
 
 impl CatalogEffectHandler for NativeCloudEffectHandler {
@@ -1305,12 +1378,47 @@ impl CatalogEffectHandler for NativeCloudEffectHandler {
                 item: _,
                 url,
             } => self.copy_public_link(token, url),
+            CatalogEffect::StartUpload {
+                token,
+                owner,
+                target,
+                options,
+            } => self.start_upload(token, owner, target, options),
             other => self.local.execute(other),
         }
     }
 }
 
 impl NativeCloudEffectHandler {
+    fn start_upload(
+        &self,
+        token: WindowWorkToken,
+        owner: CloudCatalogOwner,
+        target: clipline_library::ResolvedLocalClip,
+        options: clipline_library::CatalogUploadOptions,
+    ) -> Result<Option<OwnedCatalogResult>, String> {
+        let Some(uploads) = self.uploads.as_ref() else {
+            return Err("native Cloud upload service is unavailable".into());
+        };
+        let work = CloudWorkToken {
+            window: token,
+            account_key: owner.account_key.clone(),
+            account_generation: owner.account_generation,
+        };
+        if !self.cloud.fences.is_window_current(&work) {
+            return Ok(None);
+        }
+        let result = upload_endpoint_from_shared(&self.cloud, &owner)
+            .and_then(|endpoint| uploads.start(&self.cloud.handle, endpoint, &target, options));
+        match result {
+            Ok(_) => Ok(None),
+            Err(_error) if !self.cloud.fences.is_window_current(&work) => Ok(None),
+            Err(error) => Ok(Some(foreground_feedback(
+                token,
+                format!("Start Cloud upload: {error}"),
+            ))),
+        }
+    }
     fn open_cloud_profile(
         &self,
         token: CloudWorkToken,

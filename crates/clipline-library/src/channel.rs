@@ -117,6 +117,7 @@ fn coalesce_key(result: &CatalogResult) -> Option<CoalesceKey> {
         | CatalogResult::RenameCompleted { .. }
         | CatalogResult::DeleteCompleted { .. }
         | CatalogResult::UploadCompleted { .. }
+        | CatalogResult::UploadRemoved { .. }
         | CatalogResult::ForegroundFeedback { .. } => None,
     }
 }
@@ -169,7 +170,8 @@ fn validate_owner(
         }
         (
             CatalogResult::UploadByteProgress { token, .. }
-            | CatalogResult::UploadCompleted { token, .. },
+            | CatalogResult::UploadCompleted { token, .. }
+            | CatalogResult::UploadRemoved { token },
             ExpectedResultOwner::Upload(expected),
         ) => {
             if token.account_key != expected.account_key
@@ -184,7 +186,9 @@ fn validate_owner(
         }
         (CatalogResult::CloudPage(_), ExpectedResultOwner::Upload(_))
         | (
-            CatalogResult::UploadByteProgress { .. } | CatalogResult::UploadCompleted { .. },
+            CatalogResult::UploadByteProgress { .. }
+            | CatalogResult::UploadCompleted { .. }
+            | CatalogResult::UploadRemoved { .. },
             ExpectedResultOwner::Cloud(_),
         ) => Err(ResultPortError::AccountChanged),
         _ => Err(ResultPortError::Stale),

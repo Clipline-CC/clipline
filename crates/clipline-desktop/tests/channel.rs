@@ -172,6 +172,14 @@ fn cloud_state(
     }
 }
 
+fn cloud_removed(account: CloudAccountOwner, generation: u64, id: &str) -> UiEvent {
+    UiEvent::CloudUploadRemoved {
+        account,
+        generation: Generation::new(generation),
+        local_clip_id: id.to_owned(),
+    }
+}
+
 #[test]
 fn cloud_progress_never_coalesces_or_stales_across_accounts() {
     let (sender, receiver) = ui_event_channel();
@@ -257,6 +265,30 @@ fn cloud_state_and_account_changes_are_durable_barriers() {
         .unwrap();
 
     assert_eq!(receiver.len(), 5);
+}
+
+#[test]
+fn cloud_upload_removal_is_an_account_fenced_durable_barrier() {
+    let (sender, receiver) = ui_event_channel();
+    let account = owner("account-a", 1);
+    sender
+        .try_publish(account_changed(account.clone()))
+        .unwrap();
+    sender
+        .try_publish(cloud_bytes(account.clone(), 7, "clip", 10))
+        .unwrap();
+    sender
+        .try_publish(cloud_removed(account.clone(), 7, "clip"))
+        .unwrap();
+    sender
+        .try_publish(cloud_bytes(account.clone(), 7, "clip", 20))
+        .unwrap();
+    assert_eq!(receiver.len(), 4, "removal separates byte progress epochs");
+
+    assert_eq!(
+        sender.try_publish(cloud_removed(owner("account-b", 2), 7, "clip")),
+        Err(UiEventSendError::AccountChanged)
+    );
 }
 
 #[test]

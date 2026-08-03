@@ -291,6 +291,14 @@ fn generation_domain(event: &UiEvent) -> Option<(GenerationDomain, Generation)> 
             GenerationDomain::CloudUpload(account.clone(), progress.local_clip_id.clone()),
             *generation,
         )),
+        UiEvent::CloudUploadRemoved {
+            account,
+            generation,
+            local_clip_id,
+        } => Some((
+            GenerationDomain::CloudUpload(account.clone(), local_clip_id.clone()),
+            *generation,
+        )),
         UiEvent::EnrichmentUpdated { generation } => {
             Some((GenerationDomain::Enrichment, *generation))
         }
@@ -331,7 +339,9 @@ fn validate_generation(state: &ChannelState, event: &UiEvent) -> Result<(), UiEv
             }
         }
     }
-    if let UiEvent::CloudUploadProgress { account, .. } = event {
+    if let UiEvent::CloudUploadProgress { account, .. }
+    | UiEvent::CloudUploadRemoved { account, .. } = event
+    {
         if state.cloud_account.as_ref() != Some(account) {
             return Err(UiEventSendError::AccountChanged);
         }
@@ -439,6 +449,7 @@ fn coalescing_key(event: &UiEvent) -> Option<CoalescingKey> {
             update: CloudUploadUpdateKind::State,
             ..
         }
+        | UiEvent::CloudUploadRemoved { .. }
         | UiEvent::UserError { .. } => None,
     }
 }
@@ -456,6 +467,7 @@ fn is_durable_barrier(event: &UiEvent) -> bool {
                 update: CloudUploadUpdateKind::State,
                 ..
             }
+            | UiEvent::CloudUploadRemoved { .. }
             | UiEvent::UserError { .. }
     )
 }

@@ -2139,6 +2139,9 @@ pub enum CatalogResult {
         token: DurableUploadToken,
         result: UploadSummary,
     },
+    UploadRemoved {
+        token: DurableUploadToken,
+    },
     ForegroundFeedback {
         token: WindowWorkToken,
         message: String,
@@ -2155,6 +2158,7 @@ impl CatalogResult {
                 | Self::RenameCompleted { .. }
                 | Self::DeleteCompleted { .. }
                 | Self::UploadCompleted { .. }
+                | Self::UploadRemoved { .. }
                 | Self::ForegroundFeedback { .. }
         )
     }
@@ -2218,6 +2222,7 @@ impl CatalogResult {
                 }
                 Ok(())
             }
+            Self::UploadRemoved { token } => validate_durable_upload_token(token),
             Self::RenameCompleted { result, .. } => validate_renamed_clip(result),
             Self::DeleteCompleted { report, .. } => validate_deleted_report(report),
             Self::ForegroundFeedback { message, .. } => check_len(
@@ -2271,6 +2276,7 @@ impl CatalogResult {
                 token,
                 result: progress,
             } => estimated_upload_summary_bytes(token, progress),
+            Self::UploadRemoved { token } => estimated_upload_token_bytes(token),
             Self::RenameCompleted { result, .. } => result
                 .old_path
                 .capacity()
@@ -2452,4 +2458,22 @@ fn estimated_upload_summary_bytes(token: &DurableUploadToken, summary: &UploadSu
         .saturating_add(summary.remote_clip_id.as_ref().map_or(0, String::capacity))
         .saturating_add(summary.remote_url.as_ref().map_or(0, String::capacity))
         .saturating_add(summary.error.as_ref().map_or(0, String::capacity))
+}
+
+fn estimated_upload_token_bytes(token: &DurableUploadToken) -> usize {
+    std::mem::size_of::<DurableUploadToken>()
+        .saturating_add(token.account_key.0.capacity())
+        .saturating_add(token.local_clip_id.0.capacity())
+        .saturating_add(token.source_path.owned_capacity())
+}
+
+fn validate_durable_upload_token(token: &DurableUploadToken) -> Result<(), PayloadBoundsError> {
+    check_string("upload.account_key", token.account_key.as_str())?;
+    check_string("upload.local_clip_id", token.local_clip_id.as_str())?;
+    if token.source_path.as_str().trim().is_empty() {
+        return Err(PayloadBoundsError::Invalid {
+            field: "upload.source_path",
+        });
+    }
+    check_string("upload.source_path", token.source_path.as_str())
 }

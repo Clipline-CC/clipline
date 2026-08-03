@@ -461,6 +461,9 @@ impl CatalogController {
             return Ok(Vec::new());
         }
         let mut candidate = self.state.clone();
+        if candidate.cloud_owner != owner {
+            candidate.uploads = Arc::new(Vec::new());
+        }
         candidate.cloud_owner = owner.clone();
         candidate.cloud_preferences = preferences;
         candidate.cloud_page = None;
@@ -1215,6 +1218,9 @@ impl CatalogController {
             }
             CatalogResult::UploadCompleted { token, result } => {
                 apply_upload_result(state, token, result, true, self.reservation.as_ref())
+            }
+            CatalogResult::UploadRemoved { token } => {
+                apply_upload_removed(state, &token, self.reservation.as_ref())
             }
             CatalogResult::RenameCompleted { token, result } => {
                 let Some(pending) = state.pending_mutation.as_ref() else {
@@ -2082,6 +2088,14 @@ fn apply_upload_result(
     completed: bool,
     reservation: &dyn ProjectionReservation,
 ) -> Result<bool, CatalogControllerError> {
+    let Some(owner) = state.cloud_owner.as_ref() else {
+        return Ok(false);
+    };
+    if token.account_key != owner.account_key
+        || token.account_generation != owner.account_generation
+    {
+        return Ok(false);
+    }
     let progress = format_upload_progress(&summary);
     let entry = CatalogUploadProjection::new(token, summary)?;
     let mut uploads = reserve_clone(
@@ -2117,6 +2131,40 @@ fn apply_upload_result(
             updated.progress = Some(progress);
             state.dialog = Some(Arc::new(updated));
         }
+    }
+    state.uploads = Arc::new(uploads);
+    state.revision = state.revision.checked_next()?;
+    Ok(true)
+}
+
+fn apply_upload_removed(
+    state: &mut CatalogControllerState,
+    token: &DurableUploadToken,
+    reservation: &dyn ProjectionReservation,
+) -> Result<bool, CatalogControllerError> {
+    let Some(owner) = state.cloud_owner.as_ref() else {
+        return Ok(false);
+    };
+    if token.account_key != owner.account_key
+        || token.account_generation != owner.account_generation
+    {
+        return Ok(false);
+    }
+    let Some(index) = state.uploads.iter().position(|entry| &entry.token == token) else {
+        return Ok(false);
+    };
+    let mut uploads = reserve_clone(
+        reservation,
+        "controller.uploads",
+        state.uploads.as_slice(),
+        0,
+    )?;
+    uploads.remove(index);
+    if state.dialog.as_ref().is_some_and(|dialog| {
+        dialog.kind == CatalogDialogKind::CancelUpload
+            && dialog.cancel_upload_token.as_ref() == Some(token)
+    }) {
+        state.dialog = None;
     }
     state.uploads = Arc::new(uploads);
     state.revision = state.revision.checked_next()?;

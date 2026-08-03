@@ -311,6 +311,26 @@ where
                     }
                 }
             }
+            UiEvent::CloudUploadRemoved {
+                account,
+                generation,
+                local_clip_id,
+            } => {
+                if next.current_cloud_account.as_ref() != Some(&account) {
+                    return Ok(ApplyEventOutcome::Stale);
+                }
+                let Ok(index) = next.uploads.binary_search_by(|upload| {
+                    upload_order(upload, &account, local_clip_id.as_str())
+                }) else {
+                    return Ok(ApplyEventOutcome::Unchanged);
+                };
+                if next.uploads[index].generation != generation {
+                    return Ok(ApplyEventOutcome::Stale);
+                }
+                next.uploads.remove(index);
+                next.library_revision = next.library_revision.checked_next()?;
+                true
+            }
             UiEvent::EnrichmentUpdated { generation } => {
                 if generation < next.enrichment_generation {
                     return Ok(ApplyEventOutcome::Stale);

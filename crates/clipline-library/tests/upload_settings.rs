@@ -9,7 +9,7 @@ use clipline_library::{
 };
 use clipline_settings::{
     AppSettings, CloudAccountIdentity, SettingsChange, SettingsProfile, SettingsStore,
-    SettingsTransaction,
+    SettingsTransaction, UiTheme,
 };
 use clipline_test_utils::TestDir;
 
@@ -158,6 +158,47 @@ fn settings_record_port_uses_exact_cas_and_advances_durable_generations() {
         UploadGeneration::new(2),
         "exact removal must not make a durable upload generation reusable"
     );
+}
+
+#[test]
+fn status_record_cas_ignores_unrelated_settings_revisions_but_keeps_exact_record_cas() {
+    let (directory, store) = connected_store("status-cas-unrelated-revision");
+    let source = validated_source(&directory);
+    let owner = upload_account_owner_from_snapshot(&store.snapshot().unwrap()).unwrap();
+    let port = SettingsUploadRecordPort::new(store.clone());
+    let local_clip_id = local_clip_id_for_source(source.file_identity());
+    let mut completed = record(
+        &owner,
+        &source,
+        port.allocate_generation(&owner, &local_clip_id, &source)
+            .unwrap(),
+    );
+    completed.phase = UploadPhase::Completed;
+    completed.upload_status = "uploaded_private".into();
+    completed.remote_clip_id = Some("remote-1".into());
+    let cursor = port.admit(completed.clone()).unwrap();
+
+    let before_preferences = store.snapshot().unwrap();
+    let mut preferences = before_preferences.document.clone();
+    preferences.ui_theme = UiTheme::Classic;
+    let after_preferences = store
+        .transact(SettingsTransaction {
+            expected_revision: before_preferences.revision,
+            expected_account_generation: before_preferences.account_generation,
+            change: SettingsChange::ReplaceUiPreferences(preferences),
+        })
+        .unwrap();
+    assert!(after_preferences.revision.get() > cursor.revision);
+
+    let mut replacement = completed;
+    replacement.visibility = "public".into();
+    replacement.upload_status = "uploaded_public".into();
+    replacement.remote_url = Some("https://clips.example/c/remote-1".into());
+    let updated = port.compare_exchange(&cursor, replacement.clone()).unwrap();
+    assert_eq!(updated.record, replacement);
+
+    let error = port.compare_exchange(&cursor, updated.record).unwrap_err();
+    assert_eq!(error.kind(), UploadRecordErrorKind::Superseded);
 }
 
 #[test]

@@ -568,6 +568,53 @@ fn byte_progress_changes_snapshot_but_only_state_changes_library_revision() {
 }
 
 #[test]
+fn upload_removal_is_account_and_generation_fenced() {
+    let mut controller = DesktopController::new((), Vec::new()).unwrap();
+    let account = owner("account-a", 1);
+    controller
+        .apply_event(account_changed(account.clone()))
+        .unwrap();
+    controller
+        .apply_event(cloud_state(
+            account.clone(),
+            7,
+            "clip",
+            100,
+            "uploaded_public",
+            None,
+        ))
+        .unwrap();
+    assert_eq!(controller.snapshot().uploads.len(), 1);
+
+    assert_eq!(
+        controller
+            .apply_event(UiEvent::CloudUploadRemoved {
+                account: account.clone(),
+                generation: Generation::new(6),
+                local_clip_id: "clip".into(),
+            })
+            .unwrap(),
+        ApplyEventOutcome::Stale
+    );
+    assert_eq!(controller.snapshot().uploads.len(), 1);
+
+    assert!(matches!(
+        controller.apply_event(UiEvent::CloudUploadRemoved {
+            account: account.clone(),
+            generation: Generation::new(7),
+            local_clip_id: "clip".into(),
+        }),
+        Ok(ApplyEventOutcome::Applied { .. })
+    ));
+    assert!(controller.snapshot().uploads.is_empty());
+
+    controller
+        .apply_event(cloud_state(account, 8, "clip", 0, "uploading", None))
+        .unwrap();
+    assert_eq!(controller.snapshot().uploads.len(), 1);
+}
+
+#[test]
 fn byte_progress_cannot_smuggle_a_state_transition() {
     let mut controller = DesktopController::new((), Vec::new()).unwrap();
     let account = owner("account-a", 1);

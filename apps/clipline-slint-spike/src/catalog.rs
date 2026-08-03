@@ -322,6 +322,15 @@ pub fn rejected_effect_result(
             expected: ExpectedResultOwner::Window(token.window),
         });
     }
+    if let CatalogEffect::StartUpload { token, .. } = effect {
+        return Some(OwnedCatalogResult {
+            result: CatalogResult::ForegroundFeedback {
+                token: *token,
+                message,
+            },
+            expected: ExpectedResultOwner::Window(*token),
+        });
+    }
     effect
         .operation_owner()
         .ok()

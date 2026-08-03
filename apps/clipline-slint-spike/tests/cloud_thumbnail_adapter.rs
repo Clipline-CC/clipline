@@ -205,8 +205,16 @@ fn shell_reconciles_exact_manifest_and_releases_images_before_models_and_cloud_r
         .unwrap();
     assert!(detach < clear);
     let thumbnail_shutdown = shell.find("cloud_thumbnails.shutdown()").unwrap();
-    let cloud_shutdown = shell.find("self.catalog_cloud.shutdown()").unwrap();
-    assert!(thumbnail_shutdown < cloud_shutdown);
+    let executor_shutdown = shell
+        .find("self.catalog_cloud.shutdown_executor()")
+        .unwrap();
+    let upload_shutdown = shell
+        .find("uploads.shutdown(&cloud.runtime_handle())")
+        .unwrap();
+    let cloud_shutdown = shell.find("self.catalog_cloud.shutdown_cloud()").unwrap();
+    assert!(thumbnail_shutdown < executor_shutdown);
+    assert!(executor_shutdown < upload_shutdown);
+    assert!(upload_shutdown < cloud_shutdown);
 
     let cloud = include_str!("../src/cloud.rs");
     assert!(cloud.contains("decode_cached_cloud_thumbnail(&cached)"));

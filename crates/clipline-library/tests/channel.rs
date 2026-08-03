@@ -396,6 +396,52 @@ fn cloud_progress_never_coalesces_across_accounts_or_upload_generations() {
 }
 
 #[test]
+fn upload_removal_is_an_exact_account_fenced_barrier() {
+    let (sender, receiver) = catalog_result_channel();
+    let token = upload("account-a", 1, 7);
+    sender
+        .try_send(
+            progress(token.clone(), 10),
+            ExpectedResultOwner::Upload(token.clone()),
+        )
+        .unwrap();
+    sender
+        .try_send(
+            CatalogResult::UploadRemoved {
+                token: token.clone(),
+            },
+            ExpectedResultOwner::Upload(token.clone()),
+        )
+        .unwrap();
+    sender
+        .try_send(
+            progress(token.clone(), 20),
+            ExpectedResultOwner::Upload(token.clone()),
+        )
+        .unwrap();
+    assert_eq!(receiver.len(), 3, "progress cannot replace across removal");
+
+    let replacement_account = upload("account-a", 2, 7);
+    assert_eq!(
+        sender.try_send(
+            CatalogResult::UploadRemoved {
+                token: token.clone(),
+            },
+            ExpectedResultOwner::Upload(replacement_account),
+        ),
+        Err(ResultPortError::AccountChanged)
+    );
+    assert!(matches!(
+        receiver.try_recv(),
+        Some(CatalogResult::UploadByteProgress { .. })
+    ));
+    assert_eq!(
+        receiver.try_recv(),
+        Some(CatalogResult::UploadRemoved { token })
+    );
+}
+
+#[test]
 fn stale_account_changed_and_disconnected_are_distinct() {
     let (sender, receiver) = catalog_result_channel();
     let old_window = window(1);

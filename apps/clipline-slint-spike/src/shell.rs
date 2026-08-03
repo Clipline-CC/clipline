@@ -293,7 +293,8 @@ mod windows_runtime {
     use std::time::Duration;
 
     use clipline_desktop::{
-        Generation, RecorderEvent, Revision, UiEvent, WindowLifecycleMode, WindowLifecycleSnapshot,
+        CloudAccountOwner as DesktopCloudAccountOwner, CloudAccountScope, Generation,
+        RecorderEvent, Revision, UiEvent, WindowLifecycleMode, WindowLifecycleSnapshot,
     };
     use clipline_library::{
         catalog_result_channel, ActiveFileRegistry, CatalogDialogTextField, CatalogEffect,
@@ -301,7 +302,8 @@ mod windows_runtime {
         CatalogSource, CatalogUploadVisibility, CloudCatalogOwner, CloudReviewMediaOwner,
         ForegroundGeneration, LocalClipFilter, LocalClipGrouping, LocalClipSort,
         PlaybackSourceLease, PreparedCloudReviewMedia, RequestGeneration, ResolvedLocalClip,
-        ValidatedClipPath, WindowAttachmentGeneration, WindowWorkToken, CATALOG_RESULT_CAPACITY,
+        UploadAccountOwner, UploadEventKind, UploadServiceEvent, ValidatedClipPath,
+        WindowAttachmentGeneration, WindowWorkToken, CATALOG_RESULT_CAPACITY,
     };
     use clipline_playback::windows::{WindowsD3D11Publisher, WindowsVideoHost};
     use clipline_settings::LibraryConfig;
@@ -323,6 +325,7 @@ mod windows_runtime {
     use crate::cloud::{CatalogCloudLifetime, NativeCloudMediaRegistry, NativeCloudRuntime};
     use crate::cloud_profile::{CloudProfileImageOwner, CloudRailProjection};
     use crate::cloud_thumbnail::CloudThumbnailImageOwner;
+    use crate::cloud_upload::{NativeUploadEventFanout, NativeUploadRuntime};
     use crate::controller::PlaybackController;
     use crate::desktop::{DesktopAttachment, SlintDesktopAdapter};
     use crate::live::{
@@ -408,6 +411,8 @@ mod windows_runtime {
         _settings: CandidateSettings,
         cloud_thumbnails: Option<CloudThumbnailImageOwner>,
         cloud_profile: Option<CloudProfileImageOwner>,
+        cloud_uploads: Option<Arc<NativeUploadRuntime>>,
+        upload_fanout: NativeUploadEventFanout,
         catalog_cloud: CatalogCloudLifetime,
         cloud_owner: Option<CloudCatalogOwner>,
         cloud_startup_error: Option<String>,
@@ -445,6 +450,12 @@ mod windows_runtime {
                 let _ = cloud_thumbnails.shutdown();
             }
             self.cloud_thumbnails = None;
+            let _ = self.catalog_cloud.shutdown_executor();
+            if let (Some(uploads), Some(cloud)) =
+                (self.cloud_uploads.take(), self.catalog_cloud.cloud())
+            {
+                let _ = uploads.shutdown(&cloud.runtime_handle());
+            }
             if let Some(resources) = self.window.as_mut() {
                 self.review_bridge
                     .revoke(resources.catalog_attachment, resources.catalog_foreground);
@@ -455,7 +466,7 @@ mod windows_runtime {
                     let _ = host.close();
                 }
             }
-            let _ = self.catalog_cloud.shutdown();
+            let _ = self.catalog_cloud.shutdown_cloud();
         }
     }
 
@@ -658,11 +669,18 @@ mod windows_runtime {
         let local_catalog_handler: Arc<dyn crate::catalog::CatalogEffectHandler> =
             Arc::new(LocalCatalogEffectHandler::open_with_review_port(
                 &media_root,
-                active_files,
+                active_files.clone(),
                 Arc::new(clipline_library::Mp4LegacyAudioTrackProbe),
                 Arc::new(SystemCatalogReveal),
                 review_bridge.clone(),
             )?);
+        let (catalog_sender, catalog_results) = catalog_result_channel();
+        let tray = SpikeTray::new().map_err(|error| error.to_string())?;
+        tray.set_tray_icon(tray_icon());
+        let desktop = SlintDesktopAdapter::start_with_tray(tray.as_weak())?;
+        publish_recorder_snapshot(&desktop)?;
+        let upload_fanout =
+            NativeUploadEventFanout::new(catalog_sender.clone(), desktop.event_sender());
         let (cloud, cloud_owner, cloud_preferences, cloud_startup_error) =
             match NativeCloudRuntime::open(settings.store().clone()) {
                 Ok(cloud) => match cloud.account_context() {
@@ -681,9 +699,73 @@ mod windows_runtime {
                     Some(bounded_cloud_startup_diagnostic(error)),
                 ),
             };
+        if let Some(owner) = cloud_owner.as_ref() {
+            desktop
+                .try_publish(UiEvent::CloudAccountChanged {
+                    generation: CloudAccountScope::new(owner.account_generation.get()),
+                    account: Some(
+                        DesktopCloudAccountOwner::new(
+                            owner.account_key.as_str(),
+                            CloudAccountScope::new(owner.account_generation.get()),
+                        )
+                        .map_err(|error| error.to_string())?,
+                    ),
+                })
+                .map_err(|error| error.to_string())?;
+        }
+        let cloud_uploads = cloud
+            .as_ref()
+            .map(|_| {
+                NativeUploadRuntime::open(
+                    settings.store().clone(),
+                    &media_root,
+                    active_files,
+                    Arc::new(upload_fanout.clone()),
+                )
+                .map(Arc::new)
+            })
+            .transpose()?;
+        if let (Some(uploads), Some(cloud), Some(owner)) =
+            (cloud_uploads.as_ref(), cloud.as_ref(), cloud_owner.as_ref())
+        {
+            let upload_owner =
+                UploadAccountOwner::new(owner.account_key.clone(), owner.account_generation);
+            let hydration = uploads.hydrate(&upload_owner)?;
+            for record in &hydration.visible {
+                clipline_library::UploadEventPort::try_publish(
+                    &upload_fanout,
+                    UploadServiceEvent {
+                        kind: UploadEventKind::State,
+                        record: record.clone(),
+                        notice: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            }
+            if !hydration.status_candidates.is_empty() {
+                if let Ok(endpoint) = cloud.upload_endpoint(owner) {
+                    uploads.refresh_hydrated_statuses(
+                        &cloud.runtime_handle(),
+                        endpoint,
+                        &hydration.status_candidates,
+                        upload_fanout.clone(),
+                    )?;
+                }
+            }
+        }
         let catalog_handler = cloud.as_ref().map_or_else(
             || Arc::clone(&local_catalog_handler),
-            |cloud| cloud.effect_handler(Arc::clone(&local_catalog_handler)),
+            |cloud| {
+                cloud_uploads.as_ref().map_or_else(
+                    || cloud.effect_handler(Arc::clone(&local_catalog_handler)),
+                    |uploads| {
+                        cloud.effect_handler_with_uploads(
+                            Arc::clone(&local_catalog_handler),
+                            Arc::clone(uploads),
+                        )
+                    },
+                )
+            },
         );
         let cloud_media = cloud.as_ref().map(NativeCloudRuntime::media_registry);
         let cloud_thumbnails = cloud
@@ -694,7 +776,6 @@ mod windows_runtime {
             .as_ref()
             .map(|cloud| CloudProfileImageOwner::start(cloud.profile_port()))
             .transpose()?;
-        let (catalog_sender, catalog_results) = catalog_result_channel();
         let catalog_executor = CatalogEffectExecutor::start(
             catalog_handler,
             catalog_sender.clone(),
@@ -709,10 +790,6 @@ mod windows_runtime {
         let hotkeys = WindowsHotkeyService::start(shell_commands.clone())
             .map_err(|error| format!("start Slint spike hotkey service: {error}"))?;
 
-        let tray = SpikeTray::new().map_err(|error| error.to_string())?;
-        tray.set_tray_icon(tray_icon());
-        let desktop = SlintDesktopAdapter::start_with_tray(tray.as_weak())?;
-        publish_recorder_snapshot(&desktop)?;
         let launch_mode = if options.autostart {
             LaunchMode::Autostart
         } else {
@@ -733,6 +810,8 @@ mod windows_runtime {
             _settings: settings,
             cloud_thumbnails,
             cloud_profile,
+            cloud_uploads,
+            upload_fanout,
             catalog_cloud,
             cloud_owner,
             cloud_startup_error,
@@ -865,6 +944,7 @@ mod windows_runtime {
         }
         pump_cloud_profile_completions(runtime)?;
         pump_cloud_thumbnail_completions(runtime)?;
+        runtime.borrow().upload_fanout.pump();
         pump_catalog_results(runtime)?;
         Ok(())
     }
@@ -1164,6 +1244,11 @@ mod windows_runtime {
                     registry.cancel_media(&owner)?;
                 }
             }
+            CatalogEffect::CancelUpload { token } => {
+                if let Some(uploads) = runtime.borrow().cloud_uploads.as_ref() {
+                    let _ = uploads.cancel(&token);
+                }
+            }
             CatalogEffect::OpenPreparedCloudReview { owner, media } => {
                 let token = owner.token.window;
                 let (current, attached, bridge, registry, attachment) = {
@@ -1240,6 +1325,7 @@ mod windows_runtime {
             | CatalogEffect::RenameTitle { .. }
             | CatalogEffect::RenameFile { .. }
             | CatalogEffect::Delete { .. }
+            | CatalogEffect::StartUpload { .. }
             | CatalogEffect::Reveal { .. }
             | CatalogEffect::OpenInBrowser { .. }
             | CatalogEffect::OpenCloudProfile { .. }
@@ -1279,14 +1365,6 @@ mod windows_runtime {
                         rollback_failed_review_open(runtime)?;
                         return Err("catalog executor queue is full".to_owned());
                     }
-                }
-            }
-            unsupported => {
-                let runtime_ref = runtime.borrow();
-                if let Some(resources) = runtime_ref.window.as_ref() {
-                    resources.window.set_status_text(
-                        format!("Catalog action is not connected yet: {unsupported:?}").into(),
-                    );
                 }
             }
         }
@@ -2351,6 +2429,8 @@ mod windows_runtime {
             hotkeys,
             activation,
             cloud_thumbnail_result,
+            catalog_executor_result,
+            cloud_upload_result,
             catalog_cloud_result,
             request_event_loop_quit,
         ) = {
@@ -2367,16 +2447,32 @@ mod windows_runtime {
                 .map(CloudThumbnailImageOwner::shutdown)
                 .transpose();
             runtime_ref.cloud_thumbnails = None;
-            let catalog_cloud_result = runtime_ref.catalog_cloud.shutdown();
+            let catalog_executor_result = runtime_ref.catalog_cloud.shutdown_executor();
+            let cloud_upload_result = match (
+                runtime_ref.cloud_uploads.take(),
+                runtime_ref.catalog_cloud.cloud(),
+            ) {
+                (Some(uploads), Some(cloud)) => uploads.shutdown(&cloud.runtime_handle()),
+                _ => Ok(()),
+            };
+            let catalog_cloud_result = runtime_ref.catalog_cloud.shutdown_cloud();
             (
                 runtime_ref.hotkeys.take(),
                 runtime_ref.activation.take(),
                 cloud_thumbnail_result,
+                catalog_executor_result,
+                cloud_upload_result,
                 catalog_cloud_result,
                 request,
             )
         };
         if let Err(error) = cloud_thumbnail_result {
+            remember_first_error(&mut first_error, error);
+        }
+        if let Err(error) = catalog_executor_result {
+            remember_first_error(&mut first_error, error);
+        }
+        if let Err(error) = cloud_upload_result {
             remember_first_error(&mut first_error, error);
         }
         if let Err(error) = catalog_cloud_result {

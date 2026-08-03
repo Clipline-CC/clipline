@@ -92,7 +92,7 @@ stable; the baseline commit preserves exact historical locations.
 | `event:window-lifecycle` | Revisioned neutral foreground/tray/taskbar/background snapshot with stale-revision rejection and bootstrap reconciliation. | M5 lifecycle snapshot | Stale-revision and bootstrap-race tests. | `implemented` |
 | `event:desktop-event-sequence` | Monotonic reduced-event sequence and snapshot revision drive WebView gap recovery; Slint consumes the neutral channel directly. | M5 bootstrap adapter | Coalescing-gap and destroyed-window bootstrap tests. | `implemented` |
 | `event:game-detection` | M5 routes generation-fenced game/process/mode/elevation state through the neutral sink; the full Slint games surface remains M8. | M8 games | Detector stream and elevation warning test. | `in_progress` |
-| `event:cloud-upload-progress` | M5 adds bounded per-upload coalescing and deterministic completed-entry eviction; the full Slint cloud surface remains M7. | M7 cloud controller | Coalescing/account-generation test. | `in_progress` |
+| `event:cloud-upload-progress` | The process-owned native upload service durably commits before a bounded two-contract fanout publishes byte/state progress; state barriers remain sticky, terminal rows close the cancel flow, and exact removals reach both catalog and desktop reducers. | M7 cloud controller | Account/generation fencing, byte coalescing, sticky state, terminal/removal, restart hydration, and proved 48-slot/32 MiB union bounds. | `implemented` |
 | `event:osu-enrichment-updated` | M5 routes generation-fenced durable library invalidation through the neutral sink; the full Library refresh surface remains M7. | M7 library controller | Deferred foreground refresh test. | `in_progress` |
 
 ## Surfaces and dialogs
@@ -101,7 +101,7 @@ stable; the baseline commit preserves exact historical locations.
 |---|---|---|---|---|
 | `surface:persistent-shell` | Frameless titlebar, recorder controls/status, Save Replay, hotkey, game/memory/cloud summaries, Settings. | M6 shell + M7/M8 models | Snapshot, keyboard, DPI, Narrator checks. | `not_started` |
 | `surface:local-library` | Search/filter/group/sort/page, poster states, selection, context actions. | M7 library | Model fixtures; 50/500/2,000-item manual matrix. | `not_started` |
-| `surface:cloud-library` | Remote paging/cache/progress/account-aware actions. | M7 cloud | Cloud generation fixtures and manual flow. | `not_started` |
+| `surface:cloud-library` | Native remote paging, bounded thumbnails/media leases, profile/avatar, public actions, and durable upload progress are account/window-generation fenced; final large-library and live-account gates remain. | M7 cloud | Cloud generation, cache/lease, upload recovery, and manual live-account flow. | `in_progress` |
 | `surface:review` | Playback, tracks, trim, markers, timeline, export/share/rename/delete. | M9 review | Cross-implementation vectors and media gates. | `not_started` |
 | `review:playback-rate` | 0.5x, 0.75x, 1x, 1.25x, 1.5x, and 2x playback with pitch-preserving audio. Milestone 3 intentionally supports only 1x. | M9 review / final parity | Bounded tempo-stage vectors plus live multi-track A/V gates at every rate, or an explicit approved product waiver. | `not_started` |
 | `surface:settings-general` | Startup, lifecycle, timeline, theme, update channel/check. | M8 settings | Draft/validation/accessibility tests. | `not_started` |
@@ -116,7 +116,7 @@ stable; the baseline commit preserves exact historical locations.
 | `dialog:quit-confirmation` | Close without tray prompts before orderly quit. | M6 shell | Close-setting matrix. | `not_started` |
 | `dialog:update-available` | Version/notes and install action. | M6 updater | Keyboard/accessibility and signed-install smoke. | `not_started` |
 | `dialog:elevated-game-warning` | One-per-process warning and optional elevated restart. | M6 shell | Warning suppression/restart manual test. | `not_started` |
-| `dialog:cloud-upload` | Title, audio, visibility, local-delete options. | M7 cloud | Validation/focus/upload fixture. | `not_started` |
+| `dialog:cloud-upload` | The modal native form owns bounded title/description, visibility, selected audio tracks, saved local-delete policy, exact submit ownership, and cancel-progress routing. | M7 cloud | UTF-16 validation, focus/Escape/Enter, exact upload start/cancel, and queue-rejection fixtures. | `implemented` |
 | `dialog:detected-games` | Select detected games to configure. | M8 games | Keyboard/list update test. | `not_started` |
 | `dialog:running-window` | Select a running window for a custom game. | M8 games | Refresh/cancel/select test. | `not_started` |
 | `dialog:file-rename` | Validate and commit media filename rename. | M7 library | Enter/Escape/collision tests. | `not_started` |

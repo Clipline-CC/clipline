@@ -8,13 +8,14 @@ use clipline_library::{
     build_catalog_projection, catalog_result_channel, CatalogAction, CatalogEffect,
     CatalogItemIdentity, CatalogLoadState, CatalogMenuProjection, CatalogOperationOwner,
     CatalogProjectionInput, CatalogProjectionSource, CatalogResult, CatalogRevision,
-    CatalogUploadProjection, ClipPathIdentity, CloudAccountGeneration, CloudAccountKey,
-    CloudThumbnailDescriptor, CloudThumbnailOwner, CloudThumbnailRequest, CloudWorkToken,
-    DurableUploadToken, ExpectedResultOwner, ForegroundGeneration, GalleryPresentation,
-    LocalClipFilter, LocalClipId, LocalClipItem, LocalDay, LocalDayResolver, LocalGalleryOptions,
-    LocalIndexCompletion, LocalPageIndex, MarkerSidecarSummary, PosterStatus, PresentationError,
-    RemoteClipId, RequestGeneration, SystemProjectionReservation, UploadGeneration, UploadSummary,
-    WindowAttachmentGeneration, WindowWorkToken, CATALOG_RESULT_CAPACITY,
+    CatalogUploadOptions, CatalogUploadProjection, CatalogUploadVisibility, ClipPathIdentity,
+    CloudAccountGeneration, CloudAccountKey, CloudCatalogOwner, CloudThumbnailDescriptor,
+    CloudThumbnailOwner, CloudThumbnailRequest, CloudWorkToken, DurableUploadToken,
+    ExpectedResultOwner, ForegroundGeneration, GalleryPresentation, LocalClipFilter, LocalClipId,
+    LocalClipItem, LocalDay, LocalDayResolver, LocalGalleryOptions, LocalIndexCompletion,
+    LocalPageIndex, MarkerSidecarSummary, PosterStatus, PresentationError, RemoteClipId,
+    RequestGeneration, ResolvedLocalClip, SystemProjectionReservation, UploadGeneration,
+    UploadSummary, WindowAttachmentGeneration, WindowWorkToken, CATALOG_RESULT_CAPACITY,
 };
 use clipline_slint_spike::catalog::{
     rejected_effect_result, route_ui_intent, CatalogEffectExecutor, CatalogEffectHandler,
@@ -517,6 +518,37 @@ fn admission_rejection_maps_only_owned_operations_to_exact_failures() {
         account_generation: cloud_token.account_generation,
         remote_clip_id: RemoteClipId::new("remote-1").unwrap(),
     };
+    let upload_target = ResolvedLocalClip::new(
+        ClipPathIdentity::from_text("C:/clips/one.mp4").unwrap(),
+        "C:/clips/one.mp4",
+    )
+    .unwrap();
+    let completion = rejected_effect_result(
+        &CatalogEffect::StartUpload {
+            token,
+            owner: CloudCatalogOwner::from_work_token(&cloud_token),
+            target: upload_target,
+            options: CatalogUploadOptions {
+                title: None,
+                description: None,
+                visibility: CatalogUploadVisibility::Private,
+                audio_track_ids: Vec::new(),
+                delete_local_after_upload: false,
+            },
+        },
+        "upload queue is full",
+    )
+    .unwrap();
+    assert!(matches!(
+        completion,
+        clipline_slint_spike::catalog::OwnedCatalogResult {
+            result: CatalogResult::ForegroundFeedback {
+                token: actual,
+                message,
+            },
+            expected: ExpectedResultOwner::Window(expected),
+        } if actual == token && expected == token && message == "upload queue is full"
+    ));
     let completion = rejected_effect_result(
         &CatalogEffect::OpenInBrowser {
             token: cloud_token.clone(),

@@ -169,6 +169,9 @@ fn tauri_emissions(event: &UiEvent) -> Vec<TauriEmission> {
                 |_| Vec::new(),
                 |payload| one(CLOUD_UPLOAD_PROGRESS_EVENT, payload),
             ),
+        // The shipping command response already removes the compatibility
+        // record. This native snapshot event has no legacy WebView name.
+        UiEvent::CloudUploadRemoved { .. } => Vec::new(),
         UiEvent::EnrichmentUpdated { .. } => one("osu-enrichment-updated", Value::Null),
         // The compact catalog summary is native-shell state. The shipping
         // WebView already owns its rich catalog model and has no legacy event

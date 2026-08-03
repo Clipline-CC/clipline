@@ -216,7 +216,13 @@ fn spike_is_exactly_pinned_small_and_non_distributed() {
         .expect("SlintShell Drop body");
     let session_shutdown = shell_drop.find("session.shutdown()").unwrap();
     let profile_shutdown = shell_drop.find("cloud_profile.shutdown()").unwrap();
-    let cloud_shutdown = shell_drop.find("catalog_cloud.shutdown()").unwrap();
+    let executor_shutdown = shell_drop
+        .find("catalog_cloud.shutdown_executor()")
+        .unwrap();
+    let upload_shutdown = shell_drop
+        .find("uploads.shutdown(&cloud.runtime_handle())")
+        .unwrap();
+    let cloud_shutdown = shell_drop.find("catalog_cloud.shutdown_cloud()").unwrap();
     assert!(
         session_shutdown < cloud_shutdown,
         "exceptional shell drop must join playback before Cloud cache/runtime shutdown"
@@ -224,6 +230,10 @@ fn spike_is_exactly_pinned_small_and_non_distributed() {
     assert!(
         profile_shutdown < cloud_shutdown,
         "exceptional shell drop must join Cloud profile workers before the Cloud runtime"
+    );
+    assert!(
+        executor_shutdown < upload_shutdown && upload_shutdown < cloud_shutdown,
+        "exceptional shell drop must join catalog work and uploads before the Cloud runtime"
     );
     let live = read(root.join("apps/clipline-slint-spike/src/live.rs"));
     assert!(

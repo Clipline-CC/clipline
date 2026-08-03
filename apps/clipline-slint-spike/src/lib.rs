@@ -4,6 +4,7 @@ pub mod catalog;
 pub mod cloud;
 pub mod cloud_profile;
 pub mod cloud_thumbnail;
+pub mod cloud_upload;
 pub mod controller;
 pub mod cpu_frame;
 pub mod desktop;
