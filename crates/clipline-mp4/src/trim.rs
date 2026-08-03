@@ -867,6 +867,13 @@ fn prepare_decoded_audio_sample(
             "invalid decoded Opus sample duration".into(),
         ));
     }
+    let decoded_duration = u32::try_from(pcm.len() / 2)
+        .map_err(|_| TrimError::Corrupt("decoded Opus packet is too long".into()))?;
+    if sample.duration.abs_diff(decoded_duration) > 1 {
+        return Err(TrimError::Corrupt(
+            "MP4 and decoded Opus sample durations differ".into(),
+        ));
+    }
     let source_end = sample
         .start_ticks
         .checked_add(u64::from(sample.duration))
@@ -3578,6 +3585,27 @@ mod tests {
             &oversized,
             vec![0.0; OPUS_MIX_FRAME_TICKS as usize * 2],
             &mut oversized_state,
+        )
+        .is_err());
+
+        let mismatched = SampleRecord {
+            offset: 0,
+            size: 0,
+            duration: 480,
+            is_sync: true,
+            start_ticks: 0,
+        };
+        let mut mismatched_state = AudioMixTrackState {
+            next_sample: 0,
+            pending: None,
+            previous_source_end: None,
+            output_cursor: None,
+            remaining_pre_skip: 0,
+        };
+        assert!(prepare_decoded_audio_sample(
+            &mismatched,
+            vec![0.0; OPUS_MIX_FRAME_TICKS as usize * 2],
+            &mut mismatched_state,
         )
         .is_err());
     }
