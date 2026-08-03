@@ -40,7 +40,7 @@ static EMAIL_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b").expect("email redaction regex")
 });
 static PATH_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)\b[A-Z]:\\(?:[^\\\r\n"]+\\)*[^\\\r\n"]*"#).expect("path redaction regex")
+    Regex::new(r#"(?i)\b[A-Z]:\\+(?:[^\\\r\n"]+\\+)*[^\\\r\n"]*"#).expect("path redaction regex")
 });
 static URL_QUERY_PATTERN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"(https?://[^\s?"']+)\?[^\s"']*"#).expect("URL redaction regex"));
@@ -1044,6 +1044,21 @@ mod tests {
             redact_generic("basic recording started with fallback settings"),
             "basic recording started with fallback settings"
         );
+    }
+
+    #[test]
+    fn export_redaction_preserves_json_with_escaped_windows_paths() {
+        let source = serde_json::json!({
+            "fields": { "path": r"C:\Users\JsonUser\Videos\Clipline\clip.mp4" }
+        })
+        .to_string();
+
+        let redacted = BundleRedactor::from_settings(&AppSettings::default()).redact(&source);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&redacted).expect("redacted diagnostic line must remain JSON");
+
+        assert_eq!(parsed["fields"]["path"], "<path>");
+        assert!(!redacted.contains("JsonUser"));
     }
 
     #[test]
