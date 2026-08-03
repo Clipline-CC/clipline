@@ -187,6 +187,29 @@ pub fn remux_with_selected_audio_tracks_file(
     selected_audio_track_indices: &[u32],
 ) -> Result<(), TrimError> {
     reject_same_file(source, target)?;
+    write_file_atomically(target, |mut target_file| {
+        remux_with_selected_audio_tracks_into_file(
+            source,
+            &mut target_file,
+            selected_audio_track_indices,
+        )?;
+        Ok(target_file)
+    })
+}
+
+/// Stream-remux selected audio tracks into an already-open, caller-owned file.
+///
+/// Unlike [`remux_with_selected_audio_tracks_file`], this function never
+/// renames or replaces the output path. It validates the source and selection
+/// before truncating, rejects a handle that aliases the source, and returns
+/// with the same output handle still owned by the caller. A failure after
+/// output writing begins may leave partial bytes; the caller retains exact
+/// identity ownership and decides whether to seal or remove that reservation.
+pub fn remux_with_selected_audio_tracks_into_file(
+    source: &Path,
+    output: &mut File,
+    selected_audio_track_indices: &[u32],
+) -> Result<(), TrimError> {
     let mut source_file = File::open(source)?;
     let movie = parse_movie_reader(&mut source_file)?;
     let selected = selected_audio_index_set(&movie, selected_audio_track_indices)?;
@@ -223,11 +246,11 @@ pub fn remux_with_selected_audio_tracks_file(
         }
     }
 
-    write_file_atomically(target, |target_file| {
-        let mut writer = HybridMp4Writer::new_multi(target_file, tracks)?;
-        write_timed_source_samples(&mut writer, &mut source_file, &per_track, &starts)?;
-        Ok(writer.finalize()?)
-    })
+    prepare_caller_owned_output(&source_file, output)?;
+    let mut writer = HybridMp4Writer::new_multi(output, tracks)?;
+    write_timed_source_samples(&mut writer, &mut source_file, &per_track, &starts)?;
+    let _ = writer.finalize()?;
+    Ok(())
 }
 
 pub fn remux_with_mixed_audio_track_file(
@@ -236,15 +259,57 @@ pub fn remux_with_mixed_audio_track_file(
     selected_audio_track_indices: &[u32],
 ) -> Result<(), TrimError> {
     reject_same_file(source, target)?;
+    write_file_atomically(target, |mut target_file| {
+        remux_with_mixed_audio_track_into_file_with_spool(
+            source,
+            &mut target_file,
+            selected_audio_track_indices,
+            target,
+        )?;
+        Ok(target_file)
+    })
+}
+
+/// Stream-remux selected tracks into one mixed Opus track in an already-open,
+/// caller-owned output file without replacing its directory entry.
+///
+/// The bounded mixed-audio spool is create-new beside `source`; it is removed
+/// on every return path. As with the selected-track variant, all source,
+/// selection, and audio-mix validation completes before the output is
+/// truncated, while a later write failure may leave partial caller-owned bytes.
+pub fn remux_with_mixed_audio_track_into_file(
+    source: &Path,
+    output: &mut File,
+    selected_audio_track_indices: &[u32],
+) -> Result<(), TrimError> {
+    remux_with_mixed_audio_track_into_file_with_spool(
+        source,
+        output,
+        selected_audio_track_indices,
+        source,
+    )
+}
+
+fn remux_with_mixed_audio_track_into_file_with_spool(
+    source: &Path,
+    output: &mut File,
+    selected_audio_track_indices: &[u32],
+    spool_target: &Path,
+) -> Result<(), TrimError> {
     let mut source_file = File::open(source)?;
     let movie = parse_movie_reader(&mut source_file)?;
     let selected = selected_audio_index_set(&movie, selected_audio_track_indices)?;
     if selected.is_empty() {
-        return remux_with_selected_audio_tracks_file(source, target, selected_audio_track_indices);
+        return remux_with_selected_audio_tracks_into_file(
+            source,
+            output,
+            selected_audio_track_indices,
+        );
     }
+    reject_same_open_file(&source_file, output)?;
 
     let selected_audio = selected_audio_tracks(&movie, &selected);
-    let mut spool = OwnedTempFile::create_near(target, "mix")?;
+    let mut spool = OwnedTempFile::create_near(spool_target, "mix")?;
     let mixed = mix_selected_opus_audio_tracks_to_spool(
         &mut source_file,
         &selected_audio,
@@ -294,20 +359,15 @@ pub fn remux_with_mixed_audio_track_file(
         sources.push(File::open(spool.path())?);
     }
 
-    write_file_atomically(target, |target_file| {
-        let mut writer = HybridMp4Writer::new_multi(target_file, tracks)?;
-        let mut source_refs: Vec<&mut dyn crate::writer::ReadSeek> = sources
-            .iter_mut()
-            .map(|file| file as &mut dyn crate::writer::ReadSeek)
-            .collect();
-        write_timed_source_samples_from_sources(
-            &mut writer,
-            &mut source_refs,
-            &per_track,
-            &starts,
-        )?;
-        Ok(writer.finalize()?)
-    })
+    reset_caller_owned_output(output)?;
+    let mut writer = HybridMp4Writer::new_multi(output, tracks)?;
+    let mut source_refs: Vec<&mut dyn crate::writer::ReadSeek> = sources
+        .iter_mut()
+        .map(|file| file as &mut dyn crate::writer::ReadSeek)
+        .collect();
+    write_timed_source_samples_from_sources(&mut writer, &mut source_refs, &per_track, &starts)?;
+    let _ = writer.finalize()?;
+    Ok(())
 }
 
 pub fn remux_with_selected_audio_tracks(
@@ -967,40 +1027,80 @@ fn reject_same_file(source: &Path, target: &Path) -> Result<(), TrimError> {
     Ok(())
 }
 
+fn prepare_caller_owned_output(source: &File, output: &mut File) -> Result<(), TrimError> {
+    reject_same_open_file(source, output)?;
+    reset_caller_owned_output(output)
+}
+
+fn reject_same_open_file(source: &File, output: &File) -> Result<(), TrimError> {
+    if open_files_have_same_identity(source, output)? {
+        return Err(TrimError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "MP4 source and output handle must be different files",
+        )));
+    }
+    Ok(())
+}
+
+fn reset_caller_owned_output(output: &mut File) -> Result<(), TrimError> {
+    output.set_len(0)?;
+    output.seek(SeekFrom::Start(0))?;
+    Ok(())
+}
+
 #[cfg(unix)]
 fn files_have_same_identity(source: &Path, target: &Path) -> std::io::Result<bool> {
-    use std::os::unix::fs::MetadataExt;
-    let source = std::fs::metadata(source)?;
-    let target = std::fs::metadata(target)?;
-    Ok(source.dev() == target.dev() && source.ino() == target.ino())
+    let source = File::open(source)?;
+    let target = File::open(target)?;
+    open_files_have_same_identity(&source, &target)
 }
 
 #[cfg(windows)]
 fn files_have_same_identity(source: &Path, target: &Path) -> std::io::Result<bool> {
+    let source = File::open(source)?;
+    let target = File::open(target)?;
+    open_files_have_same_identity(&source, &target)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn files_have_same_identity(source: &Path, target: &Path) -> std::io::Result<bool> {
+    Ok(std::fs::canonicalize(source)? == std::fs::canonicalize(target)?)
+}
+
+#[cfg(unix)]
+fn open_file_identity(file: &File) -> std::io::Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = file.metadata()?;
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(windows)]
+fn open_file_identity(file: &File) -> std::io::Result<(u64, u64)> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Foundation::HANDLE;
     use windows_sys::Win32::Storage::FileSystem::{
         GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
     };
 
-    fn identity(path: &Path) -> std::io::Result<(u32, u64)> {
-        let file = File::open(path)?;
-        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
-        let result =
-            unsafe { GetFileInformationByHandle(file.as_raw_handle() as HANDLE, &mut info) };
-        if result == 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        let index = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
-        Ok((info.dwVolumeSerialNumber, index))
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    let result = unsafe { GetFileInformationByHandle(file.as_raw_handle() as HANDLE, &mut info) };
+    if result == 0 {
+        return Err(std::io::Error::last_os_error());
     }
-
-    Ok(identity(source)? == identity(target)?)
+    let index = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
+    Ok((u64::from(info.dwVolumeSerialNumber), index))
 }
 
 #[cfg(not(any(unix, windows)))]
-fn files_have_same_identity(source: &Path, target: &Path) -> std::io::Result<bool> {
-    Ok(std::fs::canonicalize(source)? == std::fs::canonicalize(target)?)
+fn open_file_identity(_file: &File) -> std::io::Result<(u64, u64)> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "open-file identity is unsupported on this platform",
+    ))
+}
+
+fn open_files_have_same_identity(source: &File, output: &File) -> std::io::Result<bool> {
+    Ok(open_file_identity(source)? == open_file_identity(output)?)
 }
 
 struct OwnedTempFile {
@@ -3165,6 +3265,94 @@ mod tests {
     }
 
     #[test]
+    fn caller_owned_remux_keeps_file_identity_and_matches_the_path_api() {
+        let input = clipline_two_audio_fixture();
+        let expected = remux_with_selected_audio_tracks(&input, &[1]).unwrap();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "clipline-remux-owned-file-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.mp4");
+        let target = dir.join("target.mp4");
+        std::fs::write(&source, &input).unwrap();
+        let mut target_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&target)
+            .unwrap();
+        target_file.write_all(b"caller reservation").unwrap();
+        let identity_before = open_file_identity(&target_file).unwrap();
+
+        remux_with_selected_audio_tracks_into_file(&source, &mut target_file, &[1]).unwrap();
+        target_file.sync_all().unwrap();
+        let identity_after = open_file_identity(&target_file).unwrap();
+        let output = std::fs::read(&target).unwrap();
+        drop(target_file);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(identity_after, identity_before);
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn caller_owned_remux_validates_before_truncation_and_rejects_the_source_handle() {
+        let input = clipline_two_audio_fixture();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "clipline-remux-owned-file-failure-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.mp4");
+        let target = dir.join("target.mp4");
+        std::fs::write(&source, &input).unwrap();
+        std::fs::write(&target, b"caller reservation").unwrap();
+        let mut target_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&target)
+            .unwrap();
+        let identity_before = open_file_identity(&target_file).unwrap();
+
+        let selection_error =
+            remux_with_selected_audio_tracks_into_file(&source, &mut target_file, &[2])
+                .unwrap_err();
+        assert!(selection_error
+            .to_string()
+            .contains("outside the clip's 2 audio tracks"));
+        assert_eq!(std::fs::read(&target).unwrap(), b"caller reservation");
+        assert_eq!(open_file_identity(&target_file).unwrap(), identity_before);
+
+        let mut source_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&source)
+            .unwrap();
+        let source_identity = open_file_identity(&source_file).unwrap();
+        let same_file_error =
+            remux_with_selected_audio_tracks_into_file(&source, &mut source_file, &[0])
+                .unwrap_err();
+        assert!(matches!(
+            same_file_error,
+            TrimError::Io(ref error) if error.kind() == std::io::ErrorKind::InvalidInput
+        ));
+        assert_eq!(open_file_identity(&source_file).unwrap(), source_identity);
+        assert_eq!(std::fs::read(&source).unwrap(), input);
+        drop(source_file);
+        drop(target_file);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn atomic_file_transform_preserves_target_and_cleans_partial_on_late_failure() {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -3702,6 +3890,48 @@ mod tests {
 
         assert_eq!(movie.tracks.len(), 2);
         assert!(decoded_audible_audio_rms(&out) > 0.10);
+        assert!(leftovers.is_empty(), "leftover temp files: {leftovers:?}");
+    }
+
+    #[test]
+    fn caller_owned_audio_mix_keeps_the_reserved_file_identity() {
+        let input = clipline_two_real_opus_audio_fixture();
+        let expected = remux_with_mixed_audio_track(&input, &[0, 1]).unwrap();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "clipline-mix-owned-file-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.mp4");
+        let target = dir.join("target.mp4");
+        std::fs::write(&source, input).unwrap();
+        let mut target_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&target)
+            .unwrap();
+        let identity_before = open_file_identity(&target_file).unwrap();
+
+        remux_with_mixed_audio_track_into_file(&source, &mut target_file, &[0, 1]).unwrap();
+        target_file.sync_all().unwrap();
+        let identity_after = open_file_identity(&target_file).unwrap();
+        let output = std::fs::read(&target).unwrap();
+        let leftovers = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("clipline-tmp"))
+            .collect::<Vec<_>>();
+        drop(target_file);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(identity_after, identity_before);
+        assert_eq!(output, expected);
         assert!(leftovers.is_empty(), "leftover temp files: {leftovers:?}");
     }
 
