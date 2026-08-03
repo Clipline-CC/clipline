@@ -19,7 +19,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     ClientClipId, CloudAccountGeneration, CloudAccountKey, DurableUploadToken, LocalClipId,
-    LocalLibraryRepository, MutationLease, MutationPermit, ValidatedClipPath,
+    LocalLibraryRepository, MutationLease, MutationPermit, ValidatedClipPath, WindowWorkToken,
     ACTIVE_UPLOAD_MUTATION_ERROR,
 };
 
@@ -32,6 +32,8 @@ pub enum UploadOwnershipError {
     SourceTokenMismatch,
     #[error("another upload already owns this account and local clip")]
     DuplicateUpload,
+    #[error("this playback request already owns the clip source")]
+    DuplicatePlayback,
     #[error("clip is being modified; retry the upload")]
     MutationActive,
     #[error("clip changed while acquiring the upload lease; retry the upload")]
@@ -131,6 +133,7 @@ enum ExclusiveOwner {
 #[derive(Debug, Default)]
 struct SourceActivity {
     readers: HashSet<UploadOwnerKey>,
+    playback_readers: HashSet<WindowWorkToken>,
     exclusive: Option<ExclusiveOwner>,
 }
 
@@ -138,6 +141,7 @@ struct SourceActivity {
 struct RegistryState {
     files: HashMap<FileIdentity, SourceActivity>,
     uploads: HashMap<UploadOwnerKey, UploadRegistration>,
+    playback: HashMap<WindowWorkToken, FileIdentity>,
     mutation_sequence: u64,
 }
 
@@ -229,6 +233,54 @@ impl ActiveFileRegistry {
         })
     }
 
+    /// Acquire a restrictive, identity-checked reader for one exact native
+    /// playback request. The opaque lease is transferred into `LiveSession`;
+    /// dropping it releases both the kernel handle and mutation exclusion.
+    pub fn acquire_playback(
+        &self,
+        source: &ValidatedClipPath,
+        owner: WindowWorkToken,
+    ) -> Result<PlaybackSourceLease, UploadOwnershipError> {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| UploadOwnershipError::RegistryUnavailable)?;
+        if state.playback.contains_key(&owner) {
+            return Err(UploadOwnershipError::DuplicatePlayback);
+        }
+        if state
+            .files
+            .get(&source.file_identity())
+            .is_some_and(|activity| activity.exclusive.is_some())
+        {
+            return Err(UploadOwnershipError::MutationActive);
+        }
+        let file = clipline_shell::open_regular_file_nofollow_for_upload(source.canonical_path())
+            .map_err(|error| {
+            UploadOwnershipError::file("lease playback source", source.canonical_path(), error)
+        })?;
+        let identity = opened_file_identity(&file).map_err(|error| {
+            UploadOwnershipError::file("identify playback source", source.canonical_path(), error)
+        })?;
+        if identity != source.file_identity() {
+            return Err(UploadOwnershipError::SourceChanged);
+        }
+        let activity = state.files.entry(identity).or_default();
+        if activity.exclusive.is_some() {
+            return Err(UploadOwnershipError::MutationActive);
+        }
+        activity.playback_readers.insert(owner);
+        state.playback.insert(owner, identity);
+        Ok(PlaybackSourceLease {
+            registry: self.clone(),
+            owner,
+            identity,
+            file: Some(file),
+            registered: true,
+        })
+    }
+
     /// True only while this exact token, including its upload generation and
     /// source path identity, still owns its registered source.
     pub fn is_current(&self, token: &DurableUploadToken) -> bool {
@@ -247,7 +299,9 @@ impl ActiveFileRegistry {
     pub fn is_identity_active(&self, identity: FileIdentity) -> bool {
         self.inner.state.lock().is_ok_and(|state| {
             state.files.get(&identity).is_some_and(|activity| {
-                !activity.readers.is_empty() || activity.exclusive.is_some()
+                !activity.readers.is_empty()
+                    || !activity.playback_readers.is_empty()
+                    || activity.exclusive.is_some()
             })
         })
     }
@@ -265,7 +319,10 @@ impl MutationLease for ActiveFileRegistry {
             .lock()
             .map_err(|_| "upload ownership registry is unavailable".to_string())?;
         let activity = state.files.entry(identity).or_default();
-        if !activity.readers.is_empty() || activity.exclusive.is_some() {
+        if !activity.readers.is_empty()
+            || !activity.playback_readers.is_empty()
+            || activity.exclusive.is_some()
+        {
             return Err(ACTIVE_UPLOAD_MUTATION_ERROR.to_string());
         }
         state.mutation_sequence = state
@@ -351,7 +408,7 @@ impl UploadSourceLease {
         if activity.exclusive.is_some() || !activity.readers.contains(&self.owner) {
             return Err(UploadOwnershipError::SourceChanged);
         }
-        if activity.readers.len() != 1 {
+        if activity.readers.len() != 1 || !activity.playback_readers.is_empty() {
             return Err(UploadOwnershipError::OtherReadersActive);
         }
         activity.readers.remove(&self.owner);
@@ -396,7 +453,10 @@ impl UploadSourceLease {
         state.uploads.remove(&self.owner);
         if let Some(activity) = state.files.get_mut(&self.identity) {
             activity.readers.remove(&self.owner);
-            if activity.readers.is_empty() && activity.exclusive.is_none() {
+            if activity.readers.is_empty()
+                && activity.playback_readers.is_empty()
+                && activity.exclusive.is_none()
+            {
                 state.files.remove(&self.identity);
             }
         }
@@ -407,6 +467,63 @@ impl UploadSourceLease {
 impl Drop for UploadSourceLease {
     fn drop(&mut self) {
         self.release();
+    }
+}
+
+/// Opaque local playback reader retained by the Slint live-media seam.
+pub struct PlaybackSourceLease {
+    registry: ActiveFileRegistry,
+    owner: WindowWorkToken,
+    identity: FileIdentity,
+    file: Option<File>,
+    registered: bool,
+}
+
+impl std::fmt::Debug for PlaybackSourceLease {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PlaybackSourceLease")
+            .field("owner", &self.owner)
+            .field("identity", &self.identity)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PlaybackSourceLease {
+    #[must_use]
+    pub const fn owner(&self) -> WindowWorkToken {
+        self.owner
+    }
+
+    #[must_use]
+    pub const fn identity(&self) -> FileIdentity {
+        self.identity
+    }
+}
+
+impl Drop for PlaybackSourceLease {
+    fn drop(&mut self) {
+        if !self.registered {
+            return;
+        }
+        let Ok(mut state) = self.registry.inner.state.lock() else {
+            return;
+        };
+        if state.playback.get(&self.owner) != Some(&self.identity) {
+            return;
+        }
+        drop(self.file.take());
+        state.playback.remove(&self.owner);
+        if let Some(activity) = state.files.get_mut(&self.identity) {
+            activity.playback_readers.remove(&self.owner);
+            if activity.readers.is_empty()
+                && activity.playback_readers.is_empty()
+                && activity.exclusive.is_none()
+            {
+                state.files.remove(&self.identity);
+            }
+        }
+        self.registered = false;
     }
 }
 
@@ -508,7 +625,7 @@ impl Drop for UploadDeletePermit {
         state.uploads.remove(&self.owner);
         if let Some(activity) = state.files.get_mut(&self.identity) {
             activity.exclusive = None;
-            if activity.readers.is_empty() {
+            if activity.readers.is_empty() && activity.playback_readers.is_empty() {
                 state.files.remove(&self.identity);
             }
         }
@@ -540,7 +657,7 @@ impl Drop for ActiveMutationPermit {
         }
         if let Some(activity) = state.files.get_mut(&self.identity) {
             activity.exclusive = None;
-            if activity.readers.is_empty() {
+            if activity.readers.is_empty() && activity.playback_readers.is_empty() {
                 state.files.remove(&self.identity);
             }
         }

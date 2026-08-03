@@ -3,9 +3,10 @@ use std::sync::Arc;
 
 use clipline_library::{
     client_clip_id_for_payload, clip_sidecar_paths, local_clip_id_for_source, ActiveFileRegistry,
-    CloudAccountGeneration, CloudAccountKey, DurableUploadToken, LocalClipId,
-    LocalLibraryRepository, MutationLease, OwnedUploadTemp, StandardRepositoryFileSystem,
-    UploadGeneration, UploadOwnershipError, ACTIVE_UPLOAD_MUTATION_ERROR,
+    CloudAccountGeneration, CloudAccountKey, DurableUploadToken, ForegroundGeneration, LocalClipId,
+    LocalLibraryRepository, MutationLease, OwnedUploadTemp, RequestGeneration,
+    StandardRepositoryFileSystem, UploadGeneration, UploadOwnershipError,
+    WindowAttachmentGeneration, WindowWorkToken, ACTIVE_UPLOAD_MUTATION_ERROR,
 };
 use clipline_test_utils::TestDir;
 
@@ -183,6 +184,34 @@ fn two_distinct_upload_readers_refcount_one_file_identity() {
         ACTIVE_UPLOAD_MUTATION_ERROR
     );
     drop(second);
+    let mutation = registry
+        .acquire(source.canonical_path(), source.file_identity())
+        .unwrap();
+    drop(mutation);
+}
+
+#[test]
+fn playback_reader_blocks_mutation_until_the_live_source_lease_drops() {
+    let (_directory, registry, _repository, source) = fixture("playback-reader");
+    let owner = WindowWorkToken {
+        attachment: WindowAttachmentGeneration::new(7),
+        foreground: ForegroundGeneration::new(8),
+        request: RequestGeneration::new(9),
+    };
+    let playback = registry.acquire_playback(&source, owner).unwrap();
+    assert_eq!(playback.owner(), owner);
+    assert_eq!(playback.identity(), source.file_identity());
+    assert!(registry.is_identity_active(source.file_identity()));
+    assert_eq!(
+        registry.acquire_playback(&source, owner).unwrap_err(),
+        UploadOwnershipError::DuplicatePlayback
+    );
+    assert_eq!(
+        mutation_error(registry.acquire(source.canonical_path(), source.file_identity())),
+        ACTIVE_UPLOAD_MUTATION_ERROR
+    );
+    drop(playback);
+    assert!(!registry.is_identity_active(source.file_identity()));
     let mutation = registry
         .acquire(source.canonical_path(), source.file_identity())
         .unwrap();
