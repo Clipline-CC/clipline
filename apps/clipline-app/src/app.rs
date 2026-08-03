@@ -41,9 +41,9 @@ use crate::games::{DetectedGame, GameWindowInfo};
 use crate::osu_enrichment::OsuTitleEvent;
 use crate::service::{self, Cmd, Event, ServiceOptions};
 use crate::settings::{
-    quota_bytes_from_gb, AppSettings, AppSettingsServiceExt, CaptureMode, CloudAccountIdentity,
-    CloudUploadRecord, CustomGameSettings, GameRecordingMode, SettingsChange, SettingsProfile,
-    SettingsSnapshot, SettingsStore, SettingsTransaction,
+    quota_bytes_from_gb, AppSettings, AppSettingsServiceExt, CaptureMode, CloudRecordCas,
+    CustomGameSettings, GameRecordingMode, SettingsChange, SettingsProfile, SettingsSnapshot,
+    SettingsStore, SettingsTransaction,
 };
 use crate::updates::{channel_enabled, UpdateChannel};
 use crate::util::unix_now_i64;
@@ -1463,77 +1463,26 @@ impl RuntimeState {
             reason = "Task 7's upload adapter will implement UploadRecordPort through this exact CAS"
         )
     )]
-    pub(crate) fn compare_exchange_cloud_record(
+    pub(crate) fn compare_exchange_cloud_records(
         &self,
-        expected_generation: u64,
-        expected_account: &CloudAccountIdentity,
-        key: String,
-        expected: Option<CloudUploadRecord>,
-        replacement: Option<CloudUploadRecord>,
-    ) -> Result<AppSettings, String> {
+        change: CloudRecordCas,
+    ) -> Result<SettingsSnapshot, String> {
         let _save_guard = Self::lock_cloud_settings_save()?;
         let Some(store) = self.2.as_ref() else {
-            if expected_generation != 1 {
-                return Err("cloud account changed while upload work was in flight".into());
-            }
-            let mut next = self
-                .0
-                .lock()
-                .map_err(|_| "runtime state lock poisoned")?
-                .settings
-                .clone();
-            if &CloudAccountIdentity::from_settings(&next.cloud) != expected_account {
-                return Err("cloud account changed while upload work was in flight".into());
-            }
-            if next.cloud.uploads.get(&key) != expected.as_ref() {
-                return Err("cloud upload record changed while work was in flight".into());
-            }
-            match replacement {
-                Some(record) => {
-                    next.cloud.uploads.insert(key, record);
-                }
-                None => {
-                    next.cloud.uploads.remove(&key);
-                }
-            }
-            next.cloud.normalize();
-            AppSettings::save(&next)?;
-            let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-            inner.settings.cloud = next.cloud;
-            return Ok(inner.settings.clone());
+            return Err("cloud record CAS requires a durable settings store".into());
         };
 
         let before = store.snapshot().map_err(|error| error.to_string())?;
-        if before.account_generation.get() != expected_generation
-            || &before.account != expected_account
-        {
-            return Err("cloud account changed while upload work was in flight".into());
-        }
-        let change = match replacement {
-            Some(record) => SettingsChange::UpsertCloudRecord {
-                account: expected_account.clone(),
-                key,
-                expected,
-                record,
-            },
-            None => SettingsChange::RemoveCloudRecord {
-                account: expected_account.clone(),
-                key,
-                expected: expected.ok_or_else(|| {
-                    "removing a cloud upload record requires its expected value".to_string()
-                })?,
-            },
-        };
         let after = store
             .transact(SettingsTransaction {
                 expected_revision: before.revision,
                 expected_account_generation: before.account_generation,
-                change,
+                change: SettingsChange::CompareExchangeCloudRecords(change),
             })
             .map_err(|error| error.to_string())?;
         let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-        inner.settings.cloud = after.document.cloud;
-        Ok(inner.settings.clone())
+        inner.settings.cloud = after.document.cloud.clone();
+        Ok(after)
     }
 
     fn update_cloud_with<F>(
@@ -3987,10 +3936,31 @@ fn tray_icon() -> Image<'static> {
 mod tests {
     use super::*;
     use crate::settings::{
-        CloudUploadRecord, GameRecordingMode, ReplayStorageMode, ReplayStorageSettings,
+        CloudRecordCasKind, CloudRecordSlot, CloudUploadRecord, GameRecordingMode,
+        ReplayStorageMode, ReplayStorageSettings,
     };
     use clipline_test_utils::TestDir;
     use std::sync::Arc;
+
+    fn durable_upload_record(
+        local_clip_id: &str,
+        upload_generation: u64,
+        path: &str,
+        upload_status: &str,
+    ) -> CloudUploadRecord {
+        CloudUploadRecord {
+            local_clip_id: local_clip_id.into(),
+            client_clip_id: Some(format!("client-{local_clip_id}")),
+            upload_generation: Some(upload_generation),
+            path: path.into(),
+            remote_clip_id: None,
+            remote_url: None,
+            visibility: "private".into(),
+            upload_status: upload_status.into(),
+            error: None,
+            updated_at_unix: upload_generation,
+        }
+    }
 
     #[test]
     fn quota_parser_converts_gib_to_bytes() {
@@ -4167,8 +4137,84 @@ mod tests {
     }
 
     #[test]
-    fn cloud_record_compare_exchange_rejects_older_record_and_account_completions() {
-        let dir = TestDir::new("clipline-app", "settings-store-cloud-record-cas");
+    fn cloud_record_compare_exchange_reconciles_exact_aliases_and_preserves_other_settings() {
+        let dir = TestDir::new("clipline-app", "settings-store-cloud-record-alias-cas");
+        let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));
+        let initial = store.snapshot().unwrap();
+        let path = r"D:\Videos\Clipline\same.mp4";
+        let legacy_a = durable_upload_record("legacy-a", 3, path, "failed");
+        let legacy_b = durable_upload_record("legacy-b", 4, path, "failed");
+        let unrelated = durable_upload_record(
+            "unrelated",
+            5,
+            r"D:\Videos\Clipline\other.mp4",
+            "uploaded_private",
+        );
+        let mut document = initial.document.clone();
+        document.fps = 120;
+        document.osu.client_id = Some("61835".into());
+        document.cloud.host_url = "https://clips.example.com".into();
+        document.cloud.connected_user_id = Some("user-a".into());
+        document.cloud.credential_target = Some("credential-a".into());
+        document
+            .cloud
+            .uploads
+            .insert("legacy-a".into(), legacy_a.clone());
+        document
+            .cloud
+            .uploads
+            .insert("legacy-b".into(), legacy_b.clone());
+        document
+            .cloud
+            .uploads
+            .insert("unrelated".into(), unrelated.clone());
+        let seeded = store.replace_document(&initial, document).unwrap();
+        let state = RuntimeState::with_store(seeded.document.clone(), None, store.clone());
+        let replacement = durable_upload_record("source-1", 9, path, "queued");
+
+        let result = state
+            .compare_exchange_cloud_records(CloudRecordCas {
+                account: seeded.account.clone(),
+                account_generation: seeded.account_generation,
+                kind: CloudRecordCasKind::Admit {
+                    upload_generation: 9,
+                },
+                expected: vec![
+                    CloudRecordSlot {
+                        key: "source-1".into(),
+                        record: None,
+                    },
+                    CloudRecordSlot {
+                        key: "legacy-a".into(),
+                        record: Some(legacy_a),
+                    },
+                    CloudRecordSlot {
+                        key: "legacy-b".into(),
+                        record: Some(legacy_b),
+                    },
+                ],
+                replacement: Some(CloudRecordSlot {
+                    key: "source-1".into(),
+                    record: Some(replacement.clone()),
+                }),
+            })
+            .unwrap();
+        let persisted = store.snapshot().unwrap();
+
+        assert_eq!(persisted.document.cloud.uploads.len(), 2);
+        assert_eq!(persisted.document.cloud.uploads["source-1"], replacement);
+        assert_eq!(persisted.document.cloud.uploads["unrelated"], unrelated);
+        assert_eq!(persisted.document.fps, seeded.document.fps);
+        assert_eq!(persisted.document.osu, seeded.document.osu);
+        assert_eq!(persisted.document.media_dir, seeded.document.media_dir);
+        assert_eq!(persisted.revision.get(), seeded.revision.get() + 1);
+        assert_eq!(result, persisted);
+        assert_eq!(state.settings(), persisted.document);
+    }
+
+    #[test]
+    fn cloud_record_compare_exchange_rejects_stale_record_and_account_byte_identically() {
+        let dir = TestDir::new("clipline-app", "settings-store-cloud-record-stale-cas");
         let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));
         let initial = store.snapshot().unwrap();
         let state = RuntimeState::with_store(initial.document.clone(), None, store.clone());
@@ -4180,59 +4226,83 @@ mod tests {
             })
             .unwrap();
         let account_a = store.snapshot().unwrap();
-        let queued = CloudUploadRecord {
-            local_clip_id: "local-1".into(),
-            path: r"D:\Videos\Clipline\clip.mp4".into(),
-            remote_clip_id: None,
-            remote_url: None,
-            visibility: "private".into(),
-            upload_status: "queued".into(),
-            error: None,
-            updated_at_unix: 1,
-        };
+        let queued = durable_upload_record("local-1", 1, r"D:\Videos\Clipline\clip.mp4", "queued");
         state
-            .compare_exchange_cloud_record(
-                account_a.account_generation.get(),
-                &account_a.account,
-                "local-1".into(),
-                None,
-                Some(queued.clone()),
-            )
+            .compare_exchange_cloud_records(CloudRecordCas {
+                account: account_a.account.clone(),
+                account_generation: account_a.account_generation,
+                kind: CloudRecordCasKind::Admit {
+                    upload_generation: 1,
+                },
+                expected: vec![CloudRecordSlot {
+                    key: "local-1".into(),
+                    record: None,
+                }],
+                replacement: Some(CloudRecordSlot {
+                    key: "local-1".into(),
+                    record: Some(queued.clone()),
+                }),
+            })
+            .unwrap();
+        let mut retrying = queued.clone();
+        retrying.upload_status = "retrying".into();
+        retrying.updated_at_unix = 2;
+        let admitted = store.snapshot().unwrap();
+        state
+            .compare_exchange_cloud_records(CloudRecordCas {
+                account: admitted.account.clone(),
+                account_generation: admitted.account_generation,
+                kind: CloudRecordCasKind::Advance {
+                    upload_generation: 1,
+                },
+                expected: vec![CloudRecordSlot {
+                    key: "local-1".into(),
+                    record: Some(queued.clone()),
+                }],
+                replacement: Some(CloudRecordSlot {
+                    key: "local-1".into(),
+                    record: Some(retrying.clone()),
+                }),
+            })
             .unwrap();
 
-        let retrying = CloudUploadRecord {
-            upload_status: "retrying".into(),
-            updated_at_unix: 2,
-            ..queued.clone()
-        };
-        state
-            .compare_exchange_cloud_record(
-                account_a.account_generation.get(),
-                &account_a.account,
-                "local-1".into(),
-                Some(queued.clone()),
-                Some(retrying.clone()),
-            )
-            .unwrap();
         let before_stale_record = store.snapshot().unwrap();
-        let uploaded = CloudUploadRecord {
-            upload_status: "uploaded_private".into(),
-            remote_clip_id: Some("remote-1".into()),
-            updated_at_unix: 3,
-            ..queued.clone()
-        };
+        let mirror_before_stale_record = state.settings();
+        let primary_before_stale_record = std::fs::read(store.profile().settings_path()).unwrap();
+        let backup_path = dir.path().join("settings.json.bak");
+        let backup_before_stale_record = std::fs::read(&backup_path).unwrap();
+        let mut uploaded = queued.clone();
+        uploaded.upload_status = "uploaded_private".into();
+        uploaded.remote_clip_id = Some("remote-1".into());
+        uploaded.updated_at_unix = 3;
         let error = state
-            .compare_exchange_cloud_record(
-                account_a.account_generation.get(),
-                &account_a.account,
-                "local-1".into(),
-                Some(queued.clone()),
-                Some(uploaded.clone()),
-            )
+            .compare_exchange_cloud_records(CloudRecordCas {
+                account: before_stale_record.account.clone(),
+                account_generation: before_stale_record.account_generation,
+                kind: CloudRecordCasKind::Advance {
+                    upload_generation: 1,
+                },
+                expected: vec![CloudRecordSlot {
+                    key: "local-1".into(),
+                    record: Some(queued),
+                }],
+                replacement: Some(CloudRecordSlot {
+                    key: "local-1".into(),
+                    record: Some(uploaded.clone()),
+                }),
+            })
             .unwrap_err();
         assert!(error.contains("record changed"), "{error}");
         assert_eq!(store.snapshot().unwrap(), before_stale_record);
-        assert_eq!(state.settings(), before_stale_record.document);
+        assert_eq!(state.settings(), mirror_before_stale_record);
+        assert_eq!(
+            std::fs::read(store.profile().settings_path()).unwrap(),
+            primary_before_stale_record
+        );
+        assert_eq!(
+            std::fs::read(&backup_path).unwrap(),
+            backup_before_stale_record
+        );
 
         state
             .update_cloud(|cloud| {
@@ -4241,18 +4311,37 @@ mod tests {
             })
             .unwrap();
         let before_stale_account = store.snapshot().unwrap();
+        let mirror_before_stale_account = state.settings();
+        let primary_before_stale_account = std::fs::read(store.profile().settings_path()).unwrap();
+        let backup_before_stale_account = std::fs::read(&backup_path).unwrap();
         let error = state
-            .compare_exchange_cloud_record(
-                account_a.account_generation.get(),
-                &account_a.account,
-                "local-1".into(),
-                Some(retrying),
-                Some(uploaded),
-            )
+            .compare_exchange_cloud_records(CloudRecordCas {
+                account: account_a.account,
+                account_generation: account_a.account_generation,
+                kind: CloudRecordCasKind::Advance {
+                    upload_generation: 1,
+                },
+                expected: vec![CloudRecordSlot {
+                    key: "local-1".into(),
+                    record: Some(retrying),
+                }],
+                replacement: Some(CloudRecordSlot {
+                    key: "local-1".into(),
+                    record: Some(uploaded),
+                }),
+            })
             .unwrap_err();
         assert!(error.contains("account changed"), "{error}");
         assert_eq!(store.snapshot().unwrap(), before_stale_account);
-        assert_eq!(state.settings(), before_stale_account.document);
+        assert_eq!(state.settings(), mirror_before_stale_account);
+        assert_eq!(
+            std::fs::read(store.profile().settings_path()).unwrap(),
+            primary_before_stale_account
+        );
+        assert_eq!(
+            std::fs::read(&backup_path).unwrap(),
+            backup_before_stale_account
+        );
     }
 
     #[test]
@@ -5225,6 +5314,8 @@ mod tests {
             "local-1".into(),
             CloudUploadRecord {
                 local_clip_id: "local-1".into(),
+                client_clip_id: Some("client-1".into()),
+                upload_generation: Some(1),
                 path: "D:\\Videos\\Clipline\\clip.mp4".into(),
                 remote_clip_id: Some("remote-1".into()),
                 remote_url: Some("https://public.example.com/remote-1".into()),

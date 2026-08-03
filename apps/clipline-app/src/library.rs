@@ -1768,6 +1768,8 @@ mod tests {
     fn cloud_rename_reconciliation_matches_windows_path_aliases() {
         let record = crate::settings::CloudUploadRecord {
             local_clip_id: "local-1".into(),
+            client_clip_id: None,
+            upload_generation: None,
             path: r"C:\Clips\Session_1.mp4".into(),
             remote_clip_id: None,
             remote_url: None,

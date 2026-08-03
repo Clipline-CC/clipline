@@ -8,6 +8,14 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 pub const CLOUD_CREDENTIAL_PREFIX: &str = "Clipline Cloud";
+/// Upload identities share the neutral Library contract's 16 KiB identity bound.
+pub const MAX_CLOUD_UPLOAD_ID_BYTES: usize = 16 * 1024;
+/// Paths are user-controlled and may include a long Windows verbatim prefix.
+pub const MAX_CLOUD_UPLOAD_PATH_BYTES: usize = 1024 * 1024;
+/// Remote URLs are persisted only as bounded display/navigation metadata.
+pub const MAX_CLOUD_UPLOAD_URL_BYTES: usize = 64 * 1024;
+/// Transport errors are bounded before they enter durable settings.
+pub const MAX_CLOUD_UPLOAD_ERROR_BYTES: usize = 64 * 1024;
 
 pub fn cloud_credential_target(host_url: &str, user_id: &str) -> String {
     format!(
@@ -28,6 +36,14 @@ fn default_upload_status() -> String {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CloudUploadRecord {
     pub local_clip_id: String,
+    /// Stable server-facing identity of the prepared payload. Legacy records
+    /// predate the split between source admission and payload identity.
+    #[serde(default)]
+    pub client_clip_id: Option<String>,
+    /// Exact durable upload owner. `None` identifies a legacy record that has
+    /// not yet been advanced through the account-safe upload service.
+    #[serde(default)]
+    pub upload_generation: Option<u64>,
     pub path: String,
     #[serde(default)]
     pub remote_clip_id: Option<String>,
@@ -46,6 +62,11 @@ pub struct CloudUploadRecord {
 impl CloudUploadRecord {
     pub fn normalize(&mut self) {
         self.local_clip_id = self.local_clip_id.trim().to_string();
+        self.client_clip_id = self
+            .client_clip_id
+            .take()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
         self.path = self.path.trim().to_string();
         self.remote_clip_id = self
             .remote_clip_id
@@ -64,6 +85,7 @@ impl CloudUploadRecord {
             .take()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
+        clear_non_shareable_remote_url(self);
     }
 }
 
@@ -161,22 +183,72 @@ impl CloudSettings {
                     .then(|| (normalize_cloud_upload_key(&key, &record), record))
             })
             .collect();
-        for record in self.uploads.values_mut() {
-            clear_non_shareable_remote_url(record);
-        }
     }
 
     pub fn validate(&self) -> Result<(), String> {
         validate_cloud_visibility(&self.default_visibility)?;
-        for record in self.uploads.values() {
+        for (key, record) in &self.uploads {
+            validate_bounded_required("cloud upload key", key, MAX_CLOUD_UPLOAD_ID_BYTES)?;
             validate_cloud_visibility(&record.visibility)?;
             validate_upload_status(&record.upload_status)?;
-            if record.local_clip_id.trim().is_empty() {
-                return Err("cloud upload record is missing local_clip_id".into());
+            validate_bounded_required(
+                "cloud upload record local_clip_id",
+                &record.local_clip_id,
+                MAX_CLOUD_UPLOAD_ID_BYTES,
+            )?;
+            validate_bounded_optional(
+                "cloud upload record client_clip_id",
+                record.client_clip_id.as_deref(),
+                MAX_CLOUD_UPLOAD_ID_BYTES,
+            )?;
+            validate_bounded_optional(
+                "cloud upload record remote_clip_id",
+                record.remote_clip_id.as_deref(),
+                MAX_CLOUD_UPLOAD_ID_BYTES,
+            )?;
+            validate_bounded_optional(
+                "cloud upload record remote_url",
+                record.remote_url.as_deref(),
+                MAX_CLOUD_UPLOAD_URL_BYTES,
+            )?;
+            validate_bounded_optional(
+                "cloud upload record error",
+                record.error.as_deref(),
+                MAX_CLOUD_UPLOAD_ERROR_BYTES,
+            )?;
+            if record.path.len() > MAX_CLOUD_UPLOAD_PATH_BYTES {
+                return Err(format!(
+                    "cloud upload record path is {} bytes; maximum is {MAX_CLOUD_UPLOAD_PATH_BYTES}",
+                    record.path.len()
+                ));
             }
         }
         Ok(())
     }
+}
+
+fn validate_bounded_required(name: &str, value: &str, maximum: usize) -> Result<(), String> {
+    if value.trim().is_empty() {
+        return Err(format!("{name} is missing"));
+    }
+    if value.len() > maximum {
+        return Err(format!(
+            "{name} is {} bytes; maximum is {maximum}",
+            value.len()
+        ));
+    }
+    Ok(())
+}
+
+fn validate_bounded_optional(
+    name: &str,
+    value: Option<&str>,
+    maximum: usize,
+) -> Result<(), String> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    validate_bounded_required(name, value, maximum)
 }
 
 fn normalize_cloud_upload_key(key: &str, record: &CloudUploadRecord) -> String {
@@ -231,7 +303,8 @@ fn normalize_upload_status(value: &str) -> String {
         | "uploaded_public"
         | "uploaded_processing"
         | "failed"
-        | "retrying" => value.to_string(),
+        | "retrying"
+        | "canceled" => value.to_string(),
         _ => default_upload_status(),
     }
 }
@@ -246,7 +319,8 @@ fn validate_upload_status(value: &str) -> Result<(), String> {
         | "uploaded_public"
         | "uploaded_processing"
         | "failed"
-        | "retrying" => Ok(()),
+        | "retrying"
+        | "canceled" => Ok(()),
         _ => Err("cloud upload status is invalid".into()),
     }
 }

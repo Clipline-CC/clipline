@@ -3,8 +3,8 @@ use std::sync::{Arc, Barrier};
 use clipline_settings::cloud::{cloud_credential_target, CloudUploadRecord};
 use clipline_settings::osu::osu_credential_target;
 use clipline_settings::{
-    AccountGeneration, CloudAccountIdentity, SettingsChange, SettingsProfile, SettingsStore,
-    SettingsTransaction, SettingsTransactionError,
+    AccountGeneration, CloudAccountIdentity, CloudRecordCas, CloudRecordCasKind, CloudRecordSlot,
+    SettingsChange, SettingsProfile, SettingsStore, SettingsTransaction, SettingsTransactionError,
 };
 use clipline_test_utils::TestDir;
 
@@ -146,6 +146,8 @@ fn account_generation_changes_only_with_account_identity() {
 
     let record = CloudUploadRecord {
         local_clip_id: "clip-1".into(),
+        client_clip_id: None,
+        upload_generation: None,
         path: dir.path().join("clip.mp4").display().to_string(),
         remote_clip_id: Some("remote-1".into()),
         remote_url: None,
@@ -185,6 +187,8 @@ fn cloud_record_rejects_the_wrong_account_without_mutation() {
                 key: "clip-1".into(),
                 expected: CloudUploadRecord {
                     local_clip_id: "clip-1".into(),
+                    client_clip_id: None,
+                    upload_generation: None,
                     path: "clip.mp4".into(),
                     remote_clip_id: None,
                     remote_url: None,
@@ -208,6 +212,8 @@ fn cloud_record_compare_and_swap_rejects_delayed_upload_or_sync_results() {
     let initial = store.snapshot().unwrap();
     let record = |status: &str, updated_at_unix| CloudUploadRecord {
         local_clip_id: "clip-1".into(),
+        client_clip_id: None,
+        upload_generation: None,
         path: dir.path().join("clip.mp4").display().to_string(),
         remote_clip_id: None,
         remote_url: None,
@@ -271,6 +277,509 @@ fn cloud_record_compare_and_swap_rejects_delayed_upload_or_sync_results() {
         store.snapshot().unwrap().document.cloud.uploads["clip-1"],
         uploading
     );
+}
+
+fn durable_record(
+    local_clip_id: &str,
+    client_clip_id: Option<&str>,
+    upload_generation: u64,
+    path: impl Into<String>,
+    status: &str,
+) -> CloudUploadRecord {
+    CloudUploadRecord {
+        local_clip_id: local_clip_id.into(),
+        client_clip_id: client_clip_id.map(str::to_string),
+        upload_generation: Some(upload_generation),
+        path: path.into(),
+        remote_clip_id: None,
+        remote_url: None,
+        visibility: "private".into(),
+        upload_status: status.into(),
+        error: None,
+        updated_at_unix: upload_generation,
+    }
+}
+
+fn cloud_record_cas(
+    snapshot: &clipline_settings::SettingsSnapshot,
+    kind: CloudRecordCasKind,
+    expected: Vec<CloudRecordSlot>,
+    replacement: Option<CloudRecordSlot>,
+) -> SettingsTransaction {
+    SettingsTransaction {
+        expected_revision: snapshot.revision,
+        expected_account_generation: snapshot.account_generation,
+        change: SettingsChange::CompareExchangeCloudRecords(CloudRecordCas {
+            account: snapshot.account.clone(),
+            account_generation: snapshot.account_generation,
+            kind,
+            expected,
+            replacement,
+        }),
+    }
+}
+
+#[test]
+fn whole_record_cas_admits_once_and_rejects_stale_or_aba_writers_byte_identically() {
+    let dir = TestDir::new("clipline-settings", "whole-cloud-record-cas");
+    let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));
+    let initial = store.snapshot().unwrap();
+    let path = dir.path().join("clip.mp4").display().to_string();
+    let queued = durable_record("source-1", None, 7, &path, "queued");
+    let admitted = store
+        .transact(cloud_record_cas(
+            &initial,
+            CloudRecordCasKind::Admit {
+                upload_generation: 7,
+            },
+            vec![CloudRecordSlot {
+                key: "source-1".into(),
+                record: None,
+            }],
+            Some(CloudRecordSlot {
+                key: "source-1".into(),
+                record: Some(queued.clone()),
+            }),
+        ))
+        .unwrap();
+    assert_eq!(admitted.document.cloud.uploads["source-1"], queued);
+    assert_eq!(admitted.document.media_dir, initial.document.media_dir);
+
+    let primary = file_bytes(store.profile().settings_path());
+    let backup = file_bytes(&dir.path().join("settings.json.bak"));
+    let stale = store
+        .transact(cloud_record_cas(
+            &admitted,
+            CloudRecordCasKind::Admit {
+                upload_generation: 7,
+            },
+            vec![CloudRecordSlot {
+                key: "source-1".into(),
+                record: None,
+            }],
+            Some(CloudRecordSlot {
+                key: "source-1".into(),
+                record: Some(queued),
+            }),
+        ))
+        .unwrap_err();
+    assert_eq!(stale, SettingsTransactionError::StaleCloudRecord);
+    assert_eq!(store.snapshot().unwrap(), admitted);
+    assert_eq!(file_bytes(store.profile().settings_path()), primary);
+    assert_eq!(file_bytes(&dir.path().join("settings.json.bak")), backup);
+
+    let generation_8 = durable_record("source-1", Some("payload-8"), 8, &path, "queued");
+    let current = store
+        .transact(cloud_record_cas(
+            &admitted,
+            CloudRecordCasKind::Admit {
+                upload_generation: 8,
+            },
+            vec![CloudRecordSlot {
+                key: "source-1".into(),
+                record: Some(admitted.document.cloud.uploads["source-1"].clone()),
+            }],
+            Some(CloudRecordSlot {
+                key: "source-1".into(),
+                record: Some(generation_8.clone()),
+            }),
+        ))
+        .unwrap();
+    let delayed_generation_7 = store
+        .transact(cloud_record_cas(
+            &current,
+            CloudRecordCasKind::Advance {
+                upload_generation: 7,
+            },
+            vec![CloudRecordSlot {
+                key: "source-1".into(),
+                record: Some(admitted.document.cloud.uploads["source-1"].clone()),
+            }],
+            Some(CloudRecordSlot {
+                key: "source-1".into(),
+                record: Some(durable_record(
+                    "source-1",
+                    Some("payload-7"),
+                    7,
+                    &path,
+                    "failed",
+                )),
+            }),
+        ))
+        .unwrap_err();
+    assert_eq!(
+        delayed_generation_7,
+        SettingsTransactionError::StaleCloudRecord
+    );
+    assert_eq!(store.snapshot().unwrap(), current);
+    assert_eq!(current.document.cloud.uploads["source-1"], generation_8);
+}
+
+#[test]
+fn whole_record_cas_reconciles_only_exact_expected_equivalent_paths() {
+    let dir = TestDir::new("clipline-settings", "whole-cloud-record-paths");
+    let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));
+    let initial = store.snapshot().unwrap();
+    let mut seeded_document = initial.document.clone();
+    let legacy_a = durable_record(
+        "legacy-a",
+        Some("payload-old-a"),
+        3,
+        r"D:\Clips\same.mp4",
+        "failed",
+    );
+    let legacy_b = durable_record(
+        "legacy-b",
+        Some("payload-old-b"),
+        4,
+        r"\\?\d:/clips/SAME.mp4",
+        "failed",
+    );
+    let unrelated = durable_record(
+        "other",
+        Some("payload-other"),
+        4,
+        r"D:\Clips\other.mp4",
+        "uploaded_private",
+    );
+    seeded_document
+        .cloud
+        .uploads
+        .insert("legacy-a".into(), legacy_a.clone());
+    seeded_document
+        .cloud
+        .uploads
+        .insert("legacy-b".into(), legacy_b.clone());
+    seeded_document
+        .cloud
+        .uploads
+        .insert("other".into(), unrelated.clone());
+    let seeded = store.replace_document(&initial, seeded_document).unwrap();
+    let replacement = durable_record(
+        "source-1",
+        Some("payload-new"),
+        9,
+        r"d:/CLIPS/same.mp4",
+        "queued",
+    );
+    let reconciled = store
+        .transact(cloud_record_cas(
+            &seeded,
+            CloudRecordCasKind::Admit {
+                upload_generation: 9,
+            },
+            vec![
+                CloudRecordSlot {
+                    key: "source-1".into(),
+                    record: None,
+                },
+                CloudRecordSlot {
+                    key: "legacy-a".into(),
+                    record: Some(legacy_a),
+                },
+                CloudRecordSlot {
+                    key: "legacy-b".into(),
+                    record: Some(legacy_b),
+                },
+            ],
+            Some(CloudRecordSlot {
+                key: "source-1".into(),
+                record: Some(replacement.clone()),
+            }),
+        ))
+        .unwrap();
+    assert_eq!(reconciled.document.cloud.uploads.len(), 2);
+    assert_eq!(reconciled.document.cloud.uploads["source-1"], replacement);
+    assert_eq!(reconciled.document.cloud.uploads["other"], unrelated);
+
+    let primary = file_bytes(store.profile().settings_path());
+    let invalid = store
+        .transact(cloud_record_cas(
+            &reconciled,
+            CloudRecordCasKind::StatusSync,
+            vec![
+                CloudRecordSlot {
+                    key: "source-1".into(),
+                    record: Some(reconciled.document.cloud.uploads["source-1"].clone()),
+                },
+                CloudRecordSlot {
+                    key: "other".into(),
+                    record: Some(reconciled.document.cloud.uploads["other"].clone()),
+                },
+            ],
+            Some(CloudRecordSlot {
+                key: "source-1".into(),
+                record: Some(durable_record(
+                    "source-1",
+                    Some("payload-new"),
+                    9,
+                    r"D:\Clips\same.mp4",
+                    "uploaded_private",
+                )),
+            }),
+        ))
+        .unwrap_err();
+    assert!(matches!(invalid, SettingsTransactionError::Validation(_)));
+    assert_eq!(store.snapshot().unwrap(), reconciled);
+    assert_eq!(file_bytes(store.profile().settings_path()), primary);
+}
+
+#[test]
+fn whole_record_cas_refuses_a_stable_key_collision_with_another_local_identity() {
+    let dir = TestDir::new("clipline-settings", "whole-cloud-record-key-collision");
+    let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));
+    let initial = store.snapshot().unwrap();
+    let mut document = initial.document.clone();
+    let collision = durable_record(
+        "different-source",
+        Some("different-payload"),
+        3,
+        r"D:\Clips\different.mp4",
+        "failed",
+    );
+    document
+        .cloud
+        .uploads
+        .insert("source-1".into(), collision.clone());
+    let seeded = store.replace_document(&initial, document).unwrap();
+    let primary = file_bytes(store.profile().settings_path());
+    let error = store
+        .transact(cloud_record_cas(
+            &seeded,
+            CloudRecordCasKind::Admit {
+                upload_generation: 4,
+            },
+            vec![CloudRecordSlot {
+                key: "source-1".into(),
+                record: Some(collision),
+            }],
+            Some(CloudRecordSlot {
+                key: "source-1".into(),
+                record: Some(durable_record(
+                    "source-1",
+                    None,
+                    4,
+                    r"D:\Clips\clip.mp4",
+                    "queued",
+                )),
+            }),
+        ))
+        .unwrap_err();
+
+    assert!(matches!(error, SettingsTransactionError::Validation(_)));
+    assert_eq!(store.snapshot().unwrap(), seeded);
+    assert_eq!(file_bytes(store.profile().settings_path()), primary);
+}
+
+#[test]
+fn status_sync_cas_advances_only_the_exact_prior_record() {
+    let dir = TestDir::new("clipline-settings", "whole-cloud-record-status-sync");
+    let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));
+    let initial = store.snapshot().unwrap();
+    let processing = durable_record(
+        "source-1",
+        Some("payload-1"),
+        6,
+        r"D:\Clips\clip.mp4",
+        "uploaded_processing",
+    );
+    let admitted = store
+        .transact(cloud_record_cas(
+            &initial,
+            CloudRecordCasKind::Admit {
+                upload_generation: 6,
+            },
+            vec![CloudRecordSlot {
+                key: "source-1".into(),
+                record: None,
+            }],
+            Some(CloudRecordSlot {
+                key: "source-1".into(),
+                record: Some(processing.clone()),
+            }),
+        ))
+        .unwrap();
+    let mut ready = processing.clone();
+    ready.upload_status = "uploaded_private".into();
+    ready.remote_clip_id = Some("remote-1".into());
+    ready.updated_at_unix += 1;
+    let synced = store
+        .transact(cloud_record_cas(
+            &admitted,
+            CloudRecordCasKind::StatusSync,
+            vec![CloudRecordSlot {
+                key: "source-1".into(),
+                record: Some(processing.clone()),
+            }],
+            Some(CloudRecordSlot {
+                key: "source-1".into(),
+                record: Some(ready.clone()),
+            }),
+        ))
+        .unwrap();
+    assert_eq!(synced.document.cloud.uploads["source-1"], ready);
+
+    let delayed = store
+        .transact(cloud_record_cas(
+            &synced,
+            CloudRecordCasKind::StatusSync,
+            vec![CloudRecordSlot {
+                key: "source-1".into(),
+                record: Some(processing.clone()),
+            }],
+            Some(CloudRecordSlot {
+                key: "source-1".into(),
+                record: Some(processing),
+            }),
+        ))
+        .unwrap_err();
+    assert_eq!(delayed, SettingsTransactionError::StaleCloudRecord);
+    assert_eq!(store.snapshot().unwrap(), synced);
+}
+
+#[test]
+fn whole_record_cas_enforces_generation_client_identity_and_account_fences() {
+    let dir = TestDir::new("clipline-settings", "whole-cloud-record-invariants");
+    let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));
+    let initial = store.snapshot().unwrap();
+    let current_record = durable_record(
+        "source-1",
+        Some("payload-1"),
+        12,
+        r"D:\Clips\clip.mp4",
+        "uploading",
+    );
+    let current = store
+        .transact(cloud_record_cas(
+            &initial,
+            CloudRecordCasKind::Admit {
+                upload_generation: 12,
+            },
+            vec![CloudRecordSlot {
+                key: "source-1".into(),
+                record: None,
+            }],
+            Some(CloudRecordSlot {
+                key: "source-1".into(),
+                record: Some(current_record.clone()),
+            }),
+        ))
+        .unwrap();
+
+    for replacement in [
+        durable_record(
+            "source-1",
+            Some("payload-1"),
+            11,
+            r"D:\Clips\clip.mp4",
+            "failed",
+        ),
+        durable_record(
+            "source-1",
+            Some("payload-other"),
+            12,
+            r"D:\Clips\clip.mp4",
+            "uploaded_private",
+        ),
+    ] {
+        let error = store
+            .transact(cloud_record_cas(
+                &current,
+                CloudRecordCasKind::Advance {
+                    upload_generation: 12,
+                },
+                vec![CloudRecordSlot {
+                    key: "source-1".into(),
+                    record: Some(current_record.clone()),
+                }],
+                Some(CloudRecordSlot {
+                    key: "source-1".into(),
+                    record: Some(replacement),
+                }),
+            ))
+            .unwrap_err();
+        assert!(matches!(error, SettingsTransactionError::Validation(_)));
+        assert_eq!(store.snapshot().unwrap(), current);
+    }
+
+    let mut wrong_owner = current.account.clone();
+    wrong_owner.host_url = "https://other.example.com".into();
+    let error = store
+        .transact(SettingsTransaction {
+            expected_revision: current.revision,
+            expected_account_generation: current.account_generation,
+            change: SettingsChange::CompareExchangeCloudRecords(CloudRecordCas {
+                account: wrong_owner,
+                account_generation: current.account_generation,
+                kind: CloudRecordCasKind::StatusSync,
+                expected: vec![CloudRecordSlot {
+                    key: "source-1".into(),
+                    record: Some(current_record.clone()),
+                }],
+                replacement: Some(CloudRecordSlot {
+                    key: "source-1".into(),
+                    record: Some(current_record),
+                }),
+            }),
+        })
+        .unwrap_err();
+    assert_eq!(error, SettingsTransactionError::AccountChanged);
+    assert_eq!(store.snapshot().unwrap(), current);
+}
+
+#[test]
+fn whole_record_cas_carries_an_independent_exact_account_generation() {
+    let dir = TestDir::new("clipline-settings", "whole-cloud-record-account-generation");
+    let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));
+    let initial = store.snapshot().unwrap();
+    let mut profile = initial.document.cloud.clone();
+    profile.host_url = "https://clips.example.com".into();
+    profile.connected_user_id = Some("user-1".into());
+    profile.credential_target = Some(cloud_credential_target(&profile.host_url, "user-1"));
+    let connected = store
+        .transact(transaction(
+            &initial,
+            SettingsChange::ReplaceCloudProfile(profile),
+        ))
+        .unwrap();
+    let primary = file_bytes(store.profile().settings_path());
+    let error = store
+        .transact(SettingsTransaction {
+            expected_revision: connected.revision,
+            expected_account_generation: connected.account_generation,
+            change: SettingsChange::CompareExchangeCloudRecords(CloudRecordCas {
+                account: connected.account.clone(),
+                account_generation: initial.account_generation,
+                kind: CloudRecordCasKind::Admit {
+                    upload_generation: 1,
+                },
+                expected: vec![CloudRecordSlot {
+                    key: "source-1".into(),
+                    record: None,
+                }],
+                replacement: Some(CloudRecordSlot {
+                    key: "source-1".into(),
+                    record: Some(durable_record(
+                        "source-1",
+                        None,
+                        1,
+                        r"D:\Clips\clip.mp4",
+                        "queued",
+                    )),
+                }),
+            }),
+        })
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        SettingsTransactionError::StaleAccountGeneration {
+            expected: initial.account_generation,
+            current: connected.account_generation,
+        }
+    );
+    assert_eq!(store.snapshot().unwrap(), connected);
+    assert_eq!(file_bytes(store.profile().settings_path()), primary);
 }
 
 #[test]

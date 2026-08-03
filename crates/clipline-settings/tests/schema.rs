@@ -1289,6 +1289,8 @@ fn uploaded_processing_status_survives_cloud_settings_normalization() {
         "clip".into(),
         CloudUploadRecord {
             local_clip_id: "clip".into(),
+            client_clip_id: None,
+            upload_generation: None,
             path: "D:\\Videos\\clip.mp4".into(),
             remote_clip_id: Some("remote".into()),
             remote_url: Some("https://clips.example.com/clip/remote".into()),
@@ -1319,6 +1321,8 @@ fn cloud_settings_clear_legacy_synthesized_owner_share_urls() {
         "legacy-owner".into(),
         CloudUploadRecord {
             local_clip_id: "legacy-owner".into(),
+            client_clip_id: None,
+            upload_generation: None,
             path: "D:\\Videos\\legacy-owner.mp4".into(),
             remote_clip_id: Some("remote-owner".into()),
             remote_url: Some("https://old-clips.example.com/clip/remote-owner".into()),
@@ -1332,6 +1336,8 @@ fn cloud_settings_clear_legacy_synthesized_owner_share_urls() {
         "canonical-share".into(),
         CloudUploadRecord {
             local_clip_id: "canonical-share".into(),
+            client_clip_id: None,
+            upload_generation: None,
             path: "D:\\Videos\\canonical-share.mp4".into(),
             remote_clip_id: Some("remote-share".into()),
             remote_url: Some("https://clips.example.com/c/c_public".into()),
@@ -1345,6 +1351,8 @@ fn cloud_settings_clear_legacy_synthesized_owner_share_urls() {
         "now-private".into(),
         CloudUploadRecord {
             local_clip_id: "now-private".into(),
+            client_clip_id: None,
+            upload_generation: None,
             path: "D:\\Videos\\now-private.mp4".into(),
             remote_clip_id: Some("remote-private".into()),
             remote_url: Some("https://clips.example.com/c/c_stale".into()),
@@ -1363,6 +1371,76 @@ fn cloud_settings_clear_legacy_synthesized_owner_share_urls() {
         cloud.uploads["canonical-share"].remote_url.as_deref(),
         Some("https://clips.example.com/c/c_public")
     );
+}
+
+#[test]
+fn legacy_cloud_upload_records_default_new_durable_identity_fields() {
+    let record: CloudUploadRecord = serde_json::from_value(serde_json::json!({
+        "local_clip_id": " legacy-id ",
+        "path": " D:\\Videos\\legacy.mp4 ",
+        "upload_status": "queued"
+    }))
+    .unwrap();
+
+    assert_eq!(record.client_clip_id, None);
+    assert_eq!(record.upload_generation, None);
+
+    let mut cloud = CloudSettings::default();
+    cloud.uploads.insert(" legacy-id ".into(), record);
+    cloud.normalize();
+    let record = &cloud.uploads["legacy-id"];
+    assert_eq!(record.local_clip_id, "legacy-id");
+    assert_eq!(record.path, r"D:\Videos\legacy.mp4");
+    assert!(cloud.validate().is_ok());
+}
+
+#[test]
+fn cloud_upload_record_normalizes_new_identity_and_accepts_canceled_status() {
+    let mut cloud = CloudSettings::default();
+    cloud.uploads.insert(
+        "source-1".into(),
+        CloudUploadRecord {
+            local_clip_id: " source-1 ".into(),
+            client_clip_id: Some(" payload-1 ".into()),
+            upload_generation: Some(41),
+            path: " D:\\Videos\\clip.mp4 ".into(),
+            remote_clip_id: None,
+            remote_url: None,
+            visibility: "private".into(),
+            upload_status: "canceled".into(),
+            error: Some(" user canceled ".into()),
+            updated_at_unix: 1,
+        },
+    );
+
+    cloud.normalize();
+    let record = &cloud.uploads["source-1"];
+    assert_eq!(record.client_clip_id.as_deref(), Some("payload-1"));
+    assert_eq!(record.upload_generation, Some(41));
+    assert_eq!(record.upload_status, "canceled");
+    assert!(cloud.validate().is_ok());
+}
+
+#[test]
+fn cloud_upload_record_validation_rejects_oversized_durable_fields() {
+    let mut cloud = CloudSettings::default();
+    cloud.uploads.insert(
+        "source-1".into(),
+        CloudUploadRecord {
+            local_clip_id: "source-1".into(),
+            client_clip_id: Some("x".repeat(clipline_settings::MAX_CLOUD_UPLOAD_ID_BYTES + 1)),
+            upload_generation: Some(1),
+            path: "D:\\Videos\\clip.mp4".into(),
+            remote_clip_id: None,
+            remote_url: None,
+            visibility: "private".into(),
+            upload_status: "queued".into(),
+            error: None,
+            updated_at_unix: 1,
+        },
+    );
+
+    assert!(cloud.validate().unwrap_err().contains("client_clip_id"));
 }
 
 #[test]

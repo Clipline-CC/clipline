@@ -1110,6 +1110,8 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
     let description = normalize_upload_description(request.description.as_deref());
     let mut record = CloudUploadRecord {
         local_clip_id: local_clip_id.clone(),
+        client_clip_id: Some(local_clip_id.clone()),
+        upload_generation: Some(upload_generation.get()),
         // Store the path exactly as `list_clips` emits it (non-canonical), so the
         // UI can pair this record to its clip row by string equality. `target` is
         // the canonicalized form (`\\?\D:\…` on Windows) and is used only for I/O.
@@ -2901,6 +2903,8 @@ mod tests {
     ) -> CloudUploadRecord {
         CloudUploadRecord {
             local_clip_id: local_clip_id.into(),
+            client_clip_id: None,
+            upload_generation: None,
             path: path.into(),
             remote_clip_id: None,
             remote_url: None,

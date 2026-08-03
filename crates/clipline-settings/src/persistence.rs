@@ -678,6 +678,45 @@ impl CloudAccountIdentity {
     }
 }
 
+/// One transaction may reconcile a small, exact set of legacy/path-alias
+/// records. Bounding the vector prevents a malformed adapter from turning a
+/// settings commit into unbounded quadratic work.
+pub const MAX_CLOUD_RECORD_CAS_SLOTS: usize = 64;
+
+/// The durable operation which owns a whole-settings upload-record CAS.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloudRecordCasKind {
+    /// Establish a new upload owner. Its generation must be newer than the
+    /// expected record at the stable local key, when one exists.
+    Admit { upload_generation: u64 },
+    /// Advance state owned by one exact in-flight upload generation.
+    Advance { upload_generation: u64 },
+    /// Reconcile remote status without taking ownership from an in-flight
+    /// upload or changing its durable identities.
+    StatusSync,
+}
+
+/// An exact map slot. `record: None` means that the key must be absent.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CloudRecordSlot {
+    pub key: String,
+    pub record: Option<CloudUploadRecord>,
+}
+
+/// Compare every expected slot, then remove only the explicitly expected path
+/// aliases and optionally insert one replacement. The surrounding
+/// [`SettingsTransaction`] supplies the document revision; the duplicated
+/// account generation here binds the durable upload owner itself and prevents
+/// an adapter from combining a current outer snapshot with a stale owner.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CloudRecordCas {
+    pub account: CloudAccountIdentity,
+    pub account_generation: AccountGeneration,
+    pub kind: CloudRecordCasKind,
+    pub expected: Vec<CloudRecordSlot>,
+    pub replacement: Option<CloudRecordSlot>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct SettingsSnapshot {
     pub document: AppSettings,
@@ -704,6 +743,7 @@ pub enum SettingsChange {
         key: String,
         expected: CloudUploadRecord,
     },
+    CompareExchangeCloudRecords(CloudRecordCas),
     ReplaceOsuProfile(OsuApiSettings),
 }
 
@@ -908,7 +948,12 @@ impl SettingsStore {
         }
 
         let mut next = state.snapshot.document.clone();
-        apply_change(&mut next, transaction.change, &state.snapshot.account)?;
+        apply_change(
+            &mut next,
+            transaction.change,
+            &state.snapshot.account,
+            state.snapshot.account_generation,
+        )?;
         let (next, json) = next
             .normalized_json_bytes()
             .map_err(SettingsTransactionError::Validation)?;
@@ -974,6 +1019,7 @@ fn apply_change(
     document: &mut AppSettings,
     change: SettingsChange,
     current_account: &CloudAccountIdentity,
+    current_account_generation: AccountGeneration,
 ) -> Result<(), SettingsTransactionError> {
     match change {
         SettingsChange::ReplaceDocument(next) => *document = next,
@@ -1028,9 +1074,285 @@ fn apply_change(
             }
             document.cloud.uploads.remove(&key);
         }
+        SettingsChange::CompareExchangeCloudRecords(change) => apply_cloud_record_cas(
+            &mut document.cloud,
+            change,
+            current_account,
+            current_account_generation,
+        )?,
         SettingsChange::ReplaceOsuProfile(osu) => document.osu = osu,
     }
     Ok(())
+}
+
+fn apply_cloud_record_cas(
+    cloud: &mut CloudSettings,
+    change: CloudRecordCas,
+    current_account: &CloudAccountIdentity,
+    current_account_generation: AccountGeneration,
+) -> Result<(), SettingsTransactionError> {
+    if &change.account != current_account {
+        return Err(SettingsTransactionError::AccountChanged);
+    }
+    if change.account_generation != current_account_generation {
+        return Err(SettingsTransactionError::StaleAccountGeneration {
+            expected: change.account_generation,
+            current: current_account_generation,
+        });
+    }
+    validate_cloud_record_cas_shape(&change)?;
+
+    // Exact slot comparison deliberately precedes generation-transition
+    // validation. A delayed result is stale even if its proposed replacement
+    // is also no longer a valid transition from the current record.
+    for slot in &change.expected {
+        if cloud.uploads.get(&slot.key) != slot.record.as_ref() {
+            return Err(SettingsTransactionError::StaleCloudRecord);
+        }
+    }
+
+    validate_cloud_record_cas_transition(&change)?;
+
+    for slot in &change.expected {
+        if slot.record.is_some() {
+            cloud.uploads.remove(&slot.key);
+        }
+    }
+    if let Some(replacement) = change.replacement {
+        let record = replacement
+            .record
+            .expect("validated Cloud record replacement must be present");
+        cloud.uploads.insert(replacement.key, record);
+    }
+    Ok(())
+}
+
+fn validate_cloud_record_cas_shape(
+    change: &CloudRecordCas,
+) -> Result<(), SettingsTransactionError> {
+    if change.expected.is_empty() || change.expected.len() > MAX_CLOUD_RECORD_CAS_SLOTS {
+        return invalid_cloud_record_cas(format!(
+            "expected slot count must be between 1 and {MAX_CLOUD_RECORD_CAS_SLOTS}"
+        ));
+    }
+    let mut keys = std::collections::BTreeSet::new();
+    for slot in &change.expected {
+        validate_cloud_record_slot_key(&slot.key)?;
+        if !keys.insert(slot.key.as_str()) {
+            return invalid_cloud_record_cas("expected slot keys must be unique");
+        }
+    }
+    match &change.replacement {
+        Some(replacement) => {
+            validate_cloud_record_slot_key(&replacement.key)?;
+            let Some(record) = replacement.record.as_ref() else {
+                return invalid_cloud_record_cas("replacement slot must contain a record");
+            };
+            if record.local_clip_id != replacement.key {
+                return invalid_cloud_record_cas(
+                    "replacement key must exactly equal record local_clip_id",
+                );
+            }
+            if !change
+                .expected
+                .iter()
+                .any(|slot| slot.key == replacement.key)
+            {
+                return invalid_cloud_record_cas(
+                    "replacement key must have an exact expected slot",
+                );
+            }
+            let mut normalized = record.clone();
+            normalized.normalize();
+            if &normalized != record {
+                return invalid_cloud_record_cas("replacement record must already be normalized");
+            }
+        }
+        None if !matches!(change.kind, CloudRecordCasKind::StatusSync) => {
+            return invalid_cloud_record_cas("admit and advance require a replacement record");
+        }
+        None => {}
+    }
+    Ok(())
+}
+
+fn validate_cloud_record_slot_key(key: &str) -> Result<(), SettingsTransactionError> {
+    if key.is_empty() || key.trim() != key {
+        return invalid_cloud_record_cas("record keys must be non-empty and normalized");
+    }
+    if key.len() > super::cloud::MAX_CLOUD_UPLOAD_ID_BYTES {
+        return invalid_cloud_record_cas(format!(
+            "record key is {} bytes; maximum is {}",
+            key.len(),
+            super::cloud::MAX_CLOUD_UPLOAD_ID_BYTES
+        ));
+    }
+    Ok(())
+}
+
+fn validate_cloud_record_cas_transition(
+    change: &CloudRecordCas,
+) -> Result<(), SettingsTransactionError> {
+    let replacement = change.replacement.as_ref();
+    let replacement_record = replacement.and_then(|slot| slot.record.as_ref());
+    let replacement_expected = replacement.and_then(|replacement| {
+        change
+            .expected
+            .iter()
+            .find(|slot| slot.key == replacement.key)
+            .and_then(|slot| slot.record.as_ref())
+    });
+
+    match change.kind {
+        CloudRecordCasKind::Admit { upload_generation } => {
+            let replacement = replacement_record.expect("shape requires replacement");
+            if replacement.upload_generation != Some(upload_generation) {
+                return invalid_cloud_record_cas(
+                    "admit replacement must carry its exact upload generation",
+                );
+            }
+            if replacement_expected
+                .is_some_and(|previous| previous.local_clip_id != replacement.local_clip_id)
+            {
+                return invalid_cloud_record_cas(
+                    "admit cannot take a stable key owned by another local_clip_id",
+                );
+            }
+            if let Some(previous_generation) =
+                replacement_expected.and_then(|record| record.upload_generation)
+            {
+                if upload_generation <= previous_generation {
+                    return invalid_cloud_record_cas(
+                        "admit upload generation must be newer than the prior record",
+                    );
+                }
+            }
+        }
+        CloudRecordCasKind::Advance { upload_generation } => {
+            let Some(previous) = replacement_expected else {
+                return invalid_cloud_record_cas(
+                    "advance requires the prior record at the replacement key",
+                );
+            };
+            let replacement = replacement_record.expect("shape requires replacement");
+            if previous.upload_generation != Some(upload_generation)
+                || replacement.upload_generation != Some(upload_generation)
+            {
+                return invalid_cloud_record_cas(
+                    "advance must retain the exact owned upload generation",
+                );
+            }
+            validate_stable_record_identities(previous, replacement)?;
+        }
+        CloudRecordCasKind::StatusSync => {
+            if let Some(replacement) = replacement_record {
+                let Some(previous) = replacement_expected else {
+                    return invalid_cloud_record_cas(
+                        "status sync replacement requires its prior record",
+                    );
+                };
+                if previous.upload_generation != replacement.upload_generation {
+                    return invalid_cloud_record_cas(
+                        "status sync cannot change the upload generation",
+                    );
+                }
+                validate_stable_record_identities(previous, replacement)?;
+            }
+        }
+    }
+
+    validate_cloud_record_cas_paths(change, replacement_expected, replacement_record)
+}
+
+fn validate_stable_record_identities(
+    previous: &CloudUploadRecord,
+    replacement: &CloudUploadRecord,
+) -> Result<(), SettingsTransactionError> {
+    if previous.local_clip_id != replacement.local_clip_id {
+        return invalid_cloud_record_cas("record local_clip_id cannot change");
+    }
+    if previous.client_clip_id.is_some() && previous.client_clip_id != replacement.client_clip_id {
+        return invalid_cloud_record_cas("record client_clip_id cannot change once assigned");
+    }
+    Ok(())
+}
+
+fn validate_cloud_record_cas_paths(
+    change: &CloudRecordCas,
+    replacement_expected: Option<&CloudUploadRecord>,
+    replacement: Option<&CloudUploadRecord>,
+) -> Result<(), SettingsTransactionError> {
+    let anchor = replacement
+        .or(replacement_expected)
+        .or_else(|| change.expected.iter().find_map(|slot| slot.record.as_ref()))
+        .ok_or_else(|| {
+            SettingsTransactionError::Validation(
+                "cloud record CAS without a replacement must remove an existing record".into(),
+            )
+        })?;
+    let replacement_key = change.replacement.as_ref().map(|slot| slot.key.as_str());
+    for slot in &change.expected {
+        let Some(record) = slot.record.as_ref() else {
+            if Some(slot.key.as_str()) != replacement_key {
+                return invalid_cloud_record_cas(
+                    "only the replacement key may have an absent expected slot",
+                );
+            }
+            continue;
+        };
+        if Some(slot.key.as_str()) == replacement_key {
+            continue;
+        }
+        let matches_new = replacement
+            .is_some_and(|replacement| cloud_paths_equivalent(&record.path, &replacement.path));
+        let matches_old = replacement_expected
+            .is_some_and(|previous| cloud_paths_equivalent(&record.path, &previous.path));
+        let matches_anchor = cloud_paths_equivalent(&record.path, &anchor.path);
+        if !(matches_new || matches_old || matches_anchor) {
+            return invalid_cloud_record_cas(
+                "expected superseded records must have path-equivalent clip paths",
+            );
+        }
+    }
+    Ok(())
+}
+
+fn invalid_cloud_record_cas<T>(message: impl Into<String>) -> Result<T, SettingsTransactionError> {
+    Err(SettingsTransactionError::Validation(format!(
+        "cloud record CAS: {}",
+        message.into()
+    )))
+}
+
+/// Pure lexical equivalence used for durable record reconciliation. Windows
+/// drive/UNC spellings are slash-, case-, and verbatim-prefix-insensitive on
+/// every host so settings written on Windows behave identically in neutral CI.
+#[must_use]
+pub fn cloud_paths_equivalent(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+    matches!(
+        (windows_cloud_path_key(left), windows_cloud_path_key(right)),
+        (Some(left), Some(right)) if left == right
+    )
+}
+
+fn windows_cloud_path_key(path: &str) -> Option<String> {
+    let mut normalized = path.trim().replace('/', "\\");
+    let lower = normalized.to_ascii_lowercase();
+    if lower.starts_with(r"\\?\unc\") {
+        normalized = format!(r"\\{}", &normalized[8..]);
+    } else if lower.starts_with(r"\\?\") {
+        normalized = normalized[4..].to_string();
+    }
+    let bytes = normalized.as_bytes();
+    let drive_path =
+        bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\';
+    if !drive_path && !normalized.starts_with(r"\\") {
+        return None;
+    }
+    Some(normalized.to_ascii_lowercase())
 }
 
 fn read_primary_state(path: &Path) -> PrimaryState {
