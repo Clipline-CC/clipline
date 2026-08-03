@@ -24,7 +24,9 @@ use clipline_slint_spike::catalog::{
 use clipline_slint_spike::cloud::{
     CatalogCloudLifetime, NativeCloudPlatformPort, NativeCloudRuntime,
 };
+use clipline_slint_spike::cloud_profile::CloudProfileImageOwner;
 use clipline_test_utils::TestDir;
+use image::ImageEncoder as _;
 
 #[derive(Clone)]
 struct FakeAccount {
@@ -79,6 +81,57 @@ enum ListMode {
 struct FakeTransport {
     mode: ListMode,
     requests: Mutex<Vec<CloudListTransportRequest>>,
+}
+
+struct ProfileTransport {
+    avatar: Vec<u8>,
+}
+
+impl CloudTransport for ProfileTransport {
+    fn list<'a>(
+        &'a self,
+        _account: &'a CloudServiceAccount,
+        _credential: &'a CloudCredential,
+        _request: &'a CloudListTransportRequest,
+        _cancellation: &'a dyn CloudRequestFence,
+        _token: &'a CloudWorkToken,
+    ) -> CloudTransportFuture<'a, CloudListTransportResponse> {
+        Box::pin(async { Err(PortError::new("list is outside this test")) })
+    }
+
+    fn profile<'a>(
+        &'a self,
+        _account: &'a CloudServiceAccount,
+        _credential: &'a CloudCredential,
+        _cancellation: &'a dyn CloudRequestFence,
+        _token: &'a CloudWorkToken,
+    ) -> CloudTransportFuture<'a, CloudProfileTransport> {
+        Box::pin(async {
+            Ok(CloudProfileTransport {
+                user_id: "user-1".into(),
+                username: "native-user".into(),
+                display_name: Some("Native User".into()),
+            })
+        })
+    }
+
+    fn avatar<'a>(
+        &'a self,
+        _account: &'a CloudServiceAccount,
+        _credential: &'a CloudCredential,
+        _etag: Option<&'a str>,
+        _cancellation: &'a dyn CloudRequestFence,
+        _token: &'a CloudWorkToken,
+    ) -> CloudTransportFuture<'a, AvatarTransportResult> {
+        let avatar = self.avatar.clone();
+        Box::pin(async move {
+            Ok(AvatarTransportResult::Fresh {
+                content_type: Some("image/png".into()),
+                etag: Some("avatar-1".into()),
+                bytes: avatar,
+            })
+        })
+    }
 }
 
 impl FakeTransport {
@@ -482,6 +535,102 @@ fn public_link_effects_resolve_the_exact_clip_page_and_copy_only_the_issued_url(
         .is_none());
     assert_eq!(platform.opened.lock().unwrap().len(), 1);
     assert_eq!(platform.copied.lock().unwrap().len(), 1);
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn profile_and_avatar_refresh_independently_then_open_the_trusted_profile_page() {
+    let accounts = Arc::new(FakeAccount {
+        account: Arc::new(Mutex::new(service_account())),
+    });
+    let platform = Arc::new(RecordingCloudPlatform::default());
+    let mut avatar = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut avatar)
+        .write_image(
+            &[0x11, 0x22, 0x33, 0xff],
+            1,
+            1,
+            image::ExtendedColorType::Rgba8,
+        )
+        .unwrap();
+    let runtime = NativeCloudRuntime::with_transport_and_platform(
+        accounts.clone(),
+        Arc::new(FakeCredential::default()),
+        Arc::new(ProfileTransport { avatar }),
+        platform.clone(),
+    )
+    .unwrap();
+    runtime
+        .attach(
+            WindowAttachmentGeneration::new(3),
+            ForegroundGeneration::new(5),
+            Some(owner()),
+        )
+        .unwrap();
+    let seed = runtime
+        .profile_seed(token(30).window)
+        .unwrap()
+        .expect("connected account has a durable rail seed");
+    assert_eq!(seed.name, "User");
+    let exact_token = seed.token.clone();
+    let mut rail = CloudProfileImageOwner::start(runtime.profile_port()).unwrap();
+    rail.attach(seed).unwrap();
+    let mut received_avatar = false;
+    for _ in 0..100 {
+        let pump = rail.pump_completions().unwrap();
+        received_avatar |= pump.avatar.is_some();
+        if rail.projection().name == "Native User" && rail.projection().has_avatar {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(rail.projection().name, "Native User");
+    assert_eq!(rail.projection().initials, "NU");
+    assert!(rail.projection().has_avatar);
+    assert!(received_avatar);
+    assert_eq!(
+        accounts
+            .account
+            .lock()
+            .unwrap()
+            .snapshot
+            .username
+            .as_deref(),
+        Some("native-user")
+    );
+
+    let handler = runtime.effect_handler(Arc::new(RejectLocal));
+    assert!(handler
+        .execute(CatalogEffect::OpenCloudProfile {
+            token: exact_token.clone(),
+        })
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        platform.opened.lock().unwrap().as_slice(),
+        &[(
+            "https://clips.example/u/native-user".into(),
+            "cloud user profile".into()
+        )]
+    );
+    let mut replaced_account = exact_token.clone();
+    replaced_account.account_generation = CloudAccountGeneration::new(8);
+    assert!(handler
+        .execute(CatalogEffect::OpenCloudProfile {
+            token: replaced_account,
+        })
+        .unwrap()
+        .is_none());
+    assert_eq!(platform.opened.lock().unwrap().len(), 1);
+    runtime.detach();
+    assert!(handler
+        .execute(CatalogEffect::OpenCloudProfile { token: exact_token })
+        .unwrap()
+        .is_none());
+    assert_eq!(platform.opened.lock().unwrap().len(), 1);
+
+    rail.detach_window();
+    rail.shutdown();
     runtime.shutdown().unwrap();
 }
 

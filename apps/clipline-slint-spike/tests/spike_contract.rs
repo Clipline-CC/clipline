@@ -27,6 +27,8 @@ const REQUIRED_UI_CONTRACT: &[&str] = &[
     "in-out property <bool> cpu-frame-diagnostic",
     "in-out property <image> cpu-video-frame",
     "in-out property <string> presentation-path",
+    "in property <bool> cloud-profile-visible",
+    "in property <image> cloud-profile-avatar",
     "out property <length> video-stage-x",
     "out property <length> video-stage-y",
     "out property <length> video-stage-width",
@@ -38,6 +40,7 @@ const REQUIRED_UI_CONTRACT: &[&str] = &[
     "callback set-track(track-id: int, selected: bool)",
     "callback set-volume(value: float)",
     "callback video-geometry-changed()",
+    "callback open-cloud-profile()",
     "source: root.cpu-video-frame",
     "D3D11 child window · fast path",
     "CPU diagnostic · SharedPixelBuffer",
@@ -130,6 +133,10 @@ fn spike_is_exactly_pinned_small_and_non_distributed() {
         );
     }
     assert!(manifest.contains("publish = false"));
+    assert!(
+        manifest.contains("features = [\"jpeg\", \"png\"]"),
+        "native Cloud avatars require only the bounded JPEG and PNG decoders"
+    );
 
     let build = read(root.join("apps/clipline-slint-spike/build.rs"));
     assert!(build.contains("slint_build::compile(\"ui/app.slint\")"));
@@ -191,6 +198,7 @@ fn spike_is_exactly_pinned_small_and_non_distributed() {
         "CatalogEffect::CancelCloudReviewMedia { owner }",
         "CatalogEffect::OpenPreparedCloudReview { owner, media }",
         "CatalogEffect::ReleaseCloudReviewMedia { lease_id }",
+        "cloud_profile.shutdown()",
         "effects.filter(is_review_cleanup_effect)",
         "ValidatedLiveMediaSource::cached_cloud(lease)",
     ] {
@@ -207,10 +215,15 @@ fn spike_is_exactly_pinned_small_and_non_distributed() {
         .and_then(|tail| tail.split("enum DeferredReviewOpen").next())
         .expect("SlintShell Drop body");
     let session_shutdown = shell_drop.find("session.shutdown()").unwrap();
+    let profile_shutdown = shell_drop.find("cloud_profile.shutdown()").unwrap();
     let cloud_shutdown = shell_drop.find("catalog_cloud.shutdown()").unwrap();
     assert!(
         session_shutdown < cloud_shutdown,
         "exceptional shell drop must join playback before Cloud cache/runtime shutdown"
+    );
+    assert!(
+        profile_shutdown < cloud_shutdown,
+        "exceptional shell drop must join Cloud profile workers before the Cloud runtime"
     );
     let live = read(root.join("apps/clipline-slint-spike/src/live.rs"));
     assert!(

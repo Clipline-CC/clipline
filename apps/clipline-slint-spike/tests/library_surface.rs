@@ -116,6 +116,23 @@ fn library_surface_is_controller_owned_bounded_and_source_aware() {
     assert!(app.contains("in property <[LibraryItem]> library-items: []"));
     assert!(!library.contains("representative"));
     assert!(!library.contains("Clip 07"));
+
+    for contract in [
+        "in property <bool> cloud-profile-visible",
+        "in property <string> cloud-profile-name",
+        "in property <string> cloud-profile-initials",
+        "in property <bool> cloud-profile-has-avatar",
+        "in property <image> cloud-profile-avatar",
+        "callback open-cloud-profile()",
+        "accessible-label: \"Open Clipline Cloud profile for \" + root.cloud-profile-name",
+        "source: root.cloud-profile-avatar",
+        "text: root.cloud-profile-initials",
+    ] {
+        assert!(
+            app.contains(contract),
+            "missing Cloud profile rail contract: {contract}"
+        );
+    }
 }
 
 #[test]

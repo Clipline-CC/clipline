@@ -64,6 +64,7 @@ pub enum CatalogUiIntent {
     UploadFromMenu,
     CancelUploadFromMenu,
     RevealFromMenu,
+    OpenCloudProfile,
     OpenInBrowserFromMenu,
     CopyPublicLinkFromMenu,
     SetDialogText {
@@ -310,6 +311,7 @@ pub fn rejected_effect_result(
         });
     }
     if let CatalogEffect::OpenInBrowser { token, .. }
+    | CatalogEffect::OpenCloudProfile { token }
     | CatalogEffect::CopyPublicLink { token, .. } = effect
     {
         return Some(OwnedCatalogResult {
@@ -877,6 +879,7 @@ pub fn route_ui_intent(
         CatalogUiIntent::RevealFromMenu => CatalogAction::Reveal {
             item: menu_identity(projection)?,
         },
+        CatalogUiIntent::OpenCloudProfile => CatalogAction::OpenCloudProfile,
         CatalogUiIntent::OpenInBrowserFromMenu => CatalogAction::OpenInBrowser {
             item: menu_identity(projection)?,
         },

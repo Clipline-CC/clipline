@@ -519,7 +519,7 @@ fn admission_rejection_maps_only_owned_operations_to_exact_failures() {
     };
     let completion = rejected_effect_result(
         &CatalogEffect::OpenInBrowser {
-            token: cloud_token,
+            token: cloud_token.clone(),
             item: cloud_item,
         },
         "executor queue is full",
@@ -534,6 +534,21 @@ fn admission_rejection_maps_only_owned_operations_to_exact_failures() {
             },
             expected: ExpectedResultOwner::Window(expected),
         } if actual == token && expected == token && message == "executor queue is full"
+    ));
+    let completion = rejected_effect_result(
+        &CatalogEffect::OpenCloudProfile { token: cloud_token },
+        "profile queue is full",
+    )
+    .unwrap();
+    assert!(matches!(
+        completion,
+        clipline_slint_spike::catalog::OwnedCatalogResult {
+            result: CatalogResult::ForegroundFeedback {
+                token: actual,
+                message,
+            },
+            expected: ExpectedResultOwner::Window(expected),
+        } if actual == token && expected == token && message == "profile queue is full"
     ));
 
     let (effect, owner) = cloud_thumbnail_effect(token, 9);

@@ -1594,6 +1594,7 @@ pub enum CatalogAction {
     Reveal {
         item: CatalogItemIdentity,
     },
+    OpenCloudProfile,
     OpenInBrowser {
         item: CatalogItemIdentity,
     },
@@ -1680,6 +1681,7 @@ enum CatalogActionDef {
     Reveal {
         item: CatalogItemIdentity,
     },
+    OpenCloudProfile,
     OpenInBrowser {
         item: CatalogItemIdentity,
     },
@@ -1734,6 +1736,7 @@ impl CatalogAction {
             | Self::ConfirmDialog
             | Self::CancelDialog
             | Self::Reveal { .. }
+            | Self::OpenCloudProfile
             | Self::OpenInBrowser { .. }
             | Self::CopyPublicLink { .. }
             | Self::CancelUpload { .. }
@@ -1887,6 +1890,9 @@ pub enum CatalogEffect {
         token: CloudWorkToken,
         item: CatalogItemIdentity,
     },
+    OpenCloudProfile {
+        token: CloudWorkToken,
+    },
     CopyPublicLink {
         token: CloudWorkToken,
         item: CatalogItemIdentity,
@@ -1966,6 +1972,7 @@ impl CatalogEffect {
             | Self::CancelUpload { .. }
             | Self::Reveal { .. }
             | Self::OpenInBrowser { .. }
+            | Self::OpenCloudProfile { .. }
             | Self::CopyPublicLink { .. } => None,
         })
     }
@@ -2026,6 +2033,7 @@ impl CatalogEffect {
                 options.validate_bounds()
             }
             Self::OpenInBrowser { token, item } => validate_cloud_item_owner(item, token),
+            Self::OpenCloudProfile { .. } => Ok(()),
             Self::CopyPublicLink { token, item, url } => {
                 validate_cloud_item_owner(item, token)?;
                 if url.trim().is_empty() {

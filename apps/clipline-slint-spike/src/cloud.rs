@@ -41,6 +41,10 @@ use clipline_settings::SettingsStore;
 use sha2::{Digest as _, Sha256};
 
 use crate::catalog::{CatalogEffectExecutor, CatalogEffectHandler, OwnedCatalogResult};
+use crate::cloud_profile::{
+    bounded_cloud_profile_message, decode_bounded_avatar, CloudAvatarOutcome, CloudProfileOutcome,
+    CloudProfileRequestPort, CloudRailSeed, CloudRailWork,
+};
 use crate::cloud_thumbnail::{
     decode_cached_cloud_thumbnail, CloudThumbnailDecodeOutcome, CloudThumbnailDecodePort,
 };
@@ -959,6 +963,51 @@ impl NativeCloudRuntime {
         Ok((owner, preferences))
     }
 
+    pub fn profile_seed(&self, window: WindowWorkToken) -> Result<Option<CloudRailSeed>, String> {
+        let account = self
+            .shared
+            .accounts
+            .snapshot()
+            .map_err(|error| error.to_string())?;
+        if !account.snapshot.connected || account.credential_target.is_none() {
+            return Ok(None);
+        }
+        let name = account
+            .snapshot
+            .display_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                account
+                    .snapshot
+                    .username
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+            })
+            .or_else(|| {
+                account
+                    .snapshot
+                    .user_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+            })
+            .unwrap_or("Cloud")
+            .to_owned();
+        CloudRailSeed::new(
+            CloudWorkToken {
+                window,
+                account_key: account.snapshot.account_key,
+                account_generation: account.snapshot.generation,
+            },
+            name,
+        )
+        .map(Some)
+        .map_err(|error| error.to_string())
+    }
+
     pub fn attach(
         &self,
         attachment: WindowAttachmentGeneration,
@@ -999,6 +1048,13 @@ impl NativeCloudRuntime {
         })
     }
 
+    #[must_use]
+    pub fn profile_port(&self) -> Arc<dyn CloudProfileRequestPort> {
+        Arc::new(NativeCloudProfilePort {
+            cloud: Arc::clone(&self.shared),
+        })
+    }
+
     pub fn shutdown(mut self) -> Result<(), String> {
         self.detach();
         self.shared.media.clear();
@@ -1013,6 +1069,82 @@ impl NativeCloudRuntime {
 
 struct NativeCloudThumbnailDecoder {
     cache_provider: Arc<dyn NativeCloudCacheProvider>,
+}
+
+struct NativeCloudProfilePort {
+    cloud: Arc<CloudShared>,
+}
+
+struct ExactCloudRailFence<'a> {
+    registry: Arc<FenceRegistry>,
+    work: &'a CloudRailWork,
+}
+
+impl CloudRequestFence for ExactCloudRailFence<'_> {
+    fn is_current(&self, token: &CloudWorkToken) -> bool {
+        self.work.token == *token
+            && !self.work.is_cancelled()
+            && self.registry.is_window_current(token)
+    }
+
+    fn cancelled<'a>(&'a self, token: &'a CloudWorkToken) -> CloudCancellationFuture<'a> {
+        Box::pin(async move {
+            if self.work.token != *token || !self.registry.is_window_current(token) {
+                return;
+            }
+            self.work.cancellation().cancelled().await;
+        })
+    }
+}
+
+impl CloudProfileRequestPort for NativeCloudProfilePort {
+    fn profile(&self, work: &CloudRailWork) -> CloudProfileOutcome {
+        let fence = ExactCloudRailFence {
+            registry: Arc::clone(&self.cloud.fences),
+            work,
+        };
+        match self
+            .cloud
+            .handle
+            .block_on(self.cloud.service.profile(work.token.clone(), &fence))
+        {
+            Ok(profile) if fence.is_current(&profile.token) => {
+                CloudProfileOutcome::Ready(profile.value)
+            }
+            Ok(_) | Err(CloudServiceError::StaleWork | CloudServiceError::AccountChanged) => {
+                CloudProfileOutcome::Stale
+            }
+            Err(error) => {
+                CloudProfileOutcome::Failed(bounded_cloud_profile_message(error.to_string()))
+            }
+        }
+    }
+
+    fn avatar(&self, work: &CloudRailWork) -> CloudAvatarOutcome {
+        let fence = ExactCloudRailFence {
+            registry: Arc::clone(&self.cloud.fences),
+            work,
+        };
+        match self
+            .cloud
+            .handle
+            .block_on(self.cloud.service.avatar(work.token.clone(), &fence))
+        {
+            Ok(avatar) if fence.is_current(&avatar.token) => match avatar.value {
+                Some(avatar) => match decode_bounded_avatar(&avatar) {
+                    Ok(pixels) => CloudAvatarOutcome::Ready(pixels),
+                    Err(error) => CloudAvatarOutcome::Failed(error.to_string()),
+                },
+                None => CloudAvatarOutcome::Missing,
+            },
+            Ok(_) | Err(CloudServiceError::StaleWork | CloudServiceError::AccountChanged) => {
+                CloudAvatarOutcome::Stale
+            }
+            Err(error) => {
+                CloudAvatarOutcome::Failed(bounded_cloud_profile_message(error.to_string()))
+            }
+        }
+    }
 }
 
 impl CloudThumbnailDecodePort for NativeCloudThumbnailDecoder {
@@ -1167,6 +1299,7 @@ impl CatalogEffectHandler for NativeCloudEffectHandler {
                 Ok(None)
             }
             CatalogEffect::OpenInBrowser { token, item } => self.open_cloud_clip_page(token, item),
+            CatalogEffect::OpenCloudProfile { token } => self.open_cloud_profile(token),
             CatalogEffect::CopyPublicLink {
                 token,
                 item: _,
@@ -1178,6 +1311,43 @@ impl CatalogEffectHandler for NativeCloudEffectHandler {
 }
 
 impl NativeCloudEffectHandler {
+    fn open_cloud_profile(
+        &self,
+        token: CloudWorkToken,
+    ) -> Result<Option<OwnedCatalogResult>, String> {
+        let fence = CurrentWindowCloudFence {
+            registry: Arc::clone(&self.cloud.fences),
+            token: token.clone(),
+        };
+        let effect = match self
+            .cloud
+            .service
+            .open_profile_effect(token.clone(), &fence)
+        {
+            Ok(effect) => effect.value,
+            Err(CloudServiceError::StaleWork | CloudServiceError::AccountChanged) => {
+                return Ok(None);
+            }
+            Err(error) => {
+                return Ok(Some(foreground_feedback(
+                    token.window,
+                    format!("Open Cloud profile: {error}"),
+                )));
+            }
+        };
+        match self.cloud.fences.run_if_window_current(&token, || {
+            self.cloud
+                .platform
+                .open_browser(&effect.url, &effect.context)
+        }) {
+            Ok(Some(())) | Ok(None) => Ok(None),
+            Err(error) => Ok(Some(foreground_feedback(
+                token.window,
+                format!("Open Cloud profile: {error}"),
+            ))),
+        }
+    }
+
     fn open_cloud_clip_page(
         &self,
         token: CloudWorkToken,

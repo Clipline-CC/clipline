@@ -298,6 +298,17 @@ fn cloud_menu_copies_only_a_public_link_and_opens_every_exact_remote_identity() 
     seed_local(&mut controller, vec![local_item(0)]);
     let owner = cloud_owner("account-a", 1);
     controller.set_cloud_owner(Some(owner.clone())).unwrap();
+    assert!(matches!(
+        only_effect(
+            controller
+                .dispatch(CatalogAction::OpenCloudProfile)
+                .unwrap()
+        ),
+        CatalogEffect::OpenCloudProfile { token }
+            if token.account_key == owner.account_key
+                && token.account_generation == owner.account_generation
+                && token.window.attachment == WindowAttachmentGeneration::new(1)
+    ));
     let (token, revision, page) = only_cloud_refresh(
         controller
             .dispatch(CatalogAction::SetSource {

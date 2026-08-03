@@ -922,6 +922,21 @@ impl CatalogController {
                     target: resolve_local(state, &item)?,
                 });
             }
+            CatalogAction::OpenCloudProfile => {
+                let owner = state
+                    .cloud_owner
+                    .clone()
+                    .ok_or(CatalogControllerError::Invalid {
+                        field: "cloud.owner",
+                    })?;
+                effects.push(CatalogEffect::OpenCloudProfile {
+                    token: CloudWorkToken {
+                        window: next_window_token(state)?,
+                        account_key: owner.account_key,
+                        account_generation: owner.account_generation,
+                    },
+                });
+            }
             CatalogAction::OpenInBrowser { item } => {
                 let (token, _) = resolve_cloud(state, &item)?;
                 effects.push(CatalogEffect::OpenInBrowser { token, item });

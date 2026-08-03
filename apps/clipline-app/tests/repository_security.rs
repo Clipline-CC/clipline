@@ -101,7 +101,7 @@ fn poster_extraction_and_native_decode_have_one_bounded_owner_each() {
     let spike_manifest =
         fs::read_to_string(root.join("apps/clipline-slint-spike/Cargo.toml")).unwrap();
     assert!(spike_manifest.contains(
-        "image = { version = \"0.25\", default-features = false, features = [\"jpeg\"] }"
+        "image = { version = \"0.25\", default-features = false, features = [\"jpeg\", \"png\"] }"
     ));
     let spike = fs::read_to_string(root.join("apps/clipline-slint-spike/src/poster.rs"))
         .expect("read Slint poster adapter");

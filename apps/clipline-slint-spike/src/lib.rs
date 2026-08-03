@@ -2,6 +2,7 @@
 
 pub mod catalog;
 pub mod cloud;
+pub mod cloud_profile;
 pub mod cloud_thumbnail;
 pub mod controller;
 pub mod cpu_frame;

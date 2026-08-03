@@ -781,6 +781,13 @@ fn typed_effects_pin_exact_owners_and_resolved_paths() {
         .validate_bounds(),
         Ok(())
     );
+    assert_eq!(
+        CatalogEffect::OpenCloudProfile {
+            token: cloud.clone(),
+        }
+        .validate_bounds(),
+        Ok(())
+    );
     let mut stale_cloud = cloud;
     stale_cloud.account_generation = CloudAccountGeneration::new(5);
     assert_eq!(

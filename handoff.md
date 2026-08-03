@@ -4,6 +4,38 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-03): Slint replacement Milestone 7, Task 9 Cloud profile rail
+
+The native Slint shell now shows the connected Clipline Cloud account immediately from its durable
+saved identity, then refreshes profile metadata and avatar on two independent latest-only worker
+lanes. Replacing or dropping the window cancels both lanes without interfering with Cloud paging,
+thumbnails, or review media; each lane owns one active request plus one coalesced pending request,
+and both worker threads join before the process-owned Tokio Cloud runtime shuts down.
+
+Profile refresh still uses the shared `CloudService`, including exact account-generation CAS, so a
+replacement login cannot accept an older username or display name. The avatar path retains the
+shared 2 MiB encoded/ETag cache contract, enables only JPEG and PNG decoding in the candidate, and
+rejects dimensions above 8,192, more than 1,048,576 pixels, more than 4 MiB RGBA output, or more
+than 16 MiB of decoder allocation. PNG alpha is preserved. The final exact ticket check runs on
+the UI thread before `slint::Image` construction, and the window owns at most one avatar image;
+missing, corrupt, unsupported, offline, and stale results quietly retain the initials fallback.
+
+The profile rail is connected-only, keyboard-focusable through the standard Slint button, elides
+long names, exposes an exact accessible label, and matches the shipping display-name/initials
+fallback. Clicking it submits `OpenCloudProfile` to the existing bounded catalog executor. The
+native handler derives `/u/{username}` through `CloudService::open_profile_effect`, linearizes the
+safe Windows browser call with detach/account replacement, and reports platform or queue failures
+only to the exact foreground window.
+
+Focused controller, decoder, runtime, platform, UI-structure, and latest-mailbox tests are green.
+The final slice snapshot also passes full workspace tests, standalone Slint all-target tests,
+warning-denied workspace and standalone Clippy, both formatting checks, and `git diff --check`.
+An independent Fable medium audit returned GO with no P0/P1 findings; its suggested stale-account,
+decoded-pixel-overflow, and transparent-PNG regressions are included.
+
+Next: implement the process-owned upload/progress/status bridge and hydrate durable upload state;
+then run the complete Milestone 7 large-library, lifecycle, compatibility, and memory gates.
+
 ## Checkpoint (2026-08-03): Slint replacement Milestone 7, Task 9 Cloud public actions
 
 The existing Slint Cloud context-menu callbacks now execute through the bounded catalog worker

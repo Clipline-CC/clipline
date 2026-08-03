@@ -321,6 +321,7 @@ mod windows_runtime {
         SystemDayResolver,
     };
     use crate::cloud::{CatalogCloudLifetime, NativeCloudMediaRegistry, NativeCloudRuntime};
+    use crate::cloud_profile::{CloudProfileImageOwner, CloudRailProjection};
     use crate::cloud_thumbnail::CloudThumbnailImageOwner;
     use crate::controller::PlaybackController;
     use crate::desktop::{DesktopAttachment, SlintDesktopAdapter};
@@ -406,6 +407,7 @@ mod windows_runtime {
         desktop: SlintDesktopAdapter,
         _settings: CandidateSettings,
         cloud_thumbnails: Option<CloudThumbnailImageOwner>,
+        cloud_profile: Option<CloudProfileImageOwner>,
         catalog_cloud: CatalogCloudLifetime,
         cloud_owner: Option<CloudCatalogOwner>,
         cloud_startup_error: Option<String>,
@@ -428,6 +430,16 @@ mod windows_runtime {
 
     impl Drop for SlintShell {
         fn drop(&mut self) {
+            if let Some(resources) = self.window.as_ref() {
+                resources
+                    .window
+                    .set_cloud_profile_avatar(slint::Image::default());
+            }
+            if let Some(cloud_profile) = self.cloud_profile.as_mut() {
+                cloud_profile.detach_window();
+                cloud_profile.shutdown();
+            }
+            self.cloud_profile = None;
             if let Some(cloud_thumbnails) = self.cloud_thumbnails.as_mut() {
                 let _ = cloud_thumbnails.detach_window();
                 let _ = cloud_thumbnails.shutdown();
@@ -678,6 +690,10 @@ mod windows_runtime {
             .as_ref()
             .map(|cloud| CloudThumbnailImageOwner::start(cloud.thumbnail_decoder()))
             .transpose()?;
+        let cloud_profile = cloud
+            .as_ref()
+            .map(|cloud| CloudProfileImageOwner::start(cloud.profile_port()))
+            .transpose()?;
         let (catalog_sender, catalog_results) = catalog_result_channel();
         let catalog_executor = CatalogEffectExecutor::start(
             catalog_handler,
@@ -716,6 +732,7 @@ mod windows_runtime {
             desktop,
             _settings: settings,
             cloud_thumbnails,
+            cloud_profile,
             catalog_cloud,
             cloud_owner,
             cloud_startup_error,
@@ -846,9 +863,62 @@ mod windows_runtime {
             };
             dispatch_command(runtime, command.command)?;
         }
+        pump_cloud_profile_completions(runtime)?;
         pump_cloud_thumbnail_completions(runtime)?;
         pump_catalog_results(runtime)?;
         Ok(())
+    }
+
+    fn pump_cloud_profile_completions(runtime: &Rc<RefCell<SlintShell>>) -> Result<(), String> {
+        let pump = runtime
+            .borrow_mut()
+            .cloud_profile
+            .as_mut()
+            .map(CloudProfileImageOwner::pump_completions)
+            .transpose()?;
+        let Some(pump) = pump else {
+            return Ok(());
+        };
+        if !pump.changed {
+            return Ok(());
+        }
+        let (window, projection) = {
+            let runtime_ref = runtime.borrow();
+            (
+                runtime_ref
+                    .window
+                    .as_ref()
+                    .map(|resources| resources.window.as_weak()),
+                runtime_ref
+                    .cloud_profile
+                    .as_ref()
+                    .map(CloudProfileImageOwner::projection),
+            )
+        };
+        let (Some(window), Some(projection)) =
+            (window.and_then(|window| window.upgrade()), projection)
+        else {
+            return Ok(());
+        };
+        publish_cloud_profile(&window, &projection, pump.avatar, pump.clear_avatar);
+        Ok(())
+    }
+
+    fn publish_cloud_profile(
+        window: &CliplineSpike,
+        projection: &CloudRailProjection,
+        avatar: Option<slint::Image>,
+        clear_avatar: bool,
+    ) {
+        window.set_cloud_profile_visible(projection.visible);
+        window.set_cloud_profile_name(projection.name.clone().into());
+        window.set_cloud_profile_initials(projection.initials.clone().into());
+        if let Some(avatar) = avatar {
+            window.set_cloud_profile_avatar(avatar);
+        } else if clear_avatar {
+            window.set_cloud_profile_avatar(slint::Image::default());
+        }
+        window.set_cloud_profile_has_avatar(projection.has_avatar);
     }
 
     fn pump_cloud_thumbnail_completions(runtime: &Rc<RefCell<SlintShell>>) -> Result<(), String> {
@@ -1172,6 +1242,7 @@ mod windows_runtime {
             | CatalogEffect::Delete { .. }
             | CatalogEffect::Reveal { .. }
             | CatalogEffect::OpenInBrowser { .. }
+            | CatalogEffect::OpenCloudProfile { .. }
             | CatalogEffect::CopyPublicLink { .. } => {
                 if matches!(&effect, CatalogEffect::OpenLocalReview { .. }) {
                     if let Some(resources) = runtime.borrow().window.as_ref() {
@@ -1441,12 +1512,47 @@ mod windows_runtime {
                     runtime_ref.cloud_owner.clone(),
                 )?;
             }
+            let profile_seed = runtime_ref
+                .catalog_cloud
+                .cloud()
+                .map(|cloud| {
+                    cloud.profile_seed(WindowWorkToken {
+                        attachment: catalog_attachment,
+                        foreground: catalog_foreground,
+                        request: RequestGeneration::INITIAL,
+                    })
+                })
+                .transpose()?
+                .flatten();
+            if let Some(profile) = runtime_ref.cloud_profile.as_mut() {
+                match profile_seed.as_ref() {
+                    Some(seed) => {
+                        let projection = profile.attach(seed.clone())?;
+                        publish_cloud_profile(
+                            &runtime_ref
+                                .window
+                                .as_ref()
+                                .expect("window exists while attaching Cloud profile")
+                                .window,
+                            &projection,
+                            None,
+                            true,
+                        );
+                    }
+                    None => {
+                        profile.detach_window();
+                    }
+                }
+            }
             let effects = match runtime_ref
                 .catalog
                 .attach(catalog_attachment, catalog_foreground)
             {
                 Ok(effects) => effects,
                 Err(error) => {
+                    if let Some(profile) = runtime_ref.cloud_profile.as_mut() {
+                        profile.detach_window();
+                    }
                     if let Some(cloud) = runtime_ref.catalog_cloud.cloud() {
                         cloud.detach();
                     }
@@ -1463,6 +1569,9 @@ mod windows_runtime {
                         .map_err(|error| error.to_string())
                 });
             if let Err(error) = publish_result {
+                if let Some(profile) = runtime_ref.cloud_profile.as_mut() {
+                    profile.detach_window();
+                }
                 if let Some(cloud) = runtime_ref.catalog_cloud.cloud() {
                     cloud.detach();
                 }
@@ -1576,6 +1685,11 @@ mod windows_runtime {
             invoke_catalog_callback(&weak_runtime, attachment, CatalogUiIntent::CloseActive);
         });
         window.on_show_review(|| {});
+
+        let weak_runtime = Rc::downgrade(runtime);
+        window.on_open_cloud_profile(move || {
+            invoke_catalog_callback(&weak_runtime, attachment, CatalogUiIntent::OpenCloudProfile);
+        });
 
         let weak_runtime = Rc::downgrade(runtime);
         window.on_catalog_set_source(move |source| {
@@ -2082,6 +2196,16 @@ mod windows_runtime {
             runtime_ref
                 .review_bridge
                 .revoke(catalog_attachment, catalog_foreground);
+            if let Some(profile) = runtime_ref.cloud_profile.as_mut() {
+                profile.detach_window();
+            }
+            if let Some(resources) = runtime_ref.window.as_ref() {
+                resources
+                    .window
+                    .set_cloud_profile_avatar(slint::Image::default());
+                resources.window.set_cloud_profile_has_avatar(false);
+                resources.window.set_cloud_profile_visible(false);
+            }
             if let Some(cloud) = runtime_ref.catalog_cloud.cloud() {
                 cloud.detach();
             }
@@ -2233,6 +2357,10 @@ mod windows_runtime {
             let mut runtime_ref = runtime.borrow_mut();
             let request = !runtime_ref.quit_event_loop_requested;
             runtime_ref.quit_event_loop_requested = true;
+            if let Some(profile) = runtime_ref.cloud_profile.as_mut() {
+                profile.shutdown();
+            }
+            runtime_ref.cloud_profile = None;
             let cloud_thumbnail_result = runtime_ref
                 .cloud_thumbnails
                 .as_mut()
@@ -2367,6 +2495,9 @@ mod windows_runtime {
 
     fn clear_window_models(window: &CliplineSpike) {
         window.set_cpu_video_frame(slint::Image::default());
+        window.set_cloud_profile_avatar(slint::Image::default());
+        window.set_cloud_profile_has_avatar(false);
+        window.set_cloud_profile_visible(false);
         window.set_library_items(slint::ModelRc::new(slint::VecModel::from(
             Vec::<LibraryItem>::new(),
         )));
