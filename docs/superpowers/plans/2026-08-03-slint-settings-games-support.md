@@ -508,9 +508,12 @@ absolute memory, CPU, handle, worker, or lifecycle gates fail.
   index, wall clock, or collision-prone raw `id_hint`. Catalog-owned builders ingest the real
   `DetectedGameCandidate` and `GameWindowInfo` payloads, derive ids from complete canonical source
   authority, reject duplicate/colliding handles, and retain the exact handle-to-source membership
-  map used by every mutation. Refresh invalidates only identities owned by the replaced token. Pin
-  combined ordering/dedupe, total/page count, PastEnd, selection/dialog invalidation, forged-handle
-  rejection, and 0/60/61/128/256/400-row behavior.
+  map used by every mutation. The canonical-authority allocation ceiling is derived from the
+  accepted Task 5 source-text ceiling plus its fixed per-row framing overhead, so identity framing
+  cannot reject a valid maximum-size probe catalog. Refresh invalidates only identities owned by
+  the replaced token. Pin combined ordering/dedupe, total/page count, PastEnd, selection/dialog
+  invalidation, forged-handle rejection, exact source-boundary acceptance, and
+  0/60/61/128/256/400-row behavior.
 - Rows carry typed icon ids and bounded loading state, not decoded RGBA. A separate token-fenced image
   cache owns at most 8 MiB and 32 maximum-size surfaces, checks encoded bytes and header dimensions
   before allocation, resizes within the 256×256/256 KiB RGBA per-icon cap, releases stale images, and
