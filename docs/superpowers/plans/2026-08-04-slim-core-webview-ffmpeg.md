@@ -297,10 +297,37 @@
 297:- [x] Test: probe before install sees no SVT/FFmpeg backends (or only external if present); complete
 298:      managed install; probe/options update in-process; recorder can select a newly available FFmpeg
 299:      encoder without restart.
-300:
-…
-339:
-…
-397:- Native FFmpeg-free shareable clipboard export
 
-[Showing lines 1-300 of 398. Use :301 to continue]
+### Task B5: Remove FFmpeg from the regular installer
+
+- [x] Remove `ffmpeg/` from `apps/clipline-app/tauri.conf.json` `bundle.resources`.
+- [x] Remove the regular-SKU `beforeBundleCommand` that runs
+      `scripts/verify-ffmpeg-resource.ps1` (it must not stage FFmpeg into the slim installer).
+- [x] Keep `ffmpeg/` in `tauri.standalone.conf.json` so the offline/Fixed-Version SKU remains
+      self-contained; document that standalone is not the lightweight installer.
+- [x] Keep `configure_bundled_ffmpeg` tolerant of a missing resource path (standalone/dev still
+      register it when present; regular installs rely on on-demand managed runtime / locate).
+- [x] Update UI contracts: regular config must not list `ffmpeg/`; standalone must; no
+      `avcodec-*.dll` expectation on the regular NSIS payload.
+- [ ] Hard gate when a regular setup is built: setup size ≤ **25 MB**, and the payload contains
+      no `avcodec-*.dll`. Record actual size (requires NSIS build; config/contracts land first).
+- [x] Commit as `build(app): stop bundling FFmpeg in the regular installer`.
+
+---
+
+## Milestone C — Docs and Core vs Optional ledger
+
+### Task C1: Publish the new budgets
+
+- [ ] Update `ddoc.md` idle/installer budgets to match measured destroyable-shell reality and
+      on-demand FFmpeg (PWS ≤120 hard / ≤90 stretch; regular setup ≤25 MB; FFmpeg optional).
+- [ ] Update `handoff.md` with the Core vs Optional map and the destroy/recreate + managed
+      FFmpeg operator notes.
+- [ ] Point release notes / nightly notes at the slim-core plan outcomes.
+
+### Task C2: Stop conditions / follow-ups
+
+- [ ] Do not default disk replay on.
+- [ ] Do not remove Cloud from Core.
+- [ ] Deferred: FFmpeg-free shareable clipboard export; native HEVC/AV1 preview; custom ultra-minimal
+      FFmpeg build.

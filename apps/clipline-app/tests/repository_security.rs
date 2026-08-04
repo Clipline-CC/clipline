@@ -534,21 +534,25 @@ fn ffmpeg_release_staging_is_pinned_allowlisted_and_attributed() {
         "the release-bundle preflight must stay offline"
     );
 
-    let tauri = fs::read_to_string(root.join("apps/clipline-app/tauri.conf.json"))
+    let tauri_text = fs::read_to_string(root.join("apps/clipline-app/tauri.conf.json"))
         .expect("read Tauri config");
-    assert_eq!(tauri.matches("\"ffmpeg/\"").count(), 1);
-    let tauri: serde_json::Value = serde_json::from_str(&tauri).expect("valid Tauri configuration");
-    let preflight = tauri
-        .pointer("/build/beforeBundleCommand")
-        .expect("Tauri bundles must run the FFmpeg resource preflight");
-    assert_eq!(preflight["cwd"].as_str(), Some("../.."));
-    let preflight_script = preflight["script"]
-        .as_str()
-        .expect("beforeBundleCommand script");
     assert_eq!(
-        preflight_script,
-        r"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\verify-ffmpeg-resource.ps1",
-        "Tauri's command runner treats surrounding executable quotes literally; keep the no-space SystemRoot path unquoted"
+        tauri_text.matches("\"ffmpeg/\"").count(),
+        0,
+        "regular installer must not embed ffmpeg/ after on-demand runtime"
+    );
+    let tauri: serde_json::Value =
+        serde_json::from_str(&tauri_text).expect("valid Tauri configuration");
+    assert!(
+        tauri.pointer("/build/beforeBundleCommand").is_none(),
+        "regular SKU must not run verify-ffmpeg-resource as beforeBundleCommand"
+    );
+    let standalone_text =
+        fs::read_to_string(root.join("apps/clipline-app/tauri.standalone.conf.json"))
+            .expect("read standalone Tauri config");
+    assert!(
+        standalone_text.contains("\"ffmpeg/\""),
+        "standalone/offline SKU may still bundle the verified ffmpeg resource"
     );
     let release = fs::read_to_string(root.join("docs/release.workflow.yml"))
         .expect("read release workflow template");
@@ -560,7 +564,7 @@ fn ffmpeg_release_staging_is_pinned_allowlisted_and_attributed() {
         .expect("release workflow must build the Tauri app");
     assert!(
         stage_position < build_position,
-        "release workflow must stage and verify FFmpeg before Tauri invokes the bundle preflight"
+        "release workflow must stage/verify FFmpeg before building SKUs that still bundle it"
     );
     let readme = fs::read_to_string(root.join("apps/clipline-app/ffmpeg/README.md"))
         .expect("read bundled FFmpeg notice");

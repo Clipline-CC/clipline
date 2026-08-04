@@ -341,19 +341,25 @@ fn configured_main_window_is_not_created_at_startup() {
 }
 
 #[test]
-fn installer_bundles_ffmpeg_for_thumbnail_generation() {
+fn regular_installer_omits_ffmpeg_resources_for_on_demand_runtime() {
     let config: serde_json::Value =
         serde_json::from_str(&tauri_config()).expect("tauri.conf.json should parse");
     let resources = config
         .pointer("/bundle/resources")
         .and_then(serde_json::Value::as_array)
-        .expect("bundle.resources should be listed");
+        .cloned()
+        .unwrap_or_default();
     assert!(
         resources
             .iter()
-            .any(|resource| resource.as_str() == Some("ffmpeg/")),
-        "fresh installs need the LGPL ffmpeg resource bundle so local gallery posters can be generated"
+            .all(|resource| resource.as_str() != Some("ffmpeg/")),
+        "regular installer must not embed ffmpeg/; managed runtime is on-demand"
     );
+    assert!(
+        config.pointer("/build/beforeBundleCommand").is_none(),
+        "regular SKU must not run verify-ffmpeg-resource beforeBundleCommand"
+    );
+
     let standalone: serde_json::Value = serde_json::from_str(&tauri_standalone_config())
         .expect("tauri.standalone.conf.json should parse");
     let standalone_resources = standalone
@@ -364,16 +370,15 @@ fn installer_bundles_ffmpeg_for_thumbnail_generation() {
         standalone_resources
             .iter()
             .any(|resource| resource.as_str() == Some("ffmpeg/")),
-        "standalone installs must keep the ffmpeg resource when overlaying WebView2 resources"
+        "standalone/offline SKU may still bundle ffmpeg beside Fixed Version WebView2"
     );
 
     let app = app_rs();
     assert!(
-        app.contains("BaseDirectory::Resource")
-            && app.contains("configure_bundled_ffmpeg")
+        app.contains("configure_bundled_ffmpeg")
             && app.contains("ffmpeg/ffmpeg.exe")
-            && app.contains("clipline_capture::ffmpeg::set_bundled_ffmpeg"),
-        "Tauri setup must register the bundled ffmpeg resource path before thumbnails or encoder probing run"
+            && app.contains("bundled ffmpeg resource missing"),
+        "setup must tolerate a missing bundled ffmpeg resource on the regular SKU"
     );
 }
 
