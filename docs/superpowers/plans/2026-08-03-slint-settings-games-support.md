@@ -465,6 +465,7 @@ absolute memory, CPU, handle, worker, or lifecycle gates fail.
 - Create: `crates/clipline-games/tests/osu_enrichment.rs`
 - Modify: `crates/clipline-games/src/lib.rs`
 - Modify: `crates/clipline-games/src/identity.rs`
+- Modify: `crates/clipline-games/tests/identity.rs`
 - Modify: `crates/clipline-games/src/windows/icon.rs`
 - Modify: `crates/clipline-settings/src/games.rs`
 - Modify: `crates/clipline-settings/src/osu.rs`
@@ -472,6 +473,7 @@ absolute memory, CPU, handle, worker, or lifecycle gates fail.
 - Modify: `crates/clipline-settings/src/persistence.rs`
 - Modify: `crates/clipline-settings/tests/capture_region.rs`
 - Modify: `crates/clipline-settings/tests/coordinator.rs`
+- Create: `crates/clipline-settings/tests/osu.rs`
 - Modify: `crates/clipline-settings/tests/persistence.rs`
 - Modify: `crates/clipline-shell/Cargo.toml`
 - Modify: `crates/clipline-shell/src/hotkey.rs`
@@ -503,9 +505,12 @@ absolute memory, CPU, handle, worker, or lifecycle gates fail.
   catalogs instead of launching duplicate enumeration. It retains bounded plugin/custom/candidate
   state in Rust and projects at most 60 rows. `GameItemIdentity` distinguishes plugin, custom, and
   candidate; candidates carry the exact `ProbeToken` plus a deterministic opaque id, never a row
-  index, wall clock, or collision-prone raw `id_hint`. Refresh invalidates only identities owned by
-  the replaced token. Pin combined ordering/dedupe, total/page count, PastEnd, selection/dialog
-  invalidation, and 0/60/61/128/256/400-row behavior.
+  index, wall clock, or collision-prone raw `id_hint`. Catalog-owned builders ingest the real
+  `DetectedGameCandidate` and `GameWindowInfo` payloads, derive ids from complete canonical source
+  authority, reject duplicate/colliding handles, and retain the exact handle-to-source membership
+  map used by every mutation. Refresh invalidates only identities owned by the replaced token. Pin
+  combined ordering/dedupe, total/page count, PastEnd, selection/dialog invalidation, forged-handle
+  rejection, and 0/60/61/128/256/400-row behavior.
 - Rows carry typed icon ids and bounded loading state, not decoded RGBA. A separate token-fenced image
   cache owns at most 8 MiB and 32 maximum-size surfaces, checks encoded bytes and header dimensions
   before allocation, resizes within the 256×256/256 KiB RGBA per-icon cap, releases stale images, and
