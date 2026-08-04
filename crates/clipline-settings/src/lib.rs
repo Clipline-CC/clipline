@@ -25,6 +25,7 @@ pub mod hotkey;
 pub mod osu;
 pub mod persistence;
 pub mod preferences;
+pub mod probe;
 pub mod types;
 pub mod validation;
 
@@ -67,6 +68,14 @@ pub use preferences::{
     CloudUploadPreferences, GamePluginPreference, GamePreferences, SettingsPreferences,
     MAX_SETTINGS_COLLECTION_BYTES, MAX_SETTINGS_CUSTOM_GAMES, MAX_SETTINGS_FIELD_BYTES,
     MAX_SETTINGS_GAME_PLUGINS,
+};
+pub use probe::{
+    BoundedProbePayload, ProbeAdmissionError, ProbeExecutionContext, ProbeExecutor, ProbeKind,
+    ProbeOutcome, ProbePhase, ProbeRequestGeneration, ProbeResult, ProbeResultPublishOutcome,
+    ProbeResultReceiver, ProbeSessionFence, ProbeSessionOwner, ProbeSubmitError,
+    ProbeSubmitOutcome, ProbeSummary, ProbeToken, ProbeTokenFence, SettingsAttachmentGeneration,
+    SettingsForegroundGeneration, MAX_PROBE_ERROR_BYTES, MAX_PROBE_WORK_BYTES,
+    PROBE_RESULT_CAPACITY, PROBE_WORKER_COUNT,
 };
 #[allow(unused_imports)]
 pub use types::{

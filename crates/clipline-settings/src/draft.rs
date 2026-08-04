@@ -234,7 +234,10 @@ pub struct DirtySummary {
     pub tabs: Vec<SettingsTab>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(transparent)]
 pub struct SettingsSessionGeneration(u64);
 
 impl SettingsSessionGeneration {
