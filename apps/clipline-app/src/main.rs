@@ -25,6 +25,9 @@ mod cloud_upload;
 #[cfg(windows)]
 mod credential_transaction;
 #[cfg(windows)]
+#[allow(dead_code)] // B1 matrix; B2/B3 wire status/ensure commands
+mod ffmpeg_runtime;
+#[cfg(windows)]
 mod game_discovery;
 #[cfg(windows)]
 mod game_icon;

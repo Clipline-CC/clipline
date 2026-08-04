@@ -230,7 +230,7 @@
 230:
 231:### Task B1: Capability matrix + failing UX contracts
 232:
-233:- [ ] Document and test a pure capability helper:
+233:- [x] Document and test a pure capability helper:
 234:  - `recording_without_ffmpeg_possible` when any MFT/hardware non-FFmpeg encoder exists
 235:  - `ffmpeg_required_for` reasons:
 236:    - `svt_av1`
@@ -238,17 +238,17 @@
 238:    - `poster`
 239:    - `audio_sidecar_extract` (only where still FFmpeg-backed)
 240:    - `shareable_clipboard_export` (today always FFmpeg-backed in `library.rs`)
-241:- [ ] Distinguish discovery kinds:
+241:- [x] Distinguish discovery kinds:
 242:  - `ManagedVerified` — LOCALAPPDATA managed runtime passed full manifest verification
 243:  - `ExternalUnmanaged` — `CLIPLINE_FFMPEG`, packaged/adjacent, `%APPDATA%`, or PATH binary that
 244:    merely runs `-version`
 245:  - `Missing`
-246:- [ ] `ensure_ffmpeg_runtime` is a no-op only for `ManagedVerified`. External/unmanaged runtimes
+246:- [x] `ensure_ffmpeg_runtime` is a no-op only for `ManagedVerified`. External/unmanaged runtimes
 247:      are reported distinctly and do not skip repair when the user asks to Install/Repair managed
 248:      runtime.
-249:- [ ] Add UI-contract fixtures for Library poster empty-state, Copy Clip / share export affordance,
+249:- [x] Add UI-contract fixtures for Library poster empty-state, Copy Clip / share export affordance,
 250:      and Settings encoder rows when managed FFmpeg is absent vs present.
-251:- [ ] Add failing app tests for status query + ensure no-op when managed verification already
+251:- [x] Add failing app tests for status query + ensure no-op when managed verification already
 252:      passes.
 253:
 254:### Task B2: Managed-runtime verifier (separate from `locate()`)

@@ -322,6 +322,25 @@ fn windows_installer_repairs_webview2_with_bootstrapper() {
 }
 
 #[test]
+fn configured_main_window_is_not_created_at_startup() {
+    let config: serde_json::Value =
+        serde_json::from_str(&tauri_config()).expect("tauri.conf.json should parse");
+    let create = config
+        .pointer("/app/windows/0/create")
+        .and_then(|value| value.as_bool());
+    assert_eq!(
+        create,
+        Some(false),
+        "main window config must remain a builder template; cold --autostart creates no WebView"
+    );
+    let app = app_rs();
+    assert!(
+        app.contains("autostart launch leaving Destroyed shell without webview"),
+        "autostart setup must not build or hide a startup webview"
+    );
+}
+
+#[test]
 fn installer_bundles_ffmpeg_for_thumbnail_generation() {
     let config: serde_json::Value =
         serde_json::from_str(&tauri_config()).expect("tauri.conf.json should parse");
@@ -416,9 +435,18 @@ fn frontend_reports_webview_readiness_to_native_shell() {
         app.contains("fn frontend_ready<R: Runtime>(")
             && app.contains("runtime: tauri::State<RuntimeState>")
             && app.contains("startup_warnings: tauri::State<StartupWarnings>")
-            && app.contains("runtime.current_waiting_status()")
+            && app.contains("readiness: tauri::State<FrontendReadinessState>")
+            && app.contains("startup_warnings.snapshot()")
+            && app.contains("runtime.durable_recorder_status_for_replay()")
             && app.contains("frontend_ready,"),
-        "Rust shell must expose frontend_ready with durable startup diagnostics and recorder status replay"
+        "Rust shell must expose frontend_ready with generation-scoped readiness and durable status/warning replay"
+    );
+    assert!(
+        app.contains("struct FrontendReadinessState")
+            && app.contains("fn arm_frontend_ready_watchdog<R: Runtime>(")
+            && app.contains("watchdog_should_fire(")
+            && app.contains("begin_generation("),
+        "native shell must track frontend readiness per window generation"
     );
     assert!(
         js.contains("invoke(\"frontend_ready\")")
@@ -2553,9 +2581,14 @@ fn native_background_lifecycle_releases_heavy_frontend_state() {
     let suspend_helper = &js[suspend_start..close_review_start];
 
     assert!(
-        tray_helper.contains("publish_background_window(app, WindowLifecycleMode::Tray)")
+        tray_helper.contains("WindowLifecycleMode::Destroying")
+            && tray_helper.contains("window.destroy()")
             && tray_helper.contains("WINDOW_LIFECYCLE_EVENT"),
-        "native close-to-tray must publish durable lifecycle state after hiding"
+        "native close-to-tray must destroy the webview and publish Destroying"
+    );
+    assert!(
+        !app.contains("fn hide_autostart_webviews"),
+        "create:false makes hide_autostart_webviews obsolete"
     );
     assert!(
         js.contains("listen(\"window-lifecycle\"")
@@ -3815,6 +3848,60 @@ fn deck_status_success_toasts_auto_clear() {
             "progress status should stay explicit via `{required}`"
         );
     }
+}
+
+#[test]
+fn ffmpeg_capability_matrix_contracts_managed_runtime_surfaces() {
+    let runtime = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ffmpeg_runtime.rs"),
+    )
+    .expect("read ffmpeg_runtime.rs");
+    let library = library_rs();
+    let js = main_js();
+    let gallery = read_ui_js("gallery-window-core.js");
+
+    for required in [
+        "enum FfmpegRequirementReason",
+        "ShareableClipboardExport",
+        "AudioSidecarExtract",
+        "Poster",
+        "SvtAv1",
+        "FfmpegBackendEncoder",
+        "enum FfmpegDiscoveryKind",
+        "ManagedVerified",
+        "ExternalUnmanaged",
+        "Missing",
+        "fn recording_without_ffmpeg_possible",
+        "fn ffmpeg_required_for",
+        "fn ensure_ffmpeg_runtime_is_noop",
+        "Install the FFmpeg runtime to copy a shareable clip.",
+        "Install the FFmpeg runtime to generate clip posters.",
+    ] {
+        assert!(
+            runtime.contains(required),
+            "ffmpeg_runtime.rs must expose capability-matrix surface `{required}`"
+        );
+    }
+
+    assert!(
+        library.contains("ffmpeg is not available for a shareable clipboard export")
+            && library.contains("ffmpeg is not available for poster extraction"),
+        "library paths must keep actionable missing-FFmpeg errors for share export and posters"
+    );
+    assert!(
+        gallery.contains("posterRuntimeUnavailable")
+            && gallery.contains("ffmpeg is not available for poster extraction"),
+        "gallery core must recognize the poster missing-runtime error"
+    );
+    assert!(
+        js.contains("copyClipToClipboard")
+            && js.contains("copy_clip_to_clipboard"),
+        "Copy Clip UI must remain the share-export entry point that will host the install affordance"
+    );
+    assert!(
+        !runtime.contains("archive_size"),
+        "B1 must not pretend the managed download manifest already carries archive_size"
+    );
 }
 
 #[test]
