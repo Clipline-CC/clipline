@@ -43,6 +43,18 @@ the complete bounded member vector before swapping any token or owned source cat
 allocation failure therefore preserves the exact prior authority and projected membership; accepted
 replacements return the displaced move-owned catalog instead of cloning or re-enumerating it.
 
+The neutral Games controller now consumes the Task 5 probe catalogs by exact owner, kind, and
+request generation. It retains at most the bounded plugin/custom/candidate authorities, projects
+only the current 60-row page, rejects forged or stale action fences, and invalidates selection only
+when its active candidate authority changes. Allocation failure returns the exact incoming catalog
+or Settings draft while leaving the probe pending, so the same token can retry without enumeration
+or cloning and the prior accepted view remains usable. `GameCatalogRevision` fences mutations;
+the independent checked `GameViewGeneration` advances for probe, page, and terminal UI changes.
+Detach advances both, releases every catalog and selection, and publishes one honest
+`attached=false`, zero-count, all-idle terminal summary. No full row or source string enters that
+summary. Games all-target tests, strict package Clippy, workspace tests, and the final independent
+controller audit are green.
+
 osu! settings now persist a checked nonzero account generation, migrate legacy profiles to generation
 1, retain shipping `u64` client-id semantics, and enforce per-field, cleanup-list, and 64 KiB aggregate
 bounds before normalization can hide hostile input. The generation is not yet an authoritative ABA
@@ -50,9 +62,9 @@ fence: the later osu service/CAS slice must enforce exact transitions under the 
 before asynchronous work trusts it. The explicit 100/125/150/200% DPI and negative-half-tie matrix is
 green.
 
-Next: build the Games controller over the existing Task 5 catalogs and bounded result channel,
-moving those catalogs instead of cloning or re-enumerating them and keeping full rows out of
-`DesktopSnapshot`.
+Next: Task 8 slice 4, replace detached game discovery with the process-owned, generation-fenced,
+joined detector and transactional Settings rollback receipt. Then implement the hotkey reducer,
+osu! secret/CAS/HTTP/enrichment slices, and the thin Tauri compatibility cutover.
 `artifacts/`, `paseo.json`, and unrelated poster formatting remain local and excluded.
 
 ## Checkpoint (2026-08-04): Slint replacement Milestone 8, Task 7 joined microphone monitor

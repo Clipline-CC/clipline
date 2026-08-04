@@ -105,10 +105,19 @@ impl GameProjectionReservation for SystemGameProjectionReservation {
     }
 }
 
-#[derive(Debug)]
 pub enum GameCandidateCatalog {
     Installed(InstalledGameIdentityCatalog),
     RunningWindows(GameWindowIdentityCatalog),
+}
+
+impl fmt::Debug for GameCandidateCatalog {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GameCandidateCatalog")
+            .field("token", &self.token())
+            .field("row_count", &self.len())
+            .finish()
+    }
 }
 
 impl GameCandidateCatalog {
@@ -127,13 +136,100 @@ impl GameCandidateCatalog {
     }
 }
 
-#[derive(Debug)]
 pub struct GameCatalogInput {
     pub owner: ProbeSessionOwner,
     pub plugins_token: ProbeToken,
     pub plugins: Vec<GamePluginInfo>,
     pub settings: GamePreferences,
     pub candidates: Option<GameCandidateCatalog>,
+}
+
+impl fmt::Debug for GameCatalogInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GameCatalogInput")
+            .field("owner", &self.owner)
+            .field("plugins_token", &self.plugins_token)
+            .field("plugin_count", &self.plugins.len())
+            .field("custom_count", &self.settings.custom_games.len())
+            .field("candidates", &self.candidates)
+            .finish()
+    }
+}
+
+pub struct RejectedGameCatalogInput {
+    pub error: GamePresentationError,
+    pub input: GameCatalogInput,
+}
+
+pub struct RejectedGamePluginReplacement {
+    pub error: GamePresentationError,
+    pub plugins_token: ProbeToken,
+    pub plugins: Vec<GamePluginInfo>,
+}
+
+pub struct RejectedGameCandidateReplacement {
+    pub error: GamePresentationError,
+    pub candidates: Option<GameCandidateCatalog>,
+}
+
+pub struct RejectedGameSettingsReplacement {
+    pub error: GamePresentationError,
+    pub settings: GamePreferences,
+}
+
+macro_rules! redacted_replacement_debug {
+    ($type:ty, $name:literal, $count:expr) => {
+        impl fmt::Debug for $type {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter
+                    .debug_struct($name)
+                    .field("error", &self.error)
+                    .field("owned_count", &($count)(self))
+                    .finish()
+            }
+        }
+    };
+}
+
+redacted_replacement_debug!(
+    RejectedGamePluginReplacement,
+    "RejectedGamePluginReplacement",
+    |value: &RejectedGamePluginReplacement| value.plugins.len()
+);
+redacted_replacement_debug!(
+    RejectedGameCandidateReplacement,
+    "RejectedGameCandidateReplacement",
+    |value: &RejectedGameCandidateReplacement| value
+        .candidates
+        .as_ref()
+        .map_or(0, GameCandidateCatalog::len)
+);
+redacted_replacement_debug!(
+    RejectedGameSettingsReplacement,
+    "RejectedGameSettingsReplacement",
+    |value: &RejectedGameSettingsReplacement| value.settings.custom_games.len()
+);
+
+impl fmt::Debug for RejectedGameCatalogInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RejectedGameCatalogInput")
+            .field("error", &self.error)
+            .field("owner", &self.input.owner)
+            .field("plugins_token", &self.input.plugins_token)
+            .field("plugin_count", &self.input.plugins.len())
+            .field("custom_count", &self.input.settings.custom_games.len())
+            .field(
+                "candidate_count",
+                &self
+                    .input
+                    .candidates
+                    .as_ref()
+                    .map_or(0, GameCandidateCatalog::len),
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,7 +267,6 @@ pub enum ResolvedGameCatalogMember<'a> {
     RunningWindow(&'a GameWindowInfo),
 }
 
-#[derive(Debug)]
 pub struct GameCatalog {
     owner: ProbeSessionOwner,
     plugins_token: ProbeToken,
@@ -181,19 +276,43 @@ pub struct GameCatalog {
     members: Vec<CatalogMember>,
 }
 
+impl fmt::Debug for GameCatalog {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GameCatalog")
+            .field("owner", &self.owner)
+            .field("plugins_token", &self.plugins_token)
+            .field("plugin_count", &self.plugins.len())
+            .field("custom_count", &self.settings.custom_games.len())
+            .field("candidates", &self.candidates)
+            .field("member_count", &self.members.len())
+            .finish()
+    }
+}
+
 impl GameCatalog {
     pub fn try_build(
         input: GameCatalogInput,
         reservation: &dyn GameProjectionReservation,
     ) -> Result<Self, GamePresentationError> {
-        let members = stage_catalog_members(
+        Self::try_build_recoverable(input, reservation).map_err(|rejected| rejected.error)
+    }
+
+    pub fn try_build_recoverable(
+        input: GameCatalogInput,
+        reservation: &dyn GameProjectionReservation,
+    ) -> Result<Self, Box<RejectedGameCatalogInput>> {
+        let members = match stage_catalog_members(
             input.owner,
             input.plugins_token,
             &input.plugins,
             &input.settings,
             input.candidates.as_ref(),
             reservation,
-        )?;
+        ) {
+            Ok(members) => members,
+            Err(error) => return Err(Box::new(RejectedGameCatalogInput { error, input })),
+        };
         Ok(Self {
             owner: input.owner,
             plugins_token: input.plugins_token,
@@ -212,14 +331,33 @@ impl GameCatalog {
         plugins: Vec<GamePluginInfo>,
         reservation: &dyn GameProjectionReservation,
     ) -> Result<(ProbeToken, Vec<GamePluginInfo>), GamePresentationError> {
-        let members = stage_catalog_members(
+        self.try_replace_plugins_recoverable(plugins_token, plugins, reservation)
+            .map_err(|rejected| rejected.error)
+    }
+
+    pub fn try_replace_plugins_recoverable(
+        &mut self,
+        plugins_token: ProbeToken,
+        plugins: Vec<GamePluginInfo>,
+        reservation: &dyn GameProjectionReservation,
+    ) -> Result<(ProbeToken, Vec<GamePluginInfo>), Box<RejectedGamePluginReplacement>> {
+        let members = match stage_catalog_members(
             self.owner,
             plugins_token,
             &plugins,
             &self.settings,
             self.candidates.as_ref(),
             reservation,
-        )?;
+        ) {
+            Ok(members) => members,
+            Err(error) => {
+                return Err(Box::new(RejectedGamePluginReplacement {
+                    error,
+                    plugins_token,
+                    plugins,
+                }))
+            }
+        };
         let previous_token = std::mem::replace(&mut self.plugins_token, plugins_token);
         let previous_plugins = std::mem::replace(&mut self.plugins, plugins);
         self.members = members;
@@ -232,14 +370,31 @@ impl GameCatalog {
         candidates: Option<GameCandidateCatalog>,
         reservation: &dyn GameProjectionReservation,
     ) -> Result<Option<GameCandidateCatalog>, GamePresentationError> {
-        let members = stage_catalog_members(
+        self.try_replace_candidates_recoverable(candidates, reservation)
+            .map_err(|rejected| rejected.error)
+    }
+
+    pub fn try_replace_candidates_recoverable(
+        &mut self,
+        candidates: Option<GameCandidateCatalog>,
+        reservation: &dyn GameProjectionReservation,
+    ) -> Result<Option<GameCandidateCatalog>, Box<RejectedGameCandidateReplacement>> {
+        let members = match stage_catalog_members(
             self.owner,
             self.plugins_token,
             &self.plugins,
             &self.settings,
             candidates.as_ref(),
             reservation,
-        )?;
+        ) {
+            Ok(members) => members,
+            Err(error) => {
+                return Err(Box::new(RejectedGameCandidateReplacement {
+                    error,
+                    candidates,
+                }))
+            }
+        };
         let previous = std::mem::replace(&mut self.candidates, candidates);
         self.members = members;
         Ok(previous)
@@ -251,14 +406,31 @@ impl GameCatalog {
         settings: GamePreferences,
         reservation: &dyn GameProjectionReservation,
     ) -> Result<GamePreferences, GamePresentationError> {
-        let members = stage_catalog_members(
+        self.try_replace_settings_recoverable(settings, reservation)
+            .map_err(|rejected| rejected.error)
+    }
+
+    pub fn try_replace_settings_recoverable(
+        &mut self,
+        settings: GamePreferences,
+        reservation: &dyn GameProjectionReservation,
+    ) -> Result<GamePreferences, Box<RejectedGameSettingsReplacement>> {
+        let members = match stage_catalog_members(
             self.owner,
             self.plugins_token,
             &self.plugins,
             &settings,
             self.candidates.as_ref(),
             reservation,
-        )?;
+        ) {
+            Ok(members) => members,
+            Err(error) => {
+                return Err(Box::new(RejectedGameSettingsReplacement {
+                    error,
+                    settings,
+                }))
+            }
+        };
         let previous = std::mem::replace(&mut self.settings, settings);
         self.members = members;
         Ok(previous)

@@ -136,6 +136,10 @@ impl GamesProbeFailed {
     pub fn error(&self) -> &str {
         &self.error
     }
+
+    pub fn into_parts(self) -> (ProbeToken, String) {
+        (self.token, self.error)
+    }
 }
 
 impl fmt::Debug for GamesProbeFailed {
