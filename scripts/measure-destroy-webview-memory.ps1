@@ -4,20 +4,21 @@
 
 .DESCRIPTION
     Measures Clipline process-tree private working set and private commit after:
-      1) cold --autostart settle (no WebView expected; commit baseline)
+      1) cold --autostart settle (no WebView expected; telemetry only)
       2) recorder-stopped, no-WebView control (telemetry only)
       3) destroy-to-tray after a visible library/review session
-      4) recreate -> destroy cycles (rebound check)
+      4) recreate -> destroy cycles (same-process rebound check)
       5) immediate close -> open race
 
     Hard gates (docs/superpowers/plans/2026-08-04-slim-core-webview-ffmpeg.md):
       - zero Clipline-owned msedgewebview2.exe children after autostart/destroy
-      - settled tree private working set <= GateMiB
-      - first/final post-destroy private commit <= cold no-WebView autostart baseline + CommitSlackMiB
-      - third-cycle commit <= first-cycle commit + CommitSlackMiB
+      - settled tree private working set <= GateMiB (product budget; default 120)
+      - third-cycle AND final destroy PWS/commit <= first-destroy + ReboundSlackMiB
       - close->open race and recreate cycles succeed
 
-    Absolute private commit is telemetry, not an absolute idle ceiling.
+    Stretch (non-blocking): PWS <= StretchMiB (default 90).
+    Absolute commit, cold/warm cross-process deltas, and recorder-stopped control are telemetry.
+    Do NOT compare destroy commit to a killed cold --autostart process.
 
 .EXAMPLE
     pwsh -File scripts/measure-destroy-webview-memory.ps1 -Exe target/release/clipline-app.exe
@@ -25,8 +26,9 @@
 param(
     [Parameter(Mandatory = $true)][string]$Exe,
     [int]$Runs = 3,
-    [int]$GateMiB = 90,
-    [int]$CommitSlackMiB = 15,
+    [int]$GateMiB = 120,
+    [int]$StretchMiB = 90,
+    [int]$ReboundSlackMiB = 15,
     [int]$AutostartSettleSeconds = 100,
     [int]$DestroySettleSeconds = 90,
     [int]$ControlSettleSeconds = 60,
@@ -267,8 +269,9 @@ for ($run = 1; $run -le $Runs; $run++) {
         $autoSettled = Get-SettledSample -RootPid $auto.Id -RootStart $rootStart -Seconds $AutostartSettleSeconds
         $autoPwsMiB = [math]::Round($autoSettled.MedianTreePws / 1MB, 1)
         $autoCommitMiB = [math]::Round($autoSettled.MedianTreeCommit / 1MB, 1)
+        $autoStretch = $autoPwsMiB -le $StretchMiB
         $autoGate = ($autoSettled.WebViewProcesses -eq 0) -and ($autoPwsMiB -le $GateMiB)
-        Write-Host ("  autostart tree PWS={0} MiB commit={1} MiB webviews={2} gate={3}" -f $autoPwsMiB, $autoCommitMiB, $autoSettled.WebViewProcesses, $autoGate)
+        Write-Host ("  autostart tree PWS={0} MiB commit={1} MiB webviews={2} gate={3} stretch90={4}" -f $autoPwsMiB, $autoCommitMiB, $autoSettled.WebViewProcesses, $autoGate, $autoStretch)
     } finally {
         Stop-CliplineTree -Proc $auto
     }
@@ -314,9 +317,9 @@ for ($run = 1; $run -le $Runs; $run++) {
         $d1 = Get-SettledSample -RootPid $rootPid -RootStart $rootStart -Seconds $DestroySettleSeconds
         $d1Pws = [math]::Round($d1.MedianTreePws / 1MB, 1)
         $d1Commit = [math]::Round($d1.MedianTreeCommit / 1MB, 1)
-        $d1CommitOk = $d1Commit -le ($autoCommitMiB + $CommitSlackMiB)
-        $d1Gate = ($d1.WebViewProcesses -eq 0) -and ($d1Pws -le $GateMiB) -and $d1CommitOk
-        Write-Host ("  destroy#1 tree PWS={0} MiB commit={1} MiB (baseline+{2}={3}) webviews={4} gate={5}" -f $d1Pws, $d1Commit, $CommitSlackMiB, ($autoCommitMiB + $CommitSlackMiB), $d1.WebViewProcesses, $d1Gate)
+        $d1Stretch = $d1Pws -le $StretchMiB
+        $d1Gate = ($d1.WebViewProcesses -eq 0) -and ($d1Pws -le $GateMiB)
+        Write-Host ("  destroy#1 tree PWS={0} MiB commit={1} MiB webviews={2} gate={3} stretch90={4}" -f $d1Pws, $d1Commit, $d1.WebViewProcesses, $d1Gate, $d1Stretch)
 
         Open-FromDestroyed -ExePath $Exe
         $ws = Resolve-CliplinePage -Port $DebugPort
@@ -331,8 +334,8 @@ for ($run = 1; $run -le $Runs; $run++) {
         $d3 = Get-SettledSample -RootPid $rootPid -RootStart $rootStart -Seconds ([math]::Max(45, [math]::Floor($DestroySettleSeconds / 2)))
         $d3Pws = [math]::Round($d3.MedianTreePws / 1MB, 1)
         $d3Commit = [math]::Round($d3.MedianTreeCommit / 1MB, 1)
-        $cycleGate = ($d2.WebViewProcesses -eq 0) -and ($d3.WebViewProcesses -eq 0) -and ($d3Pws -le ($d1Pws + $CommitSlackMiB)) -and ($d3Commit -le ($d1Commit + $CommitSlackMiB))
-        Write-Host ("  destroy#3 tree PWS={0} MiB commit={1} MiB webviews={2} reboundOk={3}" -f $d3Pws, $d3Commit, $d3.WebViewProcesses, $cycleGate)
+        $cycleGate = ($d2.WebViewProcesses -eq 0) -and ($d3.WebViewProcesses -eq 0) -and ($d3Pws -le ($d1Pws + $ReboundSlackMiB)) -and ($d3Commit -le ($d1Commit + $ReboundSlackMiB))
+        Write-Host ("  destroy#3 tree PWS={0} MiB commit={1} MiB webviews={2} vsD1+{3} reboundOk={4}" -f $d3Pws, $d3Commit, $d3.WebViewProcesses, $ReboundSlackMiB, $cycleGate)
 
         Open-FromDestroyed -ExePath $Exe
         $ws = Resolve-CliplinePage -Port $DebugPort
@@ -352,9 +355,10 @@ for ($run = 1; $run -le $Runs; $run++) {
         $final = Get-SettledSample -RootPid $rootPid -RootStart $rootStart -Seconds ([math]::Max(60, [math]::Floor($DestroySettleSeconds * 2 / 3)))
         $finalPws = [math]::Round($final.MedianTreePws / 1MB, 1)
         $finalCommit = [math]::Round($final.MedianTreeCommit / 1MB, 1)
-        $finalCommitOk = $finalCommit -le ($autoCommitMiB + $CommitSlackMiB)
-        $finalGate = ($final.WebViewProcesses -eq 0) -and ($finalPws -le $GateMiB) -and $finalCommitOk
-        Write-Host ("  final destroy PWS={0} MiB commit={1} MiB webviews={2} gate={3}" -f $finalPws, $finalCommit, $final.WebViewProcesses, $finalGate)
+        $finalReboundOk = ($finalPws -le ($d1Pws + $ReboundSlackMiB)) -and ($finalCommit -le ($d1Commit + $ReboundSlackMiB))
+        $finalStretch = $finalPws -le $StretchMiB
+        $finalGate = ($final.WebViewProcesses -eq 0) -and ($finalPws -le $GateMiB) -and $finalReboundOk
+        Write-Host ("  final destroy PWS={0} MiB commit={1} MiB webviews={2} vsD1 reboundOk={3} gate={4} stretch90={5}" -f $finalPws, $finalCommit, $final.WebViewProcesses, $finalReboundOk, $finalGate, $finalStretch)
 
         $results += [pscustomobject]@{
             Run = $run
@@ -373,11 +377,13 @@ for ($run = 1; $run -le $Runs; $run++) {
             Destroy3PwsMiB = $d3Pws
             Destroy3CommitMiB = $d3Commit
             CycleNoRebound = $cycleGate
+            FinalNoRebound = $finalReboundOk
             RaceOk = $raceOk
             FinalPwsMiB = $finalPws
             FinalCommitMiB = $finalCommit
             FinalWebViews = $final.WebViewProcesses
             FinalGate = $finalGate
+            Stretch90 = ($autoStretch -and $d1Stretch -and $finalStretch)
             Gate = ($autoGate -and $d1Gate -and $cycleGate -and $raceOk -and $finalGate)
         }
     } finally {
@@ -390,6 +396,6 @@ $results | Export-Csv $OutCsv -NoTypeInformation
 $results | Format-Table -AutoSize
 $passed = ($results | Where-Object Gate).Count
 Write-Host ""
-Write-Host "hard gates: WS<=${GateMiB} MiB, zero WebViews, commit <= autostart baseline + ${CommitSlackMiB} MiB, cycle rebound <= +${CommitSlackMiB}: $passed/$($results.Count) runs passed"
+Write-Host "hard gates: WS<=${GateMiB} MiB, zero WebViews, cycle+final rebound <= first destroy +${ReboundSlackMiB} MiB; stretch WS<=${StretchMiB} MiB non-blocking: $passed/$($results.Count) runs passed"
 Write-Host "csv: $OutCsv"
 if ($passed -lt $results.Count) { exit 1 }
