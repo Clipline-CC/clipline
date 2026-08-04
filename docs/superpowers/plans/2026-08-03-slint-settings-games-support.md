@@ -452,49 +452,100 @@ absolute memory, CPU, handle, worker, or lifecycle gates fail.
 
 **Files**
 
+- Modify: `crates/clipline-games/Cargo.toml`
 - Create: `crates/clipline-games/src/controller.rs`
 - Create: `crates/clipline-games/src/presentation.rs`
 - Create: `crates/clipline-games/src/channel.rs`
 - Create: `crates/clipline-games/src/osu.rs`
 - Create: `crates/clipline-games/src/osu_http.rs`
+- Create: `crates/clipline-games/src/osu_enrichment.rs`
 - Create: `crates/clipline-games/tests/controller.rs`
 - Create: `crates/clipline-games/tests/presentation.rs`
 - Create: `crates/clipline-games/tests/osu.rs`
+- Create: `crates/clipline-games/tests/osu_enrichment.rs`
 - Modify: `crates/clipline-games/src/lib.rs`
+- Modify: `crates/clipline-games/src/identity.rs`
+- Modify: `crates/clipline-games/src/windows/icon.rs`
 - Modify: `crates/clipline-settings/src/games.rs`
 - Modify: `crates/clipline-settings/src/osu.rs`
+- Modify: `crates/clipline-settings/src/coordinator.rs`
+- Modify: `crates/clipline-settings/src/persistence.rs`
+- Modify: `crates/clipline-settings/tests/capture_region.rs`
+- Modify: `crates/clipline-settings/tests/coordinator.rs`
+- Modify: `crates/clipline-settings/tests/persistence.rs`
+- Modify: `crates/clipline-shell/Cargo.toml`
+- Modify: `crates/clipline-shell/src/hotkey.rs`
 - Modify: `crates/clipline-shell/src/windows/credential.rs`
+- Modify: `crates/clipline-shell/tests/hotkey.rs`
+- Modify: `crates/clipline-desktop/src/action.rs`
 - Modify: `crates/clipline-desktop/src/event.rs`
+- Modify: `crates/clipline-desktop/src/snapshot.rs`
+- Modify: `crates/clipline-desktop/src/channel.rs`
 - Modify: `crates/clipline-desktop/src/controller.rs`
+- Modify: `crates/clipline-desktop/src/lib.rs`
+- Modify: `crates/clipline-desktop/tests/channel.rs`
+- Modify: `crates/clipline-desktop/tests/contracts.rs`
+- Modify: `crates/clipline-desktop/tests/controller.rs`
+- Modify: `apps/clipline-app/Cargo.toml`
+- Modify: `apps/clipline-app/src/settings_probe.rs`
+- Modify: `apps/clipline-app/src/games.rs`
+- Modify: `apps/clipline-app/src/game_discovery.rs`
+- Modify: `apps/clipline-app/src/game_icon.rs`
 - Modify: `apps/clipline-app/src/osu_api.rs`
 - Modify: `apps/clipline-app/src/osu_enrichment.rs`
 - Modify: `apps/clipline-app/src/app.rs`
+- Modify: `apps/clipline-app/tests/player_core.rs`
+- Modify: `apps/clipline-app/tests/ui_contract.rs`
 
 **Test first**
 
-- Controller retains full bounded plugin/custom/candidate state in Rust and projects at most 60 rows.
-  Selection/dialog targets use typed plugin/custom/candidate identities and exact session/request
-  generations. Sorting, dedupe, migration, priority, recording modes, and enabled state match Tauri.
-- Icon decoding checks encoded bytes and dimensions before allocation, resizes within the pinned
-  256×256/256 KiB RGBA per-icon cap, and rejects publication above the 8 MiB aggregate budget.
+- Controller consumes the existing Task 5 `GamePlugins`, `GameWindows`, and `InstalledGames` probe
+  catalogs instead of launching duplicate enumeration. It retains bounded plugin/custom/candidate
+  state in Rust and projects at most 60 rows. `GameItemIdentity` distinguishes plugin, custom, and
+  candidate; candidates carry the exact `ProbeToken` plus a deterministic opaque id, never a row
+  index, wall clock, or collision-prone raw `id_hint`. Refresh invalidates only identities owned by
+  the replaced token. Pin combined ordering/dedupe, total/page count, PastEnd, selection/dialog
+  invalidation, and 0/60/61/128/256/400-row behavior.
+- Rows carry typed icon ids and bounded loading state, not decoded RGBA. A separate token-fenced image
+  cache owns at most 8 MiB and 32 maximum-size surfaces, checks encoded bytes and header dimensions
+  before allocation, resizes within the 256×256/256 KiB RGBA per-icon cap, releases stale images, and
+  falls back to a missing icon under admission pressure instead of failing a valid 60-row page. Test
+  60 highly-compressed 256×256 icons, hostile dimensions, stale completion, and allocation failure.
 - Keep game matching and candidate dedupe pure; capture-region/DPI geometry remains owned and tested
-  by `clipline-settings::capture_region` from Task 1.
-- Hotkey recording/parsing uses the shared `clipline-shell` grammar for keyboard and mouse chords,
-  primary/secondary conflict, Windows-reserved rejection, cancel, and rollback.
-- The detector is process-owned, generation-fenced, joined, and publishes through `UiEventSink`.
-  Settings changes restart/reconfigure it transactionally; elevated-hotkey warning remains once per
-  process and no stale detection changes recorder intent.
+  by `clipline-settings::capture_region` from Task 1. Add an explicit 100/125/150/200% and negative
+  half-tie table; do not move this geometry into Games.
+- Hotkey capture is a pure bounded reducer over the shared `clipline-shell` grammar: modifier-only is
+  Pending; valid key/mouse is Captured; Escape clears the active field; blur/detach cancels unchanged;
+  invalid/reserved/duplicate input never mutates the draft; clearing the last configured key is
+  rejected. OS registration occurs only in transactional Save and rollback restores the exact prior
+  `HotkeySet`. Cross-run the shipping Boa vectors.
+- Replace the detached detector with a process-owned, generation-fenced, joined service with one
+  active plus one coalesced pending reconfiguration. Check cancellation before enumeration, after
+  enumeration, and before event/recorder intent. Settings apply owns a rollback receipt. Test scan
+  races, restart failure, stale completion, save storms, full/disconnected sink, spawn failure, and
+  shutdown join; elevated warning suppression remains once per process.
 - osu! status/save/test/disconnect uses injected credential/settings/HTTP/browser ports. The client
-  secret is non-cloneable/non-serializable/redacted, credential write precedes durable config commit,
-  and every failure restores or schedules cleanup of exact prior/new targets.
+  secret and access token are non-cloneable/non-serializable/redacted zeroizing owners; every
+  first-party secret/request/blob copy is zeroized on drop. Add a persisted checked
+  `OsuAccountGeneration` that advances on save/test/disconnect so account ABA is rejected. Credential
+  write precedes an exact osu-profile CAS and every failure restores or schedules cleanup of exact
+  prior/new targets. No secret, credential target, or cleanup target enters a desktop snapshot or
+  Slint model.
 - Mock-server success, offline, timeout, malformed/oversized response, pagination ceiling, 401,
   account replacement, cancellation, stale completion, and enrichment single-flight. Tauri adapter
-  results and existing enrichment sidecars remain byte-compatible.
+  results and existing enrichment sidecars remain byte-compatible. Cap each page at 100 and the total
+  at 500 before append, bound every field/score/aggregate allocation, use one operation deadline,
+  disable redirects, and checkpoint between pages and before every credential/settings/enrichment
+  side effect. Sidecar publication is identity-fenced and atomic.
 
 **Implement to green**
 
-- Move app algorithms into the shared crate and retain thin Tauri command/event adapters. No network
-  or process enumeration on the UI thread.
+- Execute as independently committable slices: (1) identities/bounds/contracts, (2) pure
+  pagination/presentation and icon cache, (3) controller/channel over existing probe tokens, (4)
+  joined detector plus settings transaction receipt, (5) hotkey capture reducer, (6) osu secret
+  domain and exact profile CAS, (7) bounded HTTP plus shared enrichment, and (8) thin Tauri cutover
+  with exact command/JSON compatibility and duplicate-algorithm rejection tests. No network or
+  process enumeration runs on the UI thread.
 
 ## Task 9: Extract exact Cloud connect/disconnect account mutation
 
