@@ -5,8 +5,9 @@ use clipline_settings::cloud::{cloud_credential_target, CloudUploadRecord};
 use clipline_settings::osu::osu_credential_target;
 use clipline_settings::{
     AccountGeneration, CloudAccountIdentity, CloudAccountPublicationOwner, CloudProfileCas,
-    CloudRecordCas, CloudRecordCasKind, CloudRecordSlot, SettingsChange, SettingsProfile,
-    SettingsStore, SettingsTransaction, SettingsTransactionError,
+    CloudRecordCas, CloudRecordCasKind, CloudRecordSlot, OsuApiSettings, SettingsChange,
+    SettingsPreferences, SettingsProfile, SettingsStore, SettingsTransaction,
+    SettingsTransactionError,
 };
 use clipline_test_utils::TestDir;
 
@@ -23,6 +24,330 @@ fn transaction(
 
 fn file_bytes(path: &std::path::Path) -> Option<Vec<u8>> {
     std::fs::read(path).ok()
+}
+
+fn ui_preferences(snapshot: &clipline_settings::SettingsSnapshot) -> SettingsPreferences {
+    SettingsPreferences::from_document(&snapshot.document).unwrap()
+}
+
+fn cloud_account_with_record(
+    snapshot: &clipline_settings::SettingsSnapshot,
+    host: &str,
+    user: &str,
+    updated_at_unix: u64,
+) -> clipline_settings::CloudSettings {
+    let mut cloud = snapshot.document.cloud.clone();
+    cloud.host_url = host.into();
+    cloud.public_url = Some(format!("{host}/public"));
+    cloud.connected_user_id = Some(user.into());
+    cloud.connected_username = Some(format!("{user}-name"));
+    cloud.connected_display_name = Some(format!("{user} display"));
+    cloud.credential_target = Some(cloud_credential_target(host, user));
+    cloud.credential_cleanup_targets = vec![format!("old-{user}")];
+    cloud.upload_generation_sequence = updated_at_unix;
+    cloud.uploads.insert(
+        "source-1".into(),
+        CloudUploadRecord {
+            local_clip_id: "source-1".into(),
+            client_clip_id: Some("client-1".into()),
+            upload_generation: Some(updated_at_unix),
+            path: r"D:\Clips\source-1.mp4".into(),
+            remote_clip_id: Some("remote-1".into()),
+            remote_url: Some(format!("{host}/clips/remote-1")),
+            visibility: "public".into(),
+            upload_status: "ready".into(),
+            error: None,
+            updated_at_unix,
+        },
+    );
+    cloud
+}
+
+#[test]
+fn preference_cas_preserves_cloud_account_aba_upload_progress_and_osu_bytes() {
+    let dir = TestDir::new("clipline-settings", "preference-cas-backend-race");
+    let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));
+    let initial = store.snapshot().unwrap();
+    let expected = ui_preferences(&initial);
+
+    let account_a = store
+        .transact(transaction(
+            &initial,
+            SettingsChange::ReplaceCloudSettings(cloud_account_with_record(
+                &initial,
+                "https://a.example",
+                "user-a",
+                7,
+            )),
+        ))
+        .unwrap();
+    let account_b = store
+        .transact(transaction(
+            &account_a,
+            SettingsChange::ReplaceCloudSettings(cloud_account_with_record(
+                &account_a,
+                "https://b.example",
+                "user-b",
+                8,
+            )),
+        ))
+        .unwrap();
+    let account_a_again = store
+        .transact(transaction(
+            &account_b,
+            SettingsChange::ReplaceCloudSettings(cloud_account_with_record(
+                &account_b,
+                "https://a.example",
+                "user-a",
+                9,
+            )),
+        ))
+        .unwrap();
+    let osu = OsuApiSettings {
+        client_id: Some("12345".into()),
+        user: Some("dain".into()),
+        credential_target: Some(osu_credential_target("12345", "dain")),
+        credential_cleanup_targets: vec!["old-osu-target".into()],
+        last_connected_username: Some("Dain".into()),
+    };
+    let raced = store
+        .transact(transaction(
+            &account_a_again,
+            SettingsChange::ReplaceOsuProfile(osu),
+        ))
+        .unwrap();
+    let cloud_bytes = serde_json::to_vec(&raced.document.cloud).unwrap();
+    let osu_bytes = serde_json::to_vec(&raced.document.osu).unwrap();
+
+    let mut replacement = expected.try_clone_bounded().unwrap();
+    replacement.replay_window_s = 77.0;
+    replacement.close_to_tray = false;
+    let committed = store
+        .replace_preferences_if_unchanged(&expected, replacement)
+        .unwrap();
+
+    assert_eq!(committed.revision.get(), raced.revision.get() + 1);
+    assert_eq!(committed.account_generation, raced.account_generation);
+    assert_eq!(
+        serde_json::to_vec(&committed.document.cloud).unwrap(),
+        cloud_bytes
+    );
+    assert_eq!(
+        serde_json::to_vec(&committed.document.osu).unwrap(),
+        osu_bytes
+    );
+    assert_eq!(committed.document.replay_window_s, 77.0);
+    assert_eq!(committed.document.buffer_seconds, 77.0);
+    assert!(!committed.document.close_to_tray);
+}
+
+#[test]
+fn preference_cas_rejects_disjoint_second_session_without_any_mutation() {
+    let dir = TestDir::new("clipline-settings", "preference-cas-stale-draft");
+    let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));
+    let initial = store.snapshot().unwrap();
+    let expected = ui_preferences(&initial);
+    let mut first = expected.try_clone_bounded().unwrap();
+    first.open_on_startup = true;
+    let committed = store
+        .replace_preferences_if_unchanged(&expected, first)
+        .unwrap();
+
+    let primary = file_bytes(store.profile().settings_path());
+    let backup = file_bytes(&dir.path().join("settings.json.bak"));
+    let mut disjoint = expected.try_clone_bounded().unwrap();
+    disjoint.close_to_tray = false;
+    let error = store
+        .replace_preferences_if_unchanged(&expected, disjoint)
+        .unwrap_err();
+
+    assert_eq!(error, SettingsTransactionError::StalePreferences);
+    assert_eq!(store.snapshot().unwrap(), committed);
+    assert_eq!(file_bytes(store.profile().settings_path()), primary);
+    assert_eq!(file_bytes(&dir.path().join("settings.json.bak")), backup);
+}
+
+#[test]
+fn preference_cas_rejects_invalid_expected_or_replacement_before_mutation() {
+    let dir = TestDir::new("clipline-settings", "preference-cas-invalid-input");
+    let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));
+    let before = store.snapshot().unwrap();
+    let expected = ui_preferences(&before);
+
+    let mut invalid_replacement = expected.try_clone_bounded().unwrap();
+    invalid_replacement.hotkey_secondary = Some(invalid_replacement.hotkey.clone());
+    assert!(matches!(
+        store
+            .replace_preferences_if_unchanged(&expected, invalid_replacement)
+            .unwrap_err(),
+        SettingsTransactionError::Validation(_)
+    ));
+
+    let mut invalid_expected = expected.try_clone_bounded().unwrap();
+    invalid_expected.replay_window_s = f64::NAN;
+    let replacement = expected.try_clone_bounded().unwrap();
+    assert!(matches!(
+        store
+            .replace_preferences_if_unchanged(&invalid_expected, replacement)
+            .unwrap_err(),
+        SettingsTransactionError::Validation(_)
+    ));
+    assert_eq!(store.snapshot().unwrap(), before);
+    assert!(!store.profile().settings_path().exists());
+}
+
+#[test]
+fn concurrent_preference_sessions_allow_one_commit_and_one_typed_conflict() {
+    let dir = TestDir::new("clipline-settings", "preference-cas-concurrent");
+    let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));
+    let snapshot = store.snapshot().unwrap();
+    let barrier = Arc::new(Barrier::new(3));
+    let mut threads = Vec::new();
+    for edit_startup in [false, true] {
+        let store = store.clone();
+        let expected = ui_preferences(&snapshot);
+        let mut replacement = expected.try_clone_bounded().unwrap();
+        if edit_startup {
+            replacement.open_on_startup = true;
+        } else {
+            replacement.close_to_tray = false;
+        }
+        let barrier = Arc::clone(&barrier);
+        threads.push(std::thread::spawn(move || {
+            barrier.wait();
+            store.replace_preferences_if_unchanged(&expected, replacement)
+        }));
+    }
+    barrier.wait();
+    let results = threads
+        .into_iter()
+        .map(|thread| thread.join().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(result, Err(SettingsTransactionError::StalePreferences)))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn independently_opened_store_merges_preferences_into_the_current_shared_document() {
+    let dir = TestDir::new("clipline-settings", "preference-cas-independent-store");
+    let profile = SettingsProfile::isolated(dir.path());
+    let cloud_store = SettingsStore::open(profile.clone());
+    let settings_store = SettingsStore::open(profile.clone());
+    let cloud_baseline = cloud_store.snapshot().unwrap();
+    let settings_baseline = settings_store.snapshot().unwrap();
+    let expected = ui_preferences(&settings_baseline);
+    let cloud = cloud_store
+        .transact(transaction(
+            &cloud_baseline,
+            SettingsChange::ReplaceCloudSettings(cloud_account_with_record(
+                &cloud_baseline,
+                "https://peer.example",
+                "peer",
+                4,
+            )),
+        ))
+        .unwrap();
+
+    let mut replacement = expected.try_clone_bounded().unwrap();
+    replacement.minimize_to_tray = true;
+    let committed = settings_store
+        .replace_preferences_if_unchanged(&expected, replacement)
+        .unwrap();
+
+    assert_eq!(committed.revision.get(), cloud.revision.get() + 1);
+    assert_eq!(committed.document.cloud, cloud.document.cloud);
+    assert!(committed.document.minimize_to_tray);
+    assert_eq!(settings_store.snapshot().unwrap(), committed);
+    let reopened = SettingsStore::open(profile).snapshot().unwrap();
+    assert_eq!(reopened.document, committed.document);
+    assert_eq!(reopened.revision, committed.revision);
+}
+
+#[test]
+fn preference_cas_fails_closed_on_external_invalid_primary_and_persistence_error() {
+    let dir = TestDir::new("clipline-settings", "preference-cas-fail-closed");
+    let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));
+    let initial = store.snapshot().unwrap();
+    let expected = ui_preferences(&initial);
+    let mut first = expected.try_clone_bounded().unwrap();
+    first.close_to_tray = false;
+    let committed = store
+        .replace_preferences_if_unchanged(&expected, first)
+        .unwrap();
+    let committed_preferences = ui_preferences(&committed);
+    let primary_path = store.profile().settings_path();
+    let backup_path = dir.path().join("settings.json.bak");
+    let primary = file_bytes(primary_path);
+    let backup = file_bytes(&backup_path);
+
+    std::fs::write(primary_path, b"{ invalid external settings").unwrap();
+    let external = std::fs::read(primary_path).unwrap();
+    let mut external_replacement = committed_preferences.try_clone_bounded().unwrap();
+    external_replacement.minimize_to_tray = true;
+    assert_eq!(
+        store
+            .replace_preferences_if_unchanged(&committed_preferences, external_replacement)
+            .unwrap_err(),
+        SettingsTransactionError::ExternalModification
+    );
+    assert_eq!(store.snapshot().unwrap(), committed);
+    assert_eq!(std::fs::read(primary_path).unwrap(), external);
+    assert_eq!(file_bytes(&backup_path), backup);
+
+    std::fs::write(primary_path, primary.unwrap()).unwrap();
+    std::fs::create_dir(&backup_path).unwrap();
+    let mut persistence_replacement = committed_preferences.try_clone_bounded().unwrap();
+    persistence_replacement.minimize_to_tray = true;
+    let error = store
+        .replace_preferences_if_unchanged(&committed_preferences, persistence_replacement)
+        .unwrap_err();
+    assert!(matches!(error, SettingsTransactionError::Persistence(_)));
+    assert_eq!(store.snapshot().unwrap(), committed);
+}
+
+#[test]
+fn preference_cas_rejects_same_bytes_at_a_replaced_file_identity() {
+    let dir = TestDir::new("clipline-settings", "preference-cas-file-identity");
+    let profile = SettingsProfile::isolated(dir.path());
+    let store = SettingsStore::open(profile.clone());
+    let initial = store.snapshot().unwrap();
+    let expected = ui_preferences(&initial);
+    let mut first = expected.try_clone_bounded().unwrap();
+    first.close_to_tray = false;
+    let committed = store
+        .replace_preferences_if_unchanged(&expected, first)
+        .unwrap();
+    let committed_preferences = ui_preferences(&committed);
+    let primary_path = store.profile().settings_path();
+    let bytes = std::fs::read(primary_path).unwrap();
+    std::fs::remove_file(primary_path).unwrap();
+    std::fs::write(primary_path, &bytes).unwrap();
+    let peer_opened_after_replacement = SettingsStore::open(profile);
+
+    let mut replacement = committed_preferences.try_clone_bounded().unwrap();
+    replacement.minimize_to_tray = true;
+    assert_eq!(
+        store
+            .replace_preferences_if_unchanged(&committed_preferences, replacement)
+            .unwrap_err(),
+        SettingsTransactionError::ExternalModification
+    );
+    assert_eq!(store.snapshot().unwrap(), committed);
+    assert_eq!(std::fs::read(primary_path).unwrap(), bytes);
+    let peer_expected = ui_preferences(&peer_opened_after_replacement.snapshot().unwrap());
+    let peer_replacement = peer_expected.try_clone_bounded().unwrap();
+    assert_eq!(
+        peer_opened_after_replacement
+            .replace_preferences_if_unchanged(&peer_expected, peer_replacement)
+            .unwrap_err(),
+        SettingsTransactionError::ExternalModification
+    );
 }
 
 #[test]

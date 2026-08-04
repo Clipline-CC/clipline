@@ -1,5 +1,5 @@
 use clipline_settings::{
-    SettingsChange, SettingsPathResolver, SettingsProfile, SettingsTransaction,
+    SettingsChange, SettingsPathResolver, SettingsPreferences, SettingsProfile, SettingsTransaction,
 };
 use clipline_slint_spike::settings::{CandidateSettings, CandidateSettingsProfile};
 use clipline_test_utils::TestDir;
@@ -106,4 +106,23 @@ fn candidate_adapter_has_no_credential_or_secret_access() {
             "candidate settings adapter must not contain {forbidden}"
         );
     }
+}
+
+#[test]
+fn candidate_exposes_the_shared_preferences_compare_exchange() {
+    let dir = TestDir::new("clipline-slint-settings", "preferences-cas");
+    let settings =
+        CandidateSettings::open(CandidateSettingsProfile::Isolated(dir.path().to_path_buf()))
+            .unwrap();
+    let before = settings.snapshot().unwrap();
+    let expected = SettingsPreferences::from_document(&before.document).unwrap();
+    let mut replacement = expected.try_clone_bounded().unwrap();
+    replacement.ui_theme = clipline_settings::UiTheme::Classic;
+
+    let after = settings
+        .replace_preferences_if_unchanged(&expected, replacement)
+        .unwrap();
+
+    assert_eq!(after.document.ui_theme, clipline_settings::UiTheme::Classic);
+    assert_eq!(after.revision.get(), before.revision.get() + 1);
 }

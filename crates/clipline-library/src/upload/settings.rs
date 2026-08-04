@@ -560,7 +560,8 @@ fn classify_settings_error(error: SettingsTransactionError) -> UploadRecordError
             UploadRecordErrorKind::AccountChanged
         }
         SettingsTransactionError::StaleCloudRecord => UploadRecordErrorKind::Superseded,
-        SettingsTransactionError::StaleRevision { .. } => UploadRecordErrorKind::Contended,
+        SettingsTransactionError::StaleRevision { .. }
+        | SettingsTransactionError::StalePreferences => UploadRecordErrorKind::Contended,
         SettingsTransactionError::RevisionExhausted
         | SettingsTransactionError::ExternalModification
         | SettingsTransactionError::LockPoisoned => UploadRecordErrorKind::Persistence,

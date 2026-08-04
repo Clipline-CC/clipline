@@ -3,8 +3,8 @@
 use std::path::{Path, PathBuf};
 
 use clipline_settings::{
-    SettingsPathResolver, SettingsProfile, SettingsProfileError, SettingsSnapshot, SettingsStore,
-    SettingsTransaction, SettingsTransactionError,
+    SettingsPathResolver, SettingsPreferences, SettingsProfile, SettingsProfileError,
+    SettingsSnapshot, SettingsStore, SettingsTransaction, SettingsTransactionError,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -62,6 +62,15 @@ impl CandidateSettings {
         transaction: SettingsTransaction,
     ) -> Result<SettingsSnapshot, SettingsTransactionError> {
         self.store.transact(transaction)
+    }
+
+    pub fn replace_preferences_if_unchanged(
+        &self,
+        expected: &SettingsPreferences,
+        replacement: SettingsPreferences,
+    ) -> Result<SettingsSnapshot, SettingsTransactionError> {
+        self.store
+            .replace_preferences_if_unchanged(expected, replacement)
     }
 
     pub fn store(&self) -> &SettingsStore {

@@ -1,7 +1,7 @@
 //! Filesystem persistence for settings: path resolution, atomic writes,
 //! legacy field repair, and the JSON `load_from`/`save_to` impls.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -18,7 +18,7 @@ use super::validation::{
     repair_disk_quota_gb, repair_fps, repair_video_quality_from_legacy_bitrate, MAX_BITRATE_MBPS,
     MAX_REPLAY_WINDOW_S, MIN_BITRATE_MBPS, MIN_REPLAY_WINDOW_S,
 };
-use super::AppSettings;
+use super::{AppSettings, SettingsPreferences};
 use super::{CloudSettings, CloudUploadRecord, OsuApiSettings, VideoEncoder};
 
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -831,6 +831,8 @@ pub enum SettingsTransactionError {
     AccountChanged,
     #[error("cloud upload record changed while the settings operation was in flight")]
     StaleCloudRecord,
+    #[error("settings preferences changed while the draft was open")]
+    StalePreferences,
     #[error("settings revision is exhausted")]
     RevisionExhausted,
     #[error("cloud account generation is exhausted")]
@@ -909,7 +911,10 @@ pub trait SettingsPathResolver {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum PrimaryState {
     Missing,
-    Bytes(Vec<u8>),
+    File {
+        bytes: Vec<u8>,
+        identity: clipline_shell::FileIdentity,
+    },
     Unreadable(String),
 }
 
@@ -921,6 +926,7 @@ struct StoreState {
 struct SharedCommitState {
     owner: Option<CloudAccountPublicationOwner>,
     primary: PrimaryState,
+    revision: SettingsRevision,
 }
 
 struct SettingsStoreInner {
@@ -938,7 +944,7 @@ pub struct SettingsStore {
 impl SettingsStore {
     pub fn open(profile: SettingsProfile) -> Self {
         let commit_lock = shared_commit_lock(profile.settings_path());
-        let (startup, account, account_generation, primary) = {
+        let (startup, account, account_generation, primary, revision) = {
             // Loading under the profile-wide gate prevents a concurrently
             // committing independently opened store from making this new
             // store stale between its disk read and owner registration.
@@ -952,7 +958,10 @@ impl SettingsStore {
             let account = CloudAccountIdentity::from_settings(&startup.settings.cloud);
             let stable_account = cloud_publication_stable_account(&startup.settings.cloud);
             let primary = read_primary_state(profile.settings_path());
+            let authority_matches = shared.owner.is_none() || shared.primary == primary;
+            let revision = shared.revision;
             let account_generation = match shared.owner.as_ref() {
+                Some(owner) if !authority_matches => owner.account_generation,
                 Some(owner)
                     if owner.account == account && owner.stable_account == stable_account =>
                 {
@@ -964,13 +973,15 @@ impl SettingsStore {
                     .expect("process-local Cloud account generation must remain available"),
                 None => AccountGeneration::INITIAL,
             };
-            shared.owner = Some(CloudAccountPublicationOwner::from_cloud(
-                account.clone(),
-                account_generation,
-                &startup.settings.cloud,
-            ));
-            shared.primary = primary.clone();
-            (startup, account, account_generation, primary)
+            if authority_matches {
+                shared.owner = Some(CloudAccountPublicationOwner::from_cloud(
+                    account.clone(),
+                    account_generation,
+                    &startup.settings.cloud,
+                ));
+                shared.primary = primary.clone();
+            }
+            (startup, account, account_generation, primary, revision)
         };
         Self {
             inner: Arc::new(SettingsStoreInner {
@@ -980,7 +991,7 @@ impl SettingsStore {
                 state: Mutex::new(StoreState {
                     snapshot: SettingsSnapshot {
                         document: startup.settings,
-                        revision: SettingsRevision::INITIAL,
+                        revision,
                         account_generation,
                         account,
                     },
@@ -1085,6 +1096,103 @@ impl SettingsStore {
         self.commit_locked(&mut commit_guard, &mut state, transaction)
     }
 
+    /// Compare and replace only the settings fields owned by the UI.
+    ///
+    /// The comparison and merge linearize once under the profile-wide commit
+    /// gate. Cloud account/profile/upload state and osu! state are read from
+    /// the current durable document and retained even when another independently
+    /// opened store committed them after the draft was opened.
+    pub fn replace_preferences_if_unchanged(
+        &self,
+        expected: &SettingsPreferences,
+        replacement: SettingsPreferences,
+    ) -> Result<SettingsSnapshot, SettingsTransactionError> {
+        let expected = expected
+            .normalized()
+            .map_err(SettingsTransactionError::Validation)?;
+        let replacement = replacement
+            .normalized()
+            .map_err(SettingsTransactionError::Validation)?;
+        let mut shared = self
+            .inner
+            .commit_lock
+            .lock()
+            .map_err(|_| SettingsTransactionError::LockPoisoned)?;
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| SettingsTransactionError::LockPoisoned)?;
+
+        let current_primary = read_primary_state(self.inner.profile.settings_path());
+        if current_primary != shared.primary {
+            return Err(SettingsTransactionError::ExternalModification);
+        }
+        let mut current = match &current_primary {
+            PrimaryState::Missing
+                if state.primary == PrimaryState::Missing
+                    && state.snapshot.revision == shared.revision =>
+            {
+                state.snapshot.document.clone()
+            }
+            PrimaryState::File { bytes, .. } => {
+                AppSettings::load_from_json_bytes(bytes).map_err(|error| {
+                    SettingsTransactionError::Validation(format!(
+                        "current durable settings are invalid: {}",
+                        error.describe()
+                    ))
+                })?
+            }
+            PrimaryState::Missing | PrimaryState::Unreadable(_) => {
+                return Err(SettingsTransactionError::ExternalModification)
+            }
+        };
+        let current_owner = shared
+            .owner
+            .as_ref()
+            .expect("opened settings profile must register its Cloud owner")
+            .clone();
+        let current_account = CloudAccountIdentity::from_settings(&current.cloud);
+        if current_account != current_owner.account
+            || cloud_publication_stable_account(&current.cloud) != current_owner.stable_account
+        {
+            return Err(SettingsTransactionError::AccountChanged);
+        }
+        let current_preferences = SettingsPreferences::from_document(&current)
+            .map_err(SettingsTransactionError::Validation)?;
+        if current_preferences != expected {
+            return Err(SettingsTransactionError::StalePreferences);
+        }
+
+        replacement
+            .apply_to_document(&mut current)
+            .map_err(SettingsTransactionError::Validation)?;
+        let (next, json) = current
+            .normalized_json_bytes()
+            .map_err(SettingsTransactionError::Validation)?;
+        let next_account = CloudAccountIdentity::from_settings(&next.cloud);
+        let next_stable_account = cloud_publication_stable_account(&next.cloud);
+        if next_account != current_owner.account
+            || next_stable_account != current_owner.stable_account
+        {
+            return Err(SettingsTransactionError::AccountChanged);
+        }
+        let next_revision = shared.revision.checked_next()?;
+        let primary =
+            persist_store_transaction(self.inner.profile.settings_path(), json, &current_primary)
+                .map_err(SettingsTransactionError::Persistence)?;
+        shared.primary = primary.clone();
+        shared.revision = next_revision;
+        state.primary = primary;
+        state.snapshot = SettingsSnapshot {
+            document: next,
+            revision: next_revision,
+            account_generation: current_owner.account_generation,
+            account: next_account,
+        };
+        Ok(state.snapshot.clone())
+    }
+
     /// Run one publication only while the exact durable Cloud owner remains
     /// current, holding the same per-profile commit gate used by settings
     /// replacement and Cloud CAS operations.
@@ -1174,7 +1282,7 @@ impl SettingsStore {
             .map_err(SettingsTransactionError::Validation)?;
         let next_account = CloudAccountIdentity::from_settings(&next.cloud);
         let next_stable_account = cloud_publication_stable_account(&next.cloud);
-        let next_revision = state.snapshot.revision.checked_next()?;
+        let next_revision = shared.revision.checked_next()?;
         let next_account_generation = if next_account == current_owner.account
             && next_stable_account == current_owner.stable_account
         {
@@ -1182,11 +1290,11 @@ impl SettingsStore {
         } else {
             current_owner.account_generation.checked_next()?
         };
-        persist_store_transaction(self.inner.profile.settings_path(), &json)
-            .map_err(SettingsTransactionError::Persistence)?;
-
-        let primary = PrimaryState::Bytes(json);
+        let primary =
+            persist_store_transaction(self.inner.profile.settings_path(), json, &state.primary)
+                .map_err(SettingsTransactionError::Persistence)?;
         shared.primary = primary.clone();
+        shared.revision = next_revision;
         shared.owner = Some(CloudAccountPublicationOwner::from_cloud(
             next_account.clone(),
             next_account_generation,
@@ -1233,6 +1341,7 @@ fn shared_commit_lock(path: &Path) -> Arc<Mutex<SharedCommitState>> {
     let lock = Arc::new(Mutex::new(SharedCommitState {
         owner: None,
         primary: PrimaryState::Missing,
+        revision: SettingsRevision::INITIAL,
     }));
     locks.push((path.to_path_buf(), Arc::downgrade(&lock)));
     lock
@@ -1648,13 +1757,24 @@ fn windows_cloud_path_key(path: &str) -> Option<String> {
 }
 
 fn read_primary_state(path: &Path) -> PrimaryState {
-    match std::fs::read(path) {
-        Ok(bytes) => PrimaryState::Bytes(bytes),
+    match clipline_shell::open_regular_file_nofollow(path) {
+        Ok(mut file) => {
+            let identity = match clipline_shell::opened_file_identity(&file) {
+                Ok(identity) => identity,
+                Err(error) => return PrimaryState::Unreadable(error.to_string()),
+            };
+            let mut bytes = Vec::new();
+            match file.read_to_end(&mut bytes) {
+                Ok(_) => PrimaryState::File { bytes, identity },
+                Err(error) => PrimaryState::Unreadable(error.to_string()),
+            }
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => PrimaryState::Missing,
         Err(error) => PrimaryState::Unreadable(error.to_string()),
     }
 }
 
+#[cfg(test)]
 fn read_optional_bytes(path: &Path) -> Result<Option<Vec<u8>>, String> {
     match std::fs::read(path) {
         Ok(bytes) => Ok(Some(bytes)),
@@ -1663,6 +1783,7 @@ fn read_optional_bytes(path: &Path) -> Result<Option<Vec<u8>>, String> {
     }
 }
 
+#[cfg(test)]
 fn restore_optional_bytes(path: &Path, bytes: Option<&[u8]>) -> Result<(), String> {
     match bytes {
         Some(bytes) => write_file_atomically(path, bytes),
@@ -1674,10 +1795,143 @@ fn restore_optional_bytes(path: &Path, bytes: Option<&[u8]>) -> Result<(), Strin
     }
 }
 
-fn persist_store_transaction(path: &Path, json: &[u8]) -> Result<(), String> {
-    persist_store_transaction_with(path, json, persist_normalized_bytes)
+fn persist_store_transaction(
+    path: &Path,
+    json: Vec<u8>,
+    expected_primary: &PrimaryState,
+) -> Result<PrimaryState, String> {
+    if &read_primary_state(path) != expected_primary {
+        return Err("settings primary identity changed before persistence".into());
+    }
+    let backup = backup_path(path);
+    let old_backup = read_primary_state(&backup);
+    if let PrimaryState::Unreadable(error) = &old_backup {
+        return Err(format!("read last-known-good settings: {error}"));
+    }
+    let written_backup = match expected_primary {
+        PrimaryState::File { bytes, .. } => Some(
+            write_file_atomically_if_primary(&backup, bytes.clone(), &old_backup)
+                .map_err(|error| format!("preserve last-known-good settings: {error}"))?,
+        ),
+        PrimaryState::Missing => None,
+        PrimaryState::Unreadable(error) => {
+            return Err(format!("settings primary is unreadable: {error}"));
+        }
+    };
+
+    match write_file_atomically_if_primary(path, json, expected_primary) {
+        Ok(primary) => Ok(primary),
+        Err(primary) => {
+            let rollback = match written_backup.as_ref() {
+                Some(written_backup) => {
+                    restore_primary_state_if_current(&backup, &old_backup, written_backup)
+                }
+                None => Ok(()),
+            };
+            match rollback {
+                Ok(()) => Err(primary),
+                Err(rollback) => Err(format!(
+                    "{primary}; settings transaction rollback incomplete: restore backup: {rollback}"
+                )),
+            }
+        }
+    }
 }
 
+fn write_file_atomically_if_primary(
+    path: &Path,
+    bytes: Vec<u8>,
+    expected_primary: &PrimaryState,
+) -> Result<PrimaryState, String> {
+    write_file_atomically_if_primary_with(path, bytes, expected_primary, |_| Ok(()))
+}
+
+fn write_file_atomically_if_primary_with(
+    path: &Path,
+    bytes: Vec<u8>,
+    expected_primary: &PrimaryState,
+    before_publish: impl FnOnce(&Path) -> Result<(), String>,
+) -> Result<PrimaryState, String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let temporary = sibling_tmp_path(path)?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|error| format!("create temporary settings file: {error}"))?;
+    let identity = clipline_shell::opened_file_identity(&file)
+        .map_err(|error| format!("identify temporary settings file: {error}"))?;
+    let write_result = file
+        .write_all(&bytes)
+        .map_err(|error| format!("write temporary settings file: {error}"))
+        .and_then(|()| {
+            file.sync_all()
+                .map_err(|error| format!("sync temporary settings file: {error}"))
+        });
+    drop(file);
+    if let Err(error) = write_result {
+        let _ = clipline_shell::remove_file_if_identity(&temporary, identity);
+        return Err(error);
+    }
+    if let Err(error) = before_publish(&temporary) {
+        let _ = clipline_shell::remove_file_if_identity(&temporary, identity);
+        return Err(error);
+    }
+
+    let publication = match expected_primary {
+        PrimaryState::Missing => {
+            clipline_shell::rename_file_noreplace_if_identity(&temporary, path, identity)
+        }
+        PrimaryState::File {
+            identity: target_identity,
+            ..
+        } => {
+            clipline_shell::replace_file_if_identities(&temporary, identity, path, *target_identity)
+        }
+        PrimaryState::Unreadable(error) => {
+            let _ = clipline_shell::remove_file_if_identity(&temporary, identity);
+            return Err(format!("settings primary is unreadable: {error}"));
+        }
+    };
+    if let Err(error) = publication {
+        if !error.may_have_moved() {
+            let _ = clipline_shell::remove_file_if_identity(&temporary, identity);
+        }
+        return Err(format!(
+            "publish settings primary with exact identity: {error}"
+        ));
+    }
+    Ok(PrimaryState::File { bytes, identity })
+}
+
+fn restore_primary_state_if_current(
+    path: &Path,
+    previous: &PrimaryState,
+    current: &PrimaryState,
+) -> Result<(), String> {
+    match previous {
+        PrimaryState::Missing => match current {
+            PrimaryState::File { identity, .. } => {
+                clipline_shell::remove_file_if_identity(path, *identity)
+                    .map_err(|error| format!("remove transaction-created file: {error}"))
+            }
+            PrimaryState::Missing => Ok(()),
+            PrimaryState::Unreadable(error) => {
+                Err(format!("transaction-created file is unreadable: {error}"))
+            }
+        },
+        PrimaryState::File { bytes, .. } => {
+            write_file_atomically_if_primary(path, bytes.clone(), current).map(|_| ())
+        }
+        PrimaryState::Unreadable(error) => {
+            Err(format!("previous settings state is unreadable: {error}"))
+        }
+    }
+}
+
+#[cfg(test)]
 fn persist_store_transaction_with(
     path: &Path,
     json: &[u8],
@@ -1759,6 +2013,103 @@ mod transaction_tests {
         assert_eq!(
             AccountGeneration(u64::MAX).checked_next(),
             Err(SettingsTransactionError::AccountGenerationExhausted)
+        );
+    }
+
+    #[test]
+    fn preference_commit_revision_exhaustion_is_atomic() {
+        let dir = TestDir::new("clipline-settings", "preference-revision-exhaustion");
+        let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));
+        let initial = store.snapshot().unwrap();
+        let expected = SettingsPreferences::from_document(&initial.document).unwrap();
+        let mut replacement = expected.try_clone_bounded().unwrap();
+        replacement.close_to_tray = false;
+        store.inner.commit_lock.lock().unwrap().revision = SettingsRevision(u64::MAX);
+        store.inner.state.lock().unwrap().snapshot.revision = SettingsRevision(u64::MAX);
+        let before = store.snapshot().unwrap();
+
+        assert_eq!(
+            store
+                .replace_preferences_if_unchanged(&expected, replacement)
+                .unwrap_err(),
+            SettingsTransactionError::RevisionExhausted
+        );
+        assert_eq!(store.snapshot().unwrap(), before);
+        assert!(!store.profile().settings_path().exists());
+    }
+
+    #[test]
+    fn preference_commit_fails_closed_when_the_profile_gate_is_poisoned() {
+        let dir = TestDir::new("clipline-settings", "preference-lock-poison");
+        let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));
+        let before = store.snapshot().unwrap();
+        let expected = SettingsPreferences::from_document(&before.document).unwrap();
+        let replacement = expected.try_clone_bounded().unwrap();
+        let gate = Arc::clone(&store.inner.commit_lock);
+        assert!(std::thread::spawn(move || {
+            let _guard = gate.lock().unwrap();
+            panic!("poison settings profile gate");
+        })
+        .join()
+        .is_err());
+
+        assert_eq!(
+            store
+                .replace_preferences_if_unchanged(&expected, replacement)
+                .unwrap_err(),
+            SettingsTransactionError::LockPoisoned
+        );
+        assert_eq!(store.snapshot().unwrap(), before);
+        assert!(!store.profile().settings_path().exists());
+    }
+
+    #[test]
+    fn final_preference_publication_refuses_a_same_bytes_identity_replacement() {
+        let dir = TestDir::new("clipline-settings", "preference-publish-identity-race");
+        let primary_path = dir.path().join("settings.json");
+        let original = b"same durable settings bytes";
+        std::fs::write(&primary_path, original).unwrap();
+        let expected = read_primary_state(&primary_path);
+        let expected_identity = match &expected {
+            PrimaryState::File { identity, .. } => *identity,
+            state => panic!("expected a regular primary file, got {state:?}"),
+        };
+        let mut foreign_identity = None;
+
+        let error = write_file_atomically_if_primary_with(
+            &primary_path,
+            b"replacement settings".to_vec(),
+            &expected,
+            |_temporary| {
+                std::fs::remove_file(&primary_path).map_err(|error| error.to_string())?;
+                std::fs::write(&primary_path, original).map_err(|error| error.to_string())?;
+                foreign_identity = match read_primary_state(&primary_path) {
+                    PrimaryState::File { identity, .. } => Some(identity),
+                    state => return Err(format!("replacement primary is not readable: {state:?}")),
+                };
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.contains("exact identity"), "{error}");
+        let foreign_identity = foreign_identity.expect("hook must publish a foreign primary");
+        assert_ne!(foreign_identity, expected_identity);
+        assert_eq!(
+            read_primary_state(&primary_path),
+            PrimaryState::File {
+                bytes: original.to_vec(),
+                identity: foreign_identity,
+            }
+        );
+        let leftovers = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path != &primary_path)
+            .collect::<Vec<_>>();
+        assert!(
+            leftovers.is_empty(),
+            "temporary files remain: {leftovers:?}"
         );
     }
 
