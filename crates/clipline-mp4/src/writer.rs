@@ -155,6 +155,8 @@ impl<W: Write + Seek> HybridMp4Writer<W> {
 
     /// Advance one track to an absolute decode timestamp in its own
     /// timescale. The next non-empty fragment for that track begins there.
+    /// Internal video gaps shorter than the preceding sample are absorbed
+    /// into that sample; leading, frame-sized, and audio gaps remain exact.
     pub fn set_track_decode_time(
         &mut self,
         track_index: usize,
@@ -169,6 +171,9 @@ impl<W: Write + Seek> HybridMp4Writer<W> {
                 "track {track_index} decode time cannot move backward from {} to {decode_time}",
                 state.next_decode_time
             )));
+        }
+        if state.absorb_subframe_video_gap(decode_time)? {
+            return Ok(());
         }
         state.next_decode_time = decode_time;
         Ok(())
@@ -496,6 +501,64 @@ fn rescale_duration(duration: u64, source_timescale: u32, target_timescale: u32)
 }
 
 impl TrackState {
+    fn absorb_subframe_video_gap(&mut self, decode_time: u64) -> io::Result<bool> {
+        if !matches!(&self.cfg, TrackConfig::Video(_)) || decode_time <= self.next_decode_time {
+            return Ok(false);
+        }
+        let Some(last_duration_run) = self.duration_runs.last().copied() else {
+            return Ok(false);
+        };
+        let gap = decode_time - self.next_decode_time;
+        if gap >= u64::from(last_duration_run.sample_delta) {
+            return Ok(false);
+        }
+
+        let gap = u32::try_from(gap)
+            .map_err(|_| invalid_config("subframe video gap exceeds sample duration field"))?;
+        let extended_delta = last_duration_run
+            .sample_delta
+            .checked_add(gap)
+            .ok_or_else(|| invalid_config("video sample duration overflow"))?;
+        let media_duration = self
+            .media_duration
+            .checked_add(u64::from(gap))
+            .ok_or_else(|| invalid_config("track duration overflow"))?;
+        let timeline_duration = self
+            .timeline_runs
+            .last()
+            .ok_or_else(|| invalid_config("video duration run has no presentation run"))?
+            .duration
+            .checked_add(u64::from(gap))
+            .ok_or_else(|| invalid_config("track presentation duration overflow"))?;
+
+        let last_duration_run = self
+            .duration_runs
+            .pop()
+            .expect("last duration run was checked above");
+        if last_duration_run.sample_count > 1 {
+            self.duration_runs.push(DurationRun {
+                sample_count: last_duration_run.sample_count - 1,
+                sample_delta: last_duration_run.sample_delta,
+            });
+        }
+        match self.duration_runs.last_mut() {
+            Some(previous) if previous.sample_delta == extended_delta => {
+                previous.sample_count += 1;
+            }
+            _ => self.duration_runs.push(DurationRun {
+                sample_count: 1,
+                sample_delta: extended_delta,
+            }),
+        }
+        self.media_duration = media_duration;
+        self.timeline_runs
+            .last_mut()
+            .expect("presentation run was checked above")
+            .duration = timeline_duration;
+        self.next_decode_time = decode_time;
+        Ok(true)
+    }
+
     fn duration_media_ts(&self) -> u64 {
         self.media_duration
     }
@@ -1181,6 +1244,39 @@ mod tests {
             &[(100, 90_000, true)],
         );
         assert_eq!(state.duration_movie_ts(), MOVIE_TIMESCALE as u64);
+    }
+
+    #[test]
+    fn subframe_video_gap_extends_previous_frame_but_frame_gap_remains() {
+        let mut subframe = HybridMp4Writer::new(Cursor::new(Vec::new()), video_cfg()).unwrap();
+        subframe.write_fragment(&gop(0)).unwrap();
+        subframe.set_track_decode_time(0, 9_001).unwrap();
+        subframe.write_fragment(&gop(3)).unwrap();
+
+        assert_eq!(subframe.tracks[0].duration_media_ts(), 18_001);
+        assert!(subframe.tracks[0].edit_list().is_empty());
+
+        let mut full_frame = HybridMp4Writer::new(Cursor::new(Vec::new()), video_cfg()).unwrap();
+        full_frame.write_fragment(&gop(0)).unwrap();
+        full_frame.set_track_decode_time(0, 12_000).unwrap();
+        full_frame.write_fragment(&gop(3)).unwrap();
+        assert_eq!(
+            full_frame.tracks[0].edit_list(),
+            vec![
+                EditListEntry {
+                    duration_movie_ts: 72_000,
+                    media_time: 0,
+                },
+                EditListEntry {
+                    duration_movie_ts: 24_000,
+                    media_time: -1,
+                },
+                EditListEntry {
+                    duration_movie_ts: 72_000,
+                    media_time: 9_000,
+                },
+            ]
+        );
     }
 
     #[test]
