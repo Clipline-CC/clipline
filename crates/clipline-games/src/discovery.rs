@@ -364,17 +364,33 @@ fn has_match_identity(candidate: &DetectedGameCandidate) -> bool {
         || !normalized_name_key(&candidate.name).is_empty()
 }
 
-fn matches_existing_custom_game(
+pub fn matches_existing_custom_game(
     candidate: &DetectedGameCandidate,
     existing: &CustomGameSettings,
 ) -> bool {
-    let candidate_path = usable_process_path(candidate.process_path.as_deref());
+    discovery_fields_match_custom_game(
+        candidate.process_path.as_deref(),
+        &candidate.exe_name,
+        &candidate.name,
+        existing,
+    )
+}
+
+/// Reuse the discovery dedupe contract for catalogs that retain only window
+/// metadata instead of a full [`DetectedGameCandidate`].
+pub fn discovery_fields_match_custom_game(
+    process_path: Option<&str>,
+    exe_name: &str,
+    name: &str,
+    existing: &CustomGameSettings,
+) -> bool {
+    let candidate_path = usable_process_path(process_path);
     let existing_path = usable_process_path(existing.process_path.as_deref());
     if let (Some(candidate_path), Some(existing_path)) = (&candidate_path, &existing_path) {
         return candidate_path == existing_path;
     }
 
-    let candidate_exe = candidate.exe_name.trim();
+    let candidate_exe = exe_name.trim();
     let existing_exe = existing.exe_name.trim();
     if !candidate_exe.is_empty()
         && !existing_exe.is_empty()
@@ -383,7 +399,7 @@ fn matches_existing_custom_game(
         return true;
     }
 
-    let candidate_name = normalized_name_key(&candidate.name);
+    let candidate_name = normalized_name_key(name);
     let existing_name = normalized_name_key(&existing.name);
     !candidate_name.is_empty() && candidate_name == existing_name
 }

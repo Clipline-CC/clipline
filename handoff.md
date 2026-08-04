@@ -4,6 +4,35 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-04): Slint replacement Milestone 8, Task 8 Games foundations
+
+Task 8 is in progress through its bounded identity, settings, presentation, and icon-decode
+foundations. Games now uses disjoint validated plugin/custom/candidate identities. Candidate
+authority is minted only by an owning `InstalledGameIdentityCatalog` or `GameWindowIdentityCatalog`
+over the real Task 5 payload, carries the exact probe token, uses complete canonical source authority,
+and resolves every mutation through current-catalog membership. Duplicate authority, an injected
+SHA-256 collision, a forged handle, a superseded token, and valid 4 MiB source catalogs are all pinned
+fail-closed without exposing paths in the UI handle.
+
+The pure Games projection retains at most 400 bounded members and emits at most 60 rows in stable
+plugin/custom/candidate order. It reuses the discovery matcher against the current custom-game draft,
+preserves exact plugin/candidate probe tokens, validates candidate-only selection, and reports
+`PastEnd` instead of clamping. Rows carry typed icon ids and compact state, never paths, data URLs,
+RGBA, or whole catalogs. Neutral PNG decoding now bounds data URLs and encoded bytes, inspects a
+maximum 1024×1024/1,048,576-pixel header before decoder allocation, resizes into move-only
+256×256/256 KiB RGBA, and accepts only the reviewed built-in asset routes.
+
+osu! settings now persist a checked nonzero account generation, migrate legacy profiles to generation
+1, retain shipping `u64` client-id semantics, and enforce per-field, cleanup-list, and 64 KiB aggregate
+bounds before normalization can hide hostile input. The generation is not yet an authoritative ABA
+fence: the later osu service/CAS slice must enforce exact transitions under the settings commit lock
+before asynchronous work trusts it. The explicit 100/125/150/200% DPI and negative-half-tie matrix is
+green.
+
+Next: finish the separate 32-image/8 MiB token-fenced cache lifecycle, then build the Games
+controller/channel over the existing Task 5 catalogs. `artifacts/`, `paseo.json`, and unrelated poster
+formatting remain local and excluded.
+
 ## Checkpoint (2026-08-04): Slint replacement Milestone 8, Task 7 joined microphone monitor
 
 Milestone 8 Task 7 is implemented. `clipline-recorder::MicrophoneMonitorService` owns one joined

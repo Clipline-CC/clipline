@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 clipline-settings = { path = "../clipline-settings" }
 base64 = "0.22"
+png = "0.17"
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"
@@ -15,7 +16,6 @@ tracing = "0.1"
 
 [target.'cfg(windows)'.dependencies]
 clipline-capture = { path = "../clipline-capture" }
-png = "0.17"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
