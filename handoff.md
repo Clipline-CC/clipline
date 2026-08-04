@@ -22,8 +22,16 @@ desktop/storage/media-authorization publication as infallible. Hotkey and tray r
 verify their exact after-state before restoring; autostart retains its identity-aware registry
 receipt. Storage quota/root publication is one poison-recovering mutex replacement.
 
+The post-commit audit closed a concurrent restart gap: after the prior pump join, the prepared
+worker rechecks its exact recorder generation/intent/sender reservation while holding the runtime
+fence before publishing its sender, releasing its latch, and installing its pump. A newer manual or
+game-detection restart therefore wins and the stale parked worker is canceled and joined. Quit and
+updater persistence now acquire the same Settings-apply lease, so they cannot restore stale
+preferences during the persist-to-runtime-commit window. The Tauri Save adapter runs on a blocking
+worker because joining a finalizing recorder is intentionally synchronous.
+
 Validation is green: the coordinator failure/concurrency suite, recorder latch/join tests, Tauri
-cutover contract, 229 Tauri unit tests, live Windows hotkey receipt/rollback coverage,
+cutover contract, 230 Tauri unit tests, live Windows hotkey receipt/rollback coverage,
 `cargo test --workspace`, and warning-denied workspace Clippy. The installed Clipline process and
 profile remained untouched. `artifacts/` and `paseo.json` remain local scratch and are excluded.
 

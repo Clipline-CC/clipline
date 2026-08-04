@@ -1341,6 +1341,23 @@ impl RuntimeState {
         Ok(generation)
     }
 
+    fn install_settings_restart_sender(
+        inner: &mut RuntimeInner,
+        generation: u64,
+        tx: Sender<Cmd>,
+    ) -> Result<(), Sender<Cmd>> {
+        if inner.recording_generation != generation
+            || !inner.recording_desired
+            || inner.tx.is_some()
+            || !recorder_should_run(&inner.settings, inner.active_game.as_ref())
+        {
+            return Err(tx);
+        }
+        inner.tx = Some(tx);
+        inner.last_save_request = None;
+        Ok(())
+    }
+
     fn prepare_settings_restart(
         &self,
         settings: AppSettings,
@@ -1432,7 +1449,7 @@ impl RuntimeState {
             .options
             .take()
             .expect("prepared settings restart owns validated options");
-        let sender = prepared
+        let mut sender = prepared
             .worker
             .as_ref()
             .map(service::PreparedRecorderRestart::command_sender);
@@ -1477,7 +1494,6 @@ impl RuntimeState {
             if should_run && replacement_generation.is_none() {
                 inner.recording_desired = false;
             }
-            inner.tx = replacement_generation.and(sender);
             (
                 old_tx,
                 replacement_generation,
@@ -1492,12 +1508,25 @@ impl RuntimeState {
             let _ = old_pump.join();
         }
         if let Some(generation) = replacement_generation {
-            let stream = prepared
-                .worker
+            let mut inner = self
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // Joining the prior recorder can take long enough for Stop/Start
+            // or game detection to install a newer generation. Publish and
+            // release this parked worker only while its exact reservation is
+            // still current; otherwise Drop cancels and joins it.
+            let tx = sender
                 .take()
-                .expect("running prepared restart owns a worker")
-                .commit_with_options(options);
-            self.install_event_pump(pump_events(app.clone(), stream, generation));
+                .expect("running prepared restart owns a command sender");
+            if Self::install_settings_restart_sender(&mut inner, generation, tx).is_ok() {
+                let stream = prepared
+                    .worker
+                    .take()
+                    .expect("running prepared restart owns a worker")
+                    .commit_with_options(options);
+                self.install_event_pump(pump_events(app.clone(), stream, generation));
+            }
         }
         if waiting_for_game {
             let generation = self
@@ -1865,6 +1894,15 @@ impl RuntimeState {
             .settings
             .clone();
         self.persist_ui_preferences(&settings)
+    }
+
+    fn publish_durable_settings_exclusive(
+        &self,
+        coordinator: &SettingsApplyCoordinator,
+    ) -> Result<(), String> {
+        coordinator
+            .with_exclusive(|| self.publish_durable_settings())
+            .map_err(|error| error.to_string())?
     }
 
     fn set_recording<R: Runtime>(
@@ -2419,7 +2457,7 @@ fn shutdown_app<R: Runtime>(
         effect = match effect {
             ShutdownEffect::PublishDurableState { generation } => {
                 app.state::<RuntimeState>()
-                    .publish_durable_settings()
+                    .publish_durable_settings_exclusive(&app.state::<SettingsApplyCoordinator>())
                     .map_err(|message| TauriShellError::Action {
                         command: ShellCommand::Quit,
                         message,
@@ -2794,7 +2832,7 @@ impl<R: Runtime> UpdateShutdown for TauriUpdateShutdown<'_, R> {
             self.uploads = Some(UploadQuiescence::begin(self.app).map_err(AppUpdateShutdownError)?);
         }
         self.state
-            .publish_durable_settings()
+            .publish_durable_settings_exclusive(&self.app.state::<SettingsApplyCoordinator>())
             .map_err(AppUpdateShutdownError)
     }
 
@@ -3509,32 +3547,36 @@ impl<R: Runtime> SettingsApplyPorts for TauriSettingsApplyPorts<'_, R> {
 }
 
 #[tauri::command]
-fn save_settings<R: Runtime>(
+async fn save_settings<R: Runtime>(
     app: AppHandle<R>,
-    state: tauri::State<RuntimeState>,
-    coordinator: tauri::State<SettingsApplyCoordinator>,
-    tray_items: tauri::State<TrayItems<R>>,
-    storage_settings: tauri::State<crate::library::StorageSettings>,
-    media_folder_authorization: tauri::State<NativeMediaFolderAuthorization>,
     settings: AppSettings,
 ) -> Result<AppSettings, String> {
-    let baseline = SettingsPreferences::from_document(&state.settings())?;
-    let candidate = SettingsPreferences::from_document(&settings)?;
-    let mut ports = TauriSettingsApplyPorts {
-        app: &app,
-        runtime: &state,
-        tray: &tray_items,
-        storage: &storage_settings,
-        authorization: &media_folder_authorization,
-    };
-    let success = coordinator
-        .apply(&mut ports, baseline, candidate)
-        .map_err(|error| error.to_string())?;
-    for message in success.warnings {
-        tracing::warn!(event = "settings_apply_warning", message = %message);
-        publish_user_error(&app, message);
-    }
-    Ok(success.snapshot.document)
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<RuntimeState>();
+        let coordinator = app.state::<SettingsApplyCoordinator>();
+        let tray_items = app.state::<TrayItems<R>>();
+        let storage_settings = app.state::<crate::library::StorageSettings>();
+        let media_folder_authorization = app.state::<NativeMediaFolderAuthorization>();
+        let baseline = SettingsPreferences::from_document(&state.settings())?;
+        let candidate = SettingsPreferences::from_document(&settings)?;
+        let mut ports = TauriSettingsApplyPorts {
+            app: &app,
+            runtime: &state,
+            tray: &tray_items,
+            storage: &storage_settings,
+            authorization: &media_folder_authorization,
+        };
+        let success = coordinator
+            .apply(&mut ports, baseline, candidate)
+            .map_err(|error| error.to_string())?;
+        for message in success.warnings {
+            tracing::warn!(event = "settings_apply_warning", message = %message);
+            publish_user_error(&app, message);
+        }
+        Ok(success.snapshot.document)
+    })
+    .await
+    .map_err(|error| format!("settings apply worker failed: {error}"))?
 }
 
 pub fn run(
@@ -5679,6 +5721,34 @@ mod tests {
             matches!(newer_rx.try_recv(), Ok(Cmd::Save)),
             "the manual start must remain the active sender"
         );
+        assert!(matches!(
+            stale_rx.try_recv(),
+            Ok(Cmd::Stop { announce: false })
+        ));
+    }
+
+    #[test]
+    fn settings_restart_gap_rejects_a_parked_sender_after_a_newer_start() {
+        let state = RuntimeState::new(AppSettings::default(), None);
+        let reserved_generation = {
+            let mut inner = state.0.lock().unwrap();
+            inner.recording_desired = true;
+            inner.recording_generation = 7;
+            7
+        };
+
+        let (newer_tx, newer_rx) = mpsc::channel();
+        let (stale_tx, stale_rx) = mpsc::channel();
+        let rejected = {
+            let mut inner = state.0.lock().unwrap();
+            RuntimeState::install_recording_sender(&mut inner, newer_tx).unwrap();
+            RuntimeState::install_settings_restart_sender(&mut inner, reserved_generation, stale_tx)
+                .unwrap_err()
+        };
+        rejected.send(Cmd::Stop { announce: false }).unwrap();
+
+        assert!(state.send(Cmd::Save));
+        assert!(matches!(newer_rx.try_recv(), Ok(Cmd::Save)));
         assert!(matches!(
             stale_rx.try_recv(),
             Ok(Cmd::Stop { announce: false })

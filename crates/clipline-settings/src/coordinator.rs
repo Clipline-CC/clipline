@@ -153,24 +153,38 @@ impl SettingsApplyCoordinator {
         baseline: SettingsPreferences,
         candidate: SettingsPreferences,
     ) -> Result<SettingsApplySuccess, SettingsApplyError> {
-        if self
-            .active
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return Err(SettingsApplyError::new(
-                "another settings apply is already in progress".into(),
-                Vec::new(),
-            ));
-        }
-        let _lease = SettingsApplyLease {
-            active: &self.active,
-        };
+        let _lease = self.try_acquire()?;
         apply_settings(ports, baseline, candidate)
+    }
+
+    /// Run a settings-document publication while excluding a concurrent
+    /// Settings apply. Shutdown uses this to prevent its final persistence
+    /// pass from restoring the pre-apply preferences during the durable
+    /// persist-to-runtime-commit window.
+    pub fn with_exclusive<T>(
+        &self,
+        operation: impl FnOnce() -> T,
+    ) -> Result<T, SettingsApplyError> {
+        let _lease = self.try_acquire()?;
+        Ok(operation())
     }
 
     pub fn is_active(&self) -> bool {
         self.active.load(Ordering::Acquire)
+    }
+
+    fn try_acquire(&self) -> Result<SettingsApplyLease<'_>, SettingsApplyError> {
+        self.active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| {
+                SettingsApplyError::new(
+                    "another settings apply is already in progress".into(),
+                    Vec::new(),
+                )
+            })?;
+        Ok(SettingsApplyLease {
+            active: &self.active,
+        })
     }
 }
 

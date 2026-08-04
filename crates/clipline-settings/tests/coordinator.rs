@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
@@ -366,4 +367,36 @@ fn overlapping_settings_apply_is_rejected_without_blocking_backend_transactions(
     release_tx.send(()).unwrap();
     first.join().unwrap().unwrap();
     assert!(!coordinator.is_active());
+}
+
+#[test]
+fn exclusive_shutdown_publication_cannot_overlap_an_active_apply() {
+    let coordinator = Arc::new(SettingsApplyCoordinator::default());
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let (document, baseline, candidate) = documents();
+    let mut ports = FakePorts::new(document, None);
+    ports.block_preflight = Some((entered_tx, release_rx));
+    let apply_coordinator = coordinator.clone();
+    let apply =
+        std::thread::spawn(move || apply_coordinator.apply(&mut ports, baseline, candidate));
+    entered_rx.recv().unwrap();
+
+    let publication_ran = Arc::new(AtomicBool::new(false));
+    let publication_flag = publication_ran.clone();
+    let error = coordinator
+        .with_exclusive(move || publication_flag.store(true, Ordering::Release))
+        .unwrap_err();
+    assert_eq!(
+        error.primary(),
+        "another settings apply is already in progress"
+    );
+    assert!(!publication_ran.load(Ordering::Acquire));
+
+    release_tx.send(()).unwrap();
+    apply.join().unwrap().unwrap();
+    coordinator
+        .with_exclusive(|| publication_ran.store(true, Ordering::Release))
+        .unwrap();
+    assert!(publication_ran.load(Ordering::Acquire));
 }

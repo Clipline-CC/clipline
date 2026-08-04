@@ -24,7 +24,7 @@ fn shipping_save_command_is_an_adapter_over_the_shared_coordinator() {
 
     assert!(save.contains("SettingsApplyCoordinator"));
     assert!(save.contains("SettingsPreferences::from_document"));
-    assert!(save.contains("coordinator\n        .apply"));
+    assert!(save.contains(".apply(&mut ports, baseline, candidate)"));
     assert!(save.contains("Ok(success.snapshot.document)"));
 }
 
@@ -72,4 +72,32 @@ fn post_persistence_runtime_commit_is_not_fallible() {
         join < start,
         "old recorder must join before replacement starts"
     );
+    let fence = commit
+        .find("install_settings_restart_sender")
+        .expect("recheck exact recorder reservation after joining");
+    assert!(
+        join < fence && fence < start,
+        "replacement must be fenced after old join and before latch release"
+    );
+    let early_publish = &commit[..join];
+    assert!(
+        !early_publish.contains("inner.tx = replacement_generation"),
+        "parked sender must not publish before the old pump joins"
+    );
+}
+
+#[test]
+fn shutdown_publication_uses_the_settings_apply_lease() {
+    let source = app_source();
+    assert!(source.contains("fn publish_durable_settings_exclusive("));
+    assert!(source.contains(".with_exclusive(|| self.publish_durable_settings())"));
+
+    let shutdown = source
+        .find("fn shutdown_app<R: Runtime>(")
+        .expect("shipping quit shutdown");
+    let update = source
+        .find("impl<R: Runtime> UpdateShutdown")
+        .expect("shipping updater shutdown");
+    assert!(source[shutdown..].contains("publish_durable_settings_exclusive("));
+    assert!(source[update..].contains("publish_durable_settings_exclusive("));
 }
