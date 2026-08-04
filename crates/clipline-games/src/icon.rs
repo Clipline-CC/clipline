@@ -9,6 +9,7 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use clipline_settings::ProbeSessionOwner;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::identity::GameItemIdentity;
 
@@ -21,6 +22,10 @@ pub const MAX_SOURCE_ICON_DIMENSION: u32 = 1024;
 pub const MAX_SOURCE_ICON_PIXELS: u64 = 1_048_576;
 pub const MAX_GAME_ICON_DIMENSION: u32 = 256;
 pub const MAX_GAME_ICON_RGBA_BYTES: usize = 256 * 1024;
+pub const MAX_GAME_ICON_MANIFEST_ENTRIES: usize = 60;
+pub const MAX_GAME_ICON_SLOTS: usize = 32;
+pub const MAX_GAME_ICON_DECODED_OWNERSHIP_BYTES: usize =
+    MAX_GAME_ICON_SLOTS * MAX_GAME_ICON_RGBA_BYTES;
 
 const PNG_DATA_URL_PREFIX: &str = "data:image/png;base64,";
 const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
@@ -35,6 +40,7 @@ const _: () = {
     assert!(MAX_SOURCE_ICON_PIXELS == 1_048_576);
     assert!(MAX_GAME_ICON_RGBA_BYTES == 256 * 256 * 4);
     assert!(MAX_GAME_ICON_DATA_URL_BYTES == 349_550);
+    assert!(MAX_GAME_ICON_DECODED_OWNERSHIP_BYTES == 8 * 1024 * 1024);
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -130,7 +136,7 @@ pub enum GameIconLoadState {
     Failed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct GameIconSource(GameIconSourceKind);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,6 +144,21 @@ enum GameIconSourceKind {
     PngDataUrl(Arc<str>),
     FirstPartyAssetPath(Arc<str>),
     Missing,
+}
+
+impl fmt::Debug for GameIconSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let kind = match &self.0 {
+            GameIconSourceKind::PngDataUrl(_) => "png_data_url",
+            GameIconSourceKind::FirstPartyAssetPath(_) => "first_party_asset",
+            GameIconSourceKind::Missing => "missing",
+        };
+        formatter
+            .debug_struct("GameIconSource")
+            .field("kind", &kind)
+            .field("fingerprint", &self.fingerprint())
+            .finish()
+    }
 }
 
 impl GameIconSource {
@@ -183,6 +204,685 @@ impl GameIconSource {
             GameIconSourceKind::PngDataUrl(_) | GameIconSourceKind::Missing => None,
         }
     }
+
+    pub const fn is_missing(&self) -> bool {
+        matches!(self.0, GameIconSourceKind::Missing)
+    }
+
+    /// Stable provenance for cache work. Item identity alone is insufficient:
+    /// a saved game may keep its identity while its icon bytes change.
+    pub fn fingerprint(&self) -> GameIconSourceFingerprint {
+        let mut digest = Sha256::new();
+        match &self.0 {
+            GameIconSourceKind::PngDataUrl(value) => {
+                digest.update([0]);
+                digest.update((value.len() as u64).to_le_bytes());
+                digest.update(value.as_bytes());
+            }
+            GameIconSourceKind::FirstPartyAssetPath(value) => {
+                digest.update([1]);
+                digest.update((value.len() as u64).to_le_bytes());
+                digest.update(value.as_bytes());
+            }
+            GameIconSourceKind::Missing => digest.update([2]),
+        }
+        GameIconSourceFingerprint(digest.finalize().into())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct GameIconSourceFingerprint([u8; 32]);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GameIconCacheError {
+    ZeroGeneration,
+    GenerationExhausted,
+    TicketExhausted,
+    OwnerMismatch,
+    ManifestTooLarge,
+    DuplicateIdentity,
+    StaleManifest,
+    InvalidViewport,
+    CompletionMismatch,
+    InvalidDecodedImage,
+    AllocationFailed(&'static str),
+}
+
+impl fmt::Display for GameIconCacheError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ZeroGeneration => formatter.write_str("game icon generation must be nonzero"),
+            Self::GenerationExhausted => formatter.write_str("game icon generation is exhausted"),
+            Self::TicketExhausted => formatter.write_str("game icon work ticket is exhausted"),
+            Self::OwnerMismatch => formatter.write_str("game icon owner does not match"),
+            Self::ManifestTooLarge => formatter.write_str("game icon manifest is too large"),
+            Self::DuplicateIdentity => {
+                formatter.write_str("game icon manifest contains duplicates")
+            }
+            Self::StaleManifest => formatter.write_str("game icon manifest is stale"),
+            Self::InvalidViewport => formatter.write_str("game icon viewport is invalid"),
+            Self::CompletionMismatch => formatter.write_str("game icon completion is stale"),
+            Self::InvalidDecodedImage => formatter.write_str("decoded game icon is invalid"),
+            Self::AllocationFailed(field) => write!(formatter, "allocate bounded {field}"),
+        }
+    }
+}
+
+impl Error for GameIconCacheError {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct GameIconManifestGeneration(u64);
+
+impl GameIconManifestGeneration {
+    pub const fn new(value: u64) -> Result<Self, GameIconCacheError> {
+        if value == 0 {
+            Err(GameIconCacheError::ZeroGeneration)
+        } else {
+            Ok(Self(value))
+        }
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    pub const fn checked_next(self) -> Result<Self, GameIconCacheError> {
+        match self.0.checked_add(1) {
+            Some(next) => Ok(Self(next)),
+            None => Err(GameIconCacheError::GenerationExhausted),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GameIconManifestEntry {
+    id: GameIconId,
+    source: GameIconSource,
+    source_fingerprint: GameIconSourceFingerprint,
+}
+
+impl GameIconManifestEntry {
+    // The Games controller becomes the only production manifest builder in
+    // the next Task 8 slice. Keeping this crate-private prevents arbitrary
+    // frontend-supplied id/source pairs from becoming cache authority.
+    #[allow(dead_code)]
+    pub(crate) fn new(id: GameIconId, source: GameIconSource) -> Self {
+        let source_fingerprint = source.fingerprint();
+        Self {
+            id,
+            source,
+            source_fingerprint,
+        }
+    }
+
+    pub const fn id(&self) -> &GameIconId {
+        &self.id
+    }
+
+    pub const fn source(&self) -> &GameIconSource {
+        &self.source
+    }
+
+    pub const fn source_fingerprint(&self) -> GameIconSourceFingerprint {
+        self.source_fingerprint
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GameIconManifest {
+    owner: ProbeSessionOwner,
+    generation: GameIconManifestGeneration,
+    entries: Vec<GameIconManifestEntry>,
+}
+
+impl GameIconManifest {
+    #[allow(dead_code)]
+    pub(crate) fn new(
+        owner: ProbeSessionOwner,
+        generation: GameIconManifestGeneration,
+        entries: Vec<GameIconManifestEntry>,
+    ) -> Result<Self, GameIconCacheError> {
+        if entries.len() > MAX_GAME_ICON_MANIFEST_ENTRIES {
+            return Err(GameIconCacheError::ManifestTooLarge);
+        }
+        for (index, entry) in entries.iter().enumerate() {
+            if entry.id.owner() != owner {
+                return Err(GameIconCacheError::OwnerMismatch);
+            }
+            if entries[..index].iter().any(|prior| prior.id == entry.id) {
+                return Err(GameIconCacheError::DuplicateIdentity);
+            }
+        }
+        Ok(Self {
+            owner,
+            generation,
+            entries,
+        })
+    }
+
+    pub const fn owner(&self) -> ProbeSessionOwner {
+        self.owner
+    }
+
+    pub const fn generation(&self) -> GameIconManifestGeneration {
+        self.generation
+    }
+
+    pub fn entries(&self) -> &[GameIconManifestEntry] {
+        &self.entries
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct GameIconTicket(u64);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GameIconWork {
+    manifest_generation: GameIconManifestGeneration,
+    ticket: GameIconTicket,
+    id: GameIconId,
+    source_fingerprint: GameIconSourceFingerprint,
+    source: GameIconSource,
+}
+
+impl GameIconWork {
+    pub const fn id(&self) -> &GameIconId {
+        &self.id
+    }
+
+    pub const fn source(&self) -> &GameIconSource {
+        &self.source
+    }
+
+    pub const fn source_fingerprint(&self) -> GameIconSourceFingerprint {
+        self.source_fingerprint
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GameIconCompletionOutcome {
+    Ready,
+    Failed,
+    Ignored,
+}
+
+#[derive(Debug)]
+pub struct GameIconCacheUpdate {
+    pub queued: Vec<GameIconWork>,
+    pub canceled: Vec<GameIconWork>,
+    pub released: usize,
+    pub admission_error: Option<GameIconCacheError>,
+}
+
+impl GameIconCacheUpdate {
+    fn empty() -> Self {
+        Self {
+            queued: Vec::new(),
+            canceled: Vec::new(),
+            released: 0,
+            admission_error: None,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct GameIconCompletion {
+    pub outcome: GameIconCompletionOutcome,
+    pub update: GameIconCacheUpdate,
+}
+
+enum CachedIconState<H> {
+    Missing,
+    Loading(GameIconWork),
+    Ready { handle: H, rgba_bytes: usize },
+    Failed,
+}
+
+struct CachedIconEntry<H> {
+    descriptor: GameIconManifestEntry,
+    state: CachedIconState<H>,
+}
+
+/// UI-thread-owned bounded cache. Decoder workers receive move-free work
+/// tokens; the platform handle constructor runs only after the final exact
+/// token check on the owning thread.
+pub struct GameIconCache<H> {
+    owner: ProbeSessionOwner,
+    generation: Option<GameIconManifestGeneration>,
+    entries: Vec<CachedIconEntry<H>>,
+    viewport: Vec<GameIconId>,
+    canceled: Vec<GameIconWork>,
+    next_ticket: u64,
+}
+
+impl<H> GameIconCache<H> {
+    pub const fn new(owner: ProbeSessionOwner) -> Self {
+        Self {
+            owner,
+            generation: None,
+            entries: Vec::new(),
+            viewport: Vec::new(),
+            canceled: Vec::new(),
+            next_ticket: 0,
+        }
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn set_next_ticket_for_test(&mut self, value: u64) {
+        self.next_ticket = value;
+    }
+
+    pub fn sync_manifest(
+        &mut self,
+        manifest: GameIconManifest,
+    ) -> Result<GameIconCacheUpdate, GameIconCacheError> {
+        if manifest.owner != self.owner {
+            return Err(GameIconCacheError::OwnerMismatch);
+        }
+        if self
+            .generation
+            .is_some_and(|generation| manifest.generation <= generation)
+        {
+            return Err(GameIconCacheError::StaleManifest);
+        }
+
+        let mut next_entries = Vec::new();
+        next_entries
+            .try_reserve_exact(manifest.entries.len())
+            .map_err(|_| GameIconCacheError::AllocationFailed("game icon manifest entries"))?;
+        let mut update = GameIconCacheUpdate::empty();
+        let cancellation_count = self
+            .entries
+            .iter()
+            .filter(|entry| matches!(entry.state, CachedIconState::Loading(_)))
+            .count();
+        self.canceled
+            .try_reserve_exact(cancellation_count)
+            .map_err(|_| GameIconCacheError::AllocationFailed("canceled game icon work"))?;
+        update
+            .canceled
+            .try_reserve_exact(cancellation_count)
+            .map_err(|_| GameIconCacheError::AllocationFailed("game icon cancellation update"))?;
+        let mut old_entries = std::mem::take(&mut self.entries);
+
+        for descriptor in manifest.entries {
+            let retained = old_entries
+                .iter()
+                .position(|entry| {
+                    entry.descriptor.id == descriptor.id
+                        && entry.descriptor.source_fingerprint == descriptor.source_fingerprint
+                })
+                .map(|index| old_entries.swap_remove(index));
+            let state = match retained.map(|entry| entry.state) {
+                Some(CachedIconState::Ready { handle, rgba_bytes }) => {
+                    CachedIconState::Ready { handle, rgba_bytes }
+                }
+                Some(CachedIconState::Failed) => CachedIconState::Failed,
+                Some(CachedIconState::Loading(work)) => {
+                    self.remember_canceled(work, &mut update)?;
+                    CachedIconState::Missing
+                }
+                Some(CachedIconState::Missing) | None => CachedIconState::Missing,
+            };
+            next_entries.push(CachedIconEntry { descriptor, state });
+        }
+        for entry in old_entries {
+            match entry.state {
+                CachedIconState::Loading(work) => {
+                    self.remember_canceled(work, &mut update)?;
+                }
+                CachedIconState::Ready { .. } => update.released += 1,
+                CachedIconState::Missing | CachedIconState::Failed => {}
+            }
+        }
+
+        self.entries = next_entries;
+        self.generation = Some(manifest.generation);
+        self.viewport
+            .retain(|id| self.entries.iter().any(|entry| &entry.descriptor.id == id));
+        self.admit(&mut update);
+        Ok(update)
+    }
+
+    pub fn set_viewport(
+        &mut self,
+        ids: &[GameIconId],
+    ) -> Result<GameIconCacheUpdate, GameIconCacheError> {
+        if ids.len() > MAX_GAME_ICON_MANIFEST_ENTRIES || self.generation.is_none() {
+            return Err(GameIconCacheError::InvalidViewport);
+        }
+        for (index, id) in ids.iter().enumerate() {
+            if id.owner() != self.owner
+                || ids[..index].contains(id)
+                || !self.entries.iter().any(|entry| &entry.descriptor.id == id)
+            {
+                return Err(GameIconCacheError::InvalidViewport);
+            }
+        }
+
+        let mut next_viewport = Vec::new();
+        next_viewport
+            .try_reserve_exact(ids.len())
+            .map_err(|_| GameIconCacheError::AllocationFailed("game icon viewport"))?;
+        next_viewport.extend_from_slice(ids);
+        let mut update = GameIconCacheUpdate::empty();
+        let cancellation_count = self
+            .entries
+            .iter()
+            .filter(|entry| {
+                !next_viewport.contains(&entry.descriptor.id)
+                    && matches!(entry.state, CachedIconState::Loading(_))
+            })
+            .count();
+        self.canceled
+            .try_reserve_exact(cancellation_count)
+            .map_err(|_| GameIconCacheError::AllocationFailed("canceled game icon work"))?;
+        update
+            .canceled
+            .try_reserve_exact(cancellation_count)
+            .map_err(|_| GameIconCacheError::AllocationFailed("game icon cancellation update"))?;
+        for index in 0..self.entries.len() {
+            if next_viewport.contains(&self.entries[index].descriptor.id) {
+                continue;
+            }
+            let state = std::mem::replace(&mut self.entries[index].state, CachedIconState::Missing);
+            match state {
+                CachedIconState::Loading(work) => self.remember_canceled(work, &mut update)?,
+                CachedIconState::Ready { .. } => update.released += 1,
+                CachedIconState::Missing | CachedIconState::Failed => {}
+            }
+        }
+        self.viewport = next_viewport;
+        self.admit(&mut update);
+        Ok(update)
+    }
+
+    pub fn acknowledge_canceled(
+        &mut self,
+        work: &GameIconWork,
+    ) -> Result<GameIconCacheUpdate, GameIconCacheError> {
+        let Some(index) = self.canceled.iter().position(|candidate| candidate == work) else {
+            return Err(GameIconCacheError::CompletionMismatch);
+        };
+        self.canceled.swap_remove(index);
+        let mut update = GameIconCacheUpdate::empty();
+        self.admit(&mut update);
+        Ok(update)
+    }
+
+    pub fn complete_failed(
+        &mut self,
+        work: &GameIconWork,
+    ) -> Result<GameIconCompletion, GameIconCacheError> {
+        if let Some(index) = self.canceled.iter().position(|candidate| candidate == work) {
+            self.canceled.swap_remove(index);
+            let mut update = GameIconCacheUpdate::empty();
+            self.admit(&mut update);
+            return Ok(GameIconCompletion {
+                outcome: GameIconCompletionOutcome::Ignored,
+                update,
+            });
+        }
+        let index = self.active_work_index(work)?;
+        self.entries[index].state = CachedIconState::Failed;
+        let mut update = GameIconCacheUpdate::empty();
+        self.admit(&mut update);
+        Ok(GameIconCompletion {
+            outcome: GameIconCompletionOutcome::Failed,
+            update,
+        })
+    }
+
+    pub fn complete_decoded(
+        &mut self,
+        work: &GameIconWork,
+        decoded: DecodedGameIcon,
+        make_handle: impl FnOnce(DecodedGameIcon) -> Result<H, String>,
+    ) -> Result<GameIconCompletion, GameIconCacheError> {
+        if let Some(index) = self.canceled.iter().position(|candidate| candidate == work) {
+            self.canceled.swap_remove(index);
+            drop(decoded);
+            let mut update = GameIconCacheUpdate::empty();
+            self.admit(&mut update);
+            return Ok(GameIconCompletion {
+                outcome: GameIconCompletionOutcome::Ignored,
+                update,
+            });
+        }
+        let index = self.active_work_index(work)?;
+        let rgba_bytes = match validate_decoded(&decoded) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                self.entries[index].state = CachedIconState::Failed;
+                let mut update = GameIconCacheUpdate::empty();
+                self.admit(&mut update);
+                return Ok(GameIconCompletion {
+                    outcome: GameIconCompletionOutcome::Failed,
+                    update,
+                });
+            }
+        };
+        match make_handle(decoded) {
+            Ok(handle) => {
+                self.entries[index].state = CachedIconState::Ready { handle, rgba_bytes };
+                Ok(GameIconCompletion {
+                    outcome: GameIconCompletionOutcome::Ready,
+                    update: GameIconCacheUpdate::empty(),
+                })
+            }
+            Err(_) => {
+                self.entries[index].state = CachedIconState::Failed;
+                let mut update = GameIconCacheUpdate::empty();
+                self.admit(&mut update);
+                Ok(GameIconCompletion {
+                    outcome: GameIconCompletionOutcome::Failed,
+                    update,
+                })
+            }
+        }
+    }
+
+    pub fn detach(&mut self) -> Result<GameIconCacheUpdate, GameIconCacheError> {
+        let mut update = GameIconCacheUpdate::empty();
+        let cancellation_count = self
+            .entries
+            .iter()
+            .filter(|entry| matches!(entry.state, CachedIconState::Loading(_)))
+            .count();
+        self.canceled
+            .try_reserve_exact(cancellation_count)
+            .map_err(|_| GameIconCacheError::AllocationFailed("canceled game icon work"))?;
+        update
+            .canceled
+            .try_reserve_exact(cancellation_count)
+            .map_err(|_| GameIconCacheError::AllocationFailed("game icon cancellation update"))?;
+        for index in 0..self.entries.len() {
+            let state = std::mem::replace(&mut self.entries[index].state, CachedIconState::Missing);
+            match state {
+                CachedIconState::Loading(work) => self.remember_canceled(work, &mut update)?,
+                CachedIconState::Ready { .. } => update.released += 1,
+                CachedIconState::Missing | CachedIconState::Failed => {}
+            }
+        }
+        self.entries.clear();
+        self.viewport.clear();
+        self.generation = None;
+        Ok(update)
+    }
+
+    pub fn load_state(&self, id: &GameIconId) -> GameIconLoadState {
+        self.entries
+            .iter()
+            .find(|entry| &entry.descriptor.id == id)
+            .map_or(GameIconLoadState::Missing, |entry| match entry.state {
+                CachedIconState::Missing => GameIconLoadState::Missing,
+                CachedIconState::Loading(_) => GameIconLoadState::Loading,
+                CachedIconState::Ready { .. } => GameIconLoadState::Ready,
+                CachedIconState::Failed => GameIconLoadState::Failed,
+            })
+    }
+
+    pub fn issued_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| matches!(entry.state, CachedIconState::Loading(_)))
+            .count()
+    }
+
+    pub fn retained_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| matches!(entry.state, CachedIconState::Ready { .. }))
+            .count()
+    }
+
+    pub fn ownership_count(&self) -> usize {
+        self.issued_count() + self.retained_count() + self.canceled.len()
+    }
+
+    pub fn owned_rgba_bytes(&self) -> usize {
+        self.entries
+            .iter()
+            .filter_map(|entry| match entry.state {
+                CachedIconState::Ready { rgba_bytes, .. } => Some(rgba_bytes),
+                _ => None,
+            })
+            .sum()
+    }
+
+    fn active_work_index(&self, work: &GameIconWork) -> Result<usize, GameIconCacheError> {
+        self.entries
+            .iter()
+            .position(
+                |entry| matches!(&entry.state, CachedIconState::Loading(active) if active == work),
+            )
+            .ok_or(GameIconCacheError::CompletionMismatch)
+    }
+
+    fn remember_canceled(
+        &mut self,
+        work: GameIconWork,
+        update: &mut GameIconCacheUpdate,
+    ) -> Result<(), GameIconCacheError> {
+        self.canceled
+            .try_reserve(1)
+            .map_err(|_| GameIconCacheError::AllocationFailed("canceled game icon work"))?;
+        update
+            .canceled
+            .try_reserve(1)
+            .map_err(|_| GameIconCacheError::AllocationFailed("game icon cancellation update"))?;
+        self.canceled.push(work.clone());
+        update.canceled.push(work);
+        Ok(())
+    }
+
+    fn admit(&mut self, update: &mut GameIconCacheUpdate) {
+        let Some(manifest_generation) = self.generation else {
+            return;
+        };
+        let available = MAX_GAME_ICON_SLOTS.saturating_sub(self.ownership_count());
+        let candidate_count = self
+            .viewport
+            .iter()
+            .filter(|id| {
+                self.entries.iter().any(|entry| {
+                    &entry.descriptor.id == *id
+                        && matches!(entry.state, CachedIconState::Missing)
+                        && !entry.descriptor.source.is_missing()
+                })
+            })
+            .take(available)
+            .count();
+        let ticket_range = u64::try_from(candidate_count)
+            .ok()
+            .and_then(|count| self.next_ticket.checked_add(count));
+        if ticket_range.is_none() {
+            update.admission_error = Some(GameIconCacheError::TicketExhausted);
+            self.fail_unadmitted_viewport_entries();
+            return;
+        }
+        if update.queued.try_reserve_exact(candidate_count).is_err() {
+            update.admission_error = Some(GameIconCacheError::AllocationFailed(
+                "game icon work update",
+            ));
+            return;
+        }
+
+        for viewport_index in 0..self.viewport.len() {
+            if self.ownership_count() == MAX_GAME_ICON_SLOTS {
+                break;
+            }
+            let id = self.viewport[viewport_index].clone();
+            let Some(index) = self
+                .entries
+                .iter()
+                .position(|entry| entry.descriptor.id == id)
+            else {
+                continue;
+            };
+            if !matches!(self.entries[index].state, CachedIconState::Missing)
+                || self.entries[index].descriptor.source.is_missing()
+            {
+                continue;
+            }
+            let next_ticket = self
+                .next_ticket
+                .checked_add(1)
+                .expect("ticket range was preflighted");
+            let work = GameIconWork {
+                manifest_generation,
+                ticket: GameIconTicket(next_ticket),
+                id: self.entries[index].descriptor.id.clone(),
+                source_fingerprint: self.entries[index].descriptor.source_fingerprint,
+                source: self.entries[index].descriptor.source.clone(),
+            };
+            self.next_ticket = next_ticket;
+            self.entries[index].state = CachedIconState::Loading(work.clone());
+            update.queued.push(work);
+        }
+        debug_assert!(self.ownership_count() <= MAX_GAME_ICON_SLOTS);
+        debug_assert!(self.owned_rgba_bytes() <= MAX_GAME_ICON_DECODED_OWNERSHIP_BYTES);
+    }
+
+    fn fail_unadmitted_viewport_entries(&mut self) {
+        for id in &self.viewport {
+            if let Some(entry) = self
+                .entries
+                .iter_mut()
+                .find(|entry| &entry.descriptor.id == id)
+            {
+                if matches!(entry.state, CachedIconState::Missing)
+                    && !entry.descriptor.source.is_missing()
+                {
+                    entry.state = CachedIconState::Failed;
+                }
+            }
+        }
+    }
+}
+
+fn validate_decoded(decoded: &DecodedGameIcon) -> Result<usize, GameIconCacheError> {
+    if decoded.width == 0
+        || decoded.height == 0
+        || decoded.width > MAX_GAME_ICON_DIMENSION
+        || decoded.height > MAX_GAME_ICON_DIMENSION
+    {
+        return Err(GameIconCacheError::InvalidDecodedImage);
+    }
+    let expected = usize::try_from(decoded.width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(decoded.height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or(GameIconCacheError::InvalidDecodedImage)?;
+    if decoded.rgba.len() != expected || expected > MAX_GAME_ICON_RGBA_BYTES {
+        return Err(GameIconCacheError::InvalidDecodedImage);
+    }
+    Ok(expected)
 }
 
 #[derive(Debug, PartialEq, Eq)]

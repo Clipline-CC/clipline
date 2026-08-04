@@ -22,6 +22,15 @@ RGBA, or whole catalogs. Neutral PNG decoding now bounds data URLs and encoded b
 maximum 1024×1024/1,048,576-pixel header before decoder allocation, resizes into move-only
 256×256/256 KiB RGBA, and accepts only the reviewed built-in asset routes.
 
+The separate icon cache now admits at most 32 of a valid 60-row manifest and retains at most 8 MiB
+of decoded-surface ownership. Work binds the exact owner, manifest generation, private monotonic
+ticket, item id, and SHA-256 source fingerprint, so an unchanged game identity cannot accept an old
+decode after its icon changes. Viewport overlap is retained deterministically; obsolete work keeps
+its slot until exact acknowledgement/completion; stale decoded bytes are dropped before platform
+handle construction; admission pressure and ticket exhaustion degrade only the affected row. The
+cache exposes no clonable retained handle yet: the later Slint adapter must add an explicit bounded
+display lease instead of allowing a surface clone to escape accounting.
+
 osu! settings now persist a checked nonzero account generation, migrate legacy profiles to generation
 1, retain shipping `u64` client-id semantics, and enforce per-field, cleanup-list, and 64 KiB aggregate
 bounds before normalization can hide hostile input. The generation is not yet an authoritative ABA
@@ -29,9 +38,9 @@ fence: the later osu service/CAS slice must enforce exact transitions under the 
 before asynchronous work trusts it. The explicit 100/125/150/200% DPI and negative-half-tie matrix is
 green.
 
-Next: finish the separate 32-image/8 MiB token-fenced cache lifecycle, then build the Games
-controller/channel over the existing Task 5 catalogs. `artifacts/`, `paseo.json`, and unrelated poster
-formatting remain local and excluded.
+Next: build the Games controller/channel over the existing Task 5 catalogs, moving those catalogs
+instead of cloning or re-enumerating them and keeping full rows out of `DesktopSnapshot`.
+`artifacts/`, `paseo.json`, and unrelated poster formatting remain local and excluded.
 
 ## Checkpoint (2026-08-04): Slint replacement Milestone 8, Task 7 joined microphone monitor
 
