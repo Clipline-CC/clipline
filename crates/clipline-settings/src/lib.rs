@@ -16,17 +16,30 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod capture_region;
 pub mod cloud;
+pub mod draft;
 pub mod games;
 pub mod hotkey;
 pub mod osu;
 pub mod persistence;
+pub mod preferences;
 pub mod types;
 pub mod validation;
 
+pub use capture_region::{
+    Align, DisplayGeometry, DpiScale, LogicalPoint, RegionAction, RegionGeometry,
+    RegionGeometryError, MAX_DISPLAY_ID_BYTES,
+};
 pub use cloud::{
     normalize_cloud_visibility, CloudSettings, CloudUploadRecord, MAX_CLOUD_UPLOAD_ERROR_BYTES,
     MAX_CLOUD_UPLOAD_ID_BYTES, MAX_CLOUD_UPLOAD_PATH_BYTES, MAX_CLOUD_UPLOAD_URL_BYTES,
+};
+pub use draft::{
+    CloseRequest, CloseResult, CloudAccountDisplay, CloudAccountOwner, CloudConfigurationOwner,
+    CloudWorkKind, CloudWorkOwner, DirtySummary, DraftError, OwnedCloudWork,
+    SettingsBackendDisplay, SettingsDraftController, SettingsField, SettingsSaveToken,
+    SettingsSessionGeneration, SettingsTab, TabNavigation, TabProjection,
 };
 #[allow(unused_imports)]
 pub use games::{
@@ -44,6 +57,11 @@ pub use persistence::{
     SettingsPathResolver, SettingsProfile, SettingsProfileError, SettingsRevision,
     SettingsSnapshot, SettingsStore, SettingsTransaction, SettingsTransactionError,
     MAX_CLOUD_RECORD_CAS_SLOTS,
+};
+pub use preferences::{
+    CloudUploadPreferences, GamePluginPreference, GamePreferences, SettingsPreferences,
+    MAX_SETTINGS_COLLECTION_BYTES, MAX_SETTINGS_CUSTOM_GAMES, MAX_SETTINGS_FIELD_BYTES,
+    MAX_SETTINGS_GAME_PLUGINS,
 };
 #[allow(unused_imports)]
 pub use types::{

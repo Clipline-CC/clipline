@@ -860,11 +860,14 @@ function resumeForegroundSettingsWork() {
 function requestSettingsClose({ allowDiscard = true } = {}) {
   if (!settingsOpen) return;
   syncSettingsDraftFromForm({ resetDiscard: false });
-  if (settingsHaveUnsavedChanges()) {
-    if (!settingsDiscardWarningArmed || !allowDiscard) {
-      showSettingsDiscardWarning();
-      return;
-    }
+  const action = SettingsDraftCore.closeAction({
+    dirty: settingsHaveUnsavedChanges(),
+    warningArmed: settingsDiscardWarningArmed,
+    allowDiscard,
+  });
+  if (action === "warn") {
+    showSettingsDiscardWarning();
+    return;
   }
   toggleSettings(false);
 }

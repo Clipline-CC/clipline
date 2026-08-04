@@ -11,6 +11,11 @@ Milestone 7 is implementation-complete at `3e07a95`, but acceptance remains NO-G
 protocol-accepted quiet-host samples plus the named matched/manual gates. Its completed rows may be
 `implemented`; none is `verified`, and no rejected diagnostic run authorizes production cutover.
 
+Milestone 8 Task 1 freezes the shared Settings draft acceptance input at
+`fixtures/slint/settings-draft-parity.json`: exact eight-tab order, owned-preference dirty behavior,
+ephemeral Cloud-upload exclusion, and clean/warn/discard close decisions. Both the Rust controller
+and retained JavaScript/Boa oracle consume that file. Freezing vectors does not advance any M8 row.
+
 `apps/clipline-app/tests/slint_migration_contract.rs` extracts the production
 `tauri::generate_handler!` list and frontend event subscriptions. When a boundary is added, update
 this ledger in the same change. Line numbers are deliberately omitted because symbols are more

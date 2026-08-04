@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "tabOrder": [
+    "general",
+    "capture",
+    "recording",
+    "storage",
+    "hotkeys",
+    "games",
+    "cloud",
+    "support"
+  ],
+  "dirtyVectors": [
+    {
+      "name": "equal preferences",
+      "baseline": { "openOnStartup": false, "closeToTray": true, "captureBackend": "auto", "captureX": -1280, "micEnabled": false, "replayWindow": 60, "diskQuota": 10, "hotkey": "Alt+F10", "gamesAutoDetect": true, "visibility": "public", "uploadStatus": "uploading" },
+      "draft": { "openOnStartup": false, "closeToTray": true, "captureBackend": "auto", "captureX": -1280, "micEnabled": false, "replayWindow": 60, "diskQuota": 10, "hotkey": "Alt+F10", "gamesAutoDetect": true, "visibility": "public", "uploadStatus": "uploading" },
+      "expectedDirty": false
+    },
+    {
+      "name": "ephemeral upload progress is ignored",
+      "baseline": { "openOnStartup": false, "closeToTray": true, "captureBackend": "auto", "captureX": -1280, "micEnabled": false, "replayWindow": 60, "diskQuota": 10, "hotkey": "Alt+F10", "gamesAutoDetect": true, "visibility": "public", "uploadStatus": "uploading" },
+      "draft": { "openOnStartup": false, "closeToTray": true, "captureBackend": "auto", "captureX": -1280, "micEnabled": false, "replayWindow": 60, "diskQuota": 10, "hotkey": "Alt+F10", "gamesAutoDetect": true, "visibility": "public", "uploadStatus": "uploaded_processing" },
+      "expectedDirty": false
+    },
+    {
+      "name": "general preference changes are dirty",
+      "baseline": { "openOnStartup": false, "closeToTray": true, "captureBackend": "auto", "captureX": -1280, "micEnabled": false, "replayWindow": 60, "diskQuota": 10, "hotkey": "Alt+F10", "gamesAutoDetect": true, "visibility": "public", "uploadStatus": "uploading" },
+      "draft": { "openOnStartup": true, "closeToTray": true, "captureBackend": "auto", "captureX": -1280, "micEnabled": false, "replayWindow": 60, "diskQuota": 10, "hotkey": "Alt+F10", "gamesAutoDetect": true, "visibility": "public", "uploadStatus": "uploading" },
+      "expectedDirty": true
+    },
+    {
+      "name": "capture and audio preferences are dirty",
+      "baseline": { "openOnStartup": false, "closeToTray": true, "captureBackend": "auto", "captureX": -1280, "micEnabled": false, "replayWindow": 60, "diskQuota": 10, "hotkey": "Alt+F10", "gamesAutoDetect": true, "visibility": "public", "uploadStatus": "uploading" },
+      "draft": { "openOnStartup": false, "closeToTray": true, "captureBackend": "wgc", "captureX": -640, "micEnabled": true, "replayWindow": 60, "diskQuota": 10, "hotkey": "Alt+F10", "gamesAutoDetect": true, "visibility": "public", "uploadStatus": "uploading" },
+      "expectedDirty": true
+    },
+    {
+      "name": "recording and hotkey preferences are dirty",
+      "baseline": { "openOnStartup": false, "closeToTray": true, "captureBackend": "auto", "captureX": -1280, "micEnabled": false, "replayWindow": 60, "diskQuota": 10, "hotkey": "Alt+F10", "gamesAutoDetect": true, "visibility": "public", "uploadStatus": "uploading" },
+      "draft": { "openOnStartup": false, "closeToTray": true, "captureBackend": "auto", "captureX": -1280, "micEnabled": false, "replayWindow": 90, "diskQuota": 10, "hotkey": "Ctrl+Shift+F9", "gamesAutoDetect": true, "visibility": "public", "uploadStatus": "uploading" },
+      "expectedDirty": true
+    },
+    {
+      "name": "storage and games preferences are dirty",
+      "baseline": { "openOnStartup": false, "closeToTray": true, "captureBackend": "auto", "captureX": -1280, "micEnabled": false, "replayWindow": 60, "diskQuota": 10, "hotkey": "Alt+F10", "gamesAutoDetect": true, "visibility": "public", "uploadStatus": "uploading" },
+      "draft": { "openOnStartup": false, "closeToTray": true, "captureBackend": "auto", "captureX": -1280, "micEnabled": false, "replayWindow": 60, "diskQuota": 20, "hotkey": "Alt+F10", "gamesAutoDetect": false, "visibility": "public", "uploadStatus": "uploading" },
+      "expectedDirty": true
+    },
+    {
+      "name": "cloud upload preference changes are dirty",
+      "baseline": { "openOnStartup": false, "closeToTray": true, "captureBackend": "auto", "captureX": -1280, "micEnabled": false, "replayWindow": 60, "diskQuota": 10, "hotkey": "Alt+F10", "gamesAutoDetect": true, "visibility": "public", "uploadStatus": "uploading" },
+      "draft": { "openOnStartup": false, "closeToTray": true, "captureBackend": "auto", "captureX": -1280, "micEnabled": false, "replayWindow": 60, "diskQuota": 10, "hotkey": "Alt+F10", "gamesAutoDetect": true, "visibility": "unlisted", "uploadStatus": "uploading" },
+      "expectedDirty": true
+    }
+  ],
+  "closeVectors": [
+    { "name": "clean close", "dirty": false, "warningArmed": false, "allowDiscard": true, "expected": "close" },
+    { "name": "first explicit dirty close", "dirty": true, "warningArmed": false, "allowDiscard": true, "expected": "warn" },
+    { "name": "second explicit dirty close", "dirty": true, "warningArmed": true, "allowDiscard": true, "expected": "discard" },
+    { "name": "backdrop never discards", "dirty": true, "warningArmed": true, "allowDiscard": false, "expected": "warn" }
+  ]
+}

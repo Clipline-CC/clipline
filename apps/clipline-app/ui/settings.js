@@ -10,19 +10,50 @@ function cloneSettings(settings) {
 var settingsDiscardWarningArmed = false;
 var settingsIndicatorBaseline = null;
 
+// Retained until the Milestone 10 cutover as the executable WebView parity
+// oracle for the framework-neutral Rust draft controller.
+var SettingsDraftCore = Object.freeze({
+  stableSnapshot(value) {
+    if (Array.isArray(value)) return value.map(SettingsDraftCore.stableSnapshot);
+    if (value && typeof value === "object") {
+      return Object.keys(value)
+        .sort()
+        .reduce((out, key) => {
+          out[key] = SettingsDraftCore.stableSnapshot(value[key]);
+          return out;
+        }, {});
+    }
+    return value;
+  },
+
+  snapshot(value) {
+    const stable = SettingsDraftCore.stableSnapshot(value ?? null);
+    if (!stable || typeof stable !== "object" || Array.isArray(stable)) {
+      return JSON.stringify(stable);
+    }
+    if (!stable.cloud || typeof stable.cloud !== "object" || Array.isArray(stable.cloud)) {
+      return JSON.stringify(stable);
+    }
+    const out = { ...stable };
+    const cloud = { ...out.cloud };
+    delete cloud.uploads;
+    out.cloud = cloud;
+    return JSON.stringify(out);
+  },
+
+  dirty(baseline, draft) {
+    return SettingsDraftCore.snapshot(baseline) !== SettingsDraftCore.snapshot(draft);
+  },
+
+  closeAction({ dirty, warningArmed, allowDiscard }) {
+    if (!dirty) return "close";
+    if (!warningArmed || !allowDiscard) return "warn";
+    return "discard";
+  },
+});
+
 function stableSettingsSnapshot(value) {
-  if (Array.isArray(value)) {
-    return value.map(stableSettingsSnapshot);
-  }
-  if (value && typeof value === "object") {
-    return Object.keys(value)
-      .sort()
-      .reduce((out, key) => {
-        out[key] = stableSettingsSnapshot(value[key]);
-        return out;
-      }, {});
-  }
-  return value;
+  return SettingsDraftCore.stableSnapshot(value);
 }
 
 function stripEphemeralSettingsState(value) {
@@ -37,7 +68,7 @@ function stripEphemeralSettingsState(value) {
 }
 
 function settingsSnapshot(value) {
-  return JSON.stringify(stripEphemeralSettingsState(value));
+  return SettingsDraftCore.snapshot(value);
 }
 
 function settingsBaselineForComparison() {
@@ -45,7 +76,7 @@ function settingsBaselineForComparison() {
 }
 
 function settingsHaveUnsavedChanges() {
-  return settingsSnapshot(settingsDraft) !== settingsSnapshot(settingsBaselineForComparison());
+  return SettingsDraftCore.dirty(settingsBaselineForComparison(), settingsDraft);
 }
 
 function settingsValueAtPath(source, path) {
