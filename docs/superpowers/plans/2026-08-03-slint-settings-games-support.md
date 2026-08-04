@@ -455,12 +455,14 @@ absolute memory, CPU, handle, worker, or lifecycle gates fail.
 - Modify: `crates/clipline-games/Cargo.toml`
 - Create: `crates/clipline-games/src/controller.rs`
 - Create: `crates/clipline-games/src/presentation.rs`
+- Create: `crates/clipline-games/src/icon.rs`
 - Create: `crates/clipline-games/src/channel.rs`
 - Create: `crates/clipline-games/src/osu.rs`
 - Create: `crates/clipline-games/src/osu_http.rs`
 - Create: `crates/clipline-games/src/osu_enrichment.rs`
 - Create: `crates/clipline-games/tests/controller.rs`
 - Create: `crates/clipline-games/tests/presentation.rs`
+- Create: `crates/clipline-games/tests/icon.rs`
 - Create: `crates/clipline-games/tests/osu.rs`
 - Create: `crates/clipline-games/tests/osu_enrichment.rs`
 - Modify: `crates/clipline-games/src/lib.rs`
