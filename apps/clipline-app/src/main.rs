@@ -25,8 +25,10 @@ mod cloud_upload;
 #[cfg(windows)]
 mod credential_transaction;
 #[cfg(windows)]
-#[allow(dead_code)] // B1 matrix; B2/B3 wire status/ensure commands
+#[allow(dead_code)] // B1/B2 matrix+verifier; commands live in ffmpeg_install
 mod ffmpeg_runtime;
+#[cfg(windows)]
+mod ffmpeg_install;
 #[cfg(windows)]
 mod game_discovery;
 #[cfg(windows)]

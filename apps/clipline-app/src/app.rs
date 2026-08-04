@@ -2781,6 +2781,7 @@ pub fn run() {
         .manage(WindowLifecycleState::default())
         .manage(MainWindowOpenQueue::default())
         .manage(FrontendReadinessState::default())
+        .manage(crate::ffmpeg_install::FfmpegInstallController::default())
         .manage(MicTestState::default())
         .manage(support::SupportState::default())
         .manage(crate::memory::MemorySampler::default())
@@ -2833,6 +2834,9 @@ pub fn run() {
             extract_window_icon,
             memory_status,
             frontend_ready,
+            crate::ffmpeg_install::ffmpeg_runtime_status,
+            crate::ffmpeg_install::ensure_ffmpeg_runtime,
+            crate::ffmpeg_install::cancel_ffmpeg_runtime_install,
             start_microphone_test,
             stop_microphone_test,
             get_autostart_status,
@@ -2907,6 +2911,12 @@ pub fn run() {
             }
             if let Err(e) = crate::library::prune_audio_preview_cache_on_startup() {
                 tracing::warn!(event = "audio_preview_startup_prune_failed", error = %e);
+            }
+            if let Some(local) = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from) {
+                let staging = crate::ffmpeg_install::staging_root(&local);
+                if let Err(e) = crate::ffmpeg_install::sweep_abandoned_staging(&staging) {
+                    tracing::warn!(event = "ffmpeg_staging_startup_sweep_failed", error = %e);
+                }
             }
 
             // Keep release builds in sync with the user's setting. Debug builds

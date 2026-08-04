@@ -266,22 +266,22 @@
 266:
 267:### Task B3: Native single-flight ensure state + bounded download
 268:
-269:- [ ] Define a native `FfmpegInstallState` owned by the app (not the WebView):
+269:- [x] Define a native `FfmpegInstallState` owned by the app (not the WebView):
 270:  `Idle | Checking | Downloading { bytes, total } | Verifying | Publishing | Ready |
 271:  Failed { message } | Cancelled`.
-272:- [ ] Expose `ffmpeg_runtime_status` / `ensure_ffmpeg_runtime` / `cancel_ffmpeg_runtime_install`
+272:- [x] Expose `ffmpeg_runtime_status` / `ensure_ffmpeg_runtime` / `cancel_ffmpeg_runtime_install`
 273:      commands. Status is queryable after UI recreate; progress events are notifications only.
-274:- [ ] Single-flight: concurrent ensures coalesce on one job and observe the same state machine.
-275:- [ ] Reuse `ffmpeg-runtime.json` immutable URL/sha256/allowlist. **Add exact `archive_size`
+274:- [x] Single-flight: concurrent ensures coalesce on one job and observe the same state machine.
+275:- [x] Reuse `ffmpeg-runtime.json` immutable URL/sha256/allowlist. **Add exact `archive_size`
 276:      bytes** to the manifest and enforce it.
-277:- [ ] Before download: check free space ≥ `archive_size + staged allowlist total + margin`.
-278:- [ ] Download to `%LOCALAPPDATA%\Clipline\ffmpeg-staging\` with a hard byte cap (`archive_size`);
+277:- [x] Before download: check free space ≥ `archive_size + staged allowlist total + margin`.
+278:- [x] Download to `%LOCALAPPDATA%\Clipline\ffmpeg-staging\` with a hard byte cap (`archive_size`);
 279:      abort and delete partials on overflow, hash mismatch, cancel, or crash-recovery startup sweep.
-280:- [ ] Verify archive digest, extract allowlisted files only, write `PROVENANCE.json`, verify the
+280:- [x] Verify archive digest, extract allowlisted files only, write `PROVENANCE.json`, verify the
 281:      staged tree, then atomically publish to `%LOCALAPPDATA%\Clipline\ffmpeg\`.
-282:- [ ] Refuse to execute downloaded bytes before verification (same L-13 invariants).
-283:- [ ] No silent background download on cold start.
-284:- [ ] Tests: concurrent ensure coalescing; cancel cleans partials; destroy→recreate mid-download
+282:- [x] Refuse to execute downloaded bytes before verification (same L-13 invariants).
+283:- [x] No silent background download on cold start.
+284:- [x] Tests: concurrent ensure coalescing; cancel cleans partials; destroy→recreate mid-download
 285:      recovers progress via status query; crash-recovery sweep removes abandoned staging; disk-space
 286:      and overflow failures.
 287:

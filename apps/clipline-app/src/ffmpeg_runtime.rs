@@ -1,5 +1,3 @@
-//! FFmpeg capability matrix and discovery kinds (slim-core Milestone B).
-//!
 //! FFmpeg capability matrix, managed-runtime verification, and discovery status
 //! (slim-core Milestone B).
 //!
@@ -11,7 +9,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use clipline_capture::{Codec, EncoderApi, EncoderBackend, EncoderCapability};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// Why a Core surface still needs an FFmpeg child process today.
@@ -30,7 +28,8 @@ pub enum FfmpegRequirementReason {
 /// `ManagedVerified` is reserved for a LOCALAPPDATA tree that passed the B2
 /// manifest verifier. A successful `locate()` of PATH/override/bundled bytes is
 /// `ExternalUnmanaged`, never a silent no-op for Install/Repair.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FfmpegDiscoveryKind {
     ManagedVerified,
     ExternalUnmanaged,
@@ -114,6 +113,8 @@ pub struct FfmpegRuntimeManifest {
     pub archive_name: String,
     pub archive_url: String,
     pub archive_sha256: String,
+    pub archive_size: u64,
+    pub archive_root: String,
     pub version_line: String,
     pub source_offer_url: String,
     pub ffmpeg_source_url: String,
@@ -266,7 +267,30 @@ pub fn parse_ffmpeg_runtime_manifest(
             message: "allowed_files must not be empty".into(),
         });
     }
+    if manifest.archive_size == 0 {
+        return Err(ManagedRuntimeVerifyError::InvalidManifest {
+            message: "archive_size must be > 0".into(),
+        });
+    }
+    if manifest.archive_root.trim().is_empty() {
+        return Err(ManagedRuntimeVerifyError::InvalidManifest {
+            message: "archive_root must not be empty".into(),
+        });
+    }
     Ok(manifest)
+}
+
+/// Total bytes of allowlisted staged files (for free-space planning).
+pub fn allowlist_total_bytes(manifest: &FfmpegRuntimeManifest) -> u64 {
+    manifest.allowed_files.iter().map(|file| file.size).sum()
+}
+
+/// Bytes that must be free before download/extract: archive + staged tree + margin.
+pub fn free_space_required_bytes(manifest: &FfmpegRuntimeManifest, margin_bytes: u64) -> u64 {
+    manifest
+        .archive_size
+        .saturating_add(allowlist_total_bytes(manifest))
+        .saturating_add(margin_bytes)
 }
 
 pub fn load_ffmpeg_runtime_manifest(
@@ -653,6 +677,8 @@ mod tests {
             archive_name: "ffmpeg-test.zip".into(),
             archive_url: "https://example.test/ffmpeg-test.zip".into(),
             archive_sha256: "aa".repeat(32),
+            archive_size: 128,
+            archive_root: "ffmpeg-test-root".into(),
             version_line: "ffmpeg version test".into(),
             source_offer_url: "https://example.test/source".into(),
             ffmpeg_source_url: "https://example.test/ffmpeg".into(),

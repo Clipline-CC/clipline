@@ -3851,6 +3851,50 @@ fn deck_status_success_toasts_auto_clear() {
 }
 
 #[test]
+fn ffmpeg_install_commands_are_native_and_queryable() {
+    let install = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ffmpeg_install.rs"),
+    )
+    .expect("read ffmpeg_install.rs");
+    let app = app_rs();
+    let manifest = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("ffmpeg-runtime.json"),
+    )
+    .expect("read ffmpeg-runtime.json");
+
+    for required in [
+        "enum FfmpegInstallState",
+        "Downloading {",
+        "fn ffmpeg_runtime_status(",
+        "async fn ensure_ffmpeg_runtime(",
+        "fn cancel_ffmpeg_runtime_install(",
+        "fn sweep_abandoned_staging(",
+        "archive_size",
+        "FFMPEG_INSTALL_EVENT",
+    ] {
+        assert!(
+            install.contains(required),
+            "ffmpeg_install.rs must expose `{required}`"
+        );
+    }
+    assert!(
+        manifest.contains("\"archive_size\": 70103338"),
+        "committed manifest must pin exact archive_size bytes"
+    );
+    assert!(
+        app.contains("crate::ffmpeg_install::ffmpeg_runtime_status")
+            && app.contains("crate::ffmpeg_install::ensure_ffmpeg_runtime")
+            && app.contains("crate::ffmpeg_install::cancel_ffmpeg_runtime_install")
+            && app.contains("FfmpegInstallController::default()"),
+        "app must manage install controller and expose status/ensure/cancel commands"
+    );
+    assert!(
+        app.contains("ffmpeg_staging_startup_sweep_failed"),
+        "startup must sweep abandoned ffmpeg staging"
+    );
+}
+
+#[test]
 fn ffmpeg_managed_runtime_verifier_is_separate_from_locate() {
     let runtime = fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ffmpeg_runtime.rs"),
@@ -3937,8 +3981,9 @@ fn ffmpeg_capability_matrix_contracts_managed_runtime_surfaces() {
         "Copy Clip UI must remain the share-export entry point that will host the install affordance"
     );
     assert!(
-        !runtime.contains("archive_size"),
-        "B1 must not pretend the managed download manifest already carries archive_size"
+        runtime.contains("archive_size")
+            && runtime.contains("fn free_space_required_bytes"),
+        "managed download manifest and free-space planner must carry archive_size"
     );
 }
 
