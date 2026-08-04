@@ -11,9 +11,10 @@ use clipline_games::presentation::{
     MAX_GAME_PAGE_ROWS, MAX_GAME_ROW_TEXT_BYTES,
 };
 use clipline_settings::{
-    CustomGameSettings, GamePluginReviewSettings, GameRecordingMode, GameSettings, ProbeKind,
-    ProbeRequestGeneration, ProbeSessionOwner, ProbeToken, SettingsAttachmentGeneration,
-    SettingsForegroundGeneration, SettingsSessionGeneration,
+    CustomGameSettings, GamePluginPreference, GamePluginReviewSettings, GamePluginSettings,
+    GamePreferences, GameRecordingMode, ProbeKind, ProbeRequestGeneration, ProbeSessionOwner,
+    ProbeToken, SettingsAttachmentGeneration, SettingsForegroundGeneration,
+    SettingsSessionGeneration,
 };
 
 fn owner() -> ProbeSessionOwner {
@@ -75,11 +76,32 @@ fn candidate(index: usize) -> DetectedGameCandidate {
     }
 }
 
-fn catalog(customs: usize, candidates: usize) -> GameCatalog {
-    let settings = GameSettings {
+fn preferences(customs: usize) -> GamePreferences {
+    GamePreferences {
+        auto_detect: true,
+        pause_when_no_game: false,
+        plugins: Vec::new(),
         custom_games: (0..customs).map(custom).collect(),
-        ..GameSettings::default()
-    };
+    }
+}
+
+fn plugin_preference(
+    id: &str,
+    enabled: bool,
+    recording_mode: GameRecordingMode,
+) -> GamePluginPreference {
+    GamePluginPreference {
+        id: id.into(),
+        settings: GamePluginSettings {
+            enabled,
+            recording_mode,
+            review: GamePluginReviewSettings::default(),
+        },
+    }
+}
+
+fn catalog(customs: usize, candidates: usize) -> GameCatalog {
+    let settings = preferences(customs);
     let candidates = InstalledGameIdentityCatalog::build(
         token(ProbeKind::InstalledGames, 9),
         (0..candidates).map(candidate).collect(),
@@ -111,18 +133,14 @@ fn page(catalog: &GameCatalog, index: u32) -> GamePageOutcome {
 
 #[test]
 fn stable_order_exact_membership_and_current_draft_dedupe_hold() {
-    let mut settings = GameSettings {
-        custom_games: vec![custom(0), custom(1)],
-        ..GameSettings::default()
-    };
-    settings.plugins.insert(
-        OSU_ID.into(),
-        clipline_settings::GamePluginSettings {
-            enabled: false,
-            recording_mode: GameRecordingMode::ReplaysOnly,
-            review: GamePluginReviewSettings::default(),
-        },
-    );
+    let mut settings = preferences(2);
+    // UI-owned plugin preferences have their own stable lexical order. The
+    // catalog must look them up by id without changing either that order or
+    // the registry order used by projected rows.
+    settings.plugins = vec![
+        plugin_preference(OSU_ID, false, GameRecordingMode::ReplaysOnly),
+        plugin_preference(LEAGUE_OF_LEGENDS_ID, true, GameRecordingMode::FullSession),
+    ];
     let mut duplicates_custom = candidate(10);
     duplicates_custom.exe_name = settings.custom_games[1].exe_name.clone();
     duplicates_custom.process_path = settings.custom_games[1].process_path.clone();
@@ -195,7 +213,7 @@ fn rows_publish_only_typed_icon_ids_and_bounded_load_state() {
             owner: owner(),
             plugins_token: token(ProbeKind::GamePlugins, 30),
             plugins: vec![league],
-            settings: GameSettings::default(),
+            settings: GamePreferences::default(),
             candidates: None,
         },
         &SystemGameProjectionReservation,
@@ -250,9 +268,9 @@ fn running_window_catalog_uses_its_real_sources_and_shared_custom_dedupe() {
             owner: owner(),
             plugins_token: token(ProbeKind::GamePlugins, 19),
             plugins: Vec::new(),
-            settings: GameSettings {
+            settings: GamePreferences {
                 custom_games: vec![existing],
-                ..GameSettings::default()
+                ..GamePreferences::default()
             },
             candidates: Some(GameCandidateCatalog::RunningWindows(windows)),
         },
@@ -381,7 +399,7 @@ fn wrong_tokens_duplicate_configured_ids_and_wrong_plugin_order_fail_closed() {
             owner: owner(),
             plugins_token: token(ProbeKind::InstalledGames, 1),
             plugins: Vec::new(),
-            settings: GameSettings::default(),
+            settings: GamePreferences::default(),
             candidates: None,
         },
         &SystemGameProjectionReservation,
@@ -411,7 +429,7 @@ fn wrong_tokens_duplicate_configured_ids_and_wrong_plugin_order_fail_closed() {
                 owner: owner(),
                 plugins_token: foreign_token,
                 plugins: Vec::new(),
-                settings: GameSettings::default(),
+                settings: GamePreferences::default(),
                 candidates: None,
             },
             &SystemGameProjectionReservation,
@@ -428,7 +446,7 @@ fn wrong_tokens_duplicate_configured_ids_and_wrong_plugin_order_fail_closed() {
                 plugin(OSU_ID, "osu!"),
                 plugin(LEAGUE_OF_LEGENDS_ID, "League"),
             ],
-            settings: GameSettings::default(),
+            settings: GamePreferences::default(),
             candidates: None,
         },
         &SystemGameProjectionReservation,
@@ -442,9 +460,9 @@ fn wrong_tokens_duplicate_configured_ids_and_wrong_plugin_order_fail_closed() {
             owner: owner(),
             plugins_token: token(ProbeKind::GamePlugins, 1),
             plugins: Vec::new(),
-            settings: GameSettings {
+            settings: GamePreferences {
                 custom_games: vec![duplicate.clone(), duplicate],
-                ..GameSettings::default()
+                ..GamePreferences::default()
             },
             candidates: None,
         },
@@ -571,7 +589,7 @@ fn projection_reservations_fail_before_partial_catalog_or_page_publication() {
             owner: owner(),
             plugins_token: token(ProbeKind::GamePlugins, 3),
             plugins: Vec::new(),
-            settings: GameSettings::default(),
+            settings: GamePreferences::default(),
             candidates: Some(GameCandidateCatalog::Installed(candidates)),
         },
         &FailReservation("games.catalog_members"),
@@ -611,9 +629,9 @@ fn hostile_display_text_is_utf8_bounded_without_leaking_source_paths() {
             owner: owner(),
             plugins_token: token(ProbeKind::GamePlugins, 1),
             plugins: Vec::new(),
-            settings: GameSettings {
+            settings: GamePreferences {
                 custom_games: vec![game],
-                ..GameSettings::default()
+                ..GamePreferences::default()
             },
             candidates: None,
         },
@@ -628,4 +646,87 @@ fn hostile_display_text_is_utf8_bounded_without_leaking_source_paths() {
     assert!(row.title.is_char_boundary(row.title.len()));
     assert!(row.subtitle.len() <= MAX_GAME_ROW_TEXT_BYTES);
     assert!(!row.subtitle.contains("C:\\Games"));
+}
+
+#[test]
+fn into_input_returns_exact_owned_buffers_tokens_and_candidate_authority() {
+    let plugins_token = token(ProbeKind::GamePlugins, 41);
+    let candidates_token = token(ProbeKind::InstalledGames, 42);
+    let plugins = vec![
+        plugin(LEAGUE_OF_LEGENDS_ID, "League"),
+        plugin(OSU_ID, "osu!"),
+    ];
+    let settings = GamePreferences {
+        auto_detect: false,
+        pause_when_no_game: true,
+        // This is the normalized SettingsPreferences lexical order, which is
+        // intentionally independent from registry presentation order.
+        plugins: vec![
+            plugin_preference(LEAGUE_OF_LEGENDS_ID, false, GameRecordingMode::ReplaysOnly),
+            plugin_preference(OSU_ID, true, GameRecordingMode::FullSession),
+        ],
+        custom_games: vec![custom(7)],
+    };
+    let candidates =
+        InstalledGameIdentityCatalog::build(candidates_token, vec![candidate(9)]).unwrap();
+
+    let plugin_buffer = plugins.as_ptr();
+    let preference_buffer = settings.plugins.as_ptr();
+    let custom_buffer = settings.custom_games.as_ptr();
+    let candidate_identity = candidates.identity_at(0).unwrap().clone();
+    let candidate_identity_address = candidates.identity_at(0).unwrap() as *const _;
+    let candidate_source_address = candidates.source_at(0).unwrap() as *const _;
+
+    let catalog = GameCatalog::try_build(
+        GameCatalogInput {
+            owner: owner(),
+            plugins_token,
+            plugins,
+            settings,
+            candidates: Some(GameCandidateCatalog::Installed(candidates)),
+        },
+        &SystemGameProjectionReservation,
+    )
+    .unwrap();
+
+    let input = catalog.into_input();
+    assert_eq!(input.owner, owner());
+    assert_eq!(input.plugins_token, plugins_token);
+    assert_eq!(input.plugins.as_ptr(), plugin_buffer);
+    assert_eq!(input.settings.plugins.as_ptr(), preference_buffer);
+    assert_eq!(input.settings.custom_games.as_ptr(), custom_buffer);
+    assert_eq!(
+        input
+            .settings
+            .plugins
+            .iter()
+            .map(|plugin| plugin.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![LEAGUE_OF_LEGENDS_ID, OSU_ID]
+    );
+    let Some(GameCandidateCatalog::Installed(candidates)) = input.candidates.as_ref() else {
+        panic!("installed candidate authority must be returned")
+    };
+    assert_eq!(candidates.token(), candidates_token);
+    assert_eq!(
+        candidates.identity_at(0).unwrap() as *const _,
+        candidate_identity_address
+    );
+    assert_eq!(
+        candidates.source_at(0).unwrap() as *const _,
+        candidate_source_address
+    );
+    assert_eq!(
+        candidates.resolve(&candidate_identity).unwrap().id_hint,
+        "steam-9"
+    );
+
+    let rebuilt = GameCatalog::try_build(input, &SystemGameProjectionReservation).unwrap();
+    assert_eq!(rebuilt.plugins_token(), plugins_token);
+    assert_eq!(rebuilt.candidate_token(), Some(candidates_token));
+    assert!(matches!(
+        rebuilt.resolve(&GameItemIdentity::Candidate(candidate_identity)),
+        Some(ResolvedGameCatalogMember::InstalledCandidate(source))
+            if source.id_hint == "steam-9"
+    ));
 }

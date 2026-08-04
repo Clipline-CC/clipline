@@ -86,12 +86,13 @@ impl SettingsProbeRuntime {
         self.fence.request(kind).map_err(|error| error.to_string())
     }
 
-    pub fn catalog(&self, token: ProbeToken) -> Option<SettingsProbeCatalog> {
+    /// Move the exact accepted probe payload into its domain controller.
+    /// Large catalog payloads must never be cloned into a second owner.
+    pub fn take_catalog(&self, token: ProbeToken) -> Option<SettingsProbeCatalog> {
         self.catalogs
             .lock()
             .ok()
-            .and_then(|catalogs| catalogs.get(&token.kind).cloned())
-            .and_then(|(stored, catalog)| (stored == token).then_some(catalog))
+            .and_then(|mut catalogs| take_exact_catalog(&mut catalogs, token))
     }
 
     pub fn submit(
@@ -185,6 +186,20 @@ impl SettingsProbeRuntime {
     }
 }
 
+fn take_exact_catalog<P>(
+    catalogs: &mut HashMap<ProbeKind, (ProbeToken, P)>,
+    token: ProbeToken,
+) -> Option<P> {
+    if catalogs
+        .get(&token.kind)
+        .is_some_and(|(stored, _)| *stored == token)
+    {
+        catalogs.remove(&token.kind).map(|(_, catalog)| catalog)
+    } else {
+        None
+    }
+}
+
 impl Drop for SettingsProbeRuntime {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
@@ -266,4 +281,42 @@ fn custom_game_work_bytes(games: &[CustomGameSettings]) -> Result<usize, String>
                 .ok_or_else(|| "custom game probe work byte count overflowed".to_string())
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::take_exact_catalog;
+    use clipline_settings::{
+        ProbeKind, ProbeRequestGeneration, ProbeSessionOwner, ProbeToken,
+        SettingsAttachmentGeneration, SettingsForegroundGeneration, SettingsSessionGeneration,
+    };
+    use std::collections::HashMap;
+
+    fn token(kind: ProbeKind, request: u64) -> ProbeToken {
+        ProbeToken {
+            owner: ProbeSessionOwner::new(
+                SettingsSessionGeneration::new(1),
+                SettingsAttachmentGeneration::new(2),
+                SettingsForegroundGeneration::new(3),
+            ),
+            kind,
+            request_generation: ProbeRequestGeneration::new(request),
+        }
+    }
+
+    #[test]
+    fn exact_catalog_take_moves_only_the_matching_token() {
+        let current = token(ProbeKind::InstalledGames, 7);
+        let stale = token(ProbeKind::InstalledGames, 6);
+        let mut catalogs = HashMap::from([(current.kind, (current, String::from("owned")))]);
+
+        assert_eq!(take_exact_catalog(&mut catalogs, stale), None);
+        assert_eq!(catalogs.len(), 1);
+        assert_eq!(
+            take_exact_catalog(&mut catalogs, current).as_deref(),
+            Some("owned")
+        );
+        assert!(catalogs.is_empty());
+        assert_eq!(take_exact_catalog(&mut catalogs, current), None);
+    }
 }

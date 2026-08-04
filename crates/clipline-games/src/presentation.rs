@@ -4,8 +4,8 @@ use std::error::Error;
 use std::fmt;
 
 use clipline_settings::{
-    CustomGameSettings, GameRecordingMode, GameSettings, ProbeKind, ProbeSessionOwner, ProbeToken,
-    MAX_SETTINGS_CUSTOM_GAMES, MAX_SETTINGS_FIELD_BYTES, MAX_SETTINGS_GAME_PLUGINS,
+    CustomGameSettings, GamePreferences, GameRecordingMode, ProbeKind, ProbeSessionOwner,
+    ProbeToken, MAX_SETTINGS_CUSTOM_GAMES, MAX_SETTINGS_FIELD_BYTES, MAX_SETTINGS_GAME_PLUGINS,
 };
 
 use crate::detection::GameWindowInfo;
@@ -132,7 +132,7 @@ pub struct GameCatalogInput {
     pub owner: ProbeSessionOwner,
     pub plugins_token: ProbeToken,
     pub plugins: Vec<GamePluginInfo>,
-    pub settings: GameSettings,
+    pub settings: GamePreferences,
     pub candidates: Option<GameCandidateCatalog>,
 }
 
@@ -176,7 +176,7 @@ pub struct GameCatalog {
     owner: ProbeSessionOwner,
     plugins_token: ProbeToken,
     plugins: Vec<GamePluginInfo>,
-    settings: GameSettings,
+    settings: GamePreferences,
     candidates: Option<GameCandidateCatalog>,
     members: Vec<CatalogMember>,
 }
@@ -240,7 +240,12 @@ impl GameCatalog {
                     .map_err(|_| GamePresentationError::InvalidPlugin)?,
             );
             ensure_unique(&members, &identity)?;
-            let configured = input.settings.plugins.get(&plugin.id);
+            let configured = input
+                .settings
+                .plugins
+                .iter()
+                .find(|configured| configured.id == plugin.id)
+                .map(|configured| &configured.settings);
             members.push(CatalogMember {
                 identity,
                 locator: MemberLocator::Plugin(index),
@@ -392,6 +397,22 @@ impl GameCatalog {
 
     pub fn candidate_token(&self) -> Option<ProbeToken> {
         self.candidates.as_ref().map(GameCandidateCatalog::token)
+    }
+
+    /// Returns every owned catalog input without cloning the bounded source
+    /// collections or rebuilding candidate authority.
+    ///
+    /// Controllers use this consuming seam when replacing one exact probe
+    /// token or switching candidate sources. Candidate identity/source
+    /// membership remains owned by the returned catalog.
+    pub fn into_input(self) -> GameCatalogInput {
+        GameCatalogInput {
+            owner: self.owner,
+            plugins_token: self.plugins_token,
+            plugins: self.plugins,
+            settings: self.settings,
+            candidates: self.candidates,
+        }
     }
 
     pub fn len(&self) -> usize {
