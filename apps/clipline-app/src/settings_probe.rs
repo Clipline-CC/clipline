@@ -160,9 +160,11 @@ impl SettingsProbeRuntime {
                     .map(SettingsProbeCatalog::Storage)
                 })
             }
-            ProbeKind::PlaybackCapabilities => self.submit_work(token, 0, |context| {
-                context.checkpoint_after_activation()?;
-                Err("native playback capability probe is not available until Task 6".into())
+            ProbeKind::PlaybackCapabilities => self.submit_work(token, 0, move |context| {
+                clipline_recorder::probe_playback_capabilities_with_checkpoint(|| {
+                    context.checkpoint_after_activation()
+                })
+                .map(SettingsProbeCatalog::PlaybackCapabilities)
             }),
         }
     }

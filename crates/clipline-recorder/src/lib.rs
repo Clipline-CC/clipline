@@ -12,8 +12,13 @@ mod service;
 #[cfg(windows)]
 pub use service::*;
 
-pub use probe::EncoderOption;
 #[cfg(windows)]
-pub use probe::{available_encoder_options, SettingsProbeCatalog};
+pub use clipline_playback::PlaybackCapabilities;
+#[cfg(windows)]
+pub use probe::{
+    available_encoder_options, native_decodable_codecs, native_playback_warning,
+    probe_playback_capabilities, probe_playback_capabilities_with_checkpoint, SettingsProbeCatalog,
+};
+pub use probe::{EncoderOption, NativePlaybackWarning};
 #[cfg(windows)]
 pub use restart::{active_recorder_workers, PreparedRecorderRestart, RecorderEventStream};

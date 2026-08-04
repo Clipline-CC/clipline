@@ -2,6 +2,7 @@
 var gamePluginSettingsDialogPluginId = null;
 var gamePluginSettingsDialogTab = "general";
 var activeEncoderLabel = "";
+var nativePlaybackCapabilities = null;
 
 function cloneSettings(settings) {
   return settings ? JSON.parse(JSON.stringify(settings)) : null;
@@ -1383,11 +1384,12 @@ function syncRecordingFields() {
   $("replay-summary").className = "setting-summary";
   const encoderSummary = $("encoder-summary");
   if (encoder.id === "auto") {
-    encoderSummary.textContent =
-      "Clipline records H.264 when available for broad playback compatibility.";
-    encoderSummary.classList.remove("warn");
+    const caveat = nativePlaybackCodecCaveat("h264");
+    encoderSummary.textContent = caveat
+      || "Clipline records H.264 when available for broad playback compatibility.";
+    encoderSummary.classList.toggle("warn", Boolean(caveat));
   } else {
-    const caveat = PlayerCore.encoderCodecCaveat(encoder.codec, decodableCodecs);
+    const caveat = encoderCodecCaveat(encoder.codec);
     encoderSummary.textContent = caveat || `${encoder.name} is used for new recordings.`;
     encoderSummary.classList.toggle("warn", Boolean(caveat));
   }
@@ -1489,8 +1491,8 @@ function renderVideoEncoderSelect() {
   for (const encoder of videoEncoders) {
     const opt = document.createElement("option");
     opt.value = encoder.id;
-    const caveat = PlayerCore.encoderCodecCaveat(encoder.codec, decodableCodecs);
-    opt.textContent = caveat ? `${encoder.name} (limited playback)` : encoder.name;
+    const caveat = encoderCodecCaveat(encoder.codec);
+    opt.textContent = caveat ? `${encoder.name} (limited native playback)` : encoder.name;
     select.appendChild(opt);
   }
   if (selected !== "auto" && !videoEncoders.some((encoder) => encoder.id === selected)) {
@@ -1909,6 +1911,23 @@ function probeDecodableCodecs() {
   decodableCodecs = supported;
 }
 
+function nativePlaybackCodecCaveat(codec) {
+  if (!nativePlaybackCapabilities) return null;
+  const status = nativePlaybackCapabilities[codec];
+  if (codec === "h264" && status === "unavailable") {
+    return "Native H.264 review playback is unavailable on this device. The current WebView review may still work.";
+  }
+  if ((codec === "hevc" || codec === "av1") && status === "ungated") {
+    return `${codec.toUpperCase()} encoding is available, but native review playback is not yet supported.`;
+  }
+  return null;
+}
+
+function encoderCodecCaveat(codec) {
+  return nativePlaybackCodecCaveat(codec)
+    || PlayerCore.encoderCodecCaveat(codec, decodableCodecs);
+}
+
 async function loadVideoEncoders(lifecycleWork = captureForegroundWork()) {
   if (!lifecycleWork) return false;
   probeDecodableCodecs();
@@ -1918,6 +1937,15 @@ async function loadVideoEncoders(lifecycleWork = captureForegroundWork()) {
     // Reporting is best-effort; the recorder defaults to H.264-safe Automatic.
   }
   if (!isForegroundWorkCurrent(lifecycleWork)) return false;
+  try {
+    const capabilities = await invoke("probe_native_playback_capabilities");
+    if (!isForegroundWorkCurrent(lifecycleWork)) return false;
+    nativePlaybackCapabilities = capabilities;
+  } catch (e) {
+    if (!isForegroundWorkCurrent(lifecycleWork)) return false;
+    nativePlaybackCapabilities = null;
+    $("error").textContent = `Native playback probe failed: ${e}`;
+  }
   try {
     const nextVideoEncoders = await invoke("probe_encoders");
     if (!isForegroundWorkCurrent(lifecycleWork)) return false;

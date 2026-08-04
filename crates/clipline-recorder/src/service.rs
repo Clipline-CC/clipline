@@ -435,6 +435,18 @@ impl Default for ServiceOptions {
     }
 }
 
+impl ServiceOptions {
+    /// Select the codecs the native Slint review path has actually configured.
+    /// The shipping WebView compatibility adapter continues to replace this
+    /// field from `canPlayType` until the frontend cutover is complete.
+    pub fn use_native_playback_capabilities(
+        &mut self,
+        capabilities: clipline_playback::PlaybackCapabilities,
+    ) {
+        self.decodable_codecs = crate::probe::native_decodable_codecs(capabilities);
+    }
+}
+
 pub trait AppSettingsServiceExt {
     fn to_service_options(&self, lol_url: Option<String>) -> Result<ServiceOptions, String>;
 

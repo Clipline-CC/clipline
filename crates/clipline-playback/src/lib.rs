@@ -3,6 +3,7 @@
 mod annexb;
 mod audio;
 mod backend;
+mod capability;
 mod command;
 mod presentation;
 mod ring;
@@ -31,6 +32,10 @@ pub use backend::{
     MonotonicTime100ns, PipelineToken, PublicationReceipt, RawAudioClock, RecoveryDisposition,
     SubmitStatus, TimelineDuration, TimelinePosition, VideoAcceleration, VideoDecoder,
     VideoDecoderInfo, VideoPixelFormat, PLAYBACK_TIMELINE_HZ,
+};
+pub use capability::{
+    H264PlaybackSupport, LimitedNativePlayback, PlaybackCapabilities, PlaybackCodec,
+    PlaybackSupport,
 };
 pub use clipline_mp4::PlaybackTime;
 pub use command::{

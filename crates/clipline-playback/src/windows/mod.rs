@@ -4,6 +4,7 @@
 //! confined to this module tree. Callers interact through safe platform
 //! traits and move-only surface wrappers.
 
+mod capability;
 mod com;
 mod d3d11;
 mod mft_decode;
@@ -12,6 +13,10 @@ mod readback;
 mod session;
 mod wasapi_render;
 
+pub use capability::{
+    probe_playback_capabilities, probe_playback_capabilities_with_checkpoint,
+    PlaybackCapabilityProbeError,
+};
 pub use mft_decode::{
     classify_device_failure, probe_h264_decoders, D3D11VideoSurface, DecoderCapabilities,
     DecoderOwnershipTelemetry, DecoderPreference, WindowsH264Decoder, MAX_PLAYBACK_SURFACES,

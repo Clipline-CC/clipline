@@ -20,6 +20,13 @@ pub struct EncoderOption {
     pub codec: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativePlaybackWarning {
+    Unavailable,
+    LimitedNativePlayback,
+}
+
 #[cfg(windows)]
 #[derive(Debug, Clone)]
 pub enum SettingsProbeCatalog {
@@ -30,8 +37,7 @@ pub enum SettingsProbeCatalog {
     InstalledGames(Vec<clipline_games::discovery::DetectedGameCandidate>),
     GamePlugins(Vec<clipline_games::plugin::GamePluginInfo>),
     Storage(clipline_storage::StorageStatus),
-    /// Reserved for Task 6's real configured-decoder capability probe.
-    PlaybackCapabilitiesPending,
+    PlaybackCapabilities(clipline_playback::PlaybackCapabilities),
 }
 
 #[cfg(windows)]
@@ -45,7 +51,7 @@ impl SettingsProbeCatalog {
             Self::InstalledGames(_) => clipline_settings::ProbeKind::InstalledGames,
             Self::GamePlugins(_) => clipline_settings::ProbeKind::GamePlugins,
             Self::Storage(_) => clipline_settings::ProbeKind::Storage,
-            Self::PlaybackCapabilitiesPending => clipline_settings::ProbeKind::PlaybackCapabilities,
+            Self::PlaybackCapabilities(_) => clipline_settings::ProbeKind::PlaybackCapabilities,
         }
     }
 }
@@ -77,7 +83,7 @@ impl BoundedProbePayload for SettingsProbeCatalog {
                 clipline_games::discovery::validate_discovery_candidates(games)
             }
             Self::GamePlugins(plugins) => clipline_games::plugin::validate_plugin_catalog(plugins),
-            Self::Storage(_) | Self::PlaybackCapabilitiesPending => Ok(()),
+            Self::Storage(_) | Self::PlaybackCapabilities(_) => Ok(()),
         }
     }
 }
@@ -174,4 +180,50 @@ pub fn available_encoder_options_bounded() -> Result<Vec<EncoderOption>, String>
     }
     validate_encoders(&options)?;
     Ok(options)
+}
+
+/// Native codecs admitted to Automatic recorder selection. HEVC and AV1 stay
+/// explicit-only until their native playback gates are complete.
+#[cfg(windows)]
+pub fn native_decodable_codecs(
+    capabilities: clipline_playback::PlaybackCapabilities,
+) -> Vec<crate::service::Codec> {
+    if capabilities.native_decodable(clipline_playback::PlaybackCodec::H264) {
+        vec![crate::service::Codec::H264]
+    } else {
+        Vec::new()
+    }
+}
+
+#[cfg(windows)]
+pub fn native_playback_warning(
+    capabilities: clipline_playback::PlaybackCapabilities,
+    codec: crate::service::Codec,
+) -> Option<NativePlaybackWarning> {
+    match codec {
+        crate::service::Codec::H264
+            if capabilities.native_decodable(clipline_playback::PlaybackCodec::H264) =>
+        {
+            None
+        }
+        crate::service::Codec::H264 => Some(NativePlaybackWarning::Unavailable),
+        crate::service::Codec::Hevc | crate::service::Codec::Av1 => {
+            Some(NativePlaybackWarning::LimitedNativePlayback)
+        }
+    }
+}
+
+#[cfg(windows)]
+pub fn probe_playback_capabilities_with_checkpoint(
+    checkpoint_after_activation: impl FnMut() -> Result<(), String>,
+) -> Result<clipline_playback::PlaybackCapabilities, String> {
+    clipline_playback::windows::probe_playback_capabilities_with_checkpoint(
+        checkpoint_after_activation,
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(windows)]
+pub fn probe_playback_capabilities() -> Result<clipline_playback::PlaybackCapabilities, String> {
+    clipline_playback::windows::probe_playback_capabilities().map_err(|error| error.to_string())
 }

@@ -4,6 +4,36 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-04): Slint replacement Milestone 8, Task 6 native playback truth
+
+Milestone 8 Task 6 is implemented. `clipline-playback::PlaybackCapabilities` reports H.264 only as
+`configured_hardware`, `configured_software`, or `unavailable`; HEVC and AV1 remain explicitly
+`ungated`. The Windows probe owns one balanced COM/MF/D3D activation, checks the exact Settings
+request fence immediately after device activation, and configures a bounded 640x360 H.264 High
+profile copied from Clipline's production-writer fixture through input/NV12 negotiation and both
+streaming-start messages. It then releases the configured transform immediately without creating a
+`DecoderSession`, CPU frame buffer, texture pool, playback surface, or playback runtime. Decoder
+candidate enumeration is capped at 32 and device loss remains a typed failure instead of a passing
+capability.
+
+`clipline-recorder` maps only configured native H.264 into Automatic codec policy; H.264 remains
+first across the existing backend/API fallback matrix, while explicit HEVC/AV1 choices stay visible
+with typed limited-native-playback warnings. The native Settings probe stores the full fixed-size
+catalog behind its exact request token. There is no invented playback-device generation: adapter
+identity is the actual DXGI LUID, and a refresh/device-loss response mints a newer Settings request
+whose existing executor/channel fences reject stale completion.
+
+The shipping Tauri `report_decode_support`/WebView `canPlayType` path remains isolated as a
+compatibility input while WebView Review is production. A separate asynchronous
+`probe_native_playback_capabilities` command supplies the typed native warning state; HEVC/AV1 are
+never promoted merely because WebView2 can decode them. Validation is green: full playback device
+suite, full recorder suite, all 96 UI contract tests, app all-target check, and warning-denied Clippy
+for every touched package, plus `cargo test --workspace` and warning-denied workspace Clippy.
+Fable's read-only final audit was launched asynchronously.
+
+Next: Task 7, replace the detached compatibility microphone-test thread with the shared joined,
+generation-fenced native microphone monitor and renderer service.
+
 ## Checkpoint (2026-08-04): Slint replacement Milestone 8, Task 5 bounded probes
 
 Milestone 8 Task 5 is implemented. `clipline-settings::ProbeExecutor` owns two joined workers,

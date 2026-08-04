@@ -19,6 +19,7 @@ chrono = "0.4.45"
 clipline-capture = { path = "../clipline-capture" }
 clipline-desktop = { path = "../clipline-desktop" }
 clipline-library = { path = "../clipline-library" }
+clipline-playback = { path = "../clipline-playback" }
 clipline-shell = { path = "../clipline-shell" }
 clipline-storage = { path = "../clipline-storage" }
 serde_json = { workspace = true }

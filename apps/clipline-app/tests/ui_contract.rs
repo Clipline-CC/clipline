@@ -4644,6 +4644,38 @@ fn support_reports_require_preview_before_private_submission() {
 }
 
 #[test]
+fn native_playback_probe_is_separate_from_the_shipping_webview_compatibility_input() {
+    let settings = read_ui_js("settings.js");
+    let app = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app.rs"))
+        .expect("read src/app.rs");
+
+    for required in [
+        "invoke(\"probe_native_playback_capabilities\"",
+        "nativePlaybackCodecCaveat",
+        "limited native playback",
+        "status === \"ungated\"",
+        "invoke(\"report_decode_support\"",
+    ] {
+        assert!(
+            settings.contains(required),
+            "recording settings must retain `{required}`"
+        );
+    }
+    for required in [
+        "fn probe_native_playback_capabilities(",
+        "probe_native_playback_capabilities,",
+        "fn report_decode_support(",
+        "report_decode_support,",
+        "Shipping-Tauri compatibility input only",
+    ] {
+        assert!(
+            app.contains(required),
+            "native command wiring must retain `{required}`"
+        );
+    }
+}
+
+#[test]
 fn settings_tabs_and_support_phases_are_accessible() {
     let html = index_html();
     let main = main_js();

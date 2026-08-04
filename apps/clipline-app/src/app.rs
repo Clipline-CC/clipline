@@ -3099,6 +3099,13 @@ fn probe_encoders() -> Vec<service::EncoderOption> {
     service::available_encoder_options()
 }
 
+/// Configures a real native H.264 decoder against Clipline's bounded probe
+/// profile. This is independent of WebView2's compatibility report.
+#[tauri::command(async)]
+fn probe_native_playback_capabilities() -> Result<service::PlaybackCapabilities, String> {
+    service::probe_playback_capabilities()
+}
+
 #[tauri::command(async)]
 fn list_game_windows() -> Vec<GameWindowInfo> {
     crate::games::list_game_windows()
@@ -3127,9 +3134,9 @@ fn list_game_plugins() -> Vec<GamePluginInfo> {
     crate::games::game_plugin_catalog()
 }
 
-/// The frontend reports which codecs WebView2 can decode (canPlayType) so
-/// Automatic selection never records a clip the review player can't show.
-/// Takes effect on the next recorder (re)start.
+/// Shipping-Tauri compatibility input only: the WebView reports what its own
+/// review player can decode. Native Slint recorder policy uses the configured
+/// `PlaybackCapabilities` probe instead. Takes effect on the next restart.
 #[tauri::command]
 fn report_decode_support(state: tauri::State<RuntimeState>, codecs: Vec<String>) {
     state.set_decodable_codecs(&codecs);
@@ -3713,6 +3720,7 @@ pub fn run(
             list_displays,
             list_audio_devices,
             probe_encoders,
+            probe_native_playback_capabilities,
             report_decode_support,
             list_game_plugins,
             list_game_windows,

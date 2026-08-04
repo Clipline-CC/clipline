@@ -45,6 +45,7 @@ const MAX_PENDING_ACCESS_UNITS: usize = 32;
 const MAX_PENDING_ENCODED_BYTES: usize = crate::MAX_ANNEX_B_ACCESS_UNIT_BYTES;
 pub const MAX_PLAYBACK_SURFACES: usize = 2;
 const MAX_STREAM_CHANGE_RETRIES: usize = 8;
+const MAX_H264_DECODER_CANDIDATES: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecoderPreference {
@@ -202,6 +203,10 @@ impl WindowsH264Decoder {
         self.preference
     }
 
+    pub fn adapter_luid(&self) -> Option<u64> {
+        self.device.adapter_luid()
+    }
+
     pub fn ownership_telemetry(&self) -> DecoderOwnershipTelemetry {
         self.session
             .as_ref()
@@ -338,6 +343,32 @@ struct DecoderCandidate {
     acceleration: VideoAcceleration,
 }
 
+pub(super) fn configure_h264_capability_tier(
+    device: &PlaybackD3D11Device,
+    acceleration: VideoAcceleration,
+    config: &H264DecoderConfig,
+) -> Result<bool, BackendError> {
+    let activations = enumerate_h264_decoders(acceleration == VideoAcceleration::Hardware)?;
+    let candidates = activations.into_iter().filter(|activation| {
+        acceleration == VideoAcceleration::Hardware || is_inbox_software_decoder(activation)
+    });
+    for activation in candidates {
+        let candidate = DecoderCandidate {
+            activation,
+            acceleration,
+        };
+        match ConfiguredTransform::new(device, candidate, config) {
+            Ok(configured) => {
+                drop(configured);
+                return Ok(true);
+            }
+            Err(error) if error.kind == BackendErrorKind::DeviceLost => return Err(error),
+            Err(_) => {}
+        }
+    }
+    Ok(false)
+}
+
 struct OwnedActivation(IMFActivate);
 
 impl Drop for OwnedActivation {
@@ -368,39 +399,23 @@ enum CallerOutputStorage {
     Memory,
 }
 
-struct DecoderSession {
+struct ConfiguredTransform {
     _activation: OwnedActivation,
     transform: IMFTransform,
     events: Option<IMFMediaEventGenerator>,
     asynchronous: bool,
     uses_dxgi_output: bool,
-    device: Rc<PlaybackD3D11Device>,
-    surfaces: Arc<TexturePool>,
     input_id: u32,
     output_id: u32,
     output_info: MFT_OUTPUT_STREAM_INFO,
-    caller_output: Option<CallerOutputSample>,
-    submitted: VecDeque<SubmittedFrame>,
-    pending_encoded_bytes: usize,
-    active_token: PipelineToken,
-    need_input_credits: u32,
-    have_output_events: u32,
-    drain_complete: bool,
-    output_time_offset_100ns: Option<i64>,
-    info: VideoDecoderInfo,
-    telemetry: DecoderOwnershipTelemetry,
-    coded_width: u32,
-    coded_height: u32,
-    cpu_nv12: Vec<u8>,
-    visible_nv12: Vec<u8>,
+    acceleration: VideoAcceleration,
 }
 
-impl DecoderSession {
+impl ConfiguredTransform {
     fn new(
-        device: Rc<PlaybackD3D11Device>,
+        device: &PlaybackD3D11Device,
         candidate: DecoderCandidate,
         config: &H264DecoderConfig,
-        token: PipelineToken,
     ) -> Result<Self, BackendError> {
         // SAFETY: candidate came from MFTEnumEx and remains alive through the
         // activation call.
@@ -432,10 +447,8 @@ impl DecoderSession {
         let (input_id, output_id) = (input_ids[0], output_ids[0]);
 
         // SAFETY: SET_D3D_MANAGER takes the live manager pointer as ULONG_PTR.
-        // Some inbox software-decoder builds advertise D3D11 awareness but
-        // reject a DXGI manager with E_NOINTERFACE. Hardware candidates must
-        // remain zero-copy; the explicit software tier may use bounded memory
-        // output followed by a copy into the playback-owned NV12 texture.
+        // Hardware candidates must bind it. The inbox software candidate may
+        // reject it and use bounded system-memory output instead.
         let manager_result = if d3d_aware {
             unsafe {
                 transform.ProcessMessage(
@@ -454,8 +467,7 @@ impl DecoderSession {
             Err(_) if candidate.acceleration == VideoAcceleration::Software => false,
             Err(error) => return Err(windows_backend(error, "bind decoder DXGI device manager")),
         };
-        // Decoder MFTs choose their DXVA or system-memory pipeline while
-        // negotiating types, so manager binding must happen first.
+
         configure_input_type(&transform, input_id, config)?;
         configure_nv12_output(&transform, output_id, config)?;
         let output_info = unsafe { transform.GetOutputStreamInfo(output_id) }
@@ -470,12 +482,82 @@ impl DecoderSession {
             None
         };
 
-        // SAFETY: standard streaming-start message order after both types and
-        // the optional D3D manager are set.
+        // Some decoder/device failures surface only when streaming begins, so
+        // capability truth includes both standard start notifications.
         unsafe { transform.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0) }
             .map_err(|error| windows_backend(error, "begin H.264 decoder streaming"))?;
         unsafe { transform.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0) }
             .map_err(|error| windows_backend(error, "start H.264 decoder streaming"))?;
+
+        Ok(Self {
+            _activation: activation,
+            transform,
+            events,
+            asynchronous,
+            uses_dxgi_output,
+            input_id,
+            output_id,
+            output_info,
+            acceleration: candidate.acceleration,
+        })
+    }
+}
+
+impl Drop for ConfiguredTransform {
+    fn drop(&mut self) {
+        // SAFETY: best-effort shutdown for a transform that completed the
+        // streaming-start sequence. The activation guard then shuts down the
+        // MFT before all remaining COM wrappers are released.
+        let _ = unsafe {
+            self.transform
+                .ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0)
+        };
+    }
+}
+
+struct DecoderSession {
+    configured: ConfiguredTransform,
+    device: Rc<PlaybackD3D11Device>,
+    surfaces: Arc<TexturePool>,
+    caller_output: Option<CallerOutputSample>,
+    submitted: VecDeque<SubmittedFrame>,
+    pending_encoded_bytes: usize,
+    active_token: PipelineToken,
+    need_input_credits: u32,
+    have_output_events: u32,
+    drain_complete: bool,
+    output_time_offset_100ns: Option<i64>,
+    info: VideoDecoderInfo,
+    telemetry: DecoderOwnershipTelemetry,
+    coded_width: u32,
+    coded_height: u32,
+    cpu_nv12: Vec<u8>,
+    visible_nv12: Vec<u8>,
+}
+
+impl std::ops::Deref for DecoderSession {
+    type Target = ConfiguredTransform;
+
+    fn deref(&self) -> &Self::Target {
+        &self.configured
+    }
+}
+
+impl std::ops::DerefMut for DecoderSession {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.configured
+    }
+}
+
+impl DecoderSession {
+    fn new(
+        device: Rc<PlaybackD3D11Device>,
+        candidate: DecoderCandidate,
+        config: &H264DecoderConfig,
+        token: PipelineToken,
+    ) -> Result<Self, BackendError> {
+        let configured = ConfiguredTransform::new(&device, candidate, config)?;
+        let acceleration = configured.acceleration;
 
         let width = config.width();
         let height = config.height();
@@ -513,16 +595,9 @@ impl DecoderSession {
             );
         }
         Ok(Self {
-            _activation: activation,
-            transform,
-            events,
-            asynchronous,
-            uses_dxgi_output,
+            configured,
             device: Rc::clone(&device),
             surfaces: Arc::new(TexturePool::new(playback_textures)),
-            input_id,
-            output_id,
-            output_info,
             caller_output: None,
             submitted: VecDeque::with_capacity(MAX_PENDING_ACCESS_UNITS),
             pending_encoded_bytes: 0,
@@ -532,7 +607,7 @@ impl DecoderSession {
             drain_complete: false,
             output_time_offset_100ns: None,
             info: VideoDecoderInfo {
-                acceleration: candidate.acceleration,
+                acceleration,
                 pixel_format: VideoPixelFormat::Nv12,
                 width,
                 height,
@@ -907,7 +982,7 @@ impl DecoderSession {
     }
 
     fn poll_events(&mut self) -> Result<(), BackendError> {
-        let Some(events) = self.events.as_ref() else {
+        let Some(events) = self.configured.events.clone() else {
             return Ok(());
         };
         loop {
@@ -940,7 +1015,7 @@ impl DecoderSession {
     }
 
     fn discard_pending_events(&mut self) -> Result<(), BackendError> {
-        let Some(events) = self.events.as_ref() else {
+        let Some(events) = self.configured.events.clone() else {
             return Ok(());
         };
         loop {
@@ -964,12 +1039,6 @@ impl Drop for DecoderSession {
     fn drop(&mut self) {
         self.submitted.clear();
         self.caller_output = None;
-        // SAFETY: best-effort shutdown for a live transform. The activation
-        // guard then calls ShutdownObject before all COM wrappers are released.
-        let _ = unsafe {
-            self.transform
-                .ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0)
-        };
     }
 }
 
@@ -1057,6 +1126,20 @@ fn enumerate_h264_decoders(hardware: bool) -> Result<Vec<IMFActivate>, BackendEr
             unsafe { CoTaskMemFree(Some(raw_activations.cast())) };
         }
         return Ok(Vec::new());
+    }
+    if usize::try_from(count).unwrap_or(usize::MAX) > MAX_H264_DECODER_CANDIDATES {
+        // SAFETY: release every returned activation before freeing the array;
+        // no Rust collection is allocated for an over-cap OS result.
+        unsafe {
+            let slice = std::slice::from_raw_parts_mut(raw_activations, count as usize);
+            for activation in slice {
+                drop(activation.take());
+            }
+            CoTaskMemFree(Some(raw_activations.cast()));
+        }
+        return Err(unavailable_error(format!(
+            "H.264 decoder candidate count {count} exceeds {MAX_H264_DECODER_CANDIDATES}"
+        )));
     }
     // SAFETY: MFTEnumEx returned `count` initialized optional interfaces.
     let activations = unsafe {

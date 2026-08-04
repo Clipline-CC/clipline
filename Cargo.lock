@@ -1060,6 +1060,7 @@ dependencies = [
  "clipline-games",
  "clipline-library",
  "clipline-lol",
+ "clipline-playback",
  "clipline-settings",
  "clipline-shell",
  "clipline-storage",

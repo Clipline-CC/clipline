@@ -35,7 +35,8 @@ stable; the baseline commit preserves exact historical locations.
 | `command:list_displays` | `app.rs`; enumerate displays and stable identifiers. | M8 capture settings | Device fixture and live multi-display check. | `not_started` |
 | `command:list_audio_devices` | `app.rs`; enumerate output and microphone endpoints. | M8 capture settings | Device fixture and live add/remove check. | `not_started` |
 | `command:probe_encoders` | `app.rs`; asynchronous hardware/FFmpeg encoder probe. | M8 recording settings | Existing probe tests and live Windows matrix. | `not_started` |
-| `command:report_decode_support` | `app.rs`; frontend capability report influences Automatic encoder choice. | M8 native playback probe | Capability-to-encoder decision test. | `not_started` |
+| `command:probe_native_playback_capabilities` | Configures the native MFT against a bounded Clipline-authored H.264 profile, reports hardware/software/unavailable truth, and leaves HEVC/AV1 explicitly ungated. | M8 native playback probe | Neutral capability matrix, real Windows configuration/release smoke, and capability-to-encoder policy tests. | `implemented` |
+| `command:report_decode_support` | Shipping-Tauri-only WebView `canPlayType` compatibility input; it does not influence the Slint/native recorder policy. | M8 native playback probe | UI contract keeps the compatibility command isolated from configured native capability truth. | `implemented` |
 | `command:list_game_plugins` | `app.rs`; return installed game integration descriptors. | M8 games | Plugin presentation fixture. | `not_started` |
 | `command:list_game_windows` | `app.rs`; enumerate candidate running windows. | M8 games | Window-enumeration adapter test. | `not_started` |
 | `command:detect_installed_games` | `app.rs`; merge detected and custom games. | M8 games | Existing detector fixtures and stale-result test. | `not_started` |
