@@ -4,6 +4,36 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-04): review video edit-list flicker
+
+Plan: `docs/superpowers/plans/2026-08-04-review-video-edit-list-flicker.md` (`77fa3de`).
+
+An affected 29.007-second user clip flashes its stale initial frame twice during playback in
+Clipline but not in a desktop player. Its H.264 stream has 1,740 unique, strictly ordered decoded
+frames and no decode errors, so the apparent first-frame repeats are not present in the source
+picture data. The video track instead has three internal empty edits, each exactly one 90 kHz tick
+(11 microseconds), at approximately 5.003, 14.506, and 27.006 seconds. Capture-clock rounding can
+put a fragment one tick beyond the MP4 writer frontier; desktop players conceal these unpresentable
+gaps, while WebView2 can briefly expose its stale initial video surface at an edit boundary.
+
+`HybridMp4Writer::set_track_decode_time` now absorbs only positive internal video gaps shorter than
+the preceding sample by extending that sample's duration. It updates the duration run, media
+duration, presentation run, and next decode time together. Leading video gaps, frame-sized or larger
+video gaps, every audio gap, and backward-time rejection are unchanged. Because trimming and audio
+track selection use the same writer, remuxes of older affected clips are normalized as well as new
+recordings.
+
+The supplied clip remuxes without a video edit list while retaining all 1,740 video frames and both
+1,450-packet Opus tracks. Decoded video has the same aggregate MD5 before and after, total container
+duration is unchanged, and video duration grows by only the three absorbed ticks (33 microseconds).
+The focused red/green regression, complete `clipline-mp4` suite, full workspace tests, targeted
+formatting, diff check, and fresh-cache warning-denied workspace Clippy are green. A fresh
+development build was launched successfully; the user-visible WebView playback check remains.
+
+Manual retest: play a new 30-second output-plus-microphone clip end to end, repeat with only Output
+Audio selected, then seek and replay while checking for flashes and A/V drift. A deliberate capture
+interruption lasting at least one video frame should still remain an explicit timeline gap.
+
 ## Checkpoint (2026-08-02): Nightly 0.1.44
 
 Plan: `docs/superpowers/plans/2026-08-02-nightly-0.1.44.md`.
