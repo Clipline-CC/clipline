@@ -6,9 +6,117 @@ use std::time::{Duration, Instant};
 use clipline_desktop::{
     ui_event_channel, CatalogSummarySnapshot, CatalogSummarySource, CloudAccountOwner,
     CloudAccountScope, CloudUploadProgress, CloudUploadUpdateKind, Generation, MicMonitor,
-    RecorderEvent, Revision, UiEvent, UiEventPublishOutcome, UiEventReceiveError, UiEventSendError,
-    WindowLifecycleMode, WindowLifecycleSnapshot, UI_EVENT_CAPACITY,
+    ProbeKind, ProbePhase, ProbeRequestGeneration, ProbeSessionOwner, ProbeSummary, ProbeToken,
+    RecorderEvent, Revision, SettingsAttachmentGeneration, SettingsForegroundGeneration,
+    SettingsSessionGeneration, UiEvent, UiEventPublishOutcome, UiEventReceiveError,
+    UiEventSendError, WindowLifecycleMode, WindowLifecycleSnapshot, UI_EVENT_CAPACITY,
 };
+
+fn probe(
+    session: u64,
+    attachment: u64,
+    foreground: u64,
+    request: u64,
+    kind: ProbeKind,
+    phase: ProbePhase,
+) -> UiEvent {
+    UiEvent::SettingsProbeChanged {
+        summary: ProbeSummary {
+            token: ProbeToken {
+                owner: ProbeSessionOwner::new(
+                    SettingsSessionGeneration::new(session),
+                    SettingsAttachmentGeneration::new(attachment),
+                    SettingsForegroundGeneration::new(foreground),
+                ),
+                kind,
+                request_generation: ProbeRequestGeneration::new(request),
+            },
+            phase,
+            error: (phase == ProbePhase::Failed).then(|| "probe failed".to_owned()),
+        },
+    }
+}
+
+#[test]
+fn terminal_probe_results_are_exactly_fenced_and_are_durable_barriers() {
+    let (sender, receiver) = ui_event_channel();
+    let ready = probe(2, 3, 4, 5, ProbeKind::Displays, ProbePhase::Ready);
+    assert_eq!(
+        sender.try_publish(ready.clone()),
+        Ok(UiEventPublishOutcome::Queued)
+    );
+    assert_eq!(
+        sender.try_publish(probe(2, 3, 4, 4, ProbeKind::Displays, ProbePhase::Ready)),
+        Err(UiEventSendError::StaleProbe {
+            current: match &ready {
+                UiEvent::SettingsProbeChanged { summary } => summary.token,
+                _ => unreachable!(),
+            },
+            received: match probe(2, 3, 4, 4, ProbeKind::Displays, ProbePhase::Ready) {
+                UiEvent::SettingsProbeChanged { summary } => summary.token,
+                _ => unreachable!(),
+            },
+        })
+    );
+    assert_eq!(
+        sender.try_publish(probe(1, 9, 9, 99, ProbeKind::Displays, ProbePhase::Ready)),
+        Err(UiEventSendError::StaleProbeOwner {
+            current: ProbeSessionOwner::new(
+                SettingsSessionGeneration::new(2),
+                SettingsAttachmentGeneration::new(3),
+                SettingsForegroundGeneration::new(4),
+            ),
+            received: ProbeSessionOwner::new(
+                SettingsSessionGeneration::new(1),
+                SettingsAttachmentGeneration::new(9),
+                SettingsForegroundGeneration::new(9),
+            ),
+        })
+    );
+    assert_eq!(
+        sender.try_publish(probe(2, 3, 4, 5, ProbeKind::Displays, ProbePhase::Failed)),
+        Err(UiEventSendError::InvalidProbeSummary)
+    );
+    assert_eq!(
+        sender.try_publish(probe(3, 1, 1, 1, ProbeKind::Displays, ProbePhase::Failed)),
+        Ok(UiEventPublishOutcome::Queued)
+    );
+    assert_eq!(
+        sender.try_publish(probe(2, 99, 99, 50, ProbeKind::Encoders, ProbePhase::Ready,)),
+        Err(UiEventSendError::StaleProbeOwner {
+            current: ProbeSessionOwner::new(
+                SettingsSessionGeneration::new(3),
+                SettingsAttachmentGeneration::new(1),
+                SettingsForegroundGeneration::new(1),
+            ),
+            received: ProbeSessionOwner::new(
+                SettingsSessionGeneration::new(2),
+                SettingsAttachmentGeneration::new(99),
+                SettingsForegroundGeneration::new(99),
+            ),
+        })
+    );
+    assert_eq!(receiver.len(), 2, "terminal results never replace barriers");
+}
+
+#[test]
+fn pending_or_malformed_probe_result_events_fail_closed() {
+    let (sender, receiver) = ui_event_channel();
+    assert_eq!(
+        sender.try_publish(probe(1, 1, 1, 1, ProbeKind::Storage, ProbePhase::Pending)),
+        Err(UiEventSendError::InvalidProbeSummary)
+    );
+    let mut malformed = probe(1, 1, 1, 1, ProbeKind::Storage, ProbePhase::Failed);
+    let UiEvent::SettingsProbeChanged { summary } = &mut malformed else {
+        unreachable!();
+    };
+    summary.error = None;
+    assert_eq!(
+        sender.try_publish(malformed),
+        Err(UiEventSendError::InvalidProbeSummary)
+    );
+    assert!(receiver.is_empty());
+}
 
 fn status(generation: u64, segments: usize) -> UiEvent {
     UiEvent::Recorder {

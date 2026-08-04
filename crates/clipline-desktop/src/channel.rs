@@ -6,7 +6,8 @@ use thiserror::Error;
 
 use crate::{
     CatalogSummarySnapshot, CloudAccountOwner, CloudAccountScope, CloudUploadUpdateKind,
-    Generation, RecorderEvent, Revision, UiEvent, WindowLifecycleMode,
+    Generation, ProbeKind, ProbePhase, ProbeSessionOwner, ProbeSummary, ProbeToken, RecorderEvent,
+    Revision, UiEvent, WindowLifecycleMode,
 };
 
 pub const UI_EVENT_CAPACITY: usize = 128;
@@ -50,6 +51,18 @@ pub enum UiEventSendError {
     InvalidAccountGeneration,
     #[error("invalid cloud upload progress: {0}")]
     InvalidCloudProgress(&'static str),
+    #[error("invalid settings probe summary")]
+    InvalidProbeSummary,
+    #[error("stale settings probe token {received:?}; current is {current:?}")]
+    StaleProbe {
+        current: ProbeToken,
+        received: ProbeToken,
+    },
+    #[error("stale settings probe owner {received:?}; current is {current:?}")]
+    StaleProbeOwner {
+        current: ProbeSessionOwner,
+        received: ProbeSessionOwner,
+    },
     #[error("UI event sequence is exhausted")]
     SequenceExhausted,
 }
@@ -97,6 +110,8 @@ struct ChannelState {
     catalog: Option<CatalogSummarySnapshot>,
     cloud_account_generation: CloudAccountScope,
     cloud_account: Option<CloudAccountOwner>,
+    probe_owner: Option<ProbeSessionOwner>,
+    probe_summaries: HashMap<ProbeKind, ProbeSummary>,
 }
 
 struct Shared {
@@ -304,6 +319,7 @@ fn generation_domain(event: &UiEvent) -> Option<(GenerationDomain, Generation)> 
         }
         UiEvent::WindowLifecycle { .. }
         | UiEvent::CatalogSummaryChanged { .. }
+        | UiEvent::SettingsProbeChanged { .. }
         | UiEvent::CloudAccountChanged { .. }
         | UiEvent::UserError { .. } => None,
     }
@@ -336,6 +352,24 @@ fn validate_generation(state: &ChannelState, event: &UiEvent) -> Result<(), UiEv
                     current: current.revision,
                     received: summary.revision,
                 });
+            }
+        }
+    }
+    if let UiEvent::SettingsProbeChanged { summary } = event {
+        if summary.phase == ProbePhase::Pending || summary.validate().is_err() {
+            return Err(UiEventSendError::InvalidProbeSummary);
+        }
+        if let Some(current) = state.probe_owner {
+            if summary.token.owner < current {
+                return Err(UiEventSendError::StaleProbeOwner {
+                    current,
+                    received: summary.token.owner,
+                });
+            }
+        }
+        if let Some(current) = state.probe_summaries.get(&summary.token.kind) {
+            if current.token.owner == summary.token.owner {
+                validate_probe_transition(current, summary)?;
             }
         }
     }
@@ -394,6 +428,15 @@ fn record_generation(state: &mut ChannelState, event: &UiEvent) {
     if let UiEvent::CatalogSummaryChanged { summary } = event {
         state.catalog = Some(*summary);
     }
+    if let UiEvent::SettingsProbeChanged { summary } = event {
+        if state.probe_owner != Some(summary.token.owner) {
+            state.probe_summaries.clear();
+            state.probe_owner = Some(summary.token.owner);
+        }
+        state
+            .probe_summaries
+            .insert(summary.token.kind, summary.clone());
+    }
     if let Some((domain, generation)) = generation_domain(event) {
         state.generations.insert(domain, generation);
     }
@@ -450,6 +493,7 @@ fn coalescing_key(event: &UiEvent) -> Option<CoalescingKey> {
             ..
         }
         | UiEvent::CloudUploadRemoved { .. }
+        | UiEvent::SettingsProbeChanged { .. }
         | UiEvent::UserError { .. } => None,
     }
 }
@@ -468,8 +512,28 @@ fn is_durable_barrier(event: &UiEvent) -> bool {
                 ..
             }
             | UiEvent::CloudUploadRemoved { .. }
+            | UiEvent::SettingsProbeChanged { .. }
             | UiEvent::UserError { .. }
     )
+}
+
+fn validate_probe_transition(
+    current: &ProbeSummary,
+    received: &ProbeSummary,
+) -> Result<(), UiEventSendError> {
+    if received.token.owner < current.token.owner
+        || (received.token.owner == current.token.owner
+            && received.token.request_generation < current.token.request_generation)
+    {
+        return Err(UiEventSendError::StaleProbe {
+            current: current.token,
+            received: received.token,
+        });
+    }
+    if received.token == current.token && received != current {
+        return Err(UiEventSendError::InvalidProbeSummary);
+    }
+    Ok(())
 }
 
 fn uses_reserved_slot(event: &UiEvent) -> bool {

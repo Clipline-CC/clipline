@@ -2132,6 +2132,23 @@ fn dispatch_ui_action<R: Runtime>(
             publish_window_lifecycle(app, mode);
             Ok(AppUiActionResult::None)
         }
+        UiEffect::RequestSettingsProbe { token } => {
+            if let Err(error) = app
+                .state::<crate::settings_probe::SettingsProbeRuntime>()
+                .submit(token, &state.settings())
+            {
+                let summary = clipline_desktop::ProbeSummary {
+                    token,
+                    phase: clipline_desktop::ProbePhase::Failed,
+                    error: Some(error.clone()),
+                };
+                let _ = app
+                    .state::<crate::desktop::tauri_sink::TauriUiEventSink>()
+                    .try_publish(UiEvent::SettingsProbeChanged { summary });
+                return Err(error);
+            }
+            Ok(AppUiActionResult::None)
+        }
         UiEffect::None => Ok(AppUiActionResult::None),
     }
 }
@@ -3024,7 +3041,7 @@ async fn choose_replay_cache_folder(
         .map(|selected| selected.map(|path| path.display().to_string()))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn list_displays() -> Result<Vec<DisplayInfo>, String> {
     clipline_capture::windows::display::enumerate_displays()
         .map_err(|e| e.to_string())
@@ -3044,7 +3061,7 @@ fn list_displays() -> Result<Vec<DisplayInfo>, String> {
         })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn list_audio_devices() -> Result<AudioDeviceLists, String> {
     clipline_capture::windows::wasapi::enumerate_audio_devices()
         .map_err(|e| e.to_string())
@@ -3082,7 +3099,7 @@ fn probe_encoders() -> Vec<service::EncoderOption> {
     service::available_encoder_options()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn list_game_windows() -> Vec<GameWindowInfo> {
     crate::games::list_game_windows()
 }
@@ -3096,7 +3113,7 @@ fn detect_installed_games(
 
 /// Extract an executable's icon as a PNG `data:` URL for the custom-games UI.
 /// Returns `None` when the path has no usable icon.
-#[tauri::command]
+#[tauri::command(async)]
 fn extract_window_icon(process_id: u32) -> Option<String> {
     let path = crate::games::list_game_windows()
         .into_iter()
@@ -3105,7 +3122,7 @@ fn extract_window_icon(process_id: u32) -> Option<String> {
     crate::game_icon::extract_exe_icon_data_url(&path)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn list_game_plugins() -> Vec<GamePluginInfo> {
     crate::games::game_plugin_catalog()
 }
@@ -3654,6 +3671,9 @@ pub fn run(
             .expect("initialize bounded desktop snapshot");
     let (ui_event_sink, ui_event_receiver) =
         crate::desktop::tauri_sink::TauriUiEventSink::channel();
+    let settings_probe_runtime =
+        crate::settings_probe::SettingsProbeRuntime::new(ui_event_sink.clone())
+            .expect("start bounded settings probe runtime");
     let launched_by_autostart = launch.mode() == LaunchMode::Autostart;
     let active_files = ActiveFileRegistry::new();
     let runtime_state = RuntimeState::with_store_and_registry(
@@ -3669,6 +3689,7 @@ pub fn run(
         .manage(desktop_state)
         .manage(crate::desktop::ProducerGenerations::default())
         .manage(ui_event_sink)
+        .manage(settings_probe_runtime)
         .manage(StartupWarnings::new(startup_warnings))
         .manage(WindowLifecycleState::default())
         .manage(shell_sender.clone())

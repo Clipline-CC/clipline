@@ -6,6 +6,7 @@
 //! anti-cheat-safe: no injection, no memory reads, no game-process hooks. Event
 //! ingestion stays behind built-in capability names.
 
+use std::io::Read as _;
 use std::sync::OnceLock;
 
 use base64::Engine as _;
@@ -20,6 +21,11 @@ use crate::detection::GameWindow;
 pub use crate::identity::{LEAGUE_OF_LEGENDS_ID, OSU_ID};
 pub const LEAGUE_LIVE_CLIENT_EVENT_SOURCE: &str = "league_live_client";
 pub const GAME_PROFILE_SCHEMA_VERSION: u32 = 1;
+pub const MAX_GAME_PLUGINS: usize = 16;
+pub const MAX_PLUGIN_ICON_BYTES: usize = 1024 * 1024;
+pub const MAX_PLUGIN_ICON_DATA_URL_BYTES: usize = (MAX_PLUGIN_ICON_BYTES * 4 / 3) + 128;
+pub const MAX_PLUGIN_TEXT_BYTES: usize = 64 * 1024;
+pub const MAX_PLUGIN_CATALOG_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct GamePluginInfo {
@@ -312,7 +318,20 @@ impl GamePlugin {
 }
 
 fn extracted_icon_data_url(cache: &std::path::Path) -> Option<String> {
-    let bytes = std::fs::read(cache).ok()?;
+    let mut file = std::fs::File::open(cache).ok()?;
+    let length = file.metadata().ok()?.len();
+    if length > MAX_PLUGIN_ICON_BYTES as u64 {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(length as usize).ok()?;
+    file.by_ref()
+        .take(MAX_PLUGIN_ICON_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() > MAX_PLUGIN_ICON_BYTES {
+        return None;
+    }
     Some(png_data_url(&bytes))
 }
 
@@ -394,13 +413,75 @@ fn catalog_base() -> &'static [GamePluginInfo] {
 }
 
 pub fn catalog(icon_cache_dir: &std::path::Path) -> Vec<GamePluginInfo> {
+    catalog_bounded(icon_cache_dir).unwrap_or_default()
+}
+
+pub fn catalog_bounded(icon_cache_dir: &std::path::Path) -> Result<Vec<GamePluginInfo>, String> {
+    if all().len() > MAX_GAME_PLUGINS {
+        return Err(format!(
+            "game plugin count {} exceeds {MAX_GAME_PLUGINS}",
+            all().len()
+        ));
+    }
     let mut catalog = catalog_base().to_vec();
     for (profile, info) in all().iter().zip(&mut catalog) {
         if profile.uses_extracted_icon() {
             info.icon = profile.icon_string(icon_cache_dir);
         }
     }
-    catalog
+    validate_plugin_catalog(&catalog)?;
+    Ok(catalog)
+}
+
+pub fn validate_plugin_catalog(catalog: &[GamePluginInfo]) -> Result<(), String> {
+    if catalog.len() > MAX_GAME_PLUGINS {
+        return Err(format!(
+            "game plugin count {} exceeds {MAX_GAME_PLUGINS}",
+            catalog.len()
+        ));
+    }
+    let mut aggregate = 0usize;
+    for plugin in catalog {
+        for value in [
+            plugin.id.as_str(),
+            plugin.name.as_str(),
+            plugin.summary.as_str(),
+        ] {
+            if value.len() > MAX_PLUGIN_TEXT_BYTES {
+                return Err(format!(
+                    "game plugin text is {} bytes; maximum is {MAX_PLUGIN_TEXT_BYTES}",
+                    value.len(),
+                ));
+            }
+            aggregate = aggregate
+                .checked_add(value.len())
+                .ok_or_else(|| "game plugin byte count overflowed".to_string())?;
+        }
+        if let Some(icon) = plugin.icon.as_deref() {
+            if icon.len() > MAX_PLUGIN_ICON_DATA_URL_BYTES {
+                return Err(format!(
+                    "game plugin icon is {} bytes; maximum is {MAX_PLUGIN_ICON_DATA_URL_BYTES}",
+                    icon.len()
+                ));
+            }
+            aggregate = aggregate
+                .checked_add(icon.len())
+                .ok_or_else(|| "game plugin byte count overflowed".to_string())?;
+        }
+        if let Some(presentation) = plugin.presentation.as_ref() {
+            let bytes = serde_json::to_vec(presentation)
+                .map_err(|error| format!("serialize game plugin presentation: {error}"))?;
+            aggregate = aggregate
+                .checked_add(bytes.len())
+                .ok_or_else(|| "game plugin byte count overflowed".to_string())?;
+        }
+    }
+    if aggregate > MAX_PLUGIN_CATALOG_BYTES {
+        return Err(format!(
+            "game plugin catalog is {aggregate} bytes; maximum is {MAX_PLUGIN_CATALOG_BYTES}"
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -762,6 +843,31 @@ mod tests {
         let err = GameProfileManifest::from_json(json).unwrap_err();
 
         assert!(err.contains("unsupported game profile schema"), "{err}");
+    }
+
+    #[test]
+    fn extracted_icon_reader_rejects_oversize_cache_files() {
+        let dir = TestDir::new("clipline-game-plugin", "oversize-icon");
+        let cache = dir.path().join("icon.png");
+        let file = std::fs::File::create(&cache).unwrap();
+        file.set_len(MAX_PLUGIN_ICON_BYTES as u64 + 1).unwrap();
+        assert!(extracted_icon_data_url(&cache).is_none());
+    }
+
+    #[test]
+    fn plugin_catalog_validator_rejects_oversize_text() {
+        let plugin = GamePluginInfo {
+            id: "plugin".into(),
+            name: "é".repeat(MAX_PLUGIN_TEXT_BYTES),
+            summary: "summary".into(),
+            default_enabled: false,
+            default_recording_mode: GameRecordingMode::ReplaysOnly,
+            default_review: GamePluginReviewSettings::default(),
+            event_markers: false,
+            presentation: None,
+            icon: None,
+        };
+        assert!(validate_plugin_catalog(&[plugin]).is_err());
     }
 
     #[test]

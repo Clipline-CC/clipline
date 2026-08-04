@@ -1,5 +1,10 @@
 //! Framework-neutral desktop UI contract for Clipline.
 
+pub use clipline_settings::{
+    ProbeKind, ProbePhase, ProbeRequestGeneration, ProbeSessionOwner, ProbeSummary, ProbeToken,
+    SettingsAttachmentGeneration, SettingsForegroundGeneration, SettingsSessionGeneration,
+};
+
 mod action;
 mod channel;
 mod controller;
@@ -12,8 +17,9 @@ pub use channel::{
     UiEventReceiver, UiEventSendError, UiEventSender, UiEventSink, UI_EVENT_CAPACITY,
 };
 pub use controller::{
-    ApplyEventOutcome, ControllerError, DesktopController, DispatchOutcome, MAX_ACTIVE_UPLOADS,
-    MAX_NOTICE_MESSAGE_BYTES, MAX_PENDING_NOTICES,
+    ApplyEventOutcome, ControllerError, DesktopController, DispatchOutcome,
+    DESKTOP_SNAPSHOT_SCHEMA_VERSION, MAX_ACTIVE_UPLOADS, MAX_NOTICE_MESSAGE_BYTES,
+    MAX_PENDING_NOTICES, MAX_SETTINGS_PROBE_SUMMARIES,
 };
 pub use event::{
     CloudUploadProgress, CloudUploadUpdateKind, EventPayloadError, GameDetection, MicMonitor,

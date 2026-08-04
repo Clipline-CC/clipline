@@ -2,9 +2,24 @@ use clipline_desktop::{
     ApplyEventOutcome, CatalogSummarySnapshot, CatalogSummarySource, CloudAccountOwner,
     CloudAccountScope, CloudUploadProgress, CloudUploadUpdateKind, ControllerError,
     DesktopController, GameDetection, Generation, MicMonitor, MicrophonePhase, NoticeKind,
-    RecorderEvent, Revision, UiAction, UiEffect, UiEvent, WindowLifecycleMode,
-    WindowLifecycleSnapshot, MAX_ACTIVE_UPLOADS, MAX_NOTICE_MESSAGE_BYTES, MAX_PENDING_NOTICES,
+    ProbeKind, ProbePhase, ProbeRequestGeneration, ProbeSessionOwner, ProbeSummary, ProbeToken,
+    RecorderEvent, Revision, SettingsAttachmentGeneration, SettingsForegroundGeneration,
+    SettingsSessionGeneration, UiAction, UiEffect, UiEvent, WindowLifecycleMode,
+    WindowLifecycleSnapshot, DESKTOP_SNAPSHOT_SCHEMA_VERSION, MAX_ACTIVE_UPLOADS,
+    MAX_NOTICE_MESSAGE_BYTES, MAX_PENDING_NOTICES,
 };
+
+fn probe_token(session: u64, request: u64, kind: ProbeKind) -> ProbeToken {
+    ProbeToken {
+        owner: ProbeSessionOwner::new(
+            SettingsSessionGeneration::new(session),
+            SettingsAttachmentGeneration::new(1),
+            SettingsForegroundGeneration::new(1),
+        ),
+        kind,
+        request_generation: ProbeRequestGeneration::new(request),
+    }
+}
 
 fn status(generation: u64, recording: bool, segments: usize) -> UiEvent {
     UiEvent::Recorder {
@@ -184,7 +199,7 @@ fn fresh_snapshot_is_complete_and_keeps_exact_settings() {
         DesktopController::new(settings.clone(), vec!["capture fallback active".to_owned()])
             .unwrap();
     let snapshot = controller.snapshot();
-    assert_eq!(snapshot.schema_version, 4);
+    assert_eq!(snapshot.schema_version, DESKTOP_SNAPSHOT_SCHEMA_VERSION);
     assert_eq!(snapshot.revision, Revision::INITIAL);
     assert_eq!(snapshot.settings, settings);
     assert_eq!(snapshot.settings_revision, Revision::INITIAL);
@@ -197,8 +212,117 @@ fn fresh_snapshot_is_complete_and_keeps_exact_settings() {
     assert_eq!(snapshot.current_cloud_account, None);
     assert_eq!(snapshot.library_revision, Revision::INITIAL);
     assert_eq!(snapshot.catalog, CatalogSummarySnapshot::default());
+    assert!(snapshot.settings_probes.is_empty());
     assert_eq!(snapshot.notices.len(), 1);
     assert_eq!(snapshot.notices[0].kind, NoticeKind::StartupWarning);
+}
+
+#[test]
+fn settings_probe_request_and_terminal_result_publish_only_compact_fenced_state() {
+    let mut controller = DesktopController::new((), Vec::new()).unwrap();
+    let token = probe_token(2, 7, ProbeKind::AudioEndpoints);
+    let dispatched = controller
+        .dispatch(UiAction::RequestSettingsProbe { token })
+        .unwrap();
+    assert_eq!(dispatched.effect, UiEffect::RequestSettingsProbe { token });
+    assert_eq!(controller.snapshot().settings_probes.len(), 1);
+    assert_eq!(
+        controller.snapshot().settings_probes[0].phase,
+        ProbePhase::Pending
+    );
+
+    assert!(matches!(
+        controller
+            .apply_event(UiEvent::SettingsProbeChanged {
+                summary: ProbeSummary {
+                    token,
+                    phase: ProbePhase::Ready,
+                    error: None,
+                },
+            })
+            .unwrap(),
+        ApplyEventOutcome::Applied { .. }
+    ));
+    let snapshot = controller.snapshot();
+    assert_eq!(snapshot.settings_probes.len(), 1);
+    assert_eq!(snapshot.settings_probes[0].phase, ProbePhase::Ready);
+
+    let before = snapshot;
+    let stale = probe_token(1, 99, ProbeKind::AudioEndpoints);
+    assert_eq!(
+        controller
+            .apply_event(UiEvent::SettingsProbeChanged {
+                summary: ProbeSummary {
+                    token: stale,
+                    phase: ProbePhase::Ready,
+                    error: None,
+                },
+            })
+            .unwrap(),
+        ApplyEventOutcome::Stale
+    );
+    assert_eq!(controller.snapshot(), before);
+
+    let next = probe_token(3, 1, ProbeKind::Storage);
+    controller
+        .dispatch(UiAction::RequestSettingsProbe { token: next })
+        .unwrap();
+    assert_eq!(controller.snapshot().settings_probes.len(), 1);
+    assert_eq!(
+        controller.snapshot().settings_probes[0].token.owner,
+        next.owner
+    );
+    assert_eq!(
+        controller
+            .apply_event(UiEvent::SettingsProbeChanged {
+                summary: ProbeSummary {
+                    token,
+                    phase: ProbePhase::Ready,
+                    error: None,
+                },
+            })
+            .unwrap(),
+        ApplyEventOutcome::Stale
+    );
+}
+
+#[test]
+fn settings_probe_rejects_result_pending_and_conflicting_terminal_republication() {
+    let mut controller = DesktopController::new((), Vec::new()).unwrap();
+    let token = probe_token(1, 1, ProbeKind::Storage);
+    controller
+        .dispatch(UiAction::RequestSettingsProbe { token })
+        .unwrap();
+    let pending = UiEvent::SettingsProbeChanged {
+        summary: ProbeSummary {
+            token,
+            phase: ProbePhase::Pending,
+            error: None,
+        },
+    };
+    assert!(matches!(
+        controller.apply_event(pending),
+        Err(ControllerError::InvalidProbeSummary(_))
+    ));
+    controller
+        .apply_event(UiEvent::SettingsProbeChanged {
+            summary: ProbeSummary {
+                token,
+                phase: ProbePhase::Ready,
+                error: None,
+            },
+        })
+        .unwrap();
+    assert!(matches!(
+        controller.apply_event(UiEvent::SettingsProbeChanged {
+            summary: ProbeSummary {
+                token,
+                phase: ProbePhase::Failed,
+                error: Some("late contradiction".into()),
+            },
+        }),
+        Err(ControllerError::InvalidProbeSummary(_))
+    ));
 }
 
 #[test]

@@ -8,6 +8,7 @@ license.workspace = true
 shiguredo_opus = { workspace = true }
 clipline-buffer = { path = "../clipline-buffer" }
 clipline-mp4 = { path = "../clipline-mp4" }
+serde = { workspace = true }
 thiserror = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]

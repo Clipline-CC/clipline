@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{CloudUploadProgress, GameDetection, MicMonitor};
+use crate::{CloudUploadProgress, GameDetection, MicMonitor, ProbeSummary};
 
 pub const MAX_CLOUD_ACCOUNT_KEY_BYTES: usize = 16 * 1024;
 
@@ -336,6 +336,9 @@ pub struct DesktopSnapshot<S> {
     pub uploads: Vec<CloudUploadSnapshot>,
     pub library_revision: Revision,
     pub catalog: CatalogSummarySnapshot,
+    /// Compact per-kind state only. Full device/game/capability catalogs stay
+    /// in the settings-session result port and never enter this snapshot.
+    pub settings_probes: Vec<ProbeSummary>,
     pub enrichment_generation: Generation,
     pub notices: Vec<Notice>,
     pub notice_sequence: u64,

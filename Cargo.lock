@@ -949,6 +949,7 @@ dependencies = [
  "clipline-buffer",
  "clipline-mp4",
  "clipline-test-utils",
+ "serde",
  "shiguredo_opus",
  "thiserror 2.0.18",
  "windows 0.62.2",
@@ -959,6 +960,7 @@ dependencies = [
 name = "clipline-desktop"
 version = "0.1.0"
 dependencies = [
+ "clipline-settings",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -1095,6 +1097,7 @@ name = "clipline-storage"
 version = "0.1.0"
 dependencies = [
  "clipline-test-utils",
+ "serde",
 ]
 
 [[package]]

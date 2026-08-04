@@ -9,8 +9,11 @@ use windows::Win32::Graphics::Gdi::{
 use crate::traits::CaptureError;
 
 const MONITORINFOF_PRIMARY: u32 = 0x00000001;
+pub const MAX_PROBE_DISPLAYS: usize = 64;
+pub const MAX_DISPLAY_TEXT_BYTES: usize = 16 * 1024;
+pub const MAX_DISPLAY_CATALOG_BYTES: usize = 256 * 1024;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct DisplayInfo {
     /// Win32 device id, e.g. `\\.\DISPLAY1`.
     pub id: String,
@@ -30,10 +33,48 @@ pub struct DisplayHandle {
 }
 
 pub fn enumerate_displays() -> Result<Vec<DisplayInfo>, CaptureError> {
+    enumerate_displays_with_checkpoint(|| Ok(()))
+}
+
+pub fn enumerate_displays_with_checkpoint(
+    checkpoint: impl FnOnce() -> Result<(), String>,
+) -> Result<Vec<DisplayInfo>, CaptureError> {
+    // GDI monitor enumeration has no separate activation object. Treat the
+    // point immediately before the OS call as the post-activation checkpoint.
+    checkpoint().map_err(CaptureError::Init)?;
     Ok(enumerate_display_handles()?
         .into_iter()
         .map(|display| display.info)
         .collect())
+}
+
+pub fn validate_display_catalog(displays: &[DisplayInfo]) -> Result<(), CaptureError> {
+    if displays.len() > MAX_PROBE_DISPLAYS {
+        return Err(CaptureError::Init(format!(
+            "display count {} exceeds {MAX_PROBE_DISPLAYS}",
+            displays.len()
+        )));
+    }
+    let mut aggregate = 0usize;
+    for display in displays {
+        for (label, value) in [("display id", &display.id), ("display name", &display.name)] {
+            if value.len() > MAX_DISPLAY_TEXT_BYTES {
+                return Err(CaptureError::Init(format!(
+                    "{label} is {} bytes; maximum is {MAX_DISPLAY_TEXT_BYTES}",
+                    value.len()
+                )));
+            }
+            aggregate = aggregate.checked_add(value.len()).ok_or_else(|| {
+                CaptureError::Init("display catalog byte count overflowed".into())
+            })?;
+        }
+    }
+    if aggregate > MAX_DISPLAY_CATALOG_BYTES {
+        return Err(CaptureError::Init(format!(
+            "display catalog is {aggregate} bytes; maximum is {MAX_DISPLAY_CATALOG_BYTES}"
+        )));
+    }
+    Ok(())
 }
 
 pub fn display_handle_by_id(id: Option<&str>) -> Result<DisplayHandle, CaptureError> {
@@ -86,6 +127,14 @@ fn select_display_handle_or_primary(
 
 fn enumerate_display_handles() -> Result<Vec<DisplayHandle>, CaptureError> {
     let mut displays = Vec::<DisplayHandle>::new();
+    displays
+        .try_reserve_exact(MAX_PROBE_DISPLAYS)
+        .map_err(|_| CaptureError::Init("reserve bounded display catalog".into()))?;
+    let mut enumeration = DisplayEnumeration {
+        displays,
+        error: None,
+        utf8_bytes: 0,
+    };
     // SAFETY: the callback only runs during this call; lparam points at
     // `displays`, which outlives the enumeration.
     let ok = unsafe {
@@ -93,13 +142,22 @@ fn enumerate_display_handles() -> Result<Vec<DisplayHandle>, CaptureError> {
             None,
             None,
             Some(enum_monitor_proc),
-            LPARAM(&mut displays as *mut Vec<DisplayHandle> as isize),
+            LPARAM(&mut enumeration as *mut DisplayEnumeration as isize),
         )
     };
+    if let Some(error) = enumeration.error {
+        return Err(CaptureError::Init(error));
+    }
     if !ok.as_bool() {
         return Err(CaptureError::Init("EnumDisplayMonitors failed".into()));
     }
-    Ok(displays)
+    Ok(enumeration.displays)
+}
+
+struct DisplayEnumeration {
+    displays: Vec<DisplayHandle>,
+    error: Option<String>,
+    utf8_bytes: usize,
 }
 
 unsafe extern "system" fn enum_monitor_proc(
@@ -108,9 +166,13 @@ unsafe extern "system" fn enum_monitor_proc(
     _rect: *mut RECT,
     lparam: LPARAM,
 ) -> BOOL {
-    // SAFETY: lparam is the Vec pointer passed by enumerate_display_handles
+    // SAFETY: lparam is the accumulator passed by enumerate_display_handles
     // on this same thread, alive for the whole enumeration.
-    let displays = unsafe { &mut *(lparam.0 as *mut Vec<DisplayHandle>) };
+    let enumeration = unsafe { &mut *(lparam.0 as *mut DisplayEnumeration) };
+    if enumeration.displays.len() == MAX_PROBE_DISPLAYS {
+        enumeration.error = Some(format!("display count exceeds {MAX_PROBE_DISPLAYS}"));
+        return BOOL(0);
+    }
     let mut info = MONITORINFOEXW::default();
     info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
     // SAFETY: monitor comes from EnumDisplayMonitors; info points to a
@@ -130,7 +192,28 @@ unsafe extern "system" fn enum_monitor_proc(
         .strip_prefix(r"\\.\")
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| id.clone());
-    displays.push(DisplayHandle {
+    if id.len() > MAX_DISPLAY_TEXT_BYTES || name.len() > MAX_DISPLAY_TEXT_BYTES {
+        enumeration.error = Some(format!(
+            "display label exceeds {MAX_DISPLAY_TEXT_BYTES} UTF-8 bytes"
+        ));
+        return BOOL(0);
+    }
+    let Some(utf8_bytes) = enumeration
+        .utf8_bytes
+        .checked_add(id.len())
+        .and_then(|bytes| bytes.checked_add(name.len()))
+    else {
+        enumeration.error = Some("display catalog byte count overflowed".into());
+        return BOOL(0);
+    };
+    if utf8_bytes > MAX_DISPLAY_CATALOG_BYTES {
+        enumeration.error = Some(format!(
+            "display catalog exceeds {MAX_DISPLAY_CATALOG_BYTES} UTF-8 bytes"
+        ));
+        return BOOL(0);
+    }
+    enumeration.utf8_bytes = utf8_bytes;
+    enumeration.displays.push(DisplayHandle {
         handle: monitor,
         info: DisplayInfo {
             id,
@@ -174,6 +257,24 @@ mod tests {
         };
         assert!(!displays.is_empty());
         assert!(displays.iter().all(|d| d.width > 0 && d.height > 0));
+    }
+
+    #[test]
+    fn display_catalog_rejects_count_and_huge_os_labels() {
+        let display = DisplayInfo {
+            id: r"\\.\DISPLAY1".into(),
+            name: "DISPLAY1".into(),
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            is_primary: true,
+        };
+        assert!(validate_display_catalog(&vec![display.clone(); MAX_PROBE_DISPLAYS]).is_ok());
+        assert!(validate_display_catalog(&vec![display.clone(); MAX_PROBE_DISPLAYS + 1]).is_err());
+        let mut huge = display;
+        huge.name = "é".repeat(MAX_DISPLAY_TEXT_BYTES);
+        assert!(validate_display_catalog(&[huge]).is_err());
     }
 
     #[test]

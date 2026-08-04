@@ -19,12 +19,16 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::windows::nv12::CropRect;
 
+pub const MAX_PROBE_WINDOWS: usize = 256;
+pub const MAX_WINDOW_TEXT_BYTES: usize = 64 * 1024;
+pub const MAX_WINDOW_CATALOG_BYTES: usize = 4 * 1024 * 1024;
+
 struct Search {
     needle_lower: String,
     found: Option<HWND>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct CapturableWindow {
     pub handle: isize,
     pub title: String,
@@ -70,16 +74,74 @@ pub fn window_from_raw_handle(raw: isize) -> Option<HWND> {
 }
 
 pub fn enumerate_capturable_windows() -> Vec<CapturableWindow> {
+    enumerate_capturable_windows_with_checkpoint(|| Ok(())).unwrap_or_default()
+}
+
+pub fn enumerate_capturable_windows_with_checkpoint(
+    checkpoint: impl FnOnce() -> Result<(), String>,
+) -> Result<Vec<CapturableWindow>, String> {
+    checkpoint()?;
     let mut windows = Vec::new();
-    // SAFETY: the callback only runs during this call; lparam points at
-    // `windows`, which outlives it.
-    unsafe {
-        let _ = EnumWindows(
-            Some(enum_capturable_proc),
-            LPARAM(&mut windows as *mut Vec<CapturableWindow> as isize),
-        );
-    }
     windows
+        .try_reserve_exact(MAX_PROBE_WINDOWS)
+        .map_err(|_| "reserve bounded capturable-window catalog".to_string())?;
+    let mut enumeration = WindowEnumeration {
+        windows,
+        utf8_bytes: 0,
+        error: None,
+    };
+    // SAFETY: the callback only runs during this call; lparam points at
+    // `enumeration`, which outlives it.
+    let result = unsafe {
+        EnumWindows(
+            Some(enum_capturable_proc),
+            LPARAM(&mut enumeration as *mut WindowEnumeration as isize),
+        )
+    };
+    if let Some(error) = enumeration.error {
+        return Err(error);
+    }
+    result.map_err(|error| format!("EnumWindows failed: {error}"))?;
+    validate_capturable_window_catalog(&enumeration.windows)?;
+    Ok(enumeration.windows)
+}
+
+pub fn validate_capturable_window_catalog(windows: &[CapturableWindow]) -> Result<(), String> {
+    if windows.len() > MAX_PROBE_WINDOWS {
+        return Err(format!(
+            "capturable window count {} exceeds {MAX_PROBE_WINDOWS}",
+            windows.len()
+        ));
+    }
+    let mut aggregate = 0usize;
+    for window in windows {
+        for value in [
+            window.title.as_str(),
+            window.exe_name.as_str(),
+            window.exe_path.as_deref().unwrap_or_default(),
+        ] {
+            if value.len() > MAX_WINDOW_TEXT_BYTES {
+                return Err(format!(
+                    "capturable window text exceeds {MAX_WINDOW_TEXT_BYTES} UTF-8 bytes"
+                ));
+            }
+            aggregate = aggregate
+                .checked_add(value.len())
+                .ok_or_else(|| "capturable window byte count overflowed".to_string())?;
+        }
+    }
+    if aggregate > MAX_WINDOW_CATALOG_BYTES {
+        return Err(format!(
+            "capturable window catalog exceeds {MAX_WINDOW_CATALOG_BYTES} UTF-8 bytes"
+        ));
+    }
+    Ok(())
+}
+
+struct WindowEnumeration {
+    windows: Vec<CapturableWindow>,
+    utf8_bytes: usize,
+    error: Option<String>,
 }
 
 pub(super) fn window_client_crop_state(hwnd: HWND) -> Option<WindowClientCrop> {
@@ -129,9 +191,9 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
 }
 
 unsafe extern "system" fn enum_capturable_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
-    // SAFETY: lparam is the Vec pointer passed by enumerate_capturable_windows
+    // SAFETY: lparam is the accumulator passed by enumerate_capturable_windows
     // on this same thread, alive for the whole enumeration.
-    let windows = unsafe { &mut *(lparam.0 as *mut Vec<CapturableWindow>) };
+    let enumeration = unsafe { &mut *(lparam.0 as *mut WindowEnumeration) };
     // SAFETY: hwnd comes from the enumeration; these are read-only queries.
     unsafe {
         if !IsWindowVisible(hwnd).as_bool() {
@@ -143,6 +205,12 @@ unsafe extern "system" fn enum_capturable_proc(hwnd: HWND, lparam: LPARAM) -> BO
         if title.trim().is_empty() {
             return BOOL(1);
         }
+        if enumeration.windows.len() == MAX_PROBE_WINDOWS {
+            enumeration.error = Some(format!(
+                "capturable window count exceeds {MAX_PROBE_WINDOWS}"
+            ));
+            return BOOL(0);
+        }
         let mut process_id = 0u32;
         GetWindowThreadProcessId(hwnd, Some(&mut process_id));
         let exe_path = process_path(process_id);
@@ -150,7 +218,36 @@ unsafe extern "system" fn enum_capturable_proc(hwnd: HWND, lparam: LPARAM) -> BO
             .as_deref()
             .and_then(exe_name_from_path)
             .unwrap_or_default();
-        windows.push(CapturableWindow {
+        if [
+            title.as_str(),
+            exe_name.as_str(),
+            exe_path.as_deref().unwrap_or_default(),
+        ]
+        .into_iter()
+        .any(|value| value.len() > MAX_WINDOW_TEXT_BYTES)
+        {
+            enumeration.error = Some(format!(
+                "capturable window text exceeds {MAX_WINDOW_TEXT_BYTES} UTF-8 bytes"
+            ));
+            return BOOL(0);
+        }
+        let Some(utf8_bytes) = enumeration
+            .utf8_bytes
+            .checked_add(title.len())
+            .and_then(|bytes| bytes.checked_add(exe_name.len()))
+            .and_then(|bytes| bytes.checked_add(exe_path.as_deref().map_or(0, str::len)))
+        else {
+            enumeration.error = Some("capturable window byte count overflowed".into());
+            return BOOL(0);
+        };
+        if utf8_bytes > MAX_WINDOW_CATALOG_BYTES {
+            enumeration.error = Some(format!(
+                "capturable window catalog exceeds {MAX_WINDOW_CATALOG_BYTES} UTF-8 bytes"
+            ));
+            return BOOL(0);
+        }
+        enumeration.utf8_bytes = utf8_bytes;
+        enumeration.windows.push(CapturableWindow {
             handle: hwnd.0 as isize,
             title,
             process_id,
@@ -262,6 +359,27 @@ mod tests {
         // this just exercises EnumWindows + the callback end to end.
         let _ = find_window_by_title("");
         let _ = enumerate_capturable_windows();
+    }
+
+    #[test]
+    fn probe_catalog_rejects_count_and_utf8_overflow() {
+        let window = CapturableWindow {
+            handle: 1,
+            title: "game".into(),
+            process_id: 2,
+            exe_name: "game.exe".into(),
+            exe_path: Some(r"C:\Games\game.exe".into()),
+        };
+        assert!(
+            validate_capturable_window_catalog(&vec![window.clone(); MAX_PROBE_WINDOWS]).is_ok()
+        );
+        assert!(
+            validate_capturable_window_catalog(&vec![window.clone(); MAX_PROBE_WINDOWS + 1])
+                .is_err()
+        );
+        let mut huge = window;
+        huge.title = "é".repeat(MAX_WINDOW_TEXT_BYTES);
+        assert!(validate_capturable_window_catalog(&[huge]).is_err());
     }
 
     #[test]

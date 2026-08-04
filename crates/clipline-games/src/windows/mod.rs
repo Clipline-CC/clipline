@@ -2,7 +2,9 @@
 
 use std::path::PathBuf;
 
-use clipline_capture::windows::{enumerate_capturable_windows, CapturableWindow};
+use clipline_capture::windows::{
+    enumerate_capturable_windows, enumerate_capturable_windows_with_checkpoint, CapturableWindow,
+};
 use clipline_settings::{games::GameSettings, CustomGameSettings};
 
 use crate::detection::{self, DetectedGame, GameWindow, GameWindowInfo};
@@ -12,6 +14,16 @@ pub mod icon;
 
 pub fn list_game_windows() -> Vec<GameWindowInfo> {
     detection::project_game_windows(enumerate_game_windows(), std::process::id())
+}
+
+pub fn list_game_windows_with_checkpoint(
+    checkpoint: impl FnOnce() -> Result<(), String>,
+) -> Result<Vec<GameWindowInfo>, String> {
+    let windows = enumerate_capturable_windows_with_checkpoint(checkpoint)?
+        .into_iter()
+        .map(game_window)
+        .collect();
+    Ok(detection::project_game_windows(windows, std::process::id()))
 }
 
 pub fn detect_active_game(
@@ -51,6 +63,32 @@ pub fn detect_installed_games(
     )
 }
 
+pub fn detect_installed_games_with_checkpoint(
+    existing_custom_games: &[CustomGameSettings],
+    checkpoint: impl FnOnce() -> Result<(), String>,
+) -> Result<Vec<DetectedGameCandidate>, String> {
+    if existing_custom_games.len() > discovery::MAX_DISCOVERED_GAMES {
+        return Err(format!(
+            "custom game count {} exceeds {}",
+            existing_custom_games.len(),
+            discovery::MAX_DISCOVERED_GAMES
+        ));
+    }
+    let roots = steam_install_roots()?;
+    checkpoint()?;
+    let steam_apps = discovery::steam_apps_from_roots(&roots)?;
+    let windows = enumerate_capturable_windows_with_checkpoint(|| Ok(()))?
+        .into_iter()
+        .map(game_window)
+        .collect();
+    discovery::candidates_from_sources_checked(
+        steam_apps,
+        windows,
+        existing_custom_games,
+        icon::extract_exe_icon_data_url,
+    )
+}
+
 pub fn enumerate_game_windows() -> Vec<GameWindow> {
     enumerate_capturable_windows()
         .into_iter()
@@ -83,18 +121,82 @@ fn steam_install_roots() -> Result<Vec<PathBuf>, String> {
 }
 
 fn query_reg_sz(key: &str, value_name: &str) -> Option<String> {
-    use std::os::windows::process::CommandExt as _;
+    use windows_sys::Win32::Foundation::{ERROR_MORE_DATA, ERROR_SUCCESS};
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegGetValueW, RegOpenKeyExW, HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE,
+        RRF_RT_REG_SZ,
+    };
 
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let output = std::process::Command::new("reg.exe")
-        .args(["query", key, "/v", value_name])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .ok()?;
-    if !output.status.success() {
+    const MAX_REGISTRY_VALUE_BYTES: u32 = 64 * 1024;
+
+    struct Key(HKEY);
+    impl Drop for Key {
+        fn drop(&mut self) {
+            // SAFETY: this handle was returned by RegOpenKeyExW and is owned.
+            unsafe {
+                RegCloseKey(self.0);
+            }
+        }
+    }
+
+    let subkey = key.strip_prefix("HKCU\\")?;
+    let subkey = wide_null(std::ffi::OsStr::new(subkey));
+    let value_name_wide = wide_null(std::ffi::OsStr::new(value_name));
+    let mut raw = std::ptr::null_mut();
+    // SAFETY: pointers reference nul-terminated input and a valid out slot.
+    if unsafe {
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            subkey.as_ptr(),
+            0,
+            KEY_QUERY_VALUE,
+            &mut raw,
+        )
+    } != ERROR_SUCCESS
+    {
         return None;
     }
-    discovery::parse_reg_sz_output(&String::from_utf8_lossy(&output.stdout), value_name)
+    let key = Key(raw);
+    let mut bytes = 0u32;
+    // SAFETY: a null data pointer asks Windows for the exact value size.
+    let measured = unsafe {
+        RegGetValueW(
+            key.0,
+            std::ptr::null(),
+            value_name_wide.as_ptr(),
+            RRF_RT_REG_SZ,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut bytes,
+        )
+    };
+    if !matches!(measured, ERROR_SUCCESS | ERROR_MORE_DATA)
+        || bytes == 0
+        || bytes > MAX_REGISTRY_VALUE_BYTES
+    {
+        return None;
+    }
+    let mut utf16 = vec![0u16; (bytes as usize).div_ceil(2)];
+    // SAFETY: the buffer was sized from the bounded measurement above.
+    if unsafe {
+        RegGetValueW(
+            key.0,
+            std::ptr::null(),
+            value_name_wide.as_ptr(),
+            RRF_RT_REG_SZ,
+            std::ptr::null_mut(),
+            utf16.as_mut_ptr().cast(),
+            &mut bytes,
+        )
+    } != ERROR_SUCCESS
+    {
+        return None;
+    }
+    let length = utf16
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(utf16.len());
+    String::from_utf16(&utf16[..length]).ok()
 }
 
 pub(crate) fn wide_null(value: &std::ffi::OsStr) -> Vec<u16> {

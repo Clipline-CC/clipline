@@ -218,7 +218,7 @@ fn desktop_catalog_summary_is_fixed_shape_and_contains_no_item_arrays() {
 
     let snapshot =
         serde_json::to_value(DesktopController::new((), Vec::new()).unwrap().snapshot()).unwrap();
-    assert_eq!(snapshot["schema_version"], json!(4));
+    assert_eq!(snapshot["schema_version"], json!(5));
     assert_eq!(
         snapshot["catalog"],
         json!({ "revision": 0, "source": "local", "active": false })
@@ -228,4 +228,5 @@ fn desktop_catalog_summary_is_fixed_shape_and_contains_no_item_arrays() {
     for forbidden in ["items", "rows", "groups", "selected", "uploads"] {
         assert!(!catalog.contains_key(forbidden));
     }
+    assert_eq!(snapshot["settings_probes"], json!([]));
 }

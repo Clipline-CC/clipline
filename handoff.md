@@ -4,6 +4,38 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-04): Slint replacement Milestone 8, Task 5 bounded probes
+
+Milestone 8 Task 5 is implemented. `clipline-settings::ProbeExecutor` owns two joined workers,
+one active plus one latest pending request per probe kind, a bounded eight-result port, checked
+request generations, exact settings-session/attachment/foreground ownership, active-tab admission,
+pre-work/post-activation/pre-publication fences, bounded work/error envelopes, and fail-closed panic,
+payload, queue, and shutdown handling. The 10,000-request storm runs only the active and latest work.
+
+Full catalogs remain in the settings-session adapter. `clipline-desktop` stores only one compact,
+sorted `ProbeSummary` per kind, rejects stale owners/request generations and contradictory terminal
+republication, and treats every terminal result as a durable event barrier. Desktop snapshot schema is
+now 5. `apps/clipline-app/src/settings_probe.rs` owns the joined result pump and exact-token catalog
+store for the native Settings shell; it starts disconnected, so opening the app performs no discovery
+work before Settings attaches and requests the active tab.
+
+Producer bounds are enforced before publication: 64 displays, 128 endpoints per audio direction,
+32 encoders, 256 capturable/game/install rows, 16 plugins, 64 KiB text/error fields, fixed aggregate
+catalog limits, bounded Steam VDF and plugin-icon reads, and streaming storage status without an
+inventory-sized `Vec`. WASAPI probe COM initialization is balanced on the long-lived workers. Steam
+root lookup uses a fixed-size Win32 registry read rather than unbounded `reg.exe` output. Playback
+capability remains an explicit Task 6 failure/pending lane; no enum-only or WebView result is presented
+as native decoder truth.
+
+The shipping Tauri display/audio/window/plugin commands now run asynchronously and reuse the bounded
+domain producers while retaining their compatibility DTOs. Validation is green: focused executor,
+desktop, capture, games, recorder, storage, and Tauri tests; `cargo test --workspace`; and warning-
+denied workspace Clippy. The installed Clipline process and profile remained untouched. `artifacts/`
+and `paseo.json` remain local scratch and are excluded.
+
+Next: Task 6, implement configured native playback capability truth and keep WebView codec reporting
+as a Tauri-only compatibility input.
+
 ## Checkpoint (2026-08-03): Slint replacement Milestone 8, Task 4 transactional settings
 
 Milestone 8 Task 4 is implemented. `clipline-settings::SettingsApplyCoordinator` now owns the

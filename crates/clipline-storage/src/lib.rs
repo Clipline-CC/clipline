@@ -9,7 +9,7 @@ use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct StorageStatus {
     pub clip_count: usize,
     pub total_bytes: u64,
@@ -48,8 +48,29 @@ pub struct RecordingRecoveryReport {
 }
 
 pub fn storage_status(dir: &Path, quota_bytes: Option<u64>) -> io::Result<StorageStatus> {
-    let clips = inventory(dir, None)?;
-    Ok(status_from_clips(&clips, quota_bytes))
+    let mut status = StorageStatus {
+        clip_count: 0,
+        total_bytes: 0,
+        quota_bytes,
+    };
+    visit_media_dirs(dir, |media_dir| {
+        collect_storage_status(media_dir, &mut status)
+    })?;
+    Ok(status)
+}
+
+/// Streaming status probe with a post-activation cancellation checkpoint.
+/// The directory metadata lookup establishes the OS resource before the
+/// caller's exact settings-session token is rechecked.
+pub fn storage_status_with_checkpoint(
+    dir: &Path,
+    quota_bytes: Option<u64>,
+    checkpoint: impl FnOnce() -> Result<(), String>,
+) -> Result<StorageStatus, String> {
+    fs::metadata(dir).map_err(|error| format!("open storage root {}: {error}", dir.display()))?;
+    checkpoint()?;
+    storage_status(dir, quota_bytes)
+        .map_err(|error| format!("inspect storage root {}: {error}", dir.display()))
 }
 
 /// Return the metadata sidecar that proves Clipline owns `path`.
@@ -379,6 +400,37 @@ fn collect_clips(dir: &Path, include: Option<&Path>, clips: &mut Vec<ClipFile>) 
     Ok(())
 }
 
+fn collect_storage_status(dir: &Path, status: &mut StorageStatus) -> io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let recording = is_recording_mp4(&path);
+        if !is_mp4(&path) && !recording || !is_managed_clip(&path) {
+            continue;
+        }
+        let meta = entry.metadata()?;
+        if !meta.is_file() {
+            continue;
+        }
+        let sidecar_bytes = if recording {
+            0
+        } else {
+            clip_sidecar_bytes(&path)?
+        };
+        status.total_bytes = status
+            .total_bytes
+            .checked_add(meta.len())
+            .and_then(|bytes| bytes.checked_add(sidecar_bytes))
+            .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "storage byte count overflow"))?;
+        if !recording {
+            status.clip_count = status.clip_count.checked_add(1).ok_or_else(|| {
+                io::Error::new(ErrorKind::InvalidData, "storage clip count overflow")
+            })?;
+        }
+    }
+    Ok(())
+}
+
 fn status_from_clips(clips: &[ClipFile], quota_bytes: Option<u64>) -> StorageStatus {
     StorageStatus {
         clip_count: clips.iter().filter(|clip| !clip.recording).count(),
@@ -535,6 +587,21 @@ fn clip_sidecars(clip: &Path) -> io::Result<(Vec<PathBuf>, u64)> {
         }
     }
     Ok((sidecars, bytes))
+}
+
+fn clip_sidecar_bytes(clip: &Path) -> io::Result<u64> {
+    [
+        sidecar_path(clip),
+        clip_metadata_path(clip),
+        osu_pending_path(clip),
+        poster_path(clip),
+    ]
+    .into_iter()
+    .try_fold(0u64, |total, candidate| {
+        total
+            .checked_add(optional_file_len(&candidate)?)
+            .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "sidecar byte count overflow"))
+    })
 }
 
 fn optional_file_len(path: &Path) -> io::Result<u64> {

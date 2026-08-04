@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    CatalogSummarySnapshot, CloudAccountOwner, CloudAccountScope, Generation,
+    CatalogSummarySnapshot, CloudAccountOwner, CloudAccountScope, Generation, ProbeSummary,
     WindowLifecycleSnapshot,
 };
 
@@ -218,6 +218,9 @@ pub enum UiEvent {
     CatalogSummaryChanged {
         summary: CatalogSummarySnapshot,
     },
+    SettingsProbeChanged {
+        summary: ProbeSummary,
+    },
     UserError {
         message: String,
     },
@@ -238,6 +241,7 @@ impl UiEvent {
             Self::WindowLifecycle { .. }
             | Self::CloudAccountChanged { .. }
             | Self::CatalogSummaryChanged { .. }
+            | Self::SettingsProbeChanged { .. }
             | Self::UserError { .. } => None,
         }
     }

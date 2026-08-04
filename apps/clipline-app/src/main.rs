@@ -92,6 +92,8 @@ mod service;
 #[cfg(windows)]
 mod settings;
 #[cfg(windows)]
+mod settings_probe;
+#[cfg(windows)]
 mod sound;
 #[cfg(windows)]
 mod updates;

@@ -31,7 +31,7 @@ use windows::Win32::System::Com::StructuredStorage::{
     PROPVARIANT_0_0_0,
 };
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoTaskMemAlloc, CoTaskMemFree, IAgileObject,
+    CoCreateInstance, CoInitializeEx, CoTaskMemAlloc, CoTaskMemFree, CoUninitialize, IAgileObject,
     IAgileObject_Impl, BLOB, CLSCTX_ALL, COINIT_MULTITHREADED, STGM_READ,
 };
 use windows::Win32::System::Diagnostics::ToolHelp::{
@@ -60,15 +60,18 @@ const PROCESS_LOOPBACK_ACTIVATION_TIMEOUT: Duration = Duration::from_millis(1500
 const AUDIO_DELIVERY_HEADROOM_S: f64 = FRAME_DURATION_S + 0.010;
 const TERMINAL_AUDIO_DRAIN_S: f64 = FRAME_DURATION_S * 3.0;
 const DEVICE_REACTIVATION_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+pub const MAX_AUDIO_ENDPOINTS_PER_DIRECTION: usize = 128;
+pub const MAX_AUDIO_ENDPOINT_TEXT_BYTES: usize = 16 * 1024;
+pub const MAX_AUDIO_ENDPOINT_CATALOG_BYTES: usize = 512 * 1024;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct AudioDeviceInfo {
     pub id: String,
     pub name: String,
     pub is_default: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct AudioDeviceList {
     pub outputs: Vec<AudioDeviceInfo>,
     pub inputs: Vec<AudioDeviceInfo>,
@@ -958,16 +961,59 @@ impl WasapiLoopback {
 }
 
 pub fn enumerate_audio_devices() -> Result<AudioDeviceList, CaptureError> {
-    init_com()?;
+    enumerate_audio_devices_with_checkpoint(|| Ok(()))
+}
+
+pub fn enumerate_audio_devices_with_checkpoint(
+    checkpoint: impl FnOnce() -> Result<(), String>,
+) -> Result<AudioDeviceList, CaptureError> {
+    let _apartment = ProbeComApartment::enter()?;
     // SAFETY: standard MMDevice enumeration; all COM results are checked.
     unsafe {
         let enumerator: IMMDeviceEnumerator =
             CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).map_err(init)?;
-        Ok(AudioDeviceList {
+        checkpoint().map_err(CaptureError::Init)?;
+        let devices = AudioDeviceList {
             outputs: enumerate_endpoints(&enumerator, eRender)?,
             inputs: enumerate_endpoints(&enumerator, eCapture)?,
-        })
+        };
+        validate_audio_device_catalog(&devices)?;
+        Ok(devices)
     }
+}
+
+pub fn validate_audio_device_catalog(devices: &AudioDeviceList) -> Result<(), CaptureError> {
+    for (direction, endpoints) in [("output", &devices.outputs), ("input", &devices.inputs)] {
+        if endpoints.len() > MAX_AUDIO_ENDPOINTS_PER_DIRECTION {
+            return Err(CaptureError::Init(format!(
+                "{direction} audio endpoint count {} exceeds {MAX_AUDIO_ENDPOINTS_PER_DIRECTION}",
+                endpoints.len()
+            )));
+        }
+    }
+    let mut aggregate = 0usize;
+    for endpoint in devices.outputs.iter().chain(&devices.inputs) {
+        for (label, value) in [
+            ("audio endpoint id", &endpoint.id),
+            ("audio endpoint name", &endpoint.name),
+        ] {
+            if value.len() > MAX_AUDIO_ENDPOINT_TEXT_BYTES {
+                return Err(CaptureError::Init(format!(
+                    "{label} is {} bytes; maximum is {MAX_AUDIO_ENDPOINT_TEXT_BYTES}",
+                    value.len()
+                )));
+            }
+            aggregate = aggregate.checked_add(value.len()).ok_or_else(|| {
+                CaptureError::Init("audio endpoint catalog byte count overflowed".into())
+            })?;
+        }
+    }
+    if aggregate > MAX_AUDIO_ENDPOINT_CATALOG_BYTES {
+        return Err(CaptureError::Init(format!(
+            "audio endpoint catalog is {aggregate} bytes; maximum is {MAX_AUDIO_ENDPOINT_CATALOG_BYTES}"
+        )));
+    }
+    Ok(())
 }
 
 pub fn enumerate_output_processes(
@@ -1119,11 +1165,39 @@ fn enumerate_endpoints(
         let collection = enumerator
             .EnumAudioEndpoints(dataflow, DEVICE_STATE_ACTIVE)
             .map_err(init)?;
+        let count = collection.GetCount().map_err(init)? as usize;
+        if count > MAX_AUDIO_ENDPOINTS_PER_DIRECTION {
+            return Err(CaptureError::Init(format!(
+                "audio endpoint count {count} exceeds {MAX_AUDIO_ENDPOINTS_PER_DIRECTION}"
+            )));
+        }
         let mut devices = Vec::new();
-        for i in 0..collection.GetCount().map_err(init)? {
+        devices
+            .try_reserve_exact(count)
+            .map_err(|_| CaptureError::Init("reserve bounded audio endpoint catalog".into()))?;
+        let mut aggregate = 0usize;
+        for i in 0..count as u32 {
             let device = collection.Item(i).map_err(init)?;
             let id = device_id_string(&device)?;
             let name = friendly_name(&device).unwrap_or_else(|| id.clone());
+            if id.len() > MAX_AUDIO_ENDPOINT_TEXT_BYTES
+                || name.len() > MAX_AUDIO_ENDPOINT_TEXT_BYTES
+            {
+                return Err(CaptureError::Init(format!(
+                    "audio endpoint label exceeds {MAX_AUDIO_ENDPOINT_TEXT_BYTES} UTF-8 bytes"
+                )));
+            }
+            aggregate = aggregate
+                .checked_add(id.len())
+                .and_then(|bytes| bytes.checked_add(name.len()))
+                .ok_or_else(|| {
+                    CaptureError::Init("audio endpoint catalog byte count overflowed".into())
+                })?;
+            if aggregate > MAX_AUDIO_ENDPOINT_CATALOG_BYTES {
+                return Err(CaptureError::Init(format!(
+                    "audio endpoint catalog exceeds {MAX_AUDIO_ENDPOINT_CATALOG_BYTES} UTF-8 bytes"
+                )));
+            }
             devices.push(AudioDeviceInfo {
                 is_default: default_id.as_deref() == Some(id.as_str()),
                 id,
@@ -1714,6 +1788,37 @@ fn init_com() -> Result<(), CaptureError> {
     }
 }
 
+struct ProbeComApartment {
+    uninitialize: bool,
+}
+
+impl ProbeComApartment {
+    fn enter() -> Result<Self, CaptureError> {
+        // SAFETY: paired with CoUninitialize on this probe worker thread when
+        // COM accepted or incremented this MTA initialization.
+        let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+        if hr.is_ok() {
+            Ok(Self { uninitialize: true })
+        } else if hr == RPC_E_CHANGED_MODE {
+            Ok(Self {
+                uninitialize: false,
+            })
+        } else {
+            Err(CaptureError::Init(format!("CoInitializeEx: {hr}")))
+        }
+    }
+}
+
+impl Drop for ProbeComApartment {
+    fn drop(&mut self) {
+        if self.uninitialize {
+            // SAFETY: this instance owns exactly one successful CoInitializeEx
+            // call on the same executor thread.
+            unsafe { CoUninitialize() };
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2217,5 +2322,34 @@ mod tests {
             assert!(!device.id.is_empty());
             assert!(!device.name.is_empty());
         }
+    }
+
+    #[test]
+    fn audio_endpoint_catalog_rejects_count_and_huge_os_labels() {
+        let endpoint = AudioDeviceInfo {
+            id: "endpoint".into(),
+            name: "Endpoint".into(),
+            is_default: true,
+        };
+        let valid = AudioDeviceList {
+            outputs: vec![endpoint.clone(); MAX_AUDIO_ENDPOINTS_PER_DIRECTION],
+            inputs: Vec::new(),
+        };
+        validate_audio_device_catalog(&valid).unwrap();
+
+        let too_many = AudioDeviceList {
+            outputs: vec![endpoint.clone(); MAX_AUDIO_ENDPOINTS_PER_DIRECTION + 1],
+            inputs: Vec::new(),
+        };
+        assert!(validate_audio_device_catalog(&too_many).is_err());
+
+        let huge = AudioDeviceList {
+            outputs: vec![AudioDeviceInfo {
+                name: "é".repeat(MAX_AUDIO_ENDPOINT_TEXT_BYTES),
+                ..endpoint
+            }],
+            inputs: Vec::new(),
+        };
+        assert!(validate_audio_device_catalog(&huge).is_err());
     }
 }

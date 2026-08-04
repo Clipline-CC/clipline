@@ -1,8 +1,16 @@
 use std::path::{Path, PathBuf};
+use std::{fs::File, io::Read as _};
 
 use clipline_settings::CustomGameSettings;
 
 use crate::detection::GameWindow;
+
+pub const MAX_DISCOVERED_GAMES: usize = 256;
+pub const MAX_STEAM_ROOTS: usize = 32;
+pub const MAX_STEAM_LIBRARIES: usize = 64;
+pub const MAX_STEAM_VDF_BYTES: usize = 1024 * 1024;
+pub const MAX_DISCOVERY_TEXT_BYTES: usize = 64 * 1024;
+pub const MAX_DISCOVERY_CATALOG_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -88,10 +96,36 @@ pub(crate) fn candidates_from_sources<F>(
 where
     F: Fn(&str) -> Option<String>,
 {
+    candidates_from_sources_checked(steam_apps, windows, existing_custom_games, icon_for_path)
+        .unwrap_or_default()
+}
+
+pub(crate) fn candidates_from_sources_checked<F>(
+    steam_apps: Vec<SteamApp>,
+    windows: Vec<GameWindow>,
+    existing_custom_games: &[CustomGameSettings],
+    icon_for_path: F,
+) -> Result<Vec<DetectedGameCandidate>, String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    if steam_apps.len() > MAX_DISCOVERED_GAMES || windows.len() > MAX_DISCOVERED_GAMES {
+        return Err(format!(
+            "game discovery source count exceeds {MAX_DISCOVERED_GAMES}"
+        ));
+    }
     let mut candidates = Vec::new();
+    candidates
+        .try_reserve_exact(MAX_DISCOVERED_GAMES)
+        .map_err(|_| "reserve bounded game discovery catalog".to_string())?;
 
     for app in &steam_apps {
         if let (Some(exe_name), Some(process_path)) = (&app.exe_name, &app.process_path) {
+            if candidates.len() == MAX_DISCOVERED_GAMES {
+                return Err(format!(
+                    "game discovery candidate count exceeds {MAX_DISCOVERED_GAMES}"
+                ));
+            }
             let process_path = process_path.to_string_lossy().into_owned();
             let icon = icon_for_path(&process_path);
             candidates.push(DetectedGameCandidate {
@@ -113,6 +147,11 @@ where
         .into_iter()
         .filter(|window| !is_noise_window(window))
     {
+        if candidates.len() == MAX_DISCOVERED_GAMES {
+            return Err(format!(
+                "game discovery candidate count exceeds {MAX_DISCOVERED_GAMES}"
+            ));
+        }
         let Some(window_candidate) = candidate_from_window(&window, &icon_for_path) else {
             continue;
         };
@@ -137,7 +176,49 @@ where
         }
     }
 
-    dedupe_candidates(candidates, existing_custom_games)
+    let candidates = dedupe_candidates(candidates, existing_custom_games);
+    validate_discovery_candidates(&candidates)?;
+    Ok(candidates)
+}
+
+pub fn validate_discovery_candidates(candidates: &[DetectedGameCandidate]) -> Result<(), String> {
+    if candidates.len() > MAX_DISCOVERED_GAMES {
+        return Err(format!(
+            "game discovery candidate count {} exceeds {MAX_DISCOVERED_GAMES}",
+            candidates.len()
+        ));
+    }
+    let mut aggregate = 0usize;
+    for candidate in candidates {
+        for value in [
+            Some(candidate.id_hint.as_str()),
+            Some(candidate.name.as_str()),
+            candidate.install_dir.as_deref(),
+            Some(candidate.exe_name.as_str()),
+            candidate.process_path.as_deref(),
+            Some(candidate.window_title.as_str()),
+            candidate.icon.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if value.len() > MAX_DISCOVERY_TEXT_BYTES {
+                return Err(format!(
+                    "game discovery text is {} bytes; maximum is {MAX_DISCOVERY_TEXT_BYTES}",
+                    value.len()
+                ));
+            }
+            aggregate = aggregate
+                .checked_add(value.len())
+                .ok_or_else(|| "game discovery byte count overflowed".to_string())?;
+        }
+    }
+    if aggregate > MAX_DISCOVERY_CATALOG_BYTES {
+        return Err(format!(
+            "game discovery catalog is {aggregate} bytes; maximum is {MAX_DISCOVERY_CATALOG_BYTES}"
+        ));
+    }
+    Ok(())
 }
 
 fn candidate_from_window<F>(window: &GameWindow, icon_for_path: &F) -> Option<DetectedGameCandidate>
@@ -415,19 +496,6 @@ fn is_noise_window(window: &GameWindow) -> bool {
         || title.contains("updater")
 }
 
-pub(crate) fn parse_reg_sz_output(output: &str, value_name: &str) -> Option<String> {
-    output.lines().find_map(|line| {
-        let mut fields = line.split_whitespace();
-        let name = fields.next()?;
-        let kind = fields.next()?;
-        if !name.eq_ignore_ascii_case(value_name) || !kind.eq_ignore_ascii_case("REG_SZ") {
-            return None;
-        }
-        let value = fields.collect::<Vec<_>>().join(" ");
-        (!value.is_empty()).then_some(value)
-    })
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum VdfToken {
     String(String),
@@ -569,14 +637,25 @@ fn steam_app_from_manifest(entries: &[VdfEntry]) -> Option<SteamAppManifest> {
 }
 
 pub(crate) fn steam_apps_from_roots(steam_roots: &[PathBuf]) -> Result<Vec<SteamApp>, String> {
+    if steam_roots.len() > MAX_STEAM_ROOTS {
+        return Err(format!(
+            "Steam root count {} exceeds {MAX_STEAM_ROOTS}",
+            steam_roots.len()
+        ));
+    }
     let mut libraries = Vec::new();
+    libraries
+        .try_reserve_exact(MAX_STEAM_LIBRARIES)
+        .map_err(|_| "reserve bounded Steam library catalog".to_string())?;
     for root in steam_roots {
         for library in steam_libraries_from_root(root)? {
-            add_unique_path(&mut libraries, library);
+            add_unique_path_bounded(&mut libraries, library, MAX_STEAM_LIBRARIES)?;
         }
     }
 
     let mut apps = Vec::new();
+    apps.try_reserve_exact(MAX_DISCOVERED_GAMES)
+        .map_err(|_| "reserve bounded Steam app catalog".to_string())?;
     for library in libraries {
         let steamapps_dir = library.join("steamapps");
         let Ok(entries) = std::fs::read_dir(&steamapps_dir) else {
@@ -590,7 +669,7 @@ pub(crate) fn steam_apps_from_roots(steam_roots: &[PathBuf]) -> Result<Vec<Steam
             if !file_name.starts_with("appmanifest_") || !file_name.ends_with(".acf") {
                 continue;
             }
-            let Ok(contents) = std::fs::read_to_string(&path) else {
+            let Ok(contents) = read_bounded_utf8(&path, MAX_STEAM_VDF_BYTES) else {
                 continue;
             };
             let Some(manifest) = parse_vdf(&contents)
@@ -608,13 +687,18 @@ pub(crate) fn steam_apps_from_roots(steam_roots: &[PathBuf]) -> Result<Vec<Steam
                 .and_then(|path| path.file_name())
                 .and_then(|name| name.to_str())
                 .map(str::to_owned);
-            apps.push(SteamApp {
+            if apps.len() == MAX_DISCOVERED_GAMES {
+                return Err(format!("Steam app count exceeds {MAX_DISCOVERED_GAMES}"));
+            }
+            let app = SteamApp {
                 app_id: manifest.app_id,
                 name: manifest.name,
                 install_dir,
                 exe_name,
                 process_path,
-            });
+            };
+            validate_steam_app(&app)?;
+            apps.push(app);
         }
     }
 
@@ -625,7 +709,7 @@ pub(crate) fn steam_apps_from_roots(steam_roots: &[PathBuf]) -> Result<Vec<Steam
 fn steam_libraries_from_root(root: &Path) -> Result<Vec<PathBuf>, String> {
     let mut libraries = vec![root.to_path_buf()];
     let libraryfolders = root.join("steamapps").join("libraryfolders.vdf");
-    let contents = match std::fs::read_to_string(&libraryfolders) {
+    let contents = match read_bounded_utf8(&libraryfolders, MAX_STEAM_VDF_BYTES) {
         Ok(contents) => contents,
         Err(_) => return Ok(libraries),
     };
@@ -633,9 +717,65 @@ fn steam_libraries_from_root(root: &Path) -> Result<Vec<PathBuf>, String> {
         return Ok(libraries);
     };
     for library in library_paths_from_vdf(&entries) {
-        add_unique_path(&mut libraries, library);
+        add_unique_path_bounded(&mut libraries, library, MAX_STEAM_LIBRARIES)?;
     }
     Ok(libraries)
+}
+
+fn read_bounded_utf8(path: &Path, maximum: usize) -> Result<String, String> {
+    let mut file = File::open(path).map_err(|error| error.to_string())?;
+    let length = file.metadata().map_err(|error| error.to_string())?.len();
+    if length > maximum as u64 {
+        return Err(format!("{} exceeds {maximum} bytes", path.display()));
+    }
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(length as usize)
+        .map_err(|_| format!("reserve bounded read for {}", path.display()))?;
+    file.by_ref()
+        .take(maximum as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() > maximum {
+        return Err(format!("{} exceeds {maximum} bytes", path.display()));
+    }
+    String::from_utf8(bytes).map_err(|error| error.to_string())
+}
+
+fn validate_steam_app(app: &SteamApp) -> Result<(), String> {
+    for value in [
+        Some(app.name.as_str()),
+        app.exe_name.as_deref(),
+        app.install_dir.to_str(),
+        app.process_path.as_deref().and_then(Path::to_str),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if value.len() > MAX_DISCOVERY_TEXT_BYTES {
+            return Err(format!(
+                "Steam app text is {} bytes; maximum is {MAX_DISCOVERY_TEXT_BYTES}",
+                value.len()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn add_unique_path_bounded(
+    paths: &mut Vec<PathBuf>,
+    path: PathBuf,
+    maximum: usize,
+) -> Result<(), String> {
+    let key = path_key(&path);
+    if paths.iter().any(|existing| path_key(existing) == key) {
+        return Ok(());
+    }
+    if paths.len() == maximum {
+        return Err(format!("path count exceeds {maximum}"));
+    }
+    paths.push(path);
+    Ok(())
 }
 
 pub(crate) fn add_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
@@ -885,6 +1025,43 @@ mod tests {
             err.contains("unterminated object"),
             "unexpected parse error: {err}"
         );
+    }
+
+    #[test]
+    fn bounded_discovery_rejects_source_count_and_text_overflow() {
+        let windows = (0..=MAX_DISCOVERED_GAMES)
+            .map(|index| GameWindow {
+                handle: index as isize + 1,
+                title: "game".into(),
+                process_id: index as u32 + 1,
+                exe_name: "game.exe".into(),
+                exe_path: None,
+            })
+            .collect();
+        assert!(candidates_from_sources_checked(Vec::new(), windows, &[], |_| None,).is_err());
+
+        let candidate = DetectedGameCandidate {
+            id_hint: "id".into(),
+            name: "é".repeat(MAX_DISCOVERY_TEXT_BYTES),
+            source: DetectedGameSource::RunningWindow,
+            steam_app_id: None,
+            install_dir: None,
+            exe_name: "game.exe".into(),
+            process_path: None,
+            window_title: "game".into(),
+            icon: None,
+            confidence: 60,
+        };
+        assert!(validate_discovery_candidates(&[candidate]).is_err());
+    }
+
+    #[test]
+    fn bounded_vdf_reader_rejects_oversize_files_before_reading_them() {
+        let dir = TestDir::new("clipline-game-discovery", "oversize-vdf");
+        let path = dir.path().join("libraryfolders.vdf");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(MAX_STEAM_VDF_BYTES as u64 + 1).unwrap();
+        assert!(read_bounded_utf8(&path, MAX_STEAM_VDF_BYTES).is_err());
     }
 
     #[test]

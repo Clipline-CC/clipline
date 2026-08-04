@@ -3,15 +3,16 @@ use thiserror::Error;
 use crate::{
     CatalogSummarySnapshot, CloudAccountOwner, CloudAccountScope, CloudUploadSnapshot,
     CloudUploadUpdateKind, DesktopSnapshot, GameSnapshot, Generation, GenerationError,
-    MediaRootSnapshot, MicrophonePhase, MicrophoneSnapshot, Notice, NoticeKind, RecorderEvent,
-    RecorderSnapshot, RecorderStatus, Revision, SavedReplay, StorageStatus, UiAction, UiEffect,
-    UiEvent, WindowLifecycleSnapshot,
+    MediaRootSnapshot, MicrophonePhase, MicrophoneSnapshot, Notice, NoticeKind, ProbeKind,
+    ProbePhase, ProbeSummary, RecorderEvent, RecorderSnapshot, RecorderStatus, Revision,
+    SavedReplay, StorageStatus, UiAction, UiEffect, UiEvent, WindowLifecycleSnapshot,
 };
 
 pub const MAX_PENDING_NOTICES: usize = 64;
 pub const MAX_NOTICE_MESSAGE_BYTES: usize = 64 * 1024;
 pub const MAX_ACTIVE_UPLOADS: usize = 16;
-pub const DESKTOP_SNAPSHOT_SCHEMA_VERSION: u32 = 4;
+pub const MAX_SETTINGS_PROBE_SUMMARIES: usize = ProbeKind::COUNT;
+pub const DESKTOP_SNAPSHOT_SCHEMA_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApplyEventOutcome {
@@ -45,6 +46,8 @@ pub enum ControllerError {
     InvalidRecorderMetric,
     #[error("invalid desktop snapshot: {0}")]
     InvalidSnapshot(&'static str),
+    #[error("invalid settings probe summary: {0}")]
+    InvalidProbeSummary(String),
 }
 
 impl From<GenerationError> for ControllerError {
@@ -100,6 +103,7 @@ where
                 uploads: Vec::new(),
                 library_revision: Revision::INITIAL,
                 catalog: CatalogSummarySnapshot::default(),
+                settings_probes: Vec::new(),
                 enrichment_generation: Generation::INITIAL,
                 notices,
                 notice_sequence,
@@ -126,15 +130,37 @@ where
     }
 
     pub fn dispatch(&mut self, action: UiAction) -> Result<DispatchOutcome, ControllerError> {
-        let effect = action.effect();
+        let mut effect = action.effect();
         let mut changed = false;
-        if let UiAction::AcknowledgeNotice { notice_id } = action {
-            if self.snapshot.notices.first().map(|notice| notice.id) == Some(notice_id) {
-                let revision = self.snapshot.revision.checked_next()?;
-                self.snapshot.notices.remove(0);
-                self.snapshot.revision = revision;
-                changed = true;
+        match action {
+            UiAction::AcknowledgeNotice { notice_id } => {
+                if self.snapshot.notices.first().map(|notice| notice.id) == Some(notice_id) {
+                    let revision = self.snapshot.revision.checked_next()?;
+                    self.snapshot.notices.remove(0);
+                    self.snapshot.revision = revision;
+                    changed = true;
+                }
             }
+            UiAction::RequestSettingsProbe { token } => {
+                let mut next = self.snapshot.clone();
+                let summary = ProbeSummary {
+                    token,
+                    phase: ProbePhase::Pending,
+                    error: None,
+                };
+                match apply_probe_summary(&mut next, summary)? {
+                    ProbeApplyOutcome::Changed => {
+                        next.revision = next.revision.checked_next()?;
+                        self.snapshot = next;
+                        changed = true;
+                    }
+                    ProbeApplyOutcome::Unchanged => {}
+                    ProbeApplyOutcome::Stale => effect = UiEffect::None,
+                }
+            }
+            UiAction::SaveReplay
+            | UiAction::SetRecording { .. }
+            | UiAction::SetLifecycle { .. } => {}
         }
         Ok(DispatchOutcome {
             effect,
@@ -364,6 +390,18 @@ where
                     true
                 }
             }
+            UiEvent::SettingsProbeChanged { summary } => {
+                if summary.phase == ProbePhase::Pending {
+                    return Err(ControllerError::InvalidProbeSummary(
+                        "probe result events must be terminal".into(),
+                    ));
+                }
+                match apply_probe_summary(&mut next, summary)? {
+                    ProbeApplyOutcome::Changed => true,
+                    ProbeApplyOutcome::Unchanged => false,
+                    ProbeApplyOutcome::Stale => return Ok(ApplyEventOutcome::Stale),
+                }
+            }
             UiEvent::UserError { message } => {
                 push_notice(&mut next, NoticeKind::Error, message, None)?;
                 true
@@ -413,6 +451,81 @@ where
         self.snapshot.recorder.desired = desired;
         self.snapshot.revision = revision;
         Ok(true)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeApplyOutcome {
+    Changed,
+    Unchanged,
+    Stale,
+}
+
+fn apply_probe_summary<S>(
+    snapshot: &mut DesktopSnapshot<S>,
+    summary: ProbeSummary,
+) -> Result<ProbeApplyOutcome, ControllerError> {
+    summary
+        .validate()
+        .map_err(ControllerError::InvalidProbeSummary)?;
+    if let Some(current_owner) = snapshot
+        .settings_probes
+        .first()
+        .map(|current| current.token.owner)
+    {
+        if summary.token.owner < current_owner {
+            return Ok(ProbeApplyOutcome::Stale);
+        }
+        if summary.token.owner > current_owner {
+            snapshot.settings_probes.clear();
+        }
+    }
+    let existing = snapshot
+        .settings_probes
+        .iter()
+        .position(|current| current.token.kind == summary.token.kind);
+    let Some(index) = existing else {
+        if snapshot.settings_probes.len() == MAX_SETTINGS_PROBE_SUMMARIES {
+            return Err(ControllerError::InvalidSnapshot(
+                "too many settings probe summaries",
+            ));
+        }
+        snapshot.settings_probes.push(summary);
+        snapshot
+            .settings_probes
+            .sort_by_key(|probe| probe.token.kind);
+        return Ok(ProbeApplyOutcome::Changed);
+    };
+    let current = &snapshot.settings_probes[index];
+    if summary.token.owner < current.token.owner {
+        return Ok(ProbeApplyOutcome::Stale);
+    }
+    if current.token.owner == summary.token.owner {
+        if summary.token.request_generation < current.token.request_generation {
+            return Ok(ProbeApplyOutcome::Stale);
+        }
+        if summary.token.request_generation == current.token.request_generation {
+            if probe_phase_rank(summary.phase) < probe_phase_rank(current.phase) {
+                return Ok(ProbeApplyOutcome::Stale);
+            }
+            if *current == summary {
+                return Ok(ProbeApplyOutcome::Unchanged);
+            }
+            if current.phase != ProbePhase::Pending {
+                return Err(ControllerError::InvalidProbeSummary(
+                    "a terminal probe result cannot change for the same token".into(),
+                ));
+            }
+        }
+    }
+    snapshot.settings_probes[index] = summary;
+    Ok(ProbeApplyOutcome::Changed)
+}
+
+const fn probe_phase_rank(phase: ProbePhase) -> u8 {
+    match phase {
+        ProbePhase::Pending => 0,
+        ProbePhase::Ready | ProbePhase::Failed => 1,
     }
 }
 
@@ -696,6 +809,26 @@ fn validate_snapshot<S>(snapshot: &DesktopSnapshot<S>) -> Result<(), ControllerE
     }
     if snapshot.uploads.len() > MAX_ACTIVE_UPLOADS {
         return Err(ControllerError::InvalidSnapshot("too many uploads"));
+    }
+    if snapshot.settings_probes.len() > MAX_SETTINGS_PROBE_SUMMARIES
+        || snapshot
+            .settings_probes
+            .iter()
+            .any(|summary| summary.validate().is_err())
+        || snapshot
+            .settings_probes
+            .windows(2)
+            .any(|pair| pair[0].token.kind >= pair[1].token.kind)
+        || snapshot.settings_probes.first().is_some_and(|first| {
+            snapshot
+                .settings_probes
+                .iter()
+                .any(|summary| summary.token.owner != first.token.owner)
+        })
+    {
+        return Err(ControllerError::InvalidSnapshot(
+            "settings probe summaries are invalid or not uniquely sorted",
+        ));
     }
     if snapshot
         .uploads

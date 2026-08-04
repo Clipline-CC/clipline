@@ -177,6 +177,9 @@ fn tauri_emissions(event: &UiEvent) -> Vec<TauriEmission> {
         // WebView already owns its rich catalog model and has no legacy event
         // contract for this migration-only projection.
         UiEvent::CatalogSummaryChanged { .. } => Vec::new(),
+        // Native Settings models retrieve the full bounded catalog directly;
+        // the compatibility WebView continues using its existing commands.
+        UiEvent::SettingsProbeChanged { .. } => Vec::new(),
         UiEvent::UserError { message } => one("error", Value::String(message.clone())),
     }
 }

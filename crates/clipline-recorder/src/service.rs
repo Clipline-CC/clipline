@@ -250,7 +250,7 @@ pub use clipline_settings::{AudioChannelMode, CaptureBackend, VideoEncoder};
 /// (backend, codec) pair (still falling back through Auto if it can't open).
 /// Legacy saved values (`auto`, `nvenc_h264`, `amf_h264`, `quick_sync_h264`)
 /// still deserialize.
-trait VideoEncoderRuntimeExt: Sized {
+pub(crate) trait VideoEncoderRuntimeExt: Sized {
     fn preference(self) -> EncoderPreference;
     fn from_parts(backend: EncoderBackend, codec: Codec) -> Option<Self>;
 }
@@ -291,56 +291,6 @@ impl VideoEncoderRuntimeExt for VideoEncoder {
             _ => return None,
         })
     }
-}
-
-/// The settings id string for a codec, matching the frontend's decode-probe
-/// keys ("h264"/"hevc"/"av1").
-pub fn codec_id(codec: Codec) -> &'static str {
-    match codec {
-        Codec::Av1 => "av1",
-        Codec::Hevc => "hevc",
-        Codec::H264 => "h264",
-    }
-}
-
-/// One selectable encoder for the Settings dropdown.
-#[derive(serde::Serialize)]
-pub struct EncoderOption {
-    /// VideoEncoder settings id (e.g. "amf_hevc").
-    pub id: String,
-    /// Human label (e.g. "AMD AMF · HEVC").
-    pub name: String,
-    /// Codec key the frontend matches against its decode-capability probe.
-    pub codec: String,
-}
-
-/// The encoders this machine can actually use, as Settings options. Dedupes
-/// the same (backend, codec) offered by both MFT and FFmpeg, ordered by the
-/// ddoc merit/preference order.
-pub fn available_encoder_options() -> Vec<EncoderOption> {
-    let mut seen = std::collections::BTreeSet::new();
-    let mut options = Vec::new();
-    for cap in encoder_capabilities() {
-        for &codec in &cap.codecs {
-            let Some(encoder) = VideoEncoder::from_parts(cap.backend, codec) else {
-                continue;
-            };
-            if !seen.insert(encoder.id()) {
-                continue;
-            }
-            let candidate = EncoderCandidate {
-                api: cap.api,
-                backend: cap.backend,
-                codec,
-            };
-            options.push(EncoderOption {
-                id: encoder.id().to_string(),
-                name: encoder_label(candidate),
-                codec: codec_id(codec).to_string(),
-            });
-        }
-    }
-    options
 }
 
 /// A short, human-readable label for the active encoder, shown in the
@@ -1248,7 +1198,7 @@ fn warn_user(events: &Sender<Event>, message: String) {
 /// Combined MFT + FFmpeg capabilities. Probing is hardware-stable per
 /// process, so it is computed once and reused across recorder restarts
 /// (the FFmpeg probe test-encodes, which is too slow to repeat per save).
-fn encoder_capabilities() -> &'static [EncoderCapability] {
+pub(crate) fn encoder_capabilities() -> &'static [EncoderCapability] {
     use std::sync::OnceLock;
     static CAPS: OnceLock<Vec<EncoderCapability>> = OnceLock::new();
     CAPS.get_or_init(|| {

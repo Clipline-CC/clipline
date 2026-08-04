@@ -9,6 +9,8 @@ publish = false
 clipline-events = { path = "../clipline-events" }
 clipline-games = { path = "../clipline-games" }
 clipline-lol = { path = "../clipline-lol" }
+clipline-settings = { path = "../clipline-settings" }
+serde = { workspace = true }
 tokio = { workspace = true }
 tracing = "0.1"
 
@@ -17,10 +19,8 @@ chrono = "0.4.45"
 clipline-capture = { path = "../clipline-capture" }
 clipline-desktop = { path = "../clipline-desktop" }
 clipline-library = { path = "../clipline-library" }
-clipline-settings = { path = "../clipline-settings" }
 clipline-shell = { path = "../clipline-shell" }
 clipline-storage = { path = "../clipline-storage" }
-serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
