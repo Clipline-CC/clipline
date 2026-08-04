@@ -253,15 +253,15 @@
 253:
 254:### Task B2: Managed-runtime verifier (separate from `locate()`)
 255:
-256:- [ ] Introduce `verify_managed_ffmpeg_runtime(dir, manifest) -> Result<ManagedRuntimeInfo, _>`
+256:- [x] Introduce `verify_managed_ffmpeg_runtime(dir, manifest) -> Result<ManagedRuntimeInfo, _>`
 257:      that checks:
 258:  - every allowlisted file exists with exact size + sha256
 259:  - `PROVENANCE.json` matches the committed/runtime manifest identity
 260:  - no required file is missing; unexpected critical binaries may be ignored or rejected per
 261:    documented policy, but tampered allowlisted DLLs must fail
-262:- [ ] Keep `locate()` for subprocess execution discovery. Add a higher-level
+262:- [x] Keep `locate()` for subprocess execution discovery. Add a higher-level
 263:      `ffmpeg_runtime_status()` used by UI/ensure that classifies managed vs external.
-264:- [ ] Tests: happy managed tree; tampered DLL; stale/missing provenance; override/PATH reported as
+264:- [x] Tests: happy managed tree; tampered DLL; stale/missing provenance; override/PATH reported as
 265:      external; repair path rejects the bad tree before re-download publish.
 266:
 267:### Task B3: Native single-flight ensure state + bounded download

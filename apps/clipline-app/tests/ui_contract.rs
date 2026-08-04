@@ -3851,6 +3851,44 @@ fn deck_status_success_toasts_auto_clear() {
 }
 
 #[test]
+fn ffmpeg_managed_runtime_verifier_is_separate_from_locate() {
+    let runtime = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ffmpeg_runtime.rs"),
+    )
+    .expect("read ffmpeg_runtime.rs");
+    let capture = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/clipline-capture/src/ffmpeg.rs"),
+    )
+    .expect("read capture ffmpeg.rs");
+
+    for required in [
+        "fn verify_managed_ffmpeg_runtime(",
+        "fn ffmpeg_runtime_status(",
+        "struct ManagedRuntimeInfo",
+        "ManagedRuntimeVerifyError",
+        "fn managed_runtime_needs_repair(",
+        "PROVENANCE.json",
+        "manifest_sha256",
+    ] {
+        assert!(
+            runtime.contains(required),
+            "ffmpeg_runtime.rs must expose managed verifier surface `{required}`"
+        );
+    }
+    assert!(
+        capture.contains("pub fn locate()")
+            && capture.contains("CLIPLINE_FFMPEG")
+            && capture.contains("LOCALAPPDATA"),
+        "locate() remains discovery-only and must stay in clipline-capture"
+    );
+    assert!(
+        !capture.contains("verify_managed_ffmpeg_runtime"),
+        "managed verification must not live inside locate()"
+    );
+}
+
+#[test]
 fn ffmpeg_capability_matrix_contracts_managed_runtime_surfaces() {
     let runtime = fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ffmpeg_runtime.rs"),
