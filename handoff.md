@@ -88,6 +88,19 @@ and reopening Settings; actual exit permanently closes Settings admission and jo
 detector worker. `RunEvent::Exit` is an idempotent joined-shutdown backstop. The detached Tauri
 detector loop and duplicate application-side detection wrapper are gone.
 
+The Task 8 hotkey-capture reducer is now shared in `clipline-shell`. One non-cloneable reducer is
+owned per exact Settings attachment; modifier-only input stays pending, valid keyboard/mouse input
+captures through the existing grammar, Escape clears only the active field, and blur/detach cancels
+without changing the draft. Reserved, invalid, duplicate, oversized, and last-key removal attempts
+are rejected without mutation. Persisted labels are capped at 64 bytes each and capture tokens at
+32 bytes before parsing or retention. The native interpreter serializes byte-for-byte identically
+to every shipping Boa keyboard/mouse vector. OS registration remains exclusively in the existing
+transactional Settings Save, whose exact `HotkeySet` receipt still owns rollback. The future Slint
+adapter must map toolkit key values to the documented canonical tokens and must not feed arbitrary
+display text into the reducer. Each callback carries its exact field, every draft load/rebase/discard
+atomically resets capture, and successful capture/clear returns both compacted labels so clearing
+Primary can safely promote Secondary without publishing a blank required primary.
+
 osu! settings now persist a checked nonzero account generation, migrate legacy profiles to generation
 1, retain shipping `u64` client-id semantics, and enforce per-field, cleanup-list, and 64 KiB aggregate
 bounds before normalization can hide hostile input. The generation is not yet an authoritative ABA
@@ -95,8 +108,8 @@ fence: the later osu service/CAS slice must enforce exact transitions under the 
 before asynchronous work trusts it. The explicit 100/125/150/200% DPI and negative-half-tie matrix is
 green.
 
-Next: implement the Task 8 hotkey reducer, then the osu! secret/CAS/HTTP/enrichment slices and the
-remaining thin Tauri compatibility cutover.
+Next: implement the Task 8 osu! secret/CAS/HTTP/enrichment slices and the remaining thin Tauri
+compatibility cutover.
 `artifacts/`, `paseo.json`, and unrelated poster formatting remain local and excluded.
 
 ## Checkpoint (2026-08-04): Slint replacement Milestone 8, Task 7 joined microphone monitor

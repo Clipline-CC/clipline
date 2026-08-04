@@ -6,6 +6,10 @@
 
 use boa_engine::{Context, Source};
 use clipline_library::{gallery_card_preview, GalleryCardInput, GalleryPresentation};
+use clipline_shell::hotkey::{
+    interpret_hotkey_key_event, interpret_hotkey_mouse_event, HotkeyCaptureKeyEvent,
+    HotkeyCaptureMouseEvent, HotkeyModifiers,
+};
 use std::fs;
 use std::path::Path;
 
@@ -1563,6 +1567,137 @@ fn hotkey_recorder_reports_pending_cancel_and_invalid_inputs() {
         ),
         r#"{"kind":"invalid","message":"That shortcut is reserved by Windows."}"#
     );
+}
+
+#[test]
+fn native_hotkey_capture_cross_runs_every_shipping_boa_vector() {
+    let mut ctx = player_core_context();
+    for (javascript, code, key, modifiers) in [
+        (
+            "PlayerCore.hotkeyFromKeyEvent({ code: 'F10', ctrlKey: false, altKey: false, shiftKey: false })",
+            "F10",
+            "",
+            HotkeyModifiers::default(),
+        ),
+        (
+            "PlayerCore.hotkeyFromKeyEvent({ code: 'F9', ctrlKey: true, altKey: true, shiftKey: false })",
+            "F9",
+            "",
+            HotkeyModifiers { ctrl: true, alt: true, shift: false },
+        ),
+        (
+            "PlayerCore.hotkeyFromKeyEvent({ key: 'F13', ctrlKey: false, altKey: true, shiftKey: true })",
+            "",
+            "F13",
+            HotkeyModifiers { ctrl: false, alt: true, shift: true },
+        ),
+        (
+            "PlayerCore.hotkeyFromKeyEvent({ code: 'KeyG', ctrlKey: true, altKey: false, shiftKey: false })",
+            "KeyG",
+            "",
+            HotkeyModifiers { ctrl: true, alt: false, shift: false },
+        ),
+        (
+            "PlayerCore.hotkeyFromKeyEvent({ code: 'ArrowLeft', ctrlKey: false, altKey: true, shiftKey: true })",
+            "ArrowLeft",
+            "",
+            HotkeyModifiers { ctrl: false, alt: true, shift: true },
+        ),
+        (
+            "PlayerCore.hotkeyFromKeyEvent({ code: 'Digit1', ctrlKey: true, altKey: false, shiftKey: false })",
+            "Digit1",
+            "",
+            HotkeyModifiers { ctrl: true, alt: false, shift: false },
+        ),
+        (
+            "PlayerCore.hotkeyFromKeyEvent({ code: 'Slash', ctrlKey: true, altKey: false, shiftKey: false })",
+            "Slash",
+            "",
+            HotkeyModifiers { ctrl: true, alt: false, shift: false },
+        ),
+        (
+            "PlayerCore.hotkeyFromKeyEvent({ code: 'ControlLeft', ctrlKey: true })",
+            "ControlLeft",
+            "",
+            HotkeyModifiers { ctrl: true, alt: false, shift: false },
+        ),
+        (
+            "PlayerCore.hotkeyFromKeyEvent({ code: 'Escape' })",
+            "Escape",
+            "",
+            HotkeyModifiers::default(),
+        ),
+        (
+            "PlayerCore.hotkeyFromKeyEvent({ code: 'F12', ctrlKey: false, altKey: false, shiftKey: false })",
+            "F12",
+            "",
+            HotkeyModifiers::default(),
+        ),
+        (
+            "PlayerCore.hotkeyFromKeyEvent({ code: 'KeyS', ctrlKey: true, altKey: false, shiftKey: false })",
+            "KeyS",
+            "",
+            HotkeyModifiers { ctrl: true, alt: false, shift: false },
+        ),
+        (
+            "PlayerCore.hotkeyFromKeyEvent({ code: 'KeyS', ctrlKey: false, altKey: false, shiftKey: false })",
+            "KeyS",
+            "",
+            HotkeyModifiers::default(),
+        ),
+        (
+            "PlayerCore.hotkeyFromKeyEvent({ code: 'Tab', ctrlKey: false, altKey: true, shiftKey: false })",
+            "Tab",
+            "",
+            HotkeyModifiers { ctrl: false, alt: true, shift: false },
+        ),
+    ] {
+        let javascript_result = eval_json(&mut ctx, javascript);
+        let native_result = serde_json::to_string(&interpret_hotkey_key_event(
+            &HotkeyCaptureKeyEvent {
+                code,
+                key,
+                modifiers,
+            },
+        ))
+        .unwrap();
+        assert_eq!(native_result, javascript_result, "{javascript}");
+    }
+
+    for (javascript, button, modifiers) in [
+        (
+            "PlayerCore.hotkeyFromMouseEvent({ button: 1, ctrlKey: true, altKey: false, shiftKey: false })",
+            1,
+            HotkeyModifiers { ctrl: true, alt: false, shift: false },
+        ),
+        (
+            "PlayerCore.hotkeyFromMouseEvent({ button: 3, ctrlKey: true, altKey: false, shiftKey: false })",
+            3,
+            HotkeyModifiers { ctrl: true, alt: false, shift: false },
+        ),
+        (
+            "PlayerCore.hotkeyFromMouseEvent({ button: 4, ctrlKey: false, altKey: true, shiftKey: true })",
+            4,
+            HotkeyModifiers { ctrl: false, alt: true, shift: true },
+        ),
+        (
+            "PlayerCore.hotkeyFromMouseEvent({ button: 0, ctrlKey: false, altKey: false, shiftKey: false })",
+            0,
+            HotkeyModifiers::default(),
+        ),
+        (
+            "PlayerCore.hotkeyFromMouseEvent({ button: 1, ctrlKey: false, altKey: false, shiftKey: false })",
+            1,
+            HotkeyModifiers::default(),
+        ),
+    ] {
+        let javascript_result = eval_json(&mut ctx, javascript);
+        let native_result = serde_json::to_string(&interpret_hotkey_mouse_event(
+            &HotkeyCaptureMouseEvent { button, modifiers },
+        ))
+        .unwrap();
+        assert_eq!(native_result, javascript_result, "{javascript}");
+    }
 }
 
 #[test]

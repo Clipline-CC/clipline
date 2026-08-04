@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 
+use serde::Serialize;
 use thiserror::Error;
 
 pub const MODIFIER_ALT: u32 = 0x0001;
@@ -9,6 +10,21 @@ pub const MODIFIER_CONTROL: u32 = 0x0002;
 pub const MODIFIER_SHIFT: u32 = 0x0004;
 pub const MODIFIER_NOREPEAT: u32 = 0x4000;
 pub const MAX_CONFIGURED_HOTKEYS: usize = 2;
+pub const MAX_HOTKEY_LABEL_BYTES: usize = 64;
+pub const MAX_HOTKEY_CAPTURE_TOKEN_BYTES: usize = 32;
+
+const CAPTURE_PENDING_MESSAGE: &str = "Now press an F-key, mouse button, or keyboard key.";
+const CAPTURE_RECORDING_MESSAGE: &str =
+    "Press an F-key, mouse button, or Ctrl/Alt/Shift plus a keyboard key - or Esc to clear.";
+const CAPTURE_F12_MESSAGE: &str = "F12 is reserved by Windows for debuggers.";
+const CAPTURE_UNSUPPORTED_KEY_MESSAGE: &str =
+    "Use an F-key, mouse button, or Ctrl/Alt/Shift plus a keyboard key.";
+const CAPTURE_MODIFIER_REQUIRED_MESSAGE: &str = "Use Ctrl, Alt, or Shift with this key.";
+const CAPTURE_RESERVED_MESSAGE: &str = "That shortcut is reserved by Windows.";
+const CAPTURE_UNSUPPORTED_MOUSE_MESSAGE: &str =
+    "Use middle, Mouse4, or Mouse5 as a mouse shortcut.";
+const CAPTURE_DUPLICATE_MESSAGE: &str = "Already used by the other Save Replay keybind.";
+const CAPTURE_LAST_HOTKEY_MESSAGE: &str = "At least one Save Replay keybind is required.";
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct HotkeySpec {
@@ -140,6 +156,13 @@ impl HotkeySet {
         }
         let mut hotkeys = Vec::with_capacity(raws.len());
         for (index, raw) in raws.iter().enumerate() {
+            if raw.len() > MAX_HOTKEY_LABEL_BYTES {
+                return Err(HotkeySetError::LabelTooLong {
+                    index,
+                    bytes: raw.len(),
+                    maximum: MAX_HOTKEY_LABEL_BYTES,
+                });
+            }
             let hotkey = parse_hotkey_spec(raw)
                 .map_err(|source| HotkeySetError::Invalid { index, source })?;
             if hotkeys.contains(&hotkey) {
@@ -182,6 +205,12 @@ impl HotkeySet {
 pub enum HotkeySetError {
     #[error("configured {count} hotkeys; maximum is {maximum}")]
     TooMany { count: usize, maximum: usize },
+    #[error("hotkey {index} is {bytes} bytes; maximum is {maximum}")]
+    LabelTooLong {
+        index: usize,
+        bytes: usize,
+        maximum: usize,
+    },
     #[error("hotkey {index}: {source}")]
     Invalid {
         index: usize,
@@ -190,6 +219,365 @@ pub enum HotkeySetError {
     },
     #[error("duplicate hotkey {label}")]
     Duplicate { label: String },
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HotkeyModifiers {
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+}
+
+/// One already-canonicalized keyboard event.
+///
+/// `code` follows the frozen browser-style tokens used by Clipline's shipping
+/// recorder (`ControlLeft`, `F10`, `KeyG`, and so on). Native adapters must map
+/// toolkit keys explicitly; arbitrary display text is not a canonical code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HotkeyCaptureKeyEvent<'a> {
+    pub code: &'a str,
+    pub key: &'a str,
+    pub modifiers: HotkeyModifiers,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HotkeyCaptureMouseEvent {
+    pub button: u8,
+    pub modifiers: HotkeyModifiers,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum HotkeyCaptureInterpretation {
+    Captured { value: String },
+    Pending { message: &'static str },
+    Cancel,
+    Invalid { message: &'static str },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HotkeyCaptureField {
+    Primary,
+    Secondary,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HotkeyCaptureLabels {
+    pub primary: String,
+    pub secondary: Option<String>,
+}
+
+impl HotkeyCaptureField {
+    const fn index(self) -> usize {
+        match self {
+            Self::Primary => 0,
+            Self::Secondary => 1,
+        }
+    }
+
+    const fn other(self) -> Self {
+        match self {
+            Self::Primary => Self::Secondary,
+            Self::Secondary => Self::Primary,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HotkeyCaptureOutcome {
+    Inactive,
+    Recording {
+        message: &'static str,
+    },
+    Pending {
+        message: &'static str,
+    },
+    Captured {
+        field: HotkeyCaptureField,
+        labels: HotkeyCaptureLabels,
+    },
+    Cleared {
+        field: HotkeyCaptureField,
+        labels: HotkeyCaptureLabels,
+    },
+    Canceled,
+    Rejected {
+        message: &'static str,
+    },
+}
+
+/// Pure capture state for one Settings attachment.
+///
+/// This type deliberately carries no process/window token and is not Clone.
+/// A controller owns one reducer per exact Settings attachment, calls
+/// [`Self::detach`] during teardown, and never routes queued events from an old
+/// attachment into a rebuilt window.
+#[derive(Debug, PartialEq, Eq)]
+pub struct HotkeyCaptureReducer {
+    configured: [Option<HotkeySpec>; MAX_CONFIGURED_HOTKEYS],
+    active: Option<HotkeyCaptureField>,
+}
+
+impl HotkeyCaptureReducer {
+    pub fn new(primary: &str, secondary: Option<&str>) -> Result<Self, HotkeySetError> {
+        let secondary = secondary.filter(|value| !value.trim().is_empty());
+        let mut labels = Vec::with_capacity(MAX_CONFIGURED_HOTKEYS);
+        labels.push(primary);
+        if let Some(secondary) = secondary {
+            labels.push(secondary);
+        }
+        let configured = HotkeySet::parse(&labels)?;
+        Ok(Self {
+            configured: [
+                configured.as_slice().first().cloned(),
+                configured.as_slice().get(1).cloned(),
+            ],
+            active: None,
+        })
+    }
+
+    #[must_use]
+    pub const fn active_field(&self) -> Option<HotkeyCaptureField> {
+        self.active
+    }
+
+    #[must_use]
+    pub fn settings_labels(&self) -> HotkeyCaptureLabels {
+        let mut configured = self
+            .configured
+            .iter()
+            .filter_map(Option::as_ref)
+            .map(HotkeySpec::normalized);
+        let primary = configured
+            .next()
+            .expect("capture reducer always retains one hotkey");
+        HotkeyCaptureLabels {
+            primary,
+            secondary: configured.next(),
+        }
+    }
+
+    /// Replace the transient capture mirror from an authoritative Settings
+    /// draft. Controllers call this on load, discard, successful-save rebase,
+    /// or any external draft replacement. Validation/allocation failure leaves
+    /// the current reducer byte-identical.
+    pub fn reset_from_settings(
+        &mut self,
+        primary: &str,
+        secondary: Option<&str>,
+    ) -> Result<(), HotkeySetError> {
+        let replacement = Self::new(primary, secondary)?;
+        *self = replacement;
+        Ok(())
+    }
+
+    pub fn begin(&mut self, field: HotkeyCaptureField) -> HotkeyCaptureOutcome {
+        self.active = Some(field);
+        HotkeyCaptureOutcome::Recording {
+            message: CAPTURE_RECORDING_MESSAGE,
+        }
+    }
+
+    pub fn handle_key(
+        &mut self,
+        field: HotkeyCaptureField,
+        event: &HotkeyCaptureKeyEvent<'_>,
+    ) -> HotkeyCaptureOutcome {
+        if self.active != Some(field) {
+            return HotkeyCaptureOutcome::Inactive;
+        }
+        self.apply(field, interpret_hotkey_key_event(event))
+    }
+
+    pub fn handle_mouse(
+        &mut self,
+        field: HotkeyCaptureField,
+        event: &HotkeyCaptureMouseEvent,
+    ) -> HotkeyCaptureOutcome {
+        if self.active != Some(field) {
+            return HotkeyCaptureOutcome::Inactive;
+        }
+        self.apply(field, interpret_hotkey_mouse_event(event))
+    }
+
+    pub fn blur(&mut self, field: HotkeyCaptureField) -> HotkeyCaptureOutcome {
+        if self.active != Some(field) {
+            return HotkeyCaptureOutcome::Inactive;
+        }
+        self.active = None;
+        HotkeyCaptureOutcome::Canceled
+    }
+
+    pub fn detach(&mut self) -> HotkeyCaptureOutcome {
+        if self.active.take().is_some() {
+            HotkeyCaptureOutcome::Canceled
+        } else {
+            HotkeyCaptureOutcome::Inactive
+        }
+    }
+
+    fn apply(
+        &mut self,
+        field: HotkeyCaptureField,
+        input: HotkeyCaptureInterpretation,
+    ) -> HotkeyCaptureOutcome {
+        if self.active != Some(field) {
+            return HotkeyCaptureOutcome::Inactive;
+        }
+        match input {
+            HotkeyCaptureInterpretation::Captured { value } => {
+                let Ok(hotkey) = parse_hotkey_spec(&value) else {
+                    return HotkeyCaptureOutcome::Rejected {
+                        message: CAPTURE_UNSUPPORTED_KEY_MESSAGE,
+                    };
+                };
+                if self.configured[field.other().index()].as_ref() == Some(&hotkey) {
+                    return HotkeyCaptureOutcome::Rejected {
+                        message: CAPTURE_DUPLICATE_MESSAGE,
+                    };
+                }
+                self.configured[field.index()] = Some(hotkey);
+                self.active = None;
+                HotkeyCaptureOutcome::Captured {
+                    field,
+                    labels: self.settings_labels(),
+                }
+            }
+            HotkeyCaptureInterpretation::Pending { message } => {
+                HotkeyCaptureOutcome::Pending { message }
+            }
+            HotkeyCaptureInterpretation::Cancel => {
+                let configured_count = self.configured.iter().flatten().count();
+                if self.configured[field.index()].is_some() && configured_count == 1 {
+                    return HotkeyCaptureOutcome::Rejected {
+                        message: CAPTURE_LAST_HOTKEY_MESSAGE,
+                    };
+                }
+                self.configured[field.index()] = None;
+                self.active = None;
+                HotkeyCaptureOutcome::Cleared {
+                    field,
+                    labels: self.settings_labels(),
+                }
+            }
+            HotkeyCaptureInterpretation::Invalid { message } => {
+                HotkeyCaptureOutcome::Rejected { message }
+            }
+        }
+    }
+}
+
+#[must_use]
+pub fn interpret_hotkey_key_event(
+    event: &HotkeyCaptureKeyEvent<'_>,
+) -> HotkeyCaptureInterpretation {
+    if event.code.len() > MAX_HOTKEY_CAPTURE_TOKEN_BYTES
+        || event.key.len() > MAX_HOTKEY_CAPTURE_TOKEN_BYTES
+    {
+        return HotkeyCaptureInterpretation::Invalid {
+            message: CAPTURE_UNSUPPORTED_KEY_MESSAGE,
+        };
+    }
+    if event.code == "Escape" || event.key == "Escape" {
+        return HotkeyCaptureInterpretation::Cancel;
+    }
+    if matches!(
+        event.code,
+        "ControlLeft" | "ControlRight" | "AltLeft" | "AltRight" | "ShiftLeft" | "ShiftRight"
+    ) {
+        return HotkeyCaptureInterpretation::Pending {
+            message: CAPTURE_PENDING_MESSAGE,
+        };
+    }
+
+    let function_token = if event.code.is_empty() {
+        event.key
+    } else {
+        event.code
+    };
+    let key = if let Some(number) = capture_function_key_number(function_token) {
+        if number == 12 {
+            return HotkeyCaptureInterpretation::Invalid {
+                message: CAPTURE_F12_MESSAGE,
+            };
+        }
+        HotkeyKey::Function(number)
+    } else {
+        let Some(key) = capture_keyboard_key(event.code) else {
+            return HotkeyCaptureInterpretation::Invalid {
+                message: CAPTURE_UNSUPPORTED_KEY_MESSAGE,
+            };
+        };
+        if !event.modifiers.ctrl && !event.modifiers.alt && !event.modifiers.shift {
+            return HotkeyCaptureInterpretation::Invalid {
+                message: CAPTURE_MODIFIER_REQUIRED_MESSAGE,
+            };
+        }
+        HotkeyKey::Keyboard(key)
+    };
+
+    capture_interpretation(key, event.modifiers)
+}
+
+#[must_use]
+pub fn interpret_hotkey_mouse_event(
+    event: &HotkeyCaptureMouseEvent,
+) -> HotkeyCaptureInterpretation {
+    let key = match event.button {
+        1 => HotkeyKey::Middle,
+        3 => HotkeyKey::Mouse4,
+        4 => HotkeyKey::Mouse5,
+        _ => {
+            return HotkeyCaptureInterpretation::Invalid {
+                message: CAPTURE_UNSUPPORTED_MOUSE_MESSAGE,
+            }
+        }
+    };
+    capture_interpretation(key, event.modifiers)
+}
+
+fn capture_interpretation(
+    key: HotkeyKey,
+    modifiers: HotkeyModifiers,
+) -> HotkeyCaptureInterpretation {
+    if validate_hotkey_combination(&key, modifiers.ctrl, modifiers.alt, modifiers.shift).is_err() {
+        return HotkeyCaptureInterpretation::Invalid {
+            message: CAPTURE_RESERVED_MESSAGE,
+        };
+    }
+    HotkeyCaptureInterpretation::Captured {
+        value: HotkeySpec {
+            ctrl: modifiers.ctrl,
+            alt: modifiers.alt,
+            shift: modifiers.shift,
+            key,
+        }
+        .normalized(),
+    }
+}
+
+fn capture_function_key_number(token: &str) -> Option<u8> {
+    let token = token.as_bytes();
+    if !(2..=3).contains(&token.len()) || !matches!(token[0], b'F' | b'f') {
+        return None;
+    }
+    let number = std::str::from_utf8(&token[1..]).ok()?.parse::<u8>().ok()?;
+    (1..=24).contains(&number).then_some(number)
+}
+
+fn capture_keyboard_key(code: &str) -> Option<KeyboardKey> {
+    let bytes = code.as_bytes();
+    if let [b'K', b'e', b'y', character] = bytes {
+        if character.is_ascii_uppercase() {
+            return keyboard_key_from_token(&(*character as char).to_string());
+        }
+    }
+    if let [b'D', b'i', b'g', b'i', b't', digit] = bytes {
+        if digit.is_ascii_digit() {
+            return keyboard_key_from_token(&(*digit as char).to_string());
+        }
+    }
+    keyboard_key_from_token(code)
 }
 
 pub trait HotkeyRegistrationBackend {
