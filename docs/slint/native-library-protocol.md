@@ -15,6 +15,35 @@ explicitly pending whenever the required environment is unavailable.
 Automated runs must never read or mutate the installed Clipline profile, saved credentials, or a
 production Cloud account.
 
+## Frozen evidence — `3e07a95`
+
+Milestone 7 is implementation-complete at `3e07a95`, but its absolute acceptance gate is **NO-GO
+pending quiet-host evidence**. No performance or lifecycle threshold failed. Every completed sample
+below was rejected by the protocol's environmental-noise rule before gate evaluation, so the values
+are diagnostic evidence only and do not pass an absolute gate.
+
+The frozen benchmark executable is
+`apps/clipline-slint-spike/target/benchmark/examples/catalog_harness.exe`, SHA-256
+`729f74cfd18555a580aa9fe07d82ff6372743142aba67adbe1e00f1bac9c7c4a`, 23,327,744 bytes. The
+source oracle is `fixtures/playback/h264-one-opus-3s.mp4`, SHA-256
+`cc925d7d111fde927d9a2e3666731b6b4403f065c83b1b475bace58ea73b7bb3`. Runs used Windows 11
+build 26200, 100% display scaling, the Microsoft Basic Display Adapter, and `winit-software`.
+
+| Scenario | Accepted / rejected | Diagnostic result | Evidence |
+|---|---:|---|---|
+| 2,000-clip `local-cold`, 300-second steady window | 0 / 6 | Five complete attempts were rejected solely for background CPU noise (6.45%–15.08% noisy samples versus the 5% limit). They reported first usable page 601.3261–1091.4355 ms, PWS p50 29,749,248–31,813,632 bytes, PWS p95 29,913,088–32,043,008 bytes, CPU p95 0.4787%–0.5458%, and clean bounds/lifetimes. The sixth attempt was externally interrupted and is invalid. | `artifacts/slint-library-m7-final-2000-cold/20260804T005541Z-slint-library-2000-local-cold-series-4ce65e89.json` plus the five complete raw/provenance pairs in that directory |
+| 50-clip `reveal-close-100`, 300-second steady window | 0 / 1 | Rejected for 14.516% background-noise samples. Diagnostic counters show 100 window cycles, 100 Cloud open/replace/close cycles, two cache fills, 200/200 balanced leases, zero active leases, 372,736-byte PWS growth, 27,369,472-byte PWS p50, and 0.4895% CPU p95. | `artifacts/slint-library-m7-final-lifecycle-diagnostic/20260804T010201Z-slint-library-50-reveal-close-100-series-bec6133b.json` |
+
+The unrelated installed Clipline process PID 5548 was excluded, recorded, and never killed. The
+automated Cloud lifecycle used a disposable local cache and hash-verified fixture; it did not read
+credentials, access the network, mutate a production account, or touch the installed profile.
+
+The required three accepted samples remain missing. Accepted 50/500/2,000 cold and warm matrices,
+synthetic Cloud, churn, and lifecycle scenarios remain open, as do matched Tauri, real-account,
+Narrator/UI Automation, DPI/OS, and real-GPU gates. Implementation work may continue because the
+stop condition is an evaluated absolute-gate failure, and no rejected sample was evaluated as a
+pass or failure. Cutover and verified parity remain prohibited until the missing evidence passes.
+
 ## Fixture ownership and provenance
 
 The sampler creates a unique disposable profile, fixture root, and seed root before starting the

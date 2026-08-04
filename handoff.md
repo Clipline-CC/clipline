@@ -4,6 +4,55 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-03): Milestone 7 implementation complete; acceptance NO-GO pending quiet evidence
+
+Milestone 7's implementation is complete at pushed commit `3e07a95`, but Task 12 and the milestone
+remain open. The absolute acceptance disposition is **NO-GO pending three protocol-accepted
+quiet-host samples**. No absolute performance, correctness, resource-bound, or lifecycle threshold
+failed: every completed frozen full-duration measurement was rejected by the environmental-noise
+rule before gate evaluation. Completed M7 ledger rows therefore advance only to `implemented`,
+never `verified`, and production cutover remains prohibited.
+
+The final implementation closes the two lifecycle gaps found during the first closeout audit.
+Durable Library/enrichment revisions now coalesce while the window is absent and dispatch one exact
+foreground refresh after attachment. The full-duration lifecycle harness now performs 100 real
+`CloudCache::get` → `accept_media` → `CloudMediaLease` open/overlapping-replace/close cycles through
+the event loop, acquiring and releasing 200 non-cloneable leases with zero left active. It also
+creates, shows, detaches, and drops 100 real Slint components through the shipping shell lifecycle.
+
+The frozen benchmark executable for `3e07a95` has SHA-256
+`729f74cfd18555a580aa9fe07d82ff6372743142aba67adbe1e00f1bac9c7c4a` and is 23,327,744 bytes.
+The source fixture `fixtures/playback/h264-one-opus-3s.mp4` has SHA-256
+`cc925d7d111fde927d9a2e3666731b6b4403f065c83b1b475bace58ea73b7bb3`. The gate host was Windows
+11 build 26200 at 100% scale with Microsoft Basic Display Adapter and `winit-software`.
+
+The 2,000-clip cold series at
+`artifacts/slint-library-m7-final-2000-cold/20260804T005541Z-slint-library-2000-local-cold-series-4ce65e89.json`
+contains zero accepted and six rejected attempts. Five complete 300-second attempts were rejected
+solely for 6.45%–15.08% noisy background samples versus the 5% limit; their diagnostic ranges were
+601.3261–1091.4355 ms first page, 29,749,248–31,813,632-byte PWS p50,
+29,913,088–32,043,008-byte PWS p95, and 0.4787%–0.5458% CPU p95, with clean bounds and ownership.
+The sixth attempt was externally interrupted and is invalid. The lifecycle series at
+`artifacts/slint-library-m7-final-lifecycle-diagnostic/20260804T010201Z-slint-library-50-reveal-close-100-series-bec6133b.json`
+was rejected for 14.516% noise; diagnostics record 100 balanced window cycles, 100 balanced Cloud
+cycles, two cache fills, 200/200 leases, zero active leases, 372,736-byte PWS growth, 27,369,472-byte
+PWS p50, and 0.4895% CPU p95.
+
+The frozen closeout rerun is green: `cargo test --workspace` (110.211 s), strict workspace Clippy
+(13.453 s), fresh-cache strict `clipline-desktop` Clippy (1.891 s), and fresh-cache strict standalone
+Slint Clippy (16.973 s). The standalone Slint all-target test/strict-Clippy matrix also passes in
+default, `package-regular`, and `package-standalone` modes. One first standalone package test was
+invalidated when a concurrent clean removed its probe executable; the agents then serialized target
+access and the identical command passed, so the invalid run is not product evidence either way.
+
+Installed Clipline PID 5548 stayed open, was excluded from every owned process tree, and was never
+killed. The harness used only disposable profiles, local cache roots, and a hash-verified fixture;
+it did not read credentials, access the network, mutate a production Cloud account, or touch the
+installed profile. Accepted 50/500/2,000 cold/warm, synthetic Cloud, churn, and lifecycle matrices
+remain open, along with matched Tauri, real-account, Narrator/UI Automation, DPI/OS, and real-GPU
+gates. Engineering may proceed to Milestone 8 because no rejected sample triggered the absolute
+failure stop rule; the quiet-host rerun remains mandatory before Milestone 7 acceptance or cutover.
+
 ## Checkpoint (2026-08-03): Slint replacement Milestone 7, Task 9 native Cloud uploads
 
 The Slint candidate now starts and cancels Cloud uploads through one process-owned

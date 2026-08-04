@@ -7,6 +7,10 @@ has a stable token, a source/contract summary, a target owner milestone, and an 
 Status values: `not_started`, `in_progress`, `implemented`, `verified`, `waived`. A waiver must add
 the approving product decision and replacement behavior; deleting a row is not a waiver.
 
+Milestone 7 is implementation-complete at `3e07a95`, but acceptance remains NO-GO pending three
+protocol-accepted quiet-host samples plus the named matched/manual gates. Its completed rows may be
+`implemented`; none is `verified`, and no rejected diagnostic run authorizes production cutover.
+
 `apps/clipline-app/tests/slint_migration_contract.rs` extracts the production
 `tauri::generate_handler!` list and frontend event subscriptions. When a boundary is added, update
 this ledger in the same change. Line numbers are deliberately omitted because symbols are more
@@ -66,15 +70,15 @@ stable; the baseline commit preserves exact historical locations.
 | `command:save_osu_api_settings` | `osu_api.rs`; persist osu! API credentials/settings. | M8 games | Validation/credential rollback test. | `not_started` |
 | `command:test_osu_api_connection` | `osu_api.rs`; cancellable live credential probe. | M8 games | Mock server success/failure test. | `not_started` |
 | `command:open_osu_api_setup_guide` | `osu_api.rs`; open trusted setup documentation. | M8 games | URL allowlist and shell test. | `not_started` |
-| `command:list_clips` | `library.rs`; scan local clips with metadata and markers. | M7 library controller | Existing scan fixtures and 2,000-clip run. | `not_started` |
-| `command:clip_poster` | `library.rs`; bounded cached poster extraction. | M7 library controller | Semaphore/cache/stale-generation test. | `not_started` |
-| `command:delete_clip` | `library.rs`; delete one clip and sidecars safely. | M7 library controller | Scope/file-lease/error test. | `not_started` |
-| `command:delete_clips` | `library.rs`; partial-success bulk delete. | M7 library controller | Existing partial-success fixture. | `not_started` |
-| `command:rename_clip` | `library.rs`; persist display-title metadata. | M7 library controller | Validation/refresh fixture. | `not_started` |
-| `command:rename_clip_file` | `library.rs`; rename media and owned sidecars. | M7 library controller | Collision/scope/file-release test. | `not_started` |
+| `command:list_clips` | The shared bounded scanner publishes a complete identity-owned index to the native catalog controller; Tauri remains a compatibility adapter. | M7 library controller | Existing scan fixtures; protocol-accepted 2,000-clip run pending. | `implemented` |
+| `command:clip_poster` | The shared poster service capped at two FFmpeg children and two-worker decoder publish only exact generation-owned viewport images. | M7 library controller | Semaphore/cache/stale-generation fixtures; accepted process-bound run pending. | `implemented` |
+| `command:delete_clip` | The shared repository deletes one exact leased clip and owned sidecars through identity-fenced mutations. | M7 library controller | Scope/file-lease/error test. | `implemented` |
+| `command:delete_clips` | The shared repository reports bounded partial-success bulk deletion without touching foreign replacements. | M7 library controller | Existing partial-success fixture. | `implemented` |
+| `command:rename_clip` | The shared catalog mutation service validates and persists an exact clip's display title. | M7 library controller | Validation/refresh fixture. | `implemented` |
+| `command:rename_clip_file` | The shared repository renames media and owned sidecars with collision and identity fencing. | M7 library controller | Collision/scope/file-release test. | `implemented` |
 | `command:export_clip` | `library.rs`; bounded keyframe-aligned trim/export. | M9 review controller | Existing byte/trim fixtures and live export. | `not_started` |
 | `command:prepare_clip_audio_sidecars` | `library.rs`; current WebView multi-track playback sidecars. | M9 compatibility boundary | Preserve until native mix verified; file cleanup test. | `not_started` |
-| `command:reveal_clip` | `library.rs`; select clip in Explorer. | M7 library controller | Shell scope test and manual Explorer check. | `not_started` |
+| `command:reveal_clip` | The native executor revalidates exact catalog ownership before passing a scoped canonical clip to the shared platform boundary. | M7 library controller | Shell scope test and manual Explorer check. | `implemented` |
 | `command:copy_clip_to_clipboard` | `library.rs`; place original/shareable selection on clipboard. | M9 review controller | Original/trimmed modifier tests. | `not_started` |
 | `command:open_media_folder` | `library.rs`; registered legacy folder action, currently unused by JS. | M7 library controller | Explicit preserve/remove decision test. | `not_started` |
 | `command:storage_status` | `library.rs`; report media/cache quota and disk usage. | M8 storage settings | Quota/drive-error fixture. | `not_started` |
@@ -93,15 +97,15 @@ stable; the baseline commit preserves exact historical locations.
 | `event:desktop-event-sequence` | Monotonic reduced-event sequence and snapshot revision drive WebView gap recovery; Slint consumes the neutral channel directly. | M5 bootstrap adapter | Coalescing-gap and destroyed-window bootstrap tests. | `implemented` |
 | `event:game-detection` | M5 routes generation-fenced game/process/mode/elevation state through the neutral sink; the full Slint games surface remains M8. | M8 games | Detector stream and elevation warning test. | `in_progress` |
 | `event:cloud-upload-progress` | The process-owned native upload service durably commits before a bounded two-contract fanout publishes byte/state progress; state barriers remain sticky, terminal rows close the cancel flow, and exact removals reach both catalog and desktop reducers. | M7 cloud controller | Account/generation fencing, byte coalescing, sticky state, terminal/removal, restart hydration, and proved 48-slot/32 MiB union bounds. | `implemented` |
-| `event:osu-enrichment-updated` | M5 routes generation-fenced durable library invalidation through the neutral sink; the full Library refresh surface remains M7. | M7 library controller | Deferred foreground refresh test. | `in_progress` |
+| `event:osu-enrichment-updated` | A durable library revision advances through the neutral sink; the Slint shell coalesces hidden changes and dispatches one exact refresh after foreground attachment. | M7 library controller | Deferred foreground refresh and burst-coalescing tests. | `implemented` |
 
 ## Surfaces and dialogs
 
 | Stable token | Current contract | Owner | Acceptance | Status |
 |---|---|---|---|---|
 | `surface:persistent-shell` | Frameless titlebar, recorder controls/status, Save Replay, hotkey, game/memory/cloud summaries, Settings. | M6 shell + M7/M8 models | Snapshot, keyboard, DPI, Narrator checks. | `not_started` |
-| `surface:local-library` | Search/filter/group/sort/page, poster states, selection, context actions. | M7 library | Model fixtures; 50/500/2,000-item manual matrix. | `not_started` |
-| `surface:cloud-library` | Native remote paging, bounded thumbnails/media leases, profile/avatar, public actions, and durable upload progress are account/window-generation fenced; final large-library and live-account gates remain. | M7 cloud | Cloud generation, cache/lease, upload recovery, and manual live-account flow. | `in_progress` |
+| `surface:local-library` | Native search/filter/group/sort/page, poster states, selection, dialogs, and actions retain at most 60 rows and 32 decoded images. Absolute large-library and manual accessibility gates remain pending. | M7 library | Model fixtures plus accepted 50/500/2,000-item and manual matrix. | `implemented` |
+| `surface:cloud-library` | Native remote paging, bounded thumbnails/media leases, profile/avatar, public actions, and durable upload progress are account/window-generation fenced. Live-account and manual accessibility gates remain pending. | M7 cloud | Cloud generation, cache/lease, upload recovery, and manual live-account flow. | `implemented` |
 | `surface:review` | Playback, tracks, trim, markers, timeline, export/share/rename/delete. | M9 review | Cross-implementation vectors and media gates. | `not_started` |
 | `review:playback-rate` | 0.5x, 0.75x, 1x, 1.25x, 1.5x, and 2x playback with pitch-preserving audio. Milestone 3 intentionally supports only 1x. | M9 review / final parity | Bounded tempo-stage vectors plus live multi-track A/V gates at every rate, or an explicit approved product waiver. | `not_started` |
 | `surface:settings-general` | Startup, lifecycle, timeline, theme, update channel/check. | M8 settings | Draft/validation/accessibility tests. | `not_started` |
@@ -112,14 +116,14 @@ stable; the baseline commit preserves exact historical locations.
 | `surface:settings-cloud` | Connect/disconnect, insecure HTTP consent, visibility, local-delete policy. | M8 settings | Consent/account replacement tests. | `not_started` |
 | `surface:settings-hotkeys` | Two global shortcut recorders and validation feedback. | M8 settings + M6 shell | Parser/rollback/live hook tests. | `not_started` |
 | `surface:settings-support` | Disclosure, prepare/preview/send/save/discard/cancel/report-ID workflow. | M8 support | Support state machine and accessibility test. | `not_started` |
-| `dialog:delete-confirmation` | Single/bulk delete confirmation and counts. | M7 library | Focus trap, cancel, confirm tests. | `not_started` |
+| `dialog:delete-confirmation` | Native single/bulk delete confirmation retains exact typed identities and bounded counts. Manual focus verification remains pending. | M7 library | Focus trap, cancel, confirm tests. | `implemented` |
 | `dialog:quit-confirmation` | Close without tray prompts before orderly quit. | M6 shell | Close-setting matrix. | `not_started` |
 | `dialog:update-available` | Version/notes and install action. | M6 updater | Keyboard/accessibility and signed-install smoke. | `not_started` |
 | `dialog:elevated-game-warning` | One-per-process warning and optional elevated restart. | M6 shell | Warning suppression/restart manual test. | `not_started` |
 | `dialog:cloud-upload` | The modal native form owns bounded title/description, visibility, selected audio tracks, saved local-delete policy, exact submit ownership, and cancel-progress routing. | M7 cloud | UTF-16 validation, focus/Escape/Enter, exact upload start/cancel, and queue-rejection fixtures. | `implemented` |
 | `dialog:detected-games` | Select detected games to configure. | M8 games | Keyboard/list update test. | `not_started` |
 | `dialog:running-window` | Select a running window for a custom game. | M8 games | Refresh/cancel/select test. | `not_started` |
-| `dialog:file-rename` | Validate and commit media filename rename. | M7 library | Enter/Escape/collision tests. | `not_started` |
+| `dialog:file-rename` | Native bounded filename dialog validates and commits the exact identity-owned media rename. Manual focus verification remains pending. | M7 library | Enter/Escape/collision tests. | `implemented` |
 | `dialog:game-plugin-settings` | Edit plugin-specific settings/modes. | M8 games | Schema/keyboard/validation tests. | `not_started` |
 | `dialog:shortcut-guide` | Player shortcut reference and close controls. | M9 review | Mapping completeness/focus test. | `not_started` |
 | `dialog:media-folder-picker` | Native media-folder selection. | M8 storage | Cancel/select/scope test. | `not_started` |
@@ -144,9 +148,9 @@ stable; the baseline commit preserves exact historical locations.
 | `shortcut:clip-boundary` | Home/End seeks start/end. | M9 review | Boundary vectors. | `not_started` |
 | `shortcut:toggle-snapping` | S toggles timeline snapping. | M9 review | Snap state vector. | `not_started` |
 | `shortcut:fullscreen` | F toggles fullscreen. | M9 review | Window transition test. | `not_started` |
-| `shortcut:escape-context` | Escape closes Review/settings/dialog or clears Library selection according to focus context. | M7–M9 | Modal priority/focus tests. | `not_started` |
+| `shortcut:escape-context` | Escape closes the current Library menu/dialog or clears selection; Review and Settings priority remain M8–M9. | M7–M9 | Modal priority/focus tests. | `in_progress` |
 | `shortcut:shortcut-guide` | Shift+? opens the guide from the player. | M9 review | Dispatch/focus test. | `not_started` |
-| `shortcut:library-select-all` | Ctrl+A selects visible page only while select mode is active. | M7 library | Paging/selection fixture. | `not_started` |
+| `shortcut:library-select-all` | Ctrl+A selects the visible native page only while select mode is active. | M7 library | Paging/selection fixture. | `implemented` |
 | `shortcut:settings-tab-navigation` | Left/Right/Home/End navigates Settings tabs. | M8 settings | Keyboard/ARIA parity test. | `not_started` |
 | `gesture:timeline-seek` | Click timeline to seek. | M9 review | Pixel-to-time and settle tests. | `not_started` |
 | `gesture:trim-edge-drag` | Drag either trim edge with ordering/minimum constraints. | M9 review | Pointer capture/trim invariant tests. | `not_started` |
@@ -160,7 +164,7 @@ stable; the baseline commit preserves exact historical locations.
 | `gesture:play-block-seek` | osu! play block click seeks/holds selection. | M9 review | Play-rail vectors. | `not_started` |
 | `gesture:shift-fit-whole-clip` | Shift-click zoom-fit selects whole-clip fit. | M9 review | Modifier behavior test. | `not_started` |
 | `gesture:shift-copy-original` | Shift-click clipboard action copies original instead of selection. | M9 review | Clipboard argument test. | `not_started` |
-| `gesture:context-menu` | Right-click clips/displays opens custom context menu with keyboard dismissal. | M7/M8 | Menu focus/position/action tests. | `not_started` |
+| `gesture:context-menu` | Right-click native Library rows opens the bounded action menu with keyboard dismissal; display/settings menus remain M8. | M7/M8 | Menu focus/position/action tests. | `in_progress` |
 | `gesture:stage-overlay-activity` | Pointer activity reveals transport overlay then fades it. | M9 review | Timer/focus/fullscreen test. | `not_started` |
 
 ## Tray, lifecycle, updater, and packaging
