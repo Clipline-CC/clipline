@@ -20,8 +20,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::hotkey::{
-    replace_hotkeys, HotkeyKey, HotkeyRegistrationBackend, HotkeyReplacementOutcome, HotkeySet,
-    HotkeySpec, HotkeyTriggerGate,
+    replace_hotkeys, HotkeyKey, HotkeyRegistrationBackend, HotkeyReplacementOutcome,
+    HotkeyReplacementReceipt, HotkeySet, HotkeySpec, HotkeyTriggerGate,
 };
 use crate::{ShellCommand, ShellCommandSender};
 
@@ -91,8 +91,18 @@ struct Startup {
 enum ServiceCommand {
     Replace {
         candidate: HotkeySet,
-        response: mpsc::Sender<Result<HotkeyReplacementOutcome, String>>,
+        response: mpsc::Sender<Result<AppliedHotkeyReplacement, String>>,
     },
+    Rollback {
+        receipt: HotkeyReplacementReceipt,
+        response: mpsc::Sender<Result<(), String>>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppliedHotkeyReplacement {
+    pub outcome: HotkeyReplacementOutcome,
+    pub receipt: HotkeyReplacementReceipt,
 }
 
 struct CallbackState {
@@ -227,6 +237,14 @@ impl WindowsHotkeyService {
         &self,
         candidate: &HotkeySet,
     ) -> Result<HotkeyReplacementOutcome, WindowsHotkeyServiceError> {
+        self.replace_with_receipt(candidate)
+            .map(|applied| applied.outcome)
+    }
+
+    pub fn replace_with_receipt(
+        &self,
+        candidate: &HotkeySet,
+    ) -> Result<AppliedHotkeyReplacement, WindowsHotkeyServiceError> {
         let (response_tx, response_rx) = mpsc::channel();
         self.command_tx
             .try_send(ServiceCommand::Replace {
@@ -243,6 +261,34 @@ impl WindowsHotkeyService {
             .map_err(|error| WindowsHotkeyServiceError::Notify(error.to_string()))?;
         match response_rx.recv_timeout(COMMAND_TIMEOUT) {
             Ok(Ok(outcome)) => Ok(outcome),
+            Ok(Err(error)) => Err(WindowsHotkeyServiceError::Replacement(error)),
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(WindowsHotkeyServiceError::ResponseTimeout),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Err(WindowsHotkeyServiceError::Disconnected)
+            }
+        }
+    }
+
+    pub fn rollback(
+        &self,
+        receipt: HotkeyReplacementReceipt,
+    ) -> Result<(), WindowsHotkeyServiceError> {
+        let (response_tx, response_rx) = mpsc::channel();
+        self.command_tx
+            .try_send(ServiceCommand::Rollback {
+                receipt,
+                response: response_tx,
+            })
+            .map_err(|error| match error {
+                TrySendError::Full(_) => WindowsHotkeyServiceError::Busy,
+                TrySendError::Disconnected(_) => WindowsHotkeyServiceError::Disconnected,
+            })?;
+        // SAFETY: the thread id came from this service's initialized message
+        // queue, and the message carries no pointers or borrowed data.
+        unsafe { PostThreadMessageW(self.thread_id, SERVICE_MESSAGE, WPARAM(0), LPARAM(0)) }
+            .map_err(|error| WindowsHotkeyServiceError::Notify(error.to_string()))?;
+        match response_rx.recv_timeout(COMMAND_TIMEOUT) {
+            Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => Err(WindowsHotkeyServiceError::Replacement(error)),
             Err(mpsc::RecvTimeoutError::Timeout) => Err(WindowsHotkeyServiceError::ResponseTimeout),
             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -414,13 +460,20 @@ fn run_service_thread(
 }
 
 fn drain_commands(command_rx: &Receiver<ServiceCommand>, state: &mut ThreadState) {
-    while let Ok(ServiceCommand::Replace {
-        candidate,
-        response,
-    }) = command_rx.try_recv()
-    {
-        let result = state.replace(candidate);
-        let _ = response.send(result);
+    while let Ok(command) = command_rx.try_recv() {
+        match command {
+            ServiceCommand::Replace {
+                candidate,
+                response,
+            } => {
+                let result = state.replace_with_receipt(candidate);
+                let _ = response.send(result);
+            }
+            ServiceCommand::Rollback { receipt, response } => {
+                let result = state.rollback(receipt);
+                let _ = response.send(result);
+            }
+        }
     }
 }
 
@@ -434,6 +487,27 @@ struct ThreadState {
 }
 
 impl ThreadState {
+    fn replace_with_receipt(
+        &mut self,
+        candidate: HotkeySet,
+    ) -> Result<AppliedHotkeyReplacement, String> {
+        let before = self.active.clone();
+        let outcome = self.replace(candidate)?;
+        Ok(AppliedHotkeyReplacement {
+            outcome,
+            receipt: HotkeyReplacementReceipt::new(before, self.active.clone()),
+        })
+    }
+
+    fn rollback(&mut self, receipt: HotkeyReplacementReceipt) -> Result<(), String> {
+        if &self.active != receipt.after() {
+            return Err(
+                "hotkey set changed concurrently; refusing to overwrite the current owner".into(),
+            );
+        }
+        self.replace(receipt.before().clone()).map(|_| ())
+    }
+
     fn replace(&mut self, candidate: HotkeySet) -> Result<HotkeyReplacementOutcome, String> {
         let old_needs_mouse = set_needs_mouse(&self.active);
         let new_needs_mouse = set_needs_mouse(&candidate);

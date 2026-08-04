@@ -205,6 +205,31 @@ pub struct HotkeyReplacementOutcome {
     pub warnings: Vec<String>,
 }
 
+/// Exact before/after ownership produced by one successful hotkey replacement.
+///
+/// Platform services consume this value when rolling back. They must first
+/// verify that `after` is still active so a concurrent owner is never
+/// overwritten with stale state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HotkeyReplacementReceipt {
+    before: HotkeySet,
+    after: HotkeySet,
+}
+
+impl HotkeyReplacementReceipt {
+    pub(crate) fn new(before: HotkeySet, after: HotkeySet) -> Self {
+        Self { before, after }
+    }
+
+    pub(crate) fn before(&self) -> &HotkeySet {
+        &self.before
+    }
+
+    pub(crate) fn after(&self) -> &HotkeySet {
+        &self.after
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HotkeyTransactionError {
     operation: String,

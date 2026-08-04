@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Condvar, Mutex, MutexGuard};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use clipline_capture::diagnostics::install_diagnostic_handler;
@@ -13,10 +14,10 @@ use clipline_desktop::{
     WindowLifecycleSnapshot,
 };
 use clipline_library::{ActiveFileRegistry, UploadService};
-use clipline_shell::hotkey::{HotkeyReplacementOutcome, HotkeySet};
+use clipline_shell::hotkey::{HotkeyReplacementReceipt, HotkeySet};
 use clipline_shell::windows::activation::WindowsInstanceGuard;
 use clipline_shell::windows::autostart::{AutostartChange, WindowsAutostartRegistration};
-use clipline_shell::windows::hotkey::WindowsHotkeyService;
+use clipline_shell::windows::hotkey::{AppliedHotkeyReplacement, WindowsHotkeyService};
 use clipline_shell::{
     LaunchMode, SequencedShellCommand, ShellCommand, ShellCommandReceiver, ShellCommandSender,
     ShellLaunch, ShutdownAcknowledgement, ShutdownCoordinator, ShutdownEffect, ShutdownGate,
@@ -44,7 +45,8 @@ use crate::service::{self, Cmd, Event, ServiceOptions};
 use crate::settings::{
     cloud_paths_equivalent, quota_bytes_from_gb, AppSettings, AppSettingsServiceExt, CaptureMode,
     CloudRecordCas, CloudRecordCasKind, CloudRecordSlot, CustomGameSettings, GameRecordingMode,
-    SettingsChange, SettingsProfile, SettingsSnapshot, SettingsStore, SettingsTransaction,
+    SettingsApplyCoordinator, SettingsApplyPorts, SettingsChange, SettingsPreferences,
+    SettingsProfile, SettingsSnapshot, SettingsStore, SettingsTransaction,
     MAX_CLOUD_RECORD_CAS_SLOTS,
 };
 use crate::updates::{channel_enabled, UpdateChannel};
@@ -631,13 +633,15 @@ impl NativeMediaFolderAuthorization {
     }
 
     fn commit(&self, path: &Path) {
-        if let Ok(mut pending) = self.0.lock() {
-            if pending
-                .as_deref()
-                .is_some_and(|authorized| same_path(authorized, path))
-            {
-                *pending = None;
-            }
+        let mut pending = match self.0.lock() {
+            Ok(pending) => pending,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if pending
+            .as_deref()
+            .is_some_and(|authorized| same_path(authorized, path))
+        {
+            *pending = None;
         }
     }
 }
@@ -773,6 +777,7 @@ pub(crate) struct RuntimeState(
     Mutex<RuntimeInner>,
     RecorderStopAcknowledgement,
     Option<SettingsStore>,
+    Mutex<Option<JoinHandle<()>>>,
 );
 
 #[derive(Default)]
@@ -794,13 +799,49 @@ static CLOUD_SETTINGS_SAVE_LOCK: Mutex<()> = Mutex::new(());
 
 struct TrayItems<R: Runtime> {
     save_item: MenuItem<R>,
+    hotkey_label: Mutex<String>,
+}
+
+struct TrayLabelReceipt {
+    before: String,
+    after: String,
 }
 
 impl<R: Runtime> TrayItems<R> {
     fn set_hotkey_label(&self, label: &str) -> Result<(), String> {
         self.save_item
             .set_text(save_menu_text(label))
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        *self
+            .hotkey_label
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = label.to_owned();
+        Ok(())
+    }
+
+    fn replace_hotkey_label(&self, label: &str) -> Result<TrayLabelReceipt, String> {
+        let before = self
+            .hotkey_label
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        self.set_hotkey_label(label)?;
+        Ok(TrayLabelReceipt {
+            before,
+            after: label.to_owned(),
+        })
+    }
+
+    fn rollback_hotkey_label(&self, receipt: TrayLabelReceipt) -> Result<(), String> {
+        let current = self
+            .hotkey_label
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if current != receipt.after {
+            return Err("tray hotkey label changed concurrently; refusing to overwrite it".into());
+        }
+        self.set_hotkey_label(&receipt.before)
     }
 }
 
@@ -843,12 +884,10 @@ struct StorageDiagnosticStatus {
 }
 
 struct PreparedRuntimeRestart {
+    #[cfg(test)]
     settings: AppSettings,
-}
-
-struct PersistedSettingsCommit {
-    before: Option<SettingsSnapshot>,
-    after: Option<SettingsSnapshot>,
+    options: Option<ServiceOptions>,
+    worker: Option<service::PreparedRecorderRestart>,
 }
 
 struct PreparedServiceRestart {
@@ -858,13 +897,12 @@ struct PreparedServiceRestart {
     waiting_generation: Option<u64>,
 }
 
+#[cfg(test)]
 #[derive(Debug)]
 struct CommittedRuntimeRestart<T> {
     old_tx: Option<Sender<Cmd>>,
     replacement: Option<(T, u64)>,
-    cleared_active_game: bool,
     waiting_for_game: bool,
-    waiting_generation: Option<u64>,
 }
 
 fn recorder_should_run(settings: &AppSettings, active_game: Option<&DetectedGame>) -> bool {
@@ -958,7 +996,30 @@ impl RuntimeState {
             Mutex::new(inner),
             RecorderStopAcknowledgement::default(),
             store,
+            Mutex::new(None),
         )
+    }
+
+    fn take_event_pump(&self) -> Option<JoinHandle<()>> {
+        self.3
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+    }
+
+    fn install_event_pump(&self, pump: JoinHandle<()>) {
+        let replaced = self
+            .3
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .replace(pump);
+        debug_assert!(
+            replaced.is_none(),
+            "event pump ownership must be joined first"
+        );
+        if let Some(replaced) = replaced {
+            let _ = replaced.join();
+        }
     }
 
     fn install_recording_sender(inner: &mut RuntimeInner, tx: Sender<Cmd>) -> Result<u64, String> {
@@ -1022,11 +1083,16 @@ impl RuntimeState {
         loop {
             if let Some((acknowledged_generation, finalized_cleanly)) = *acknowledged {
                 if acknowledged_generation == generation {
-                    return if finalized_cleanly {
+                    let result = if finalized_cleanly {
                         Ok(())
                     } else {
                         Err("recorder reported a finalization failure".to_string())
                     };
+                    drop(acknowledged);
+                    if let Some(pump) = self.take_event_pump() {
+                        let _ = pump.join();
+                    }
+                    return result;
                 }
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -1279,26 +1345,27 @@ impl RuntimeState {
         &self,
         settings: AppSettings,
     ) -> Result<PreparedRuntimeRestart, String> {
-        let inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-        let cleared_active_game = inner.active_game.is_some()
-            && !active_game_still_configured(&settings, inner.active_game.as_ref());
-        let active_game = if cleared_active_game {
-            None
-        } else {
-            inner.active_game.as_ref()
-        };
-        if inner.recording_desired && recorder_should_run(&settings, active_game) {
+        let mut options = {
+            let inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
             Self::options_for(
                 &settings,
                 inner.lol_url.clone(),
-                active_game,
+                None,
                 &inner.decodable_codecs,
                 inner.active_files.clone(),
-            )?;
-        }
-        Ok(PreparedRuntimeRestart { settings })
+            )?
+        };
+        options.recover_abandoned_recordings = false;
+        let worker = service::PreparedRecorderRestart::prepare(options.clone())?;
+        Ok(PreparedRuntimeRestart {
+            #[cfg(test)]
+            settings,
+            options: Some(options),
+            worker: Some(worker),
+        })
     }
 
+    #[cfg(test)]
     fn commit_prepared_restart_with<T, F>(
         inner: &mut RuntimeInner,
         prepared: PreparedRuntimeRestart,
@@ -1307,7 +1374,7 @@ impl RuntimeState {
     where
         F: FnOnce(ServiceOptions) -> (Sender<Cmd>, T),
     {
-        let PreparedRuntimeRestart { settings } = prepared;
+        let PreparedRuntimeRestart { settings, .. } = prepared;
         let cleared_active_game = inner.active_game.is_some()
             && !active_game_still_configured(&settings, inner.active_game.as_ref());
         let active_game = if cleared_active_game {
@@ -1348,47 +1415,109 @@ impl RuntimeState {
                 checked_generation_next(inner.recording_generation, "recording")?;
             inner.last_save_request = None;
         }
-        let waiting_generation = waiting_for_game.then_some(inner.recording_generation);
-
         Ok(CommittedRuntimeRestart {
             old_tx,
             replacement,
-            cleared_active_game,
             waiting_for_game,
-            waiting_generation,
         })
     }
 
     fn finish_prepared_restart<R: Runtime>(
         &self,
         app: AppHandle<R>,
-        prepared: PreparedRuntimeRestart,
-    ) -> Result<(), String> {
-        let CommittedRuntimeRestart {
-            old_tx,
-            replacement,
-            cleared_active_game,
-            waiting_for_game,
-            waiting_generation,
-        } = {
-            let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-            Self::commit_prepared_restart_with(&mut inner, prepared, service::spawn)?
+        mut prepared: PreparedRuntimeRestart,
+        authoritative: AppSettings,
+    ) {
+        let mut options = prepared
+            .options
+            .take()
+            .expect("prepared settings restart owns validated options");
+        let sender = prepared
+            .worker
+            .as_ref()
+            .map(service::PreparedRecorderRestart::command_sender);
+        let (old_tx, replacement_generation, cleared_active_game, waiting_for_game) = {
+            let mut inner = self
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let cleared_active_game = inner.active_game.is_some()
+                && !active_game_still_configured(&authoritative, inner.active_game.as_ref());
+            if cleared_active_game {
+                inner.active_game = None;
+            }
+            options.lol_url.clone_from(&inner.lol_url);
+            options.decodable_codecs.clone_from(&inner.decodable_codecs);
+            options.active_files = inner.active_files.clone();
+            if let Some(game) = inner.active_game.as_ref() {
+                options.capture_source = service::CaptureSource::WindowHandle {
+                    hwnd: game.hwnd,
+                    title: game.window_title.clone(),
+                };
+                options.recording_mode = game.recording_mode.into();
+                options.active_game = Some(service::ActiveGame {
+                    identity: game.identity.clone(),
+                    name: game.name.clone(),
+                });
+            }
+            let should_run = inner.recording_desired
+                && recorder_should_run(&authoritative, inner.active_game.as_ref());
+            inner.settings = authoritative;
+            let old_tx = inner.tx.take();
+            let replacement_generation = if old_tx.is_some() || inner.recording_desired {
+                inner.recording_generation.checked_add(1)
+            } else {
+                None
+            };
+            if let Some(generation) = replacement_generation {
+                inner.recording_generation = generation;
+            }
+            inner.last_save_request = None;
+            let replacement_generation = should_run.then_some(replacement_generation).flatten();
+            if should_run && replacement_generation.is_none() {
+                inner.recording_desired = false;
+            }
+            inner.tx = replacement_generation.and(sender);
+            (
+                old_tx,
+                replacement_generation,
+                cleared_active_game,
+                inner.recording_desired && !should_run,
+            )
         };
         if let Some(tx) = old_tx {
             let _ = tx.send(Cmd::Stop { announce: false });
         }
-        if let Some((rx, generation)) = replacement {
-            pump_events(app.clone(), rx, generation);
+        if let Some(old_pump) = self.take_event_pump() {
+            let _ = old_pump.join();
         }
-        if let Some(generation) = waiting_generation.filter(|generation| {
-            waiting_for_game && self.waiting_generation_is_current(*generation)
-        }) {
-            emit_waiting_for_game(&app, generation);
+        if let Some(generation) = replacement_generation {
+            let stream = prepared
+                .worker
+                .take()
+                .expect("running prepared restart owns a worker")
+                .commit_with_options(options);
+            self.install_event_pump(pump_events(app.clone(), stream, generation));
+        }
+        if waiting_for_game {
+            let generation = self
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .recording_generation;
+            if self.waiting_generation_is_current(generation) {
+                emit_waiting_for_game(&app, generation);
+            }
         }
         if cleared_active_game {
-            publish_game_detection(&app, GameDetectionEvent::from_detected(None))?;
+            if let Err(error) =
+                publish_game_detection(&app, GameDetectionEvent::from_detected(None))
+            {
+                log_diagnostic(format!(
+                    "publish cleared game after settings commit failed: {error}"
+                ));
+            }
         }
-        Ok(())
     }
 
     fn request_save(&self) -> bool {
@@ -1714,29 +1843,17 @@ impl RuntimeState {
             .map_err(|_| "cloud settings save lock poisoned".to_string())
     }
 
-    fn persist_ui_preferences(
-        &self,
-        settings: &AppSettings,
-    ) -> Result<PersistedSettingsCommit, String> {
+    fn persist_ui_preferences(&self, settings: &AppSettings) -> Result<(), String> {
         let Some(store) = self.2.as_ref() else {
-            settings.save()?;
-            return Ok(PersistedSettingsCommit {
-                before: None,
-                after: None,
-            });
+            return settings.save();
         };
         let before = store.snapshot().map_err(|error| error.to_string())?;
-        let after = store
-            .transact(SettingsTransaction {
-                expected_revision: before.revision,
-                expected_account_generation: before.account_generation,
-                change: SettingsChange::ReplaceUiPreferences(settings.clone()),
-            })
+        let expected = SettingsPreferences::from_document(&before.document)?;
+        let replacement = SettingsPreferences::from_document(settings)?;
+        store
+            .replace_preferences_if_unchanged(&expected, replacement)
             .map_err(|error| error.to_string())?;
-        Ok(PersistedSettingsCommit {
-            before: Some(before),
-            after: Some(after),
-        })
+        Ok(())
     }
 
     fn publish_durable_settings(&self) -> Result<(), String> {
@@ -1747,29 +1864,7 @@ impl RuntimeState {
             .map_err(|_| "runtime state lock poisoned")?
             .settings
             .clone();
-        self.persist_ui_preferences(&settings).map(|_| ())
-    }
-
-    fn rollback_persisted_settings(
-        &self,
-        commit: &PersistedSettingsCommit,
-        fallback: &AppSettings,
-    ) -> Result<(), String> {
-        let (Some(store), Some(before), Some(after)) = (
-            self.2.as_ref(),
-            commit.before.as_ref(),
-            commit.after.as_ref(),
-        ) else {
-            return fallback.save();
-        };
-        store
-            .transact(SettingsTransaction {
-                expected_revision: after.revision,
-                expected_account_generation: after.account_generation,
-                change: SettingsChange::ReplaceDocument(before.document.clone()),
-            })
-            .map(|_| ())
-            .map_err(|error| error.to_string())
+        self.persist_ui_preferences(&settings)
     }
 
     fn set_recording<R: Runtime>(
@@ -1793,7 +1888,7 @@ impl RuntimeState {
             inner.recording_desired = true;
             inner.last_save_request = None;
             if recorder_should_run(&inner.settings, inner.active_game.as_ref()) {
-                let (tx, rx) = service::spawn(Self::options(&inner)?);
+                let (tx, rx) = service::spawn(Self::options(&inner)?)?;
                 let generation = Self::install_recording_sender(&mut inner, tx)?;
                 Some((rx, generation))
             } else {
@@ -1801,7 +1896,10 @@ impl RuntimeState {
             }
         };
         if let Some((rx, generation)) = started {
-            pump_events(app, rx, generation);
+            if let Some(old_pump) = self.take_event_pump() {
+                let _ = old_pump.join();
+            }
+            self.install_event_pump(pump_events(app, rx, generation));
         } else if let Some((generation, status)) = self.current_waiting_status() {
             let _ = app
                 .state::<crate::desktop::tauri_sink::TauriUiEventSink>()
@@ -1859,14 +1957,19 @@ impl RuntimeState {
             if let Some(tx) = prepared.old_tx {
                 let _ = tx.send(Cmd::Stop { announce: false });
             }
+            if let Some(old_pump) = self.take_event_pump() {
+                let _ = old_pump.join();
+            }
             if let Some((options, restart_generation)) = prepared.replacement {
-                let (tx, rx) = service::spawn(options);
+                let (tx, rx) = service::spawn(options)?;
                 let installed = {
                     let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
                     Self::install_prepared_service_restart(&mut inner, restart_generation, tx)
                 };
                 match installed {
-                    Ok(generation) => pump_events(app.clone(), rx, generation),
+                    Ok(generation) => {
+                        self.install_event_pump(pump_events(app.clone(), rx, generation));
+                    }
                     Err(tx) => {
                         let _ = tx.send(Cmd::Stop { announce: false });
                     }
@@ -1925,18 +2028,6 @@ fn filter_osu_title_events(events: &[OsuTitleEvent], start: i64, end: i64) -> Ve
         .filter(|event| event.unix_s >= start && event.unix_s <= end)
         .cloned()
         .collect()
-}
-
-fn preserve_backend_owned_settings_fields(settings: &mut AppSettings, backend: &AppSettings) {
-    settings.cloud.host_url = backend.cloud.host_url.clone();
-    settings.cloud.public_url = backend.cloud.public_url.clone();
-    settings.cloud.connected_user_id = backend.cloud.connected_user_id.clone();
-    settings.cloud.connected_username = backend.cloud.connected_username.clone();
-    settings.cloud.connected_display_name = backend.cloud.connected_display_name.clone();
-    settings.cloud.credential_target = backend.cloud.credential_target.clone();
-    settings.cloud.credential_cleanup_targets = backend.cloud.credential_cleanup_targets.clone();
-    settings.cloud.uploads = backend.cloud.uploads.clone();
-    settings.osu = backend.osu.clone();
 }
 
 fn same_game_window(current: Option<&DetectedGame>, next: Option<&DetectedGame>) -> bool {
@@ -3127,13 +3218,26 @@ impl HotkeyServiceState {
         Ok(())
     }
 
-    fn replace(&self, candidate: &HotkeySet) -> Result<HotkeyReplacementOutcome, String> {
+    fn replace_with_receipt(
+        &self,
+        candidate: &HotkeySet,
+    ) -> Result<AppliedHotkeyReplacement, String> {
         self.service
             .lock()
             .map_err(|_| "hotkey service lock poisoned".to_string())?
             .as_ref()
             .ok_or_else(|| "hotkey service is unavailable".to_string())?
-            .replace(candidate)
+            .replace_with_receipt(candidate)
+            .map_err(|error| error.to_string())
+    }
+
+    fn rollback(&self, receipt: HotkeyReplacementReceipt) -> Result<(), String> {
+        self.service
+            .lock()
+            .map_err(|_| "hotkey service lock poisoned".to_string())?
+            .as_ref()
+            .ok_or_else(|| "hotkey service is unavailable".to_string())?
+            .rollback(receipt)
             .map_err(|error| error.to_string())
     }
 }
@@ -3249,49 +3353,20 @@ fn save_hotkey_label(settings: &AppSettings) -> String {
     settings.hotkeys().join(" / ")
 }
 
+struct PreparedSettingsPreflight {
+    media_dir: PathBuf,
+    quota_bytes: Option<u64>,
+}
+
+struct TauriSettingsApplyPorts<'a, R: Runtime> {
+    app: &'a AppHandle<R>,
+    runtime: &'a RuntimeState,
+    tray: &'a TrayItems<R>,
+    storage: &'a crate::library::StorageSettings,
+    authorization: &'a NativeMediaFolderAuthorization,
+}
+
 #[cfg(test)]
-fn run_before_releasing_settings_save_lock<T>(
-    save_guard: MutexGuard<'_, ()>,
-    operation: impl FnOnce() -> Result<T, String>,
-) -> Result<T, String> {
-    let result = operation();
-    drop(save_guard);
-    result
-}
-
-#[derive(Default)]
-struct AppliedSettingsSideEffects {
-    hotkeys: bool,
-    tray_label: bool,
-    autostart: Option<AutostartChange>,
-}
-
-fn rollback_settings_side_effects<R: Runtime>(
-    app: &AppHandle<R>,
-    tray_items: &TrayItems<R>,
-    old: &AppSettings,
-    old_hotkeys: &HotkeySet,
-    applied: &AppliedSettingsSideEffects,
-) -> Vec<String> {
-    let mut errors = Vec::new();
-    if let Some(change) = &applied.autostart {
-        if let Err(error) = rollback_autostart(change) {
-            errors.push(format!("restore Windows startup registration: {error}"));
-        }
-    }
-    if applied.tray_label {
-        if let Err(error) = tray_items.set_hotkey_label(&save_hotkey_label(old)) {
-            errors.push(format!("restore tray hotkey label: {error}"));
-        }
-    }
-    if applied.hotkeys {
-        if let Err(error) = app.state::<HotkeyServiceState>().replace(old_hotkeys) {
-            errors.push(format!("restore save hotkeys: {error}"));
-        }
-    }
-    errors
-}
-
 fn settings_transaction_error(primary: String, rollback_errors: Vec<String>) -> String {
     if rollback_errors.is_empty() {
         primary
@@ -3303,119 +3378,163 @@ fn settings_transaction_error(primary: String, rollback_errors: Vec<String>) -> 
     }
 }
 
+impl<R: Runtime> SettingsApplyPorts for TauriSettingsApplyPorts<'_, R> {
+    type PreparedPreflight = PreparedSettingsPreflight;
+    type HotkeyReceipt = HotkeyReplacementReceipt;
+    type TrayReceipt = TrayLabelReceipt;
+    type AutostartReceipt = Option<AutostartChange>;
+    type PreparedRecorder = PreparedRuntimeRestart;
+
+    fn prepare_preflight(
+        &mut self,
+        baseline: &SettingsPreferences,
+        candidate: &SettingsPreferences,
+    ) -> Result<Self::PreparedPreflight, String> {
+        let old_media_dir = PathBuf::from(&baseline.media_dir);
+        let media_dir = PathBuf::from(&candidate.media_dir);
+        self.authorization
+            .validate_change(&old_media_dir, &media_dir)?;
+        service::prepare_writable_media_directory(&media_dir)?;
+        Ok(PreparedSettingsPreflight {
+            media_dir,
+            quota_bytes: quota_bytes_from_gb(candidate.disk_quota_gb)?,
+        })
+    }
+
+    fn apply_hotkeys(
+        &mut self,
+        _baseline: &SettingsPreferences,
+        candidate: &SettingsPreferences,
+    ) -> Result<(Self::HotkeyReceipt, Vec<String>), String> {
+        let mut labels = vec![candidate.hotkey.as_str()];
+        if let Some(secondary) = candidate.hotkey_secondary.as_deref() {
+            labels.push(secondary);
+        }
+        let hotkeys = HotkeySet::parse(&labels).map_err(|error| error.to_string())?;
+        let applied = self
+            .app
+            .state::<HotkeyServiceState>()
+            .replace_with_receipt(&hotkeys)?;
+        Ok((applied.receipt, applied.outcome.warnings))
+    }
+
+    fn rollback_hotkeys(&mut self, receipt: Self::HotkeyReceipt) -> Result<(), String> {
+        self.app.state::<HotkeyServiceState>().rollback(receipt)
+    }
+
+    fn apply_tray_label(
+        &mut self,
+        _baseline: &SettingsPreferences,
+        candidate: &SettingsPreferences,
+    ) -> Result<Self::TrayReceipt, String> {
+        let mut labels = vec![candidate.hotkey.as_str()];
+        if let Some(secondary) = candidate.hotkey_secondary.as_deref() {
+            labels.push(secondary);
+        }
+        self.tray.replace_hotkey_label(&labels.join(" / "))
+    }
+
+    fn rollback_tray_label(&mut self, receipt: Self::TrayReceipt) -> Result<(), String> {
+        self.tray.rollback_hotkey_label(receipt)
+    }
+
+    fn apply_autostart(
+        &mut self,
+        baseline: bool,
+        requested: bool,
+    ) -> Result<(Self::AutostartReceipt, bool), String> {
+        let persisted = saved_autostart_preference_for_current_build(requested, baseline);
+        if persisted == baseline || !autostart_should_mutate_for_current_build() {
+            return Ok((None, persisted));
+        }
+        let change = set_autostart(persisted)
+            .map_err(|error| format!("update Windows startup registration: {error}"))?;
+        let enabled = change.enabled();
+        Ok((Some(change), enabled))
+    }
+
+    fn rollback_autostart(&mut self, receipt: Self::AutostartReceipt) -> Result<(), String> {
+        receipt.as_ref().map_or(Ok(()), rollback_autostart)
+    }
+
+    fn prepare_recorder(
+        &mut self,
+        candidate: &SettingsPreferences,
+    ) -> Result<Self::PreparedRecorder, String> {
+        let mut document = self.runtime.settings();
+        candidate.apply_to_document(&mut document)?;
+        self.runtime.prepare_settings_restart(document)
+    }
+
+    fn persist_preferences(
+        &mut self,
+        baseline: &SettingsPreferences,
+        candidate: SettingsPreferences,
+    ) -> Result<SettingsSnapshot, String> {
+        self.runtime
+            .2
+            .as_ref()
+            .ok_or_else(|| "settings apply requires a durable settings store".to_string())?
+            .replace_preferences_if_unchanged(baseline, candidate)
+            .map_err(|error| error.to_string())
+    }
+
+    fn commit_recorder(
+        &mut self,
+        prepared: Self::PreparedRecorder,
+        authoritative: &SettingsSnapshot,
+    ) {
+        self.runtime.finish_prepared_restart(
+            self.app.clone(),
+            prepared,
+            authoritative.document.clone(),
+        );
+    }
+
+    fn commit_preflight(
+        &mut self,
+        prepared: Self::PreparedPreflight,
+        _authoritative: &SettingsSnapshot,
+    ) {
+        self.storage
+            .replace(prepared.quota_bytes, prepared.media_dir.clone());
+        self.authorization.commit(&prepared.media_dir);
+    }
+
+    fn publish(&mut self, authoritative: &SettingsSnapshot) {
+        self.app
+            .state::<crate::desktop::DesktopState>()
+            .replace_settings_authoritative(authoritative.document.clone());
+    }
+}
+
 #[tauri::command]
 fn save_settings<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<RuntimeState>,
+    coordinator: tauri::State<SettingsApplyCoordinator>,
     tray_items: tauri::State<TrayItems<R>>,
     storage_settings: tauri::State<crate::library::StorageSettings>,
     media_folder_authorization: tauri::State<NativeMediaFolderAuthorization>,
-    mut settings: AppSettings,
+    settings: AppSettings,
 ) -> Result<AppSettings, String> {
-    settings.hotkey = crate::settings::normalize_hotkey(&settings.hotkey)?;
-    settings.hotkey_secondary = match settings.hotkey_secondary.as_deref() {
-        Some(raw) if !raw.trim().is_empty() => Some(crate::settings::normalize_hotkey(raw)?),
-        _ => None,
+    let baseline = SettingsPreferences::from_document(&state.settings())?;
+    let candidate = SettingsPreferences::from_document(&settings)?;
+    let mut ports = TauriSettingsApplyPorts {
+        app: &app,
+        runtime: &state,
+        tray: &tray_items,
+        storage: &storage_settings,
+        authorization: &media_folder_authorization,
     };
-    settings.games.normalize();
-    settings.validate()?;
-    let media_dir = settings.media_dir_path()?;
-    let cloud_save_guard = RuntimeState::lock_cloud_settings_save()?;
-    let old = state.settings();
-    preserve_backend_owned_settings_fields(&mut settings, &old);
-    let old_media_dir = old.media_dir_path()?;
-    media_folder_authorization.validate_change(&old_media_dir, &media_dir)?;
-    service::prepare_writable_media_directory(&media_dir)?;
-
-    // Apply the autostart registry change before persisting so settings.json
-    // can never say "enabled" while the Run key update failed. Debug builds
-    // share settings with installed builds, so they preserve this preference
-    // and leave the shared Run key alone.
-    let requested_open_on_startup = settings.open_on_startup;
-    settings.open_on_startup = saved_autostart_preference_for_current_build(
-        requested_open_on_startup,
-        old.open_on_startup,
-    );
-    let old_hotkeys = configured_hotkeys(&old)?;
-    let new_hotkeys = configured_hotkeys(&settings)?;
-    let quota_bytes = quota_bytes_from_gb(settings.disk_quota_gb)?;
-    let mut applied = AppliedSettingsSideEffects::default();
-    let warnings = app
-        .state::<HotkeyServiceState>()
-        .replace(&new_hotkeys)?
-        .warnings;
-    applied.hotkeys = true;
-    if let Err(primary) = tray_items.set_hotkey_label(&save_hotkey_label(&settings)) {
-        let rollback =
-            rollback_settings_side_effects(&app, &tray_items, &old, &old_hotkeys, &applied);
-        return Err(settings_transaction_error(primary, rollback));
-    }
-    applied.tray_label = true;
-    if settings.open_on_startup != old.open_on_startup
-        && autostart_should_mutate_for_current_build()
-    {
-        match set_autostart(settings.open_on_startup) {
-            Ok(change) => {
-                settings.open_on_startup = change.enabled();
-                applied.autostart = Some(change);
-            }
-            Err(primary) => {
-                let rollback =
-                    rollback_settings_side_effects(&app, &tray_items, &old, &old_hotkeys, &applied);
-                return Err(settings_transaction_error(
-                    format!("update Windows startup registration: {primary}"),
-                    rollback,
-                ));
-            }
-        }
-    }
-    let prepared_restart = match state.prepare_settings_restart(settings.clone()) {
-        Ok(prepared) => prepared,
-        Err(primary) => {
-            let rollback =
-                rollback_settings_side_effects(&app, &tray_items, &old, &old_hotkeys, &applied);
-            return Err(settings_transaction_error(primary, rollback));
-        }
-    };
-    let persisted_commit = match state.persist_ui_preferences(&settings) {
-        Ok(commit) => commit,
-        Err(error) => {
-            let rollback =
-                rollback_settings_side_effects(&app, &tray_items, &old, &old_hotkeys, &applied);
-            return Err(settings_transaction_error(error, rollback));
-        }
-    };
-    if let Err(primary) = state.finish_prepared_restart(app.clone(), prepared_restart) {
-        let mut rollback = Vec::new();
-        if let Err(error) = state.rollback_persisted_settings(&persisted_commit, &old) {
-            rollback.push(format!("restore settings.json: {error}"));
-        }
-        rollback.extend(rollback_settings_side_effects(
-            &app,
-            &tray_items,
-            &old,
-            &old_hotkeys,
-            &applied,
-        ));
-        return Err(settings_transaction_error(primary, rollback));
-    }
-    drop(cloud_save_guard);
-    for message in warnings {
+    let success = coordinator
+        .apply(&mut ports, baseline, candidate)
+        .map_err(|error| error.to_string())?;
+    for message in success.warnings {
         tracing::warn!(event = "settings_apply_warning", message = %message);
         publish_user_error(&app, message);
     }
-    storage_settings.set_quota_bytes(quota_bytes);
-    storage_settings.set_media_dir(media_dir.clone());
-    media_folder_authorization.commit(&media_dir);
-    if let Err(error) = app
-        .state::<crate::desktop::DesktopState>()
-        .replace_settings(settings.clone())
-    {
-        log_diagnostic(format!(
-            "desktop saved settings reconciliation failed: {error}"
-        ));
-    }
-    Ok(settings)
+    Ok(success.snapshot.document)
 }
 
 pub fn run(
@@ -3513,6 +3632,7 @@ pub fn run(
         .manage(shell_sender.clone())
         .manage(ShutdownGate::new())
         .manage(UpdateOperationGate::new())
+        .manage(SettingsApplyCoordinator::default())
         .manage(HotkeyServiceState::default())
         .manage(MicTestState::default())
         .manage(support::SupportState::default())
@@ -3679,10 +3799,11 @@ pub fn run(
                 webview_labels(app.handle())
             ));
 
+            let initial_hotkey_label = save_hotkey_label(&settings);
             let save_item = MenuItem::with_id(
                 app,
                 "save",
-                save_menu_text(&save_hotkey_label(&settings)),
+                save_menu_text(&initial_hotkey_label),
                 true,
                 None::<&str>,
             )?;
@@ -3699,6 +3820,7 @@ pub fn run(
                 Menu::with_items(app, &[&open_item, &save_item, &diagnostics_item, &quit_item])?;
             app.manage(TrayItems {
                 save_item: save_item.clone(),
+                hotkey_label: Mutex::new(initial_hotkey_label),
             });
             TrayIconBuilder::with_id("clipline")
                 .icon(tray_icon())
@@ -4045,7 +4167,11 @@ where
     Ok(())
 }
 
-fn pump_events<R: Runtime>(handle: AppHandle<R>, event_rx: Receiver<Event>, generation: u64) {
+fn pump_events<R: Runtime>(
+    handle: AppHandle<R>,
+    event_rx: service::RecorderEventStream,
+    generation: u64,
+) -> JoinHandle<()> {
     std::thread::spawn(move || {
         for event in event_rx {
             let accepted = match &event {
@@ -4125,7 +4251,7 @@ fn pump_events<R: Runtime>(handle: AppHandle<R>, event_rx: Receiver<Event>, gene
                 }
             }
         }
-    });
+    })
 }
 
 fn parse_quota_gb(raw: &str) -> Result<Option<u64>, &'static str> {
@@ -5044,43 +5170,6 @@ mod tests {
         assert!(matches!(rx.try_recv(), Ok(Cmd::Save)));
     }
 
-    #[test]
-    fn settings_save_lock_remains_held_through_runtime_commit() {
-        let save_lock = Mutex::new(());
-        let save_guard = save_lock.lock().unwrap();
-        let original = AppSettings::default();
-        let state = RuntimeState::new(original.clone(), None);
-        let changed = AppSettings {
-            fps: 120,
-            ..original
-        };
-        let prepared = state.prepare_settings_restart(changed).unwrap();
-
-        run_before_releasing_settings_save_lock(save_guard, || {
-            let committed: CommittedRuntimeRestart<()> = {
-                let mut inner = state.0.lock().unwrap();
-                RuntimeState::commit_prepared_restart_with(&mut inner, prepared, |_| {
-                    unreachable!("inactive runtime must not spawn a replacement")
-                })
-                .unwrap()
-            };
-
-            assert!(committed.old_tx.is_none());
-            assert_eq!(state.settings().fps, 120);
-            assert!(
-                matches!(
-                    save_lock.try_lock(),
-                    Err(std::sync::TryLockError::WouldBlock)
-                ),
-                "settings save lock was released before the runtime commit completed"
-            );
-            Ok(())
-        })
-        .unwrap();
-
-        assert!(save_lock.try_lock().is_ok());
-    }
-
     fn detected_game(id: &str, name: &str, hwnd: isize) -> DetectedGame {
         DetectedGame {
             identity: crate::game_identity::GameIdentity::custom(id),
@@ -5448,6 +5537,8 @@ mod tests {
         let state = RuntimeState::with_sender(tx, original.clone(), None);
         let prepared = PreparedRuntimeRestart {
             settings: invalid_disk_replay_settings(),
+            options: None,
+            worker: None,
         };
 
         let mut spawned = false;
@@ -5699,93 +5790,6 @@ mod tests {
         assert_eq!(inner.recording_generation, 8);
         assert!(inner.recording_desired);
         assert!(inner.tx.is_none());
-    }
-
-    #[test]
-    fn preserve_backend_owned_settings_fields_keeps_upload_state_but_allows_preferences() {
-        let mut frontend = AppSettings::default();
-        frontend.cloud.host_url = "https://stale.example.com".into();
-        frontend.cloud.public_url = Some("https://stale-public.example.com".into());
-        frontend.cloud.connected_user_id = Some("stale-user".into());
-        frontend.cloud.connected_username = Some("stale-name".into());
-        frontend.cloud.connected_display_name = Some("Stale".into());
-        frontend.cloud.credential_target = Some("stale-target".into());
-        frontend.cloud.default_visibility = "public".into();
-        frontend.cloud.delete_local_after_upload = true;
-        frontend.cloud.auto_upload_rules = true;
-
-        let mut backend = AppSettings::default();
-        backend.cloud.host_url = "https://cloud.example.com".into();
-        backend.cloud.public_url = Some("https://public.example.com".into());
-        backend.cloud.connected_user_id = Some("user-1".into());
-        backend.cloud.connected_username = Some("dain".into());
-        backend.cloud.connected_display_name = Some("Dain".into());
-        backend.cloud.credential_target = Some("clipline:user-1".into());
-        backend.cloud.credential_cleanup_targets = vec!["clipline:old-user".into()];
-        backend.cloud.uploads.insert(
-            "local-1".into(),
-            CloudUploadRecord {
-                local_clip_id: "local-1".into(),
-                client_clip_id: Some("client-1".into()),
-                upload_generation: Some(1),
-                path: "D:\\Videos\\Clipline\\clip.mp4".into(),
-                remote_clip_id: Some("remote-1".into()),
-                remote_url: Some("https://public.example.com/remote-1".into()),
-                visibility: "private".into(),
-                upload_status: "uploaded_private".into(),
-                error: None,
-                updated_at_unix: 42,
-            },
-        );
-
-        preserve_backend_owned_settings_fields(&mut frontend, &backend);
-
-        assert_eq!(frontend.cloud.host_url, backend.cloud.host_url);
-        assert_eq!(frontend.cloud.public_url, backend.cloud.public_url);
-        assert_eq!(
-            frontend.cloud.connected_user_id,
-            backend.cloud.connected_user_id
-        );
-        assert_eq!(
-            frontend.cloud.connected_username,
-            backend.cloud.connected_username
-        );
-        assert_eq!(
-            frontend.cloud.connected_display_name,
-            backend.cloud.connected_display_name
-        );
-        assert_eq!(
-            frontend.cloud.credential_target,
-            backend.cloud.credential_target
-        );
-        assert_eq!(
-            frontend.cloud.credential_cleanup_targets,
-            backend.cloud.credential_cleanup_targets
-        );
-        assert_eq!(frontend.cloud.uploads, backend.cloud.uploads);
-        assert_eq!(frontend.cloud.default_visibility, "public");
-        assert!(frontend.cloud.delete_local_after_upload);
-        assert!(frontend.cloud.auto_upload_rules);
-    }
-
-    #[test]
-    fn preserve_backend_owned_settings_fields_keeps_osu_credentials_from_backend() {
-        let mut frontend = AppSettings::default();
-        frontend.osu.client_id = None;
-        frontend.osu.user = None;
-        frontend.osu.credential_target = None;
-        frontend.osu.last_connected_username = None;
-
-        let mut backend = AppSettings::default();
-        backend.osu.client_id = Some("61835".into());
-        backend.osu.user = Some("3426414".into());
-        backend.osu.credential_target = Some("Clipline osu!:61835:3426414".into());
-        backend.osu.credential_cleanup_targets = vec!["Clipline osu!:old".into()];
-        backend.osu.last_connected_username = Some("Dain".into());
-
-        preserve_backend_owned_settings_fields(&mut frontend, &backend);
-
-        assert_eq!(frontend.osu, backend.osu);
     }
 
     #[test]

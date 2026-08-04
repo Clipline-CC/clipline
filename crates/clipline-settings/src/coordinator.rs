@@ -1,0 +1,289 @@
+//! Transaction ordering for applying UI-owned settings to live runtime state.
+//!
+//! Every operation through durable preference publication is fallible and owns
+//! an exact rollback receipt. Recorder activation, prepared storage/media
+//! authorization, and desktop publication happen only after persistence and
+//! therefore form an infallible commit tail.
+
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use thiserror::Error;
+
+use crate::{AppSettings, SettingsPreferences, SettingsSnapshot};
+
+/// Narrow application boundary consumed by [`apply_settings`].
+///
+/// A frontend adapter may implement every port on one struct, but each method
+/// retains one responsibility and every reversible mutation returns an owned
+/// receipt. Implementations must not retain controller/UI locks across calls.
+pub trait SettingsApplyPorts {
+    type PreparedPreflight;
+    type HotkeyReceipt;
+    type TrayReceipt;
+    type AutostartReceipt;
+    type PreparedRecorder;
+
+    fn prepare_preflight(
+        &mut self,
+        baseline: &SettingsPreferences,
+        candidate: &SettingsPreferences,
+    ) -> Result<Self::PreparedPreflight, String>;
+
+    fn apply_hotkeys(
+        &mut self,
+        baseline: &SettingsPreferences,
+        candidate: &SettingsPreferences,
+    ) -> Result<(Self::HotkeyReceipt, Vec<String>), String>;
+
+    fn rollback_hotkeys(&mut self, receipt: Self::HotkeyReceipt) -> Result<(), String>;
+
+    fn apply_tray_label(
+        &mut self,
+        baseline: &SettingsPreferences,
+        candidate: &SettingsPreferences,
+    ) -> Result<Self::TrayReceipt, String>;
+
+    fn rollback_tray_label(&mut self, receipt: Self::TrayReceipt) -> Result<(), String>;
+
+    /// Apply the release/debug-specific startup policy and return the exact
+    /// value that must be persisted with its rollback receipt.
+    fn apply_autostart(
+        &mut self,
+        baseline: bool,
+        requested: bool,
+    ) -> Result<(Self::AutostartReceipt, bool), String>;
+
+    fn rollback_autostart(&mut self, receipt: Self::AutostartReceipt) -> Result<(), String>;
+
+    /// Validate and create the replacement recorder behind a closed start
+    /// latch. Dropping the returned value must cancel and join that worker.
+    fn prepare_recorder(
+        &mut self,
+        candidate: &SettingsPreferences,
+    ) -> Result<Self::PreparedRecorder, String>;
+
+    /// Atomically compare the UI baseline and merge the replacement into the
+    /// latest durable document. Backend-owned Cloud/osu! state must survive.
+    fn persist_preferences(
+        &mut self,
+        baseline: &SettingsPreferences,
+        candidate: SettingsPreferences,
+    ) -> Result<SettingsSnapshot, String>;
+
+    /// Begin the already-created recorder and publish its sender/generation.
+    /// This is deliberately infallible: durable preferences already exist.
+    fn commit_recorder(
+        &mut self,
+        prepared: Self::PreparedRecorder,
+        authoritative: &SettingsSnapshot,
+    );
+
+    /// Publish storage quota/root and consume exact media authorization.
+    /// All validation and allocation happened in `prepare_preflight`.
+    fn commit_preflight(
+        &mut self,
+        prepared: Self::PreparedPreflight,
+        authoritative: &SettingsSnapshot,
+    );
+
+    /// Reconcile the compact desktop/frontend snapshot without a fallible
+    /// operation after the durable commit point.
+    fn publish(&mut self, authoritative: &SettingsSnapshot);
+}
+
+#[derive(Debug)]
+pub struct SettingsApplySuccess {
+    pub snapshot: SettingsSnapshot,
+    pub warnings: Vec<String>,
+}
+
+impl SettingsApplySuccess {
+    pub fn settings(&self) -> &AppSettings {
+        &self.snapshot.document
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+#[error("{primary}{rollback_suffix}")]
+pub struct SettingsApplyError {
+    primary: String,
+    rollback_errors: Vec<String>,
+    rollback_suffix: String,
+}
+
+impl SettingsApplyError {
+    fn new(primary: String, rollback_errors: Vec<String>) -> Self {
+        let rollback_suffix = if rollback_errors.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "; settings rollback incomplete: {}",
+                rollback_errors.join(", ")
+            )
+        };
+        Self {
+            primary,
+            rollback_errors,
+            rollback_suffix,
+        }
+    }
+
+    pub fn primary(&self) -> &str {
+        &self.primary
+    }
+
+    pub fn rollback_errors(&self) -> &[String] {
+        &self.rollback_errors
+    }
+}
+
+/// Process-wide owner of the settings-apply transaction.
+///
+/// The lease serializes Settings windows without blocking independent Cloud,
+/// upload, profile, or osu! transactions on the store's commit gate.
+#[derive(Debug, Default)]
+pub struct SettingsApplyCoordinator {
+    active: AtomicBool,
+}
+
+impl SettingsApplyCoordinator {
+    pub fn apply<P: SettingsApplyPorts>(
+        &self,
+        ports: &mut P,
+        baseline: SettingsPreferences,
+        candidate: SettingsPreferences,
+    ) -> Result<SettingsApplySuccess, SettingsApplyError> {
+        if self
+            .active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(SettingsApplyError::new(
+                "another settings apply is already in progress".into(),
+                Vec::new(),
+            ));
+        }
+        let _lease = SettingsApplyLease {
+            active: &self.active,
+        };
+        apply_settings(ports, baseline, candidate)
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.active.load(Ordering::Acquire)
+    }
+}
+
+struct SettingsApplyLease<'a> {
+    active: &'a AtomicBool,
+}
+
+impl Drop for SettingsApplyLease<'_> {
+    fn drop(&mut self) {
+        self.active.store(false, Ordering::Release);
+    }
+}
+
+/// Apply one normalized preference draft with exact old-or-new semantics.
+fn apply_settings<P: SettingsApplyPorts>(
+    ports: &mut P,
+    baseline: SettingsPreferences,
+    candidate: SettingsPreferences,
+) -> Result<SettingsApplySuccess, SettingsApplyError> {
+    let baseline = baseline
+        .normalized()
+        .map_err(|error| SettingsApplyError::new(error, Vec::new()))?;
+    let mut candidate = candidate
+        .normalized()
+        .map_err(|error| SettingsApplyError::new(error, Vec::new()))?;
+    let prepared_preflight = ports
+        .prepare_preflight(&baseline, &candidate)
+        .map_err(|error| SettingsApplyError::new(error, Vec::new()))?;
+
+    let (hotkey_receipt, warnings) = ports
+        .apply_hotkeys(&baseline, &candidate)
+        .map_err(|error| SettingsApplyError::new(error, Vec::new()))?;
+    let tray_receipt = match ports.apply_tray_label(&baseline, &candidate) {
+        Ok(receipt) => receipt,
+        Err(primary) => {
+            let rollback = rollback_hotkeys(ports, hotkey_receipt);
+            return Err(SettingsApplyError::new(primary, rollback));
+        }
+    };
+    let (autostart_receipt, persisted_autostart) =
+        match ports.apply_autostart(baseline.open_on_startup, candidate.open_on_startup) {
+            Ok(applied) => applied,
+            Err(primary) => {
+                let rollback = rollback_tray_and_hotkeys(ports, tray_receipt, hotkey_receipt);
+                return Err(SettingsApplyError::new(primary, rollback));
+            }
+        };
+    candidate.open_on_startup = persisted_autostart;
+
+    let prepared_recorder = match ports.prepare_recorder(&candidate) {
+        Ok(prepared) => prepared,
+        Err(primary) => {
+            let rollback =
+                rollback_live_effects(ports, autostart_receipt, tray_receipt, hotkey_receipt);
+            return Err(SettingsApplyError::new(primary, rollback));
+        }
+    };
+
+    let authoritative = match ports.persist_preferences(&baseline, candidate) {
+        Ok(settings) => settings,
+        Err(primary) => {
+            // Cancel and join the latched worker before reversing older OS
+            // effects. This preserves the transaction's exact reverse order.
+            drop(prepared_recorder);
+            let rollback =
+                rollback_live_effects(ports, autostart_receipt, tray_receipt, hotkey_receipt);
+            return Err(SettingsApplyError::new(primary, rollback));
+        }
+    };
+
+    ports.commit_recorder(prepared_recorder, &authoritative);
+    ports.commit_preflight(prepared_preflight, &authoritative);
+    ports.publish(&authoritative);
+    Ok(SettingsApplySuccess {
+        snapshot: authoritative,
+        warnings,
+    })
+}
+
+fn rollback_hotkeys<P: SettingsApplyPorts>(
+    ports: &mut P,
+    hotkeys: P::HotkeyReceipt,
+) -> Vec<String> {
+    ports
+        .rollback_hotkeys(hotkeys)
+        .err()
+        .map(|error| vec![format!("restore save hotkeys: {error}")])
+        .unwrap_or_default()
+}
+
+fn rollback_tray_and_hotkeys<P: SettingsApplyPorts>(
+    ports: &mut P,
+    tray: P::TrayReceipt,
+    hotkeys: P::HotkeyReceipt,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    if let Err(error) = ports.rollback_tray_label(tray) {
+        errors.push(format!("restore tray hotkey label: {error}"));
+    }
+    errors.extend(rollback_hotkeys(ports, hotkeys));
+    errors
+}
+
+fn rollback_live_effects<P: SettingsApplyPorts>(
+    ports: &mut P,
+    autostart: P::AutostartReceipt,
+    tray: P::TrayReceipt,
+    hotkeys: P::HotkeyReceipt,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    if let Err(error) = ports.rollback_autostart(autostart) {
+        errors.push(format!("restore Windows startup registration: {error}"));
+    }
+    errors.extend(rollback_tray_and_hotkeys(ports, tray, hotkeys));
+    errors
+}

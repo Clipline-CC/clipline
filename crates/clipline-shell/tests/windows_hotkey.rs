@@ -56,3 +56,37 @@ fn mouse_hook_is_owned_only_while_a_mouse_chord_is_active() {
     assert!(!service.snapshot().mouse_hook_installed);
     service.shutdown().expect("stop and join hotkey service");
 }
+
+#[test]
+fn rollback_receipt_restores_exact_state_and_rejects_a_newer_owner() {
+    let _guard = device_test_lock();
+    let (sender, _receiver) = shell_command_channel();
+    let service = WindowsHotkeyService::start(sender).expect("start Windows hotkey service");
+    let first = HotkeySet::parse(&["Ctrl+Alt+Shift+F21"]).unwrap();
+    let second = HotkeySet::parse(&["Ctrl+Alt+Shift+F22"]).unwrap();
+
+    let first_change = service
+        .replace_with_receipt(&first)
+        .expect("register first test hotkey");
+    service
+        .rollback(first_change.receipt)
+        .expect("restore empty starting set");
+    assert!(service.snapshot().active_labels.is_empty());
+
+    let stale_change = service
+        .replace_with_receipt(&first)
+        .expect("register first test hotkey again");
+    service
+        .replace(&second)
+        .expect("publish newer hotkey owner");
+    let error = service
+        .rollback(stale_change.receipt)
+        .expect_err("stale receipt must not overwrite newer owner");
+    assert!(error.to_string().contains("changed concurrently"));
+    assert_eq!(service.snapshot().active_labels, ["Ctrl+Alt+Shift+F22"]);
+
+    service
+        .replace(&HotkeySet::parse(&[]).unwrap())
+        .expect("unregister test hotkey");
+    service.shutdown().expect("stop and join hotkey service");
+}

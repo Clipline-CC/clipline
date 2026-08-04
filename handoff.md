@@ -4,6 +4,32 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-03): Slint replacement Milestone 8, Task 4 transactional settings
+
+Milestone 8 Task 4 is implemented. `clipline-settings::SettingsApplyCoordinator` now owns the
+ordered Settings apply transaction with a nonblocking process-wide apply lease, narrow ports, exact
+rollback receipts, reverse-order rollback error aggregation, preferences-only compare/exchange, and
+an infallible commit tail. The Tauri `save_settings` command is an adapter over that coordinator and
+returns the exact durable snapshot; it no longer preserves backend fields manually, holds the Cloud
+save mutex across OS work, or attempts a stale whole-document rollback. Concurrent Cloud, upload,
+profile, and osu! fields remain owned by the latest durable document.
+
+Recorder replacement now prepares a validated worker behind a closed start latch. Pre-commit Drop
+cancels and joins it. The runtime folds in the latest recording intent/game context at commit,
+publishes the new sender/generation without a fallible spawn, stops and joins the prior recorder
+event pump (which owns the prior worker join) before releasing the new latch, and treats later
+desktop/storage/media-authorization publication as infallible. Hotkey and tray rollback receipts
+verify their exact after-state before restoring; autostart retains its identity-aware registry
+receipt. Storage quota/root publication is one poison-recovering mutex replacement.
+
+Validation is green: the coordinator failure/concurrency suite, recorder latch/join tests, Tauri
+cutover contract, 229 Tauri unit tests, live Windows hotkey receipt/rollback coverage,
+`cargo test --workspace`, and warning-denied workspace Clippy. The installed Clipline process and
+profile remained untouched. `artifacts/` and `paseo.json` remain local scratch and are excluded.
+
+Next: Task 5, add the bounded, token-fenced settings probe contract/executor and migrate Tauri probe
+adapters before exposing the Slint Settings surface.
+
 ## Checkpoint (2026-08-03): Slint replacement Milestone 8, Task 3 shared runtime ownership
 
 Milestone 8 Task 3 is complete. `clipline-games` now owns game identities, the declarative plugin

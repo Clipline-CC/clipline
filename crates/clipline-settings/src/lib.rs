@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod capture_region;
 pub mod cloud;
+pub mod coordinator;
 pub mod draft;
 pub mod games;
 pub mod hotkey;
@@ -34,6 +35,9 @@ pub use capture_region::{
 pub use cloud::{
     normalize_cloud_visibility, CloudSettings, CloudUploadRecord, MAX_CLOUD_UPLOAD_ERROR_BYTES,
     MAX_CLOUD_UPLOAD_ID_BYTES, MAX_CLOUD_UPLOAD_PATH_BYTES, MAX_CLOUD_UPLOAD_URL_BYTES,
+};
+pub use coordinator::{
+    SettingsApplyCoordinator, SettingsApplyError, SettingsApplyPorts, SettingsApplySuccess,
 };
 pub use draft::{
     CloseRequest, CloseResult, CloudAccountDisplay, CloudAccountOwner, CloudConfigurationOwner,

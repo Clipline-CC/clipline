@@ -155,6 +155,14 @@ impl DesktopState {
             .map_err(|error| error.to_string())
     }
 
+    pub fn replace_settings_authoritative(&self, settings: AppSettings) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .controller
+            .replace_settings_authoritative(settings)
+    }
+
     pub fn set_recorder_desired(&self, desired: bool) -> Result<bool, String> {
         self.0
             .lock()

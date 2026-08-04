@@ -390,6 +390,21 @@ where
         Ok(true)
     }
 
+    /// Publish an already-durable settings value. This commit-tail operation
+    /// cannot reject the authoritative value: revision counters saturate only
+    /// after their representable lifetime instead of leaving desktop state on
+    /// the pre-commit settings.
+    pub fn replace_settings_authoritative(&mut self, settings: S) -> bool {
+        if self.snapshot.settings == settings {
+            return false;
+        }
+        self.snapshot.settings = settings;
+        self.snapshot.settings_revision =
+            Revision::new(self.snapshot.settings_revision.get().saturating_add(1));
+        self.snapshot.revision = Revision::new(self.snapshot.revision.get().saturating_add(1));
+        true
+    }
+
     pub fn set_recorder_desired(&mut self, desired: bool) -> Result<bool, ControllerError> {
         if self.snapshot.recorder.desired == desired {
             return Ok(false);

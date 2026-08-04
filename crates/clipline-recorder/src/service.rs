@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clipline_capture::ffmpeg;
@@ -417,6 +417,7 @@ pub struct ActiveGame {
     pub name: String,
 }
 
+#[derive(Clone)]
 pub struct ServiceOptions {
     pub capture_source: CaptureSource,
     /// Screen-capture backend preference for display/region capture.
@@ -582,19 +583,10 @@ impl From<clipline_settings::games::GameRecordingMode> for RecordingMode {
     }
 }
 
-pub fn spawn(opts: ServiceOptions) -> (Sender<Cmd>, Receiver<Event>) {
-    let (cmd_tx, cmd_rx) = mpsc::channel();
-    let (event_tx, event_rx) = mpsc::channel();
-    std::thread::Builder::new()
-        .name("clipline-recorder".into())
-        .spawn(move || {
-            if let Err(e) = run(opts, cmd_rx, &event_tx) {
-                let _ = event_tx.send(Event::Error { message: e });
-                send_stopped(&event_tx);
-            }
-        })
-        .expect("spawn recorder thread");
-    (cmd_tx, event_rx)
+pub fn spawn(opts: ServiceOptions) -> Result<(Sender<Cmd>, crate::RecorderEventStream), String> {
+    let prepared = crate::PreparedRecorderRestart::prepare(opts)?;
+    let commands = prepared.command_sender();
+    Ok((commands, prepared.commit()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -789,7 +781,11 @@ fn open_wgc(
     }
 }
 
-fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> Result<(), String> {
+pub(crate) fn run(
+    opts: ServiceOptions,
+    cmd_rx: Receiver<Cmd>,
+    events: &Sender<Event>,
+) -> Result<(), String> {
     let init = |e: &dyn std::fmt::Display| format!("init: {e}");
     let (device, _ctx) = d3d11::create_device().map_err(|e| init(&e))?;
     let clock = WgcCapture::new_clock().map_err(|e| init(&e))?;
@@ -1686,7 +1682,7 @@ fn process_instance_id(process_id: u32) -> Result<String, String> {
         .map_err(|error| error.to_string())
 }
 
-fn send_stopped(events: &Sender<Event>) {
+pub(crate) fn send_stopped(events: &Sender<Event>) {
     let _ = events.send(Event::Status {
         recording: false,
         waiting_for_game: false,
@@ -2521,6 +2517,7 @@ mod tests {
     };
     use clipline_test_utils::TestDir;
     use std::collections::VecDeque;
+    use std::sync::mpsc;
 
     #[test]
     fn save_time_quota_uses_shared_registry_as_deletion_authority() {

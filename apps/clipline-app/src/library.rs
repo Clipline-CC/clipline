@@ -30,53 +30,55 @@ use clipline_mp4::{
 use clipline_storage::storage_status as read_storage_status;
 use tauri::{AppHandle, Manager, Runtime};
 
-use crate::service::{clips_dir, default_clips_dir};
+use crate::service::clips_dir;
 use crate::util;
 
 pub struct StorageSettings {
-    quota_bytes: Mutex<Option<u64>>,
-    media_dir: Mutex<PathBuf>,
+    state: Mutex<StorageSettingsState>,
+}
+
+#[derive(Clone)]
+struct StorageSettingsState {
+    quota_bytes: Option<u64>,
+    media_dir: PathBuf,
 }
 
 impl StorageSettings {
     pub fn new(quota_bytes: Option<u64>, media_dir: PathBuf) -> Self {
         Self {
-            quota_bytes: Mutex::new(quota_bytes),
-            media_dir: Mutex::new(media_dir),
+            state: Mutex::new(StorageSettingsState {
+                quota_bytes,
+                media_dir,
+            }),
         }
     }
 
     pub fn quota_bytes(&self) -> Option<u64> {
-        match self.quota_bytes.lock() {
-            Ok(q) => *q,
-            Err(e) => {
-                tracing::error!(event = "storage_quota_lock_poisoned", error = %e);
-                None
-            }
-        }
-    }
-
-    pub fn set_quota_bytes(&self, quota_bytes: Option<u64>) {
-        match self.quota_bytes.lock() {
-            Ok(mut q) => *q = quota_bytes,
-            Err(e) => tracing::error!(event = "storage_quota_set_lock_poisoned", error = %e),
-        }
+        self.lock_state().quota_bytes
     }
 
     pub fn media_dir(&self) -> PathBuf {
-        match self.media_dir.lock() {
-            Ok(dir) => dir.clone(),
-            Err(e) => {
-                tracing::error!(event = "media_directory_lock_poisoned", error = %e);
-                default_clips_dir()
-            }
-        }
+        self.lock_state().media_dir.clone()
     }
 
     pub fn set_media_dir(&self, media_dir: PathBuf) {
-        match self.media_dir.lock() {
-            Ok(mut dir) => *dir = media_dir,
-            Err(e) => tracing::error!(event = "media_directory_set_lock_poisoned", error = %e),
+        self.lock_state().media_dir = media_dir;
+    }
+
+    pub fn replace(&self, quota_bytes: Option<u64>, media_dir: PathBuf) {
+        *self.lock_state() = StorageSettingsState {
+            quota_bytes,
+            media_dir,
+        };
+    }
+
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, StorageSettingsState> {
+        match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => {
+                tracing::error!(event = "storage_settings_lock_poisoned");
+                poisoned.into_inner()
+            }
         }
     }
 
