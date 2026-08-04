@@ -1,7 +1,10 @@
-use super::*;
-use crate::service::{
+#![cfg(windows)]
+
+use clipline_recorder::AppSettingsServiceExt;
+use clipline_recorder::{
     AudioOptions, CaptureRegion, CaptureSource, ReplayStorageOptions, DEFAULT_DISK_QUOTA_BYTES,
 };
+use clipline_settings::*;
 use std::path::PathBuf;
 
 #[test]

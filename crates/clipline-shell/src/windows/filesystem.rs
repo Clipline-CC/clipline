@@ -74,6 +74,13 @@ pub fn opened_file_identity_components(file: &File) -> std::io::Result<(u64, u64
     Ok((u64::from(information.dwVolumeSerialNumber), file_index))
 }
 
+pub fn metadata_is_link_or_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt as _;
+
+    metadata.file_type().is_symlink()
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
+}
+
 pub fn open_regular_file_nofollow(path: &Path) -> std::io::Result<File> {
     let file = OpenOptions::new()
         .read(true)

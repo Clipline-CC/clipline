@@ -195,6 +195,22 @@ pub fn opened_file_identity(file: &std::fs::File) -> std::io::Result<FileIdentit
     Ok(FileIdentity { device, file })
 }
 
+/// Return whether metadata describes a link or Windows reparse point.
+///
+/// Domain crates use this safe wrapper so platform-specific filesystem
+/// inspection remains owned by `clipline-shell`.
+pub fn metadata_is_link_or_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        windows::filesystem::metadata_is_link_or_reparse_point(metadata)
+    }
+
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
+}
+
 /// Open one regular file without following its final link/reparse component.
 pub fn open_regular_file_nofollow(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     #[cfg(windows)]

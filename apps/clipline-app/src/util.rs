@@ -2,9 +2,10 @@
 
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use clipline_events::{ClipAudioTrack, ClipMarkers};
+
+pub(crate) use clipline_recorder::time::{unix_now, unix_now_i64};
 
 /// Read the `.markers.json` sidecar next to a clip file.
 pub(crate) fn read_markers_raw(path: &Path) -> Option<ClipMarkers> {
@@ -59,25 +60,6 @@ fn infer_audio_tracks_from_file(path: &Path) -> Result<Vec<ClipAudioTrack>, Stri
         .collect())
 }
 
-/// Current wall-clock time as seconds since the Unix epoch.
-pub(crate) fn unix_now() -> u64 {
-    unix_seconds_at(SystemTime::now())
-}
-
-pub(crate) fn unix_now_i64() -> i64 {
-    unix_seconds_i64_at(SystemTime::now())
-}
-
-fn unix_seconds_at(time: SystemTime) -> u64 {
-    time.duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or_default()
-}
-
-fn unix_seconds_i64_at(time: SystemTime) -> i64 {
-    i64::try_from(unix_seconds_at(time)).unwrap_or(i64::MAX)
-}
-
 /// Resolve user-facing audio track IDs to their MP4 track indices, validating
 /// for duplicates and unknown IDs.
 pub(crate) fn selected_audio_track_indices(
@@ -117,18 +99,6 @@ mod tests {
         AudioTrackConfig, FragSample, HybridMp4Writer, TrackConfig, VideoTrackConfig,
     };
     use std::io::Cursor;
-
-    #[test]
-    fn signed_unix_seconds_clamps_pre_epoch_and_maps_normal_time() {
-        assert_eq!(
-            unix_seconds_i64_at(UNIX_EPOCH - std::time::Duration::from_secs(1)),
-            0
-        );
-        assert_eq!(
-            unix_seconds_i64_at(UNIX_EPOCH + std::time::Duration::from_secs(42)),
-            42
-        );
-    }
 
     fn two_audio_fixture() -> Vec<u8> {
         let tracks = vec![
@@ -183,7 +153,7 @@ mod tests {
             .find("fn infer_audio_tracks_from_file")
             .expect("inference helper exists");
         let end = source[start..]
-            .find("\n/// Current wall-clock")
+            .find("\n/// Resolve user-facing audio track IDs")
             .map(|offset| start + offset)
             .expect("inference helper end marker exists");
         let body = &source[start..end];

@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static PROBE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-pub(super) fn default_clips_dir() -> PathBuf {
+pub fn default_clips_dir() -> PathBuf {
     std::env::var_os("USERPROFILE")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir)
@@ -12,13 +12,13 @@ pub(super) fn default_clips_dir() -> PathBuf {
         .join("Clipline")
 }
 
-pub(super) fn clips_dir(media_dir: &Path) -> Result<PathBuf, String> {
+pub fn clips_dir(media_dir: &Path) -> Result<PathBuf, String> {
     std::fs::create_dir_all(media_dir)
         .map_err(|error| format!("create media folder {}: {error}", media_dir.display()))?;
     Ok(media_dir.to_path_buf())
 }
 
-pub(super) fn clips_dir_resolved_with_probe(
+pub fn clips_dir_resolved_with_probe(
     media_dir: &Path,
     fallback: impl FnOnce() -> PathBuf,
     mut probe: impl FnMut(&Path) -> std::io::Result<()>,
@@ -38,7 +38,7 @@ pub(super) fn clips_dir_resolved_with_probe(
     Ok((dir, true))
 }
 
-pub(super) fn prepare_writable_directory_with(
+pub fn prepare_writable_directory_with(
     dir: &Path,
     mut probe: impl FnMut(&Path) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
@@ -46,7 +46,7 @@ pub(super) fn prepare_writable_directory_with(
     probe(dir)
 }
 
-pub(super) fn probe_writable_directory(dir: &Path) -> std::io::Result<()> {
+pub fn probe_writable_directory(dir: &Path) -> std::io::Result<()> {
     for _ in 0..16 {
         let unique = PROBE_COUNTER.fetch_add(1, Ordering::Relaxed);
         let path = dir.join(format!(
@@ -75,7 +75,7 @@ pub(super) fn probe_writable_directory(dir: &Path) -> std::io::Result<()> {
     ))
 }
 
-pub(super) fn is_within_temp(dir: &Path, temp_dir: &Path) -> bool {
+pub fn is_within_temp(dir: &Path, temp_dir: &Path) -> bool {
     let normalize = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     normalize(dir).starts_with(normalize(temp_dir))
 }

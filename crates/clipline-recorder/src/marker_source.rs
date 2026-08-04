@@ -1,4 +1,4 @@
-//! League event source (ddoc section 5a): a thread with a current-thread
+//! Recorder-owned game event sources: joined capability dispatch and League polling.
 //! Tokio runtime polling the Live Client Data API at roughly 1 Hz and
 //! forwarding anchored events to the recorder service. The League game
 //! plugin owns when this source is attached to a recorder session.
@@ -212,9 +212,47 @@ pub fn spawn(base_url: Option<String>, recording_t0: Instant) -> Receiver<Poller
     rx
 }
 
+pub fn spawn_for_profile(
+    profile_id: Option<&str>,
+    base_url: Option<String>,
+    recording_t0: Instant,
+) -> Option<Receiver<PollerMsg>> {
+    match source_kind_for_profile(profile_id)? {
+        MarkerSourceKind::LeagueLiveClient => Some(spawn(base_url, recording_t0)),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MarkerSourceKind {
+    LeagueLiveClient,
+}
+
+fn source_kind_for_profile(profile_id: Option<&str>) -> Option<MarkerSourceKind> {
+    match clipline_games::plugin::event_source_for_profile(profile_id)? {
+        clipline_games::plugin::LEAGUE_LIVE_CLIENT_EVENT_SOURCE => {
+            Some(MarkerSourceKind::LeagueLiveClient)
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn declarative_profile_capability_selects_only_the_owned_marker_source() {
+        assert_eq!(
+            source_kind_for_profile(Some(clipline_games::identity::LEAGUE_OF_LEGENDS_ID)),
+            Some(MarkerSourceKind::LeagueLiveClient)
+        );
+        assert_eq!(
+            source_kind_for_profile(Some(clipline_games::identity::OSU_ID)),
+            None
+        );
+        assert_eq!(source_kind_for_profile(Some("custom:league-copy")), None);
+        assert_eq!(source_kind_for_profile(None), None);
+    }
 
     #[test]
     fn transient_failures_do_not_end_or_restart_a_match() {

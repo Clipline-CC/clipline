@@ -80,8 +80,6 @@ mod games;
 #[cfg(windows)]
 mod library;
 #[cfg(windows)]
-mod markers;
-#[cfg(windows)]
 mod memory;
 #[cfg(windows)]
 mod osu_api;

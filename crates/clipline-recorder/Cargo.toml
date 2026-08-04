@@ -1,0 +1,27 @@
+[package]
+name = "clipline-recorder"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+clipline-events = { path = "../clipline-events" }
+clipline-games = { path = "../clipline-games" }
+clipline-lol = { path = "../clipline-lol" }
+tokio = { workspace = true }
+tracing = "0.1"
+
+[target.'cfg(windows)'.dependencies]
+chrono = "0.4.45"
+clipline-capture = { path = "../clipline-capture" }
+clipline-desktop = { path = "../clipline-desktop" }
+clipline-library = { path = "../clipline-library" }
+clipline-settings = { path = "../clipline-settings" }
+clipline-shell = { path = "../clipline-shell" }
+clipline-storage = { path = "../clipline-storage" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+clipline-test-utils = { path = "../clipline-test-utils" }

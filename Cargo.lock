@@ -902,8 +902,8 @@ dependencies = [
  "clipline-events",
  "clipline-games",
  "clipline-library",
- "clipline-lol",
  "clipline-mp4",
+ "clipline-recorder",
  "clipline-settings",
  "clipline-shell",
  "clipline-storage",
@@ -1045,6 +1045,27 @@ dependencies = [
  "thiserror 2.0.18",
  "windows 0.62.2",
  "windows-core 0.62.2",
+]
+
+[[package]]
+name = "clipline-recorder"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "clipline-capture",
+ "clipline-desktop",
+ "clipline-events",
+ "clipline-games",
+ "clipline-library",
+ "clipline-lol",
+ "clipline-settings",
+ "clipline-shell",
+ "clipline-storage",
+ "clipline-test-utils",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

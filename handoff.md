@@ -4,6 +4,30 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-03): Slint replacement Milestone 8, Task 3 shared runtime ownership
+
+Milestone 8 Task 3 is complete. `clipline-games` now owns game identities, the declarative plugin
+registry, pure window matching, install discovery, and safe Windows icon/window adapters. The new
+`clipline-recorder` crate owns the shipping recorder service, media-root policy, marker-source
+lifecycle, time helpers, and the lossless `AppSettings` to `ServiceOptions` conversion. These are
+moves, not forks: the Tauri `service.rs`, game modules, settings conversion, and time helper are
+thin compatibility re-exports, and repository tests reject duplicate production algorithms.
+
+The recorder crate is framework-neutral and has no Tauri, Slint, WebView, or application-crate
+dependency. Its Windows build still uses the existing capture stack, but direct Win32/reparse,
+available-space, and process-instance plumbing remains behind safe `clipline-shell` wrappers. The
+marker-source dispatcher consumes the declarative game capability without returning event-spawner
+ownership to `clipline-games`. The shipping Tauri command/event surface and settings JSON remain
+unchanged.
+
+Validation is green: 68 recorder tests, 232 Tauri unit tests and every Tauri integration/UI
+contract, `cargo test --workspace`, and warning-denied workspace Clippy. The installed Clipline
+process/profile remained untouched. `artifacts/` and `paseo.json` remain local scratch and are not
+part of the implementation commits.
+
+Next: Task 4, add the failure-injected transactional settings coordinator and prepared recorder
+restart so live effects, durable preferences, and recorder generation change entirely old-or-new.
+
 ## Checkpoint (2026-08-03): Milestone 7 implementation complete; acceptance NO-GO pending quiet evidence
 
 Milestone 7's implementation is complete at pushed commit `3e07a95`, but Task 12 and the milestone

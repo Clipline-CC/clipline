@@ -1068,7 +1068,7 @@ fn divergence_prone_paths_keep_single_production_owners() {
     );
     assert!(app.matches("choose_folder_dialog(").count() >= 3);
 
-    let service = fs::read_to_string(root.join("apps/clipline-app/src/service.rs"))
+    let service = fs::read_to_string(root.join("crates/clipline-recorder/src/service.rs"))
         .expect("read service source");
     assert!(!service.contains("to_string().contains(\"timed out\")"));
     let ffmpeg = fs::read_to_string(root.join("crates/clipline-capture/src/ffmpeg_encoder.rs"))
@@ -1205,12 +1205,86 @@ fn shared_games_foundation_has_one_owner_and_confines_windows_code() {
 }
 
 #[test]
+fn shared_recorder_runtime_has_one_owner_and_no_framework_dependency() {
+    let root = workspace_root();
+    let source_root = root.join("crates/clipline-recorder/src");
+    let manifest = fs::read_to_string(root.join("crates/clipline-recorder/Cargo.toml"))
+        .expect("read recorder manifest");
+    for forbidden in ["clipline-app", "tauri", "slint", "webview"] {
+        assert!(
+            !manifest.to_ascii_lowercase().contains(forbidden),
+            "shared recorder manifest contains reverse/framework dependency {forbidden}"
+        );
+    }
+
+    let mut shared = String::new();
+    for path in rust_sources_below(&source_root) {
+        let source = fs::read_to_string(&path).expect("read shared recorder source");
+        for forbidden in ["windows_sys::", "std::os::windows", "CommandExt"] {
+            assert!(
+                !source.contains(forbidden),
+                "{} imports platform plumbing owned by clipline-shell: {forbidden}",
+                path.display()
+            );
+        }
+        assert!(
+            !source
+                .split_whitespace()
+                .any(|token| token == "unsafe" || token.starts_with("unsafe{")),
+            "unsafe must remain behind shared safe wrappers: {}",
+            path.display()
+        );
+        shared.push_str(&source);
+    }
+
+    for owner in [
+        "struct CadencedCapture",
+        "fn build_encoder(",
+        "fn prepare_replay_storage(",
+        "struct ReplayCacheOwner",
+        "fn write_marker_sidecar(",
+        "struct MatchLifecycle",
+        "fn probe_writable_directory(",
+    ] {
+        assert_eq!(
+            shared.matches(owner).count(),
+            1,
+            "shared recorder algorithm {owner} must have one owner"
+        );
+    }
+
+    let adapter = fs::read_to_string(root.join("apps/clipline-app/src/service.rs"))
+        .expect("read recorder compatibility adapter");
+    assert!(adapter.contains("pub use clipline_recorder::*;"));
+    for duplicate in [
+        "struct CadencedCapture",
+        "fn build_encoder(",
+        "fn prepare_replay_storage(",
+        "struct ReplayCacheOwner",
+        "fn write_marker_sidecar(",
+        "struct MatchLifecycle",
+        "fn probe_writable_directory(",
+    ] {
+        assert!(
+            !adapter.contains(duplicate),
+            "Tauri recorder adapter duplicates shared algorithm {duplicate}"
+        );
+    }
+
+    let util = fs::read_to_string(root.join("apps/clipline-app/src/util.rs"))
+        .expect("read application utility adapter");
+    assert!(!util.contains("fn unix_now("));
+}
+
+#[test]
 fn large_application_surfaces_delegate_to_named_domain_owners() {
     let root = workspace_root();
     let app =
         fs::read_to_string(root.join("apps/clipline-app/src/app.rs")).expect("read app shell");
-    let service = fs::read_to_string(root.join("apps/clipline-app/src/service.rs"))
-        .expect("read service shell");
+    let service = fs::read_to_string(root.join("crates/clipline-recorder/src/service.rs"))
+        .expect("read recorder service owner");
+    let service_adapter = fs::read_to_string(root.join("apps/clipline-app/src/service.rs"))
+        .expect("read recorder service adapter");
     let library = fs::read_to_string(root.join("apps/clipline-app/src/library.rs"))
         .expect("read library shell");
     let cloud =
@@ -1219,7 +1293,7 @@ fn large_application_surfaces_delegate_to_named_domain_owners() {
     for relative in [
         "apps/clipline-app/src/app/diagnostics.rs",
         "apps/clipline-app/src/app/support.rs",
-        "apps/clipline-app/src/service/media_root.rs",
+        "crates/clipline-recorder/src/media_root.rs",
         "apps/clipline-app/src/library/naming.rs",
     ] {
         assert!(
@@ -1233,7 +1307,9 @@ fn large_application_surfaces_delegate_to_named_domain_owners() {
             && !app.contains("struct RollingFileWriter")
     );
     assert!(
-        service.contains("mod media_root;") && !service.contains("static MEDIA_ROOT_PROBE_COUNTER")
+        service.contains("use crate::media_root;")
+            && !service.contains("static MEDIA_ROOT_PROBE_COUNTER")
+            && service_adapter.contains("pub use clipline_recorder::*;")
     );
     assert!(library.contains("mod naming;") && !library.contains("fn normalized_clip_file_name("));
     assert!(
