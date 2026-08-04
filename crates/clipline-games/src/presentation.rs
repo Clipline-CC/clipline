@@ -186,197 +186,14 @@ impl GameCatalog {
         input: GameCatalogInput,
         reservation: &dyn GameProjectionReservation,
     ) -> Result<Self, GamePresentationError> {
-        validate_token(input.owner, input.plugins_token, ProbeKind::GamePlugins)?;
-        if let Some(candidates) = input.candidates.as_ref() {
-            let token = candidates.token();
-            if token.owner != input.owner {
-                return Err(GamePresentationError::OwnerMismatch);
-            }
-        }
-        if input.plugins.len() > MAX_SETTINGS_GAME_PLUGINS
-            || input.settings.custom_games.len() > MAX_SETTINGS_CUSTOM_GAMES
-        {
-            return Err(GamePresentationError::CatalogTooLarge {
-                actual: input
-                    .plugins
-                    .len()
-                    .saturating_add(input.settings.custom_games.len()),
-                maximum: MAX_GAME_CATALOG_ROWS,
-            });
-        }
-
-        validate_plugin_order(&input.plugins)?;
-        let candidate_count = input
-            .candidates
-            .as_ref()
-            .map_or(0, GameCandidateCatalog::len);
-        let maximum_total = input
-            .plugins
-            .len()
-            .checked_add(input.settings.custom_games.len())
-            .and_then(|count| count.checked_add(candidate_count))
-            .ok_or(GamePresentationError::CatalogTooLarge {
-                actual: usize::MAX,
-                maximum: MAX_GAME_CATALOG_ROWS,
-            })?;
-        if maximum_total > MAX_GAME_CATALOG_ROWS {
-            return Err(GamePresentationError::CatalogTooLarge {
-                actual: maximum_total,
-                maximum: MAX_GAME_CATALOG_ROWS,
-            });
-        }
-
-        reservation.before_reserve("games.catalog_members", maximum_total)?;
-        let mut members = Vec::new();
-        members.try_reserve_exact(maximum_total).map_err(|_| {
-            GamePresentationError::Allocation {
-                field: "games.catalog_members",
-            }
-        })?;
-
-        for (index, plugin) in input.plugins.iter().enumerate() {
-            let identity = GameItemIdentity::Plugin(
-                PluginGameIdentity::new(&plugin.id)
-                    .map_err(|_| GamePresentationError::InvalidPlugin)?,
-            );
-            ensure_unique(&members, &identity)?;
-            let configured = input
-                .settings
-                .plugins
-                .iter()
-                .find(|configured| configured.id == plugin.id)
-                .map(|configured| &configured.settings);
-            members.push(CatalogMember {
-                identity,
-                locator: MemberLocator::Plugin(index),
-                kind: GameRowKind::Plugin,
-                title: bounded_text(
-                    &plugin.name,
-                    "Supported game",
-                    "games.plugin_title",
-                    reservation,
-                )?,
-                subtitle: bounded_text(
-                    &plugin.summary,
-                    "Built-in support",
-                    "games.plugin_subtitle",
-                    reservation,
-                )?,
-                enabled: Some(configured.map_or(plugin.default_enabled, |value| value.enabled)),
-                recording_mode: Some(
-                    configured.map_or(plugin.default_recording_mode, |value| value.recording_mode),
-                ),
-                has_icon: plugin
-                    .icon
-                    .as_deref()
-                    .is_some_and(|value| !value.is_empty()),
-            });
-        }
-
-        for (index, custom) in input.settings.custom_games.iter().enumerate() {
-            let identity = GameItemIdentity::Custom(
-                CustomGameIdentity::new(&custom.id)
-                    .map_err(|_| GamePresentationError::InvalidCustom)?,
-            );
-            ensure_unique(&members, &identity)?;
-            members.push(CatalogMember {
-                identity,
-                locator: MemberLocator::Custom(index),
-                kind: GameRowKind::Custom,
-                title: bounded_text(
-                    &custom.name,
-                    "Custom game",
-                    "games.custom_title",
-                    reservation,
-                )?,
-                subtitle: joined_text(
-                    [&custom.exe_name, &custom.window_title],
-                    "Custom detection rule",
-                    "games.custom_subtitle",
-                    reservation,
-                )?,
-                enabled: Some(custom.enabled),
-                recording_mode: Some(custom.recording_mode),
-                has_icon: custom
-                    .icon
-                    .as_deref()
-                    .is_some_and(|value| !value.is_empty()),
-            });
-        }
-
-        if let Some(candidates) = input.candidates.as_ref() {
-            match candidates {
-                GameCandidateCatalog::Installed(catalog) => {
-                    for (index, (identity, source)) in catalog.iter().enumerate() {
-                        if input
-                            .settings
-                            .custom_games
-                            .iter()
-                            .any(|custom| matches_existing_custom_game(source, custom))
-                        {
-                            continue;
-                        }
-                        let identity = GameItemIdentity::Candidate(identity.clone());
-                        ensure_unique(&members, &identity)?;
-                        members.push(CatalogMember {
-                            identity,
-                            locator: MemberLocator::Candidate(index),
-                            kind: GameRowKind::InstalledCandidate,
-                            title: bounded_text(
-                                &source.name,
-                                "Detected game",
-                                "games.candidate_title",
-                                reservation,
-                            )?,
-                            subtitle: joined_text(
-                                [candidate_source_label(source), source.exe_name.as_str()],
-                                "Detected game",
-                                "games.candidate_subtitle",
-                                reservation,
-                            )?,
-                            enabled: None,
-                            recording_mode: None,
-                            has_icon: source
-                                .icon
-                                .as_deref()
-                                .is_some_and(|value| !value.is_empty()),
-                        });
-                    }
-                }
-                GameCandidateCatalog::RunningWindows(catalog) => {
-                    for (index, (identity, source)) in catalog.iter().enumerate() {
-                        if input.settings.custom_games.iter().any(|custom| {
-                            discovery_fields_match_custom_game(
-                                source.exe_path.as_deref(),
-                                &source.exe_name,
-                                &source.title,
-                                custom,
-                            )
-                        }) {
-                            continue;
-                        }
-                        let identity = GameItemIdentity::Candidate(identity.clone());
-                        ensure_unique(&members, &identity)?;
-                        members.push(CatalogMember {
-                            identity,
-                            locator: MemberLocator::Candidate(index),
-                            kind: GameRowKind::RunningWindow,
-                            title: bounded_text(
-                                &source.title,
-                                "Running window",
-                                "games.window_title",
-                                reservation,
-                            )?,
-                            subtitle: window_subtitle(source, reservation)?,
-                            enabled: None,
-                            recording_mode: None,
-                            has_icon: false,
-                        });
-                    }
-                }
-            }
-        }
-
+        let members = stage_catalog_members(
+            input.owner,
+            input.plugins_token,
+            &input.plugins,
+            &input.settings,
+            input.candidates.as_ref(),
+            reservation,
+        )?;
         Ok(Self {
             owner: input.owner,
             plugins_token: input.plugins_token,
@@ -385,6 +202,66 @@ impl GameCatalog {
             candidates: input.candidates,
             members,
         })
+    }
+
+    /// Stage every derived row before replacing the owned plugin catalog.
+    /// The prior catalog remains byte-for-byte authoritative on any error.
+    pub fn try_replace_plugins(
+        &mut self,
+        plugins_token: ProbeToken,
+        plugins: Vec<GamePluginInfo>,
+        reservation: &dyn GameProjectionReservation,
+    ) -> Result<(ProbeToken, Vec<GamePluginInfo>), GamePresentationError> {
+        let members = stage_catalog_members(
+            self.owner,
+            plugins_token,
+            &plugins,
+            &self.settings,
+            self.candidates.as_ref(),
+            reservation,
+        )?;
+        let previous_token = std::mem::replace(&mut self.plugins_token, plugins_token);
+        let previous_plugins = std::mem::replace(&mut self.plugins, plugins);
+        self.members = members;
+        Ok((previous_token, previous_plugins))
+    }
+
+    /// Stage every derived row before replacing the active candidate authority.
+    pub fn try_replace_candidates(
+        &mut self,
+        candidates: Option<GameCandidateCatalog>,
+        reservation: &dyn GameProjectionReservation,
+    ) -> Result<Option<GameCandidateCatalog>, GamePresentationError> {
+        let members = stage_catalog_members(
+            self.owner,
+            self.plugins_token,
+            &self.plugins,
+            &self.settings,
+            candidates.as_ref(),
+            reservation,
+        )?;
+        let previous = std::mem::replace(&mut self.candidates, candidates);
+        self.members = members;
+        Ok(previous)
+    }
+
+    /// Stage every derived row before replacing the Settings-owned game draft.
+    pub fn try_replace_settings(
+        &mut self,
+        settings: GamePreferences,
+        reservation: &dyn GameProjectionReservation,
+    ) -> Result<GamePreferences, GamePresentationError> {
+        let members = stage_catalog_members(
+            self.owner,
+            self.plugins_token,
+            &self.plugins,
+            &settings,
+            self.candidates.as_ref(),
+            reservation,
+        )?;
+        let previous = std::mem::replace(&mut self.settings, settings);
+        self.members = members;
+        Ok(previous)
     }
 
     pub const fn owner(&self) -> ProbeSessionOwner {
@@ -524,6 +401,199 @@ impl GameCatalog {
             rows,
         }))
     }
+}
+
+fn stage_catalog_members(
+    owner: ProbeSessionOwner,
+    plugins_token: ProbeToken,
+    plugins: &[GamePluginInfo],
+    settings: &GamePreferences,
+    candidates: Option<&GameCandidateCatalog>,
+    reservation: &dyn GameProjectionReservation,
+) -> Result<Vec<CatalogMember>, GamePresentationError> {
+    validate_token(owner, plugins_token, ProbeKind::GamePlugins)?;
+    if let Some(candidates) = candidates {
+        let token = candidates.token();
+        if token.owner != owner {
+            return Err(GamePresentationError::OwnerMismatch);
+        }
+    }
+    if plugins.len() > MAX_SETTINGS_GAME_PLUGINS
+        || settings.custom_games.len() > MAX_SETTINGS_CUSTOM_GAMES
+    {
+        return Err(GamePresentationError::CatalogTooLarge {
+            actual: plugins.len().saturating_add(settings.custom_games.len()),
+            maximum: MAX_GAME_CATALOG_ROWS,
+        });
+    }
+
+    validate_plugin_order(plugins)?;
+    let candidate_count = candidates.map_or(0, GameCandidateCatalog::len);
+    let maximum_total = plugins
+        .len()
+        .checked_add(settings.custom_games.len())
+        .and_then(|count| count.checked_add(candidate_count))
+        .ok_or(GamePresentationError::CatalogTooLarge {
+            actual: usize::MAX,
+            maximum: MAX_GAME_CATALOG_ROWS,
+        })?;
+    if maximum_total > MAX_GAME_CATALOG_ROWS {
+        return Err(GamePresentationError::CatalogTooLarge {
+            actual: maximum_total,
+            maximum: MAX_GAME_CATALOG_ROWS,
+        });
+    }
+
+    reservation.before_reserve("games.catalog_members", maximum_total)?;
+    let mut members = Vec::new();
+    members
+        .try_reserve_exact(maximum_total)
+        .map_err(|_| GamePresentationError::Allocation {
+            field: "games.catalog_members",
+        })?;
+
+    for (index, plugin) in plugins.iter().enumerate() {
+        let identity = GameItemIdentity::Plugin(
+            PluginGameIdentity::new(&plugin.id)
+                .map_err(|_| GamePresentationError::InvalidPlugin)?,
+        );
+        ensure_unique(&members, &identity)?;
+        let configured = settings
+            .plugins
+            .iter()
+            .find(|configured| configured.id == plugin.id)
+            .map(|configured| &configured.settings);
+        members.push(CatalogMember {
+            identity,
+            locator: MemberLocator::Plugin(index),
+            kind: GameRowKind::Plugin,
+            title: bounded_text(
+                &plugin.name,
+                "Supported game",
+                "games.plugin_title",
+                reservation,
+            )?,
+            subtitle: bounded_text(
+                &plugin.summary,
+                "Built-in support",
+                "games.plugin_subtitle",
+                reservation,
+            )?,
+            enabled: Some(configured.map_or(plugin.default_enabled, |value| value.enabled)),
+            recording_mode: Some(
+                configured.map_or(plugin.default_recording_mode, |value| value.recording_mode),
+            ),
+            has_icon: plugin
+                .icon
+                .as_deref()
+                .is_some_and(|value| !value.is_empty()),
+        });
+    }
+
+    for (index, custom) in settings.custom_games.iter().enumerate() {
+        let identity = GameItemIdentity::Custom(
+            CustomGameIdentity::new(&custom.id)
+                .map_err(|_| GamePresentationError::InvalidCustom)?,
+        );
+        ensure_unique(&members, &identity)?;
+        members.push(CatalogMember {
+            identity,
+            locator: MemberLocator::Custom(index),
+            kind: GameRowKind::Custom,
+            title: bounded_text(
+                &custom.name,
+                "Custom game",
+                "games.custom_title",
+                reservation,
+            )?,
+            subtitle: joined_text(
+                [&custom.exe_name, &custom.window_title],
+                "Custom detection rule",
+                "games.custom_subtitle",
+                reservation,
+            )?,
+            enabled: Some(custom.enabled),
+            recording_mode: Some(custom.recording_mode),
+            has_icon: custom
+                .icon
+                .as_deref()
+                .is_some_and(|value| !value.is_empty()),
+        });
+    }
+
+    if let Some(candidates) = candidates {
+        match candidates {
+            GameCandidateCatalog::Installed(catalog) => {
+                for (index, (identity, source)) in catalog.iter().enumerate() {
+                    if settings
+                        .custom_games
+                        .iter()
+                        .any(|custom| matches_existing_custom_game(source, custom))
+                    {
+                        continue;
+                    }
+                    let identity = GameItemIdentity::Candidate(identity.clone());
+                    ensure_unique(&members, &identity)?;
+                    members.push(CatalogMember {
+                        identity,
+                        locator: MemberLocator::Candidate(index),
+                        kind: GameRowKind::InstalledCandidate,
+                        title: bounded_text(
+                            &source.name,
+                            "Detected game",
+                            "games.candidate_title",
+                            reservation,
+                        )?,
+                        subtitle: joined_text(
+                            [candidate_source_label(source), source.exe_name.as_str()],
+                            "Detected game",
+                            "games.candidate_subtitle",
+                            reservation,
+                        )?,
+                        enabled: None,
+                        recording_mode: None,
+                        has_icon: source
+                            .icon
+                            .as_deref()
+                            .is_some_and(|value| !value.is_empty()),
+                    });
+                }
+            }
+            GameCandidateCatalog::RunningWindows(catalog) => {
+                for (index, (identity, source)) in catalog.iter().enumerate() {
+                    if settings.custom_games.iter().any(|custom| {
+                        discovery_fields_match_custom_game(
+                            source.exe_path.as_deref(),
+                            &source.exe_name,
+                            &source.title,
+                            custom,
+                        )
+                    }) {
+                        continue;
+                    }
+                    let identity = GameItemIdentity::Candidate(identity.clone());
+                    ensure_unique(&members, &identity)?;
+                    members.push(CatalogMember {
+                        identity,
+                        locator: MemberLocator::Candidate(index),
+                        kind: GameRowKind::RunningWindow,
+                        title: bounded_text(
+                            &source.title,
+                            "Running window",
+                            "games.window_title",
+                            reservation,
+                        )?,
+                        subtitle: window_subtitle(source, reservation)?,
+                        enabled: None,
+                        recording_mode: None,
+                        has_icon: false,
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(members)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

@@ -619,6 +619,88 @@ fn projection_reservations_fail_before_partial_catalog_or_page_publication() {
 }
 
 #[test]
+fn catalog_replacements_stage_all_rows_before_swapping_authority() {
+    let original_candidate_token = token(ProbeKind::InstalledGames, 4);
+    let original_candidates =
+        InstalledGameIdentityCatalog::build(original_candidate_token, vec![candidate(1)]).unwrap();
+    let mut catalog = GameCatalog::try_build(
+        GameCatalogInput {
+            owner: owner(),
+            plugins_token: token(ProbeKind::GamePlugins, 3),
+            plugins: vec![plugin(LEAGUE_OF_LEGENDS_ID, "League")],
+            settings: preferences(1),
+            candidates: Some(GameCandidateCatalog::Installed(original_candidates)),
+        },
+        &SystemGameProjectionReservation,
+    )
+    .unwrap();
+    let original_identities = catalog.identities().cloned().collect::<Vec<_>>();
+
+    assert_eq!(
+        catalog
+            .try_replace_plugins(
+                token(ProbeKind::GamePlugins, 5),
+                vec![plugin(OSU_ID, "osu!")],
+                &FailReservation("games.catalog_members"),
+            )
+            .unwrap_err(),
+        GamePresentationError::Allocation {
+            field: "games.catalog_members"
+        }
+    );
+    assert_eq!(catalog.plugins_token(), token(ProbeKind::GamePlugins, 3));
+    assert_eq!(
+        catalog.identities().cloned().collect::<Vec<_>>(),
+        original_identities
+    );
+
+    let replacement_candidates = InstalledGameIdentityCatalog::build(
+        token(ProbeKind::InstalledGames, 6),
+        vec![candidate(2)],
+    )
+    .unwrap();
+    assert_eq!(
+        catalog
+            .try_replace_candidates(
+                Some(GameCandidateCatalog::Installed(replacement_candidates)),
+                &FailReservation("games.catalog_members"),
+            )
+            .unwrap_err(),
+        GamePresentationError::Allocation {
+            field: "games.catalog_members"
+        }
+    );
+    assert_eq!(catalog.candidate_token(), Some(original_candidate_token));
+
+    assert_eq!(
+        catalog
+            .try_replace_settings(preferences(2), &FailReservation("games.catalog_members"),)
+            .unwrap_err(),
+        GamePresentationError::Allocation {
+            field: "games.catalog_members"
+        }
+    );
+    assert_eq!(
+        catalog
+            .identities()
+            .filter(|identity| matches!(identity, GameItemIdentity::Custom(_)))
+            .count(),
+        1
+    );
+
+    let (old_token, old_plugins) = catalog
+        .try_replace_plugins(
+            token(ProbeKind::GamePlugins, 7),
+            vec![plugin(OSU_ID, "osu!")],
+            &SystemGameProjectionReservation,
+        )
+        .unwrap();
+    assert_eq!(old_token, token(ProbeKind::GamePlugins, 3));
+    assert_eq!(old_plugins[0].id, LEAGUE_OF_LEGENDS_ID);
+    assert_eq!(catalog.plugins_token(), token(ProbeKind::GamePlugins, 7));
+}
+
+#[test]
 fn hostile_display_text_is_utf8_bounded_without_leaking_source_paths() {
     let mut game = custom(1);
     game.name = "é".repeat(MAX_GAME_ROW_TEXT_BYTES);

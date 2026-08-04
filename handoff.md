@@ -38,6 +38,11 @@ Decoded icon completions never coalesce because every completion must retire its
 slot. Full, stale, byte-cap, and disconnected rejection returns the move-owned payload to the
 producer, while dropping the receiver releases every queued catalog and decoded image.
 
+`GameCatalog` refresh is transactional: plugin, candidate, and Settings-draft replacements stage
+the complete bounded member vector before swapping any token or owned source catalog. Validation or
+allocation failure therefore preserves the exact prior authority and projected membership; accepted
+replacements return the displaced move-owned catalog instead of cloning or re-enumerating it.
+
 osu! settings now persist a checked nonzero account generation, migrate legacy profiles to generation
 1, retain shipping `u64` client-id semantics, and enforce per-field, cleanup-list, and 64 KiB aggregate
 bounds before normalization can hide hostile input. The generation is not yet an authoritative ABA
