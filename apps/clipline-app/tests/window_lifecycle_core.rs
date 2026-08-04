@@ -192,3 +192,39 @@ fn visible_refresh_requests_run_immediately_without_latching_dirty_state() {
         r#"{"state":{"known":true,"backgrounded":false,"nativeRevision":0,"generation":1,"dirty":false},"refreshNow":true}"#
     );
 }
+
+#[test]
+fn destroying_or_destroyed_shaped_snapshots_invalidate_foreground_work() {
+    // Native Destroying/Destroyed modes publish backgrounded=true. The pure
+    // frontend core must treat them like any other background transition so a
+    // recreate cannot resume gallery/media work captured before destroy.
+    let mut context = context();
+    assert_eq!(
+        eval(
+            &mut context,
+            "let state = WindowLifecycleCore.applySnapshot(\
+               WindowLifecycleCore.initialState(),\
+               { revision: 1, backgrounded: false, mode: 'foreground' }\
+             ).state;\
+             const oldWork = WindowLifecycleCore.captureWork(state);\
+             const destroying = WindowLifecycleCore.applySnapshot(\
+               state,\
+               { revision: 2, backgrounded: true, mode: 'destroying' }\
+             );\
+             state = destroying.state;\
+             const destroyed = WindowLifecycleCore.applySnapshot(\
+               state,\
+               { revision: 3, backgrounded: true, mode: 'destroyed' }\
+             );\
+             JSON.stringify({\
+               enteredBackground: destroying.enteredBackground,\
+               oldWorkDuringDestroying: WindowLifecycleCore.isWorkCurrent(destroying.state, oldWork),\
+               oldWorkDuringDestroyed: WindowLifecycleCore.isWorkCurrent(destroyed.state, oldWork),\
+               captureWhileDestroyed: WindowLifecycleCore.captureWork(destroyed.state),\
+               destroyedState: destroyed.state\
+             })",
+        ),
+        r#"{"enteredBackground":true,"oldWorkDuringDestroying":false,"oldWorkDuringDestroyed":false,"captureWhileDestroyed":null,"destroyedState":{"known":true,"backgrounded":true,"nativeRevision":3,"generation":3,"dirty":true}}"#
+    );
+}
+

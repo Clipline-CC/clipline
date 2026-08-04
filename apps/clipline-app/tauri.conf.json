@@ -21,7 +21,8 @@
         "minHeight": 640,
         "resizable": true,
         "decorations": false,
-        "visible": false
+        "visible": false,
+        "create": false
       }
     ],
     "security": {
@@ -44,7 +45,9 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": [
+      "nsis"
+    ],
     "createUpdaterArtifacts": true,
     "resources": [
       "ffmpeg/"
