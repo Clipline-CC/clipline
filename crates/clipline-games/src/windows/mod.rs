@@ -49,6 +49,24 @@ pub fn detect_active_game(
     detected
 }
 
+pub fn detect_active_game_with_checkpoint(
+    settings: &GameSettings,
+    checkpoint: impl Fn() -> Result<(), String>,
+) -> Result<Option<DetectedGame>, String> {
+    checkpoint()?;
+    if !detection::has_enabled_games(settings) {
+        return Ok(None);
+    }
+    let windows = enumerate_capturable_windows_with_checkpoint(&checkpoint)?
+        .into_iter()
+        .map(game_window)
+        .collect::<Vec<_>>();
+    checkpoint()?;
+    let detected = detection::detect_active_game_from_windows(settings, windows);
+    checkpoint()?;
+    Ok(detected)
+}
+
 pub fn detect_installed_games(
     existing_custom_games: &[CustomGameSettings],
 ) -> Vec<DetectedGameCandidate> {

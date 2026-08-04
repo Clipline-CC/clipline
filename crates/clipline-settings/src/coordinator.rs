@@ -1,7 +1,7 @@
 //! Transaction ordering for applying UI-owned settings to live runtime state.
 //!
 //! Every operation through durable preference publication is fallible and owns
-//! an exact rollback receipt. Recorder activation, prepared storage/media
+//! an exact rollback receipt. Recorder and detector activation, prepared storage/media
 //! authorization, and desktop publication happen only after persistence and
 //! therefore form an infallible commit tail.
 
@@ -21,6 +21,7 @@ pub trait SettingsApplyPorts {
     type HotkeyReceipt;
     type TrayReceipt;
     type AutostartReceipt;
+    type PreparedDetector;
     type PreparedRecorder;
 
     fn prepare_preflight(
@@ -55,6 +56,14 @@ pub trait SettingsApplyPorts {
 
     fn rollback_autostart(&mut self, receipt: Self::AutostartReceipt) -> Result<(), String>;
 
+    /// Reserve the exact next detector configuration without activating it.
+    /// Dropping the receipt must cancel that reservation without changing the
+    /// currently committed detector generation or configuration.
+    fn prepare_detector(
+        &mut self,
+        candidate: &SettingsPreferences,
+    ) -> Result<Self::PreparedDetector, String>;
+
     /// Validate and create the replacement recorder behind a closed start
     /// latch. Dropping the returned value must cancel and join that worker.
     fn prepare_recorder(
@@ -75,6 +84,14 @@ pub trait SettingsApplyPorts {
     fn commit_recorder(
         &mut self,
         prepared: Self::PreparedRecorder,
+        authoritative: &SettingsSnapshot,
+    );
+
+    /// Activate the already-reserved detector configuration. This is an
+    /// infallible commit-tail operation after durable preferences exist.
+    fn commit_detector(
+        &mut self,
+        prepared: Self::PreparedDetector,
         authoritative: &SettingsSnapshot,
     );
 
@@ -234,9 +251,19 @@ fn apply_settings<P: SettingsApplyPorts>(
         };
     candidate.open_on_startup = persisted_autostart;
 
+    let prepared_detector = match ports.prepare_detector(&candidate) {
+        Ok(prepared) => prepared,
+        Err(primary) => {
+            let rollback =
+                rollback_live_effects(ports, autostart_receipt, tray_receipt, hotkey_receipt);
+            return Err(SettingsApplyError::new(primary, rollback));
+        }
+    };
+
     let prepared_recorder = match ports.prepare_recorder(&candidate) {
         Ok(prepared) => prepared,
         Err(primary) => {
+            drop(prepared_detector);
             let rollback =
                 rollback_live_effects(ports, autostart_receipt, tray_receipt, hotkey_receipt);
             return Err(SettingsApplyError::new(primary, rollback));
@@ -249,6 +276,7 @@ fn apply_settings<P: SettingsApplyPorts>(
             // Cancel and join the latched worker before reversing older OS
             // effects. This preserves the transaction's exact reverse order.
             drop(prepared_recorder);
+            drop(prepared_detector);
             let rollback =
                 rollback_live_effects(ports, autostart_receipt, tray_receipt, hotkey_receipt);
             return Err(SettingsApplyError::new(primary, rollback));
@@ -256,6 +284,7 @@ fn apply_settings<P: SettingsApplyPorts>(
     };
 
     ports.commit_recorder(prepared_recorder, &authoritative);
+    ports.commit_detector(prepared_detector, &authoritative);
     ports.commit_preflight(prepared_preflight, &authoritative);
     ports.publish(&authoritative);
     Ok(SettingsApplySuccess {

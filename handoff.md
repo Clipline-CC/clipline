@@ -55,6 +55,21 @@ Detach advances both, releases every catalog and selection, and publishes one ho
 summary. Games all-target tests, strict package Clippy, workspace tests, and the final independent
 controller audit are green.
 
+The next detector foundation is staged but not yet cut over in Tauri.
+`GameDetectorService` owns one joined process worker, a checked configuration generation, at most
+one staged reconfiguration and one recoverable result, and exact generation-plus-work-epoch
+checkpoint cancellation. Reversible quiescence advances the work epoch, so neither a pre-quiesce
+probe nor a retained `Full` result can publish after resume. Configuration/DetectedGame text is
+bounded before retention/publication;
+`Full` retains the exact event, `Disconnected` goes dormant without spinning, and probe/sink panic,
+spawn failure, repeated errors, generation exhaustion, and shutdown are fail-closed. A publication
+mutex linearizes each accepted event/recorder intent against reconfiguration, quiescence, and
+shutdown. The 10,000-save storm publishes only the final generation; identical failures publish
+once again for each new generation. Settings apply now stages this receipt before recorder
+preparation, cancels it in exact reverse order on later failure, and commits it only after durable
+preferences and the prepared recorder. The shipping adapter deliberately uses a documented unit
+receipt until the next cutover commit, so the existing detached detector behavior remains intact.
+
 osu! settings now persist a checked nonzero account generation, migrate legacy profiles to generation
 1, retain shipping `u64` client-id semantics, and enforce per-field, cleanup-list, and 64 KiB aggregate
 bounds before normalization can hide hostile input. The generation is not yet an authoritative ABA
@@ -62,9 +77,10 @@ fence: the later osu service/CAS slice must enforce exact transitions under the 
 before asynchronous work trusts it. The explicit 100/125/150/200% DPI and negative-half-tie matrix is
 green.
 
-Next: Task 8 slice 4, replace detached game discovery with the process-owned, generation-fenced,
-joined detector and transactional Settings rollback receipt. Then implement the hotkey reducer,
-osu! secret/CAS/HTTP/enrichment slices, and the thin Tauri compatibility cutover.
+Next: finish Task 8 slice 4 by replacing Tauri's detached loop with this service, preparing detected
+game recorder replacements behind the existing start latch, fencing runtime acceptance, and wiring
+quit/update quiescence. Then implement the hotkey reducer, osu! secret/CAS/HTTP/enrichment slices,
+and the remaining thin Tauri compatibility cutover.
 `artifacts/`, `paseo.json`, and unrelated poster formatting remain local and excluded.
 
 ## Checkpoint (2026-08-04): Slint replacement Milestone 8, Task 7 joined microphone monitor

@@ -3362,6 +3362,10 @@ impl<R: Runtime> SettingsApplyPorts for TauriSettingsApplyPorts<'_, R> {
     type HotkeyReceipt = HotkeyReplacementReceipt;
     type TrayReceipt = TrayLabelReceipt;
     type AutostartReceipt = Option<AutostartChange>;
+    // The shipping compatibility detector still reads RuntimeState only
+    // after recorder commit. The next Task 8 cutover replaces this unit
+    // receipt with PreparedDetectorReconfiguration.
+    type PreparedDetector = ();
     type PreparedRecorder = PreparedRuntimeRestart;
 
     fn prepare_preflight(
@@ -3436,6 +3440,13 @@ impl<R: Runtime> SettingsApplyPorts for TauriSettingsApplyPorts<'_, R> {
         receipt.as_ref().map_or(Ok(()), rollback_autostart)
     }
 
+    fn prepare_detector(
+        &mut self,
+        _candidate: &SettingsPreferences,
+    ) -> Result<Self::PreparedDetector, String> {
+        Ok(())
+    }
+
     fn prepare_recorder(
         &mut self,
         candidate: &SettingsPreferences,
@@ -3468,6 +3479,13 @@ impl<R: Runtime> SettingsApplyPorts for TauriSettingsApplyPorts<'_, R> {
             prepared,
             authoritative.document.clone(),
         );
+    }
+
+    fn commit_detector(
+        &mut self,
+        _prepared: Self::PreparedDetector,
+        _authoritative: &SettingsSnapshot,
+    ) {
     }
 
     fn commit_preflight(

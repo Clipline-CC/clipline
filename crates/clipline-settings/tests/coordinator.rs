@@ -14,8 +14,23 @@ enum Failure {
     Hotkeys,
     Tray,
     Autostart,
+    Detector,
     Recorder,
     Persistence,
+}
+
+struct PreparedDetector {
+    log: Arc<Mutex<Vec<String>>>,
+    marker: String,
+    committed: bool,
+}
+
+impl Drop for PreparedDetector {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.log.lock().unwrap().push("detector_cancel".into());
+        }
+    }
 }
 
 struct PreparedRecorder {
@@ -40,6 +55,7 @@ struct FakePorts {
     hotkeys: String,
     tray: String,
     autostart: bool,
+    detector: String,
     recorder: String,
     storage: String,
     authorization_pending: bool,
@@ -58,6 +74,7 @@ impl FakePorts {
             hotkeys: marker.clone(),
             tray: marker.clone(),
             autostart: false,
+            detector: marker.clone(),
             recorder: marker.clone(),
             storage: marker.clone(),
             authorization_pending: true,
@@ -88,6 +105,7 @@ impl SettingsApplyPorts for FakePorts {
     type HotkeyReceipt = String;
     type TrayReceipt = String;
     type AutostartReceipt = bool;
+    type PreparedDetector = PreparedDetector;
     type PreparedRecorder = PreparedRecorder;
 
     fn prepare_preflight(
@@ -166,6 +184,19 @@ impl SettingsApplyPorts for FakePorts {
         }
     }
 
+    fn prepare_detector(
+        &mut self,
+        candidate: &SettingsPreferences,
+    ) -> Result<Self::PreparedDetector, String> {
+        self.event("detector_prepare");
+        self.fail_at(Failure::Detector)?;
+        Ok(PreparedDetector {
+            log: self.log.clone(),
+            marker: candidate.hotkey.clone(),
+            committed: false,
+        })
+    }
+
     fn prepare_recorder(
         &mut self,
         candidate: &SettingsPreferences,
@@ -206,6 +237,16 @@ impl SettingsApplyPorts for FakePorts {
     ) {
         self.event("recorder_commit");
         self.recorder.clone_from(&prepared.marker);
+        prepared.committed = true;
+    }
+
+    fn commit_detector(
+        &mut self,
+        mut prepared: Self::PreparedDetector,
+        _authoritative: &SettingsSnapshot,
+    ) {
+        self.event("detector_commit");
+        self.detector.clone_from(&prepared.marker);
         prepared.committed = true;
     }
 
@@ -251,9 +292,11 @@ fn success_uses_the_pinned_order_and_preserves_backend_owned_state() {
             "hotkeys",
             "tray",
             "autostart",
+            "detector_prepare",
             "recorder_prepare",
             "persist",
             "recorder_commit",
+            "detector_commit",
             "preflight_commit",
             "publish",
         ]
@@ -267,6 +310,7 @@ fn success_uses_the_pinned_order_and_preserves_backend_owned_state() {
     assert_eq!(success.settings().osu.client_id.as_deref(), Some("12345"));
     assert_eq!(ports.hotkeys, "Ctrl+F10");
     assert_eq!(ports.tray, "Ctrl+F10");
+    assert_eq!(ports.detector, "Ctrl+F10");
     assert_eq!(ports.recorder, "Ctrl+F10");
     assert_eq!(ports.storage, "Ctrl+F10");
     assert_eq!(ports.desktop, "Ctrl+F10");
@@ -280,6 +324,7 @@ fn every_fallible_boundary_leaves_the_entire_live_projection_old() {
         Failure::Hotkeys,
         Failure::Tray,
         Failure::Autostart,
+        Failure::Detector,
         Failure::Recorder,
         Failure::Persistence,
     ] {
@@ -299,12 +344,14 @@ fn every_fallible_boundary_leaves_the_entire_live_projection_old() {
         assert_eq!(ports.hotkeys, old_hotkey, "{failure:?}: hotkeys");
         assert_eq!(ports.tray, old_hotkey, "{failure:?}: tray");
         assert_eq!(ports.autostart, old_autostart, "{failure:?}: autostart");
+        assert_eq!(ports.detector, old_hotkey, "{failure:?}: detector");
         assert_eq!(ports.recorder, old_hotkey, "{failure:?}: recorder");
         assert_eq!(ports.storage, old_hotkey, "{failure:?}: storage");
         assert_eq!(ports.desktop, old_hotkey, "{failure:?}: desktop");
         assert!(ports.authorization_pending, "{failure:?}: authorization");
         if failure == Failure::Persistence {
             assert!(ports.events().contains(&"recorder_cancel_join".into()));
+            assert!(ports.events().contains(&"detector_cancel".into()));
         }
     }
 }
@@ -321,9 +368,10 @@ fn persistence_failure_cancels_recorder_then_aggregates_reverse_rollback_errors(
         .unwrap_err();
 
     assert_eq!(
-        &ports.events()[6..],
+        &ports.events()[7..],
         [
             "recorder_cancel_join",
+            "detector_cancel",
             "rollback_autostart",
             "rollback_tray",
             "rollback_hotkeys",

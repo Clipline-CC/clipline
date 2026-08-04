@@ -3,6 +3,7 @@
 pub mod channel;
 pub mod controller;
 pub mod detection;
+pub mod detector;
 pub mod discovery;
 pub mod icon;
 pub mod identity;
