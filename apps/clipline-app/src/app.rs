@@ -12,8 +12,13 @@ use std::time::{Duration, Instant};
 
 use clipline_capture::diagnostics::install_diagnostic_handler;
 use clipline_desktop::{
-    Generation, Revision, UiAction, UiEffect, UiEvent, UiEventSink, WindowLifecycleMode,
-    WindowLifecycleSnapshot,
+    Generation, Revision, UiAction, UiEffect, UiEvent, UiEventSendError, UiEventSink,
+    WindowLifecycleMode, WindowLifecycleSnapshot,
+};
+use clipline_games::detector::{
+    GameDetectionEvent as DetectorEvent, GameDetectionProbe, GameDetectionSink,
+    GameDetectorCheckpoint, GameDetectorService, GameDetectorSinkError, GameDetectorToken,
+    PreparedDetectorReconfiguration, RejectedGameDetectionEvent,
 };
 use clipline_library::{ActiveFileRegistry, UploadService};
 use clipline_shell::hotkey::{HotkeyReplacementReceipt, HotkeySet};
@@ -47,8 +52,8 @@ use crate::service::{self, Cmd, Event, ServiceOptions};
 use crate::settings::{
     cloud_paths_equivalent, quota_bytes_from_gb, AppSettings, AppSettingsServiceExt, CaptureMode,
     CloudRecordCas, CloudRecordCasKind, CloudRecordSlot, CustomGameSettings, GameRecordingMode,
-    SettingsApplyCoordinator, SettingsApplyPorts, SettingsChange, SettingsPreferences,
-    SettingsProfile, SettingsSnapshot, SettingsStore, SettingsTransaction,
+    SettingsApplyCoordinator, SettingsApplyPorts, SettingsApplyQuiescence, SettingsChange,
+    SettingsPreferences, SettingsProfile, SettingsSnapshot, SettingsStore, SettingsTransaction,
     MAX_CLOUD_RECORD_CAS_SLOTS,
 };
 use crate::updates::{channel_enabled, UpdateChannel};
@@ -256,16 +261,74 @@ fn publish_game_detection<R: Runtime>(
     app: &AppHandle<R>,
     event: GameDetectionEvent,
 ) -> Result<(), String> {
+    try_publish_game_detection(app, event).map_err(|error| match error {
+        GameDetectorSinkError::Full => "game detection event queue is full".to_owned(),
+        GameDetectorSinkError::Disconnected => {
+            "game detection event consumer is disconnected".to_owned()
+        }
+        GameDetectorSinkError::Failed(message) => message,
+    })
+}
+
+fn try_publish_game_detection<R: Runtime>(
+    app: &AppHandle<R>,
+    event: GameDetectionEvent,
+) -> Result<(), GameDetectorSinkError> {
     let generation = app
         .state::<crate::desktop::ProducerGenerations>()
-        .next_game_detection()?;
+        .next_game_detection()
+        .map_err(GameDetectorSinkError::Failed)?;
     app.state::<crate::desktop::tauri_sink::TauriUiEventSink>()
         .try_publish(UiEvent::GameDetection {
             generation,
             detection: event.into_ui_event(),
         })
         .map(|_| ())
-        .map_err(|error| error.to_string())
+        .map_err(game_detector_sink_error)
+}
+
+fn game_detector_sink_error(error: UiEventSendError) -> GameDetectorSinkError {
+    match error {
+        UiEventSendError::Full { .. } => GameDetectorSinkError::Full,
+        UiEventSendError::Disconnected => GameDetectorSinkError::Disconnected,
+        error => GameDetectorSinkError::Failed(error.to_string()),
+    }
+}
+
+struct WindowsGameDetectionProbe;
+
+impl GameDetectionProbe for WindowsGameDetectionProbe {
+    fn detect(
+        &self,
+        settings: &clipline_settings::games::GameSettings,
+        checkpoint: &GameDetectorCheckpoint,
+    ) -> Result<Option<DetectedGame>, String> {
+        clipline_games::windows::detect_active_game_with_checkpoint(settings, || {
+            checkpoint.check().map_err(|error| error.to_string())
+        })
+    }
+}
+
+struct TauriGameDetectionSink<R: Runtime>(AppHandle<R>);
+
+impl<R: Runtime> GameDetectionSink for TauriGameDetectionSink<R> {
+    fn try_publish(&self, event: DetectorEvent) -> Result<(), Box<RejectedGameDetectionEvent>> {
+        let result = match &event {
+            DetectorEvent::Detection { token, detected } => self
+                .0
+                .state::<RuntimeState>()
+                .try_accept_detected_game(&self.0, *token, detected.clone()),
+            DetectorEvent::Failed { message, .. } => self
+                .0
+                .state::<crate::desktop::tauri_sink::TauriUiEventSink>()
+                .try_publish(UiEvent::UserError {
+                    message: format!("game detection: {message}"),
+                })
+                .map(|_| ())
+                .map_err(game_detector_sink_error),
+        };
+        result.map_err(|error| Box::new(RejectedGameDetectionEvent { error, event }))
+    }
 }
 
 fn publish_user_error<R: Runtime>(app: &AppHandle<R>, message: String) {
@@ -719,8 +782,13 @@ pub(crate) struct RuntimeState(
     Mutex<RuntimeInner>,
     RecorderStopAcknowledgement,
     Option<SettingsStore>,
-    Mutex<Option<JoinHandle<()>>>,
+    Mutex<Option<RecorderEventPump>>,
 );
+
+struct RecorderEventPump {
+    generation: u64,
+    worker: JoinHandle<()>,
+}
 
 #[derive(Default)]
 struct RecorderStopAcknowledgement {
@@ -794,6 +862,7 @@ struct RuntimeInner {
     settings: AppSettings,
     active_files: ActiveFileRegistry,
     lol_url: Option<String>,
+    detector_token: Option<GameDetectorToken>,
     active_game: Option<DetectedGame>,
     osu_title_events: Vec<OsuTitleEvent>,
     last_save_request: Option<Instant>,
@@ -830,8 +899,46 @@ struct PreparedRuntimeRestart {
     settings: AppSettings,
     options: Option<ServiceOptions>,
     worker: Option<service::PreparedRecorderRestart>,
+    detector_token: Option<GameDetectorToken>,
 }
 
+#[derive(Clone, PartialEq)]
+struct DetectorRuntimeFence {
+    recording_generation: u64,
+    recording_desired: bool,
+    sender_installed: bool,
+    settings: AppSettings,
+    lol_url: Option<String>,
+    active_game: Option<DetectedGame>,
+    detector_token: Option<GameDetectorToken>,
+    decodable_codecs: Vec<service::Codec>,
+}
+
+struct PreparedDetectedGameTransition {
+    fence: DetectorRuntimeFence,
+    token: GameDetectorToken,
+    detected: Option<DetectedGame>,
+    presentation: Option<GameDetectionEvent>,
+    osu_title_event: Option<OsuTitleEvent>,
+    restart_generation: Option<u64>,
+    waiting_for_game: bool,
+    worker: Option<service::PreparedRecorderRestart>,
+}
+
+struct CommittedDetectedGameTransition {
+    old_tx: Option<Sender<Cmd>>,
+    old_pump_generation: Option<u64>,
+    restart_generation: Option<u64>,
+    waiting_generation: Option<u64>,
+    worker: Option<service::PreparedRecorderRestart>,
+}
+
+enum DetectedGameCommitOutcome {
+    Stale,
+    Applied(CommittedDetectedGameTransition),
+}
+
+#[cfg(test)]
 struct PreparedServiceRestart {
     old_tx: Option<Sender<Cmd>>,
     replacement: Option<(ServiceOptions, u64)>,
@@ -922,6 +1029,7 @@ impl RuntimeState {
             settings,
             active_files,
             lol_url,
+            detector_token: None,
             active_game: None,
             osu_title_events: Vec::new(),
             last_save_request: None,
@@ -942,26 +1050,41 @@ impl RuntimeState {
         )
     }
 
-    fn take_event_pump(&self) -> Option<JoinHandle<()>> {
-        self.3
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()
-    }
-
-    fn install_event_pump(&self, pump: JoinHandle<()>) {
-        let replaced = self
+    fn take_event_pump(&self, generation: u64) -> Option<JoinHandle<()>> {
+        let mut pump = self
             .3
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .replace(pump);
-        debug_assert!(
-            replaced.is_none(),
-            "event pump ownership must be joined first"
-        );
-        if let Some(replaced) = replaced {
-            let _ = replaced.join();
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if pump.as_ref().map(|pump| pump.generation) != Some(generation) {
+            return None;
         }
+        pump.take().map(|pump| pump.worker)
+    }
+
+    fn take_older_event_pump(&self, generation: u64) -> Option<JoinHandle<()>> {
+        let mut pump = self
+            .3
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !matches!(pump.as_ref(), Some(pump) if pump.generation < generation) {
+            return None;
+        }
+        pump.take().map(|pump| pump.worker)
+    }
+
+    fn install_event_pump(&self, generation: u64, pump: JoinHandle<()>) {
+        let mut slot = self
+            .3
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(
+            slot.is_none(),
+            "event pump ownership must be joined before generation {generation} is installed"
+        );
+        *slot = Some(RecorderEventPump {
+            generation,
+            worker: pump,
+        });
     }
 
     fn install_recording_sender(inner: &mut RuntimeInner, tx: Sender<Cmd>) -> Result<u64, String> {
@@ -1031,7 +1154,7 @@ impl RuntimeState {
                         Err("recorder reported a finalization failure".to_string())
                     };
                     drop(acknowledged);
-                    if let Some(pump) = self.take_event_pump() {
+                    if let Some(pump) = self.take_event_pump(generation) {
                         let _ = pump.join();
                     }
                     return result;
@@ -1226,6 +1349,7 @@ impl RuntimeState {
         )
     }
 
+    #[cfg(test)]
     fn prepare_service_restart(inner: &mut RuntimeInner) -> Result<PreparedServiceRestart, String> {
         let should_run = inner.recording_desired
             && recorder_should_run(&inner.settings, inner.active_game.as_ref());
@@ -1261,6 +1385,7 @@ impl RuntimeState {
         })
     }
 
+    #[cfg(test)]
     fn install_prepared_service_restart(
         inner: &mut RuntimeInner,
         generation: u64,
@@ -1300,9 +1425,18 @@ impl RuntimeState {
         Ok(())
     }
 
+    #[cfg(test)]
     fn prepare_settings_restart(
         &self,
         settings: AppSettings,
+    ) -> Result<PreparedRuntimeRestart, String> {
+        self.prepare_settings_restart_with_detector(settings, None)
+    }
+
+    fn prepare_settings_restart_with_detector(
+        &self,
+        settings: AppSettings,
+        detector_token: Option<GameDetectorToken>,
     ) -> Result<PreparedRuntimeRestart, String> {
         let mut options = {
             let inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
@@ -1321,6 +1455,7 @@ impl RuntimeState {
             settings,
             options: Some(options),
             worker: Some(worker),
+            detector_token,
         })
     }
 
@@ -1333,7 +1468,11 @@ impl RuntimeState {
     where
         F: FnOnce(ServiceOptions) -> (Sender<Cmd>, T),
     {
-        let PreparedRuntimeRestart { settings, .. } = prepared;
+        let PreparedRuntimeRestart {
+            settings,
+            detector_token,
+            ..
+        } = prepared;
         let cleared_active_game = inner.active_game.is_some()
             && !active_game_still_configured(&settings, inner.active_game.as_ref());
         let active_game = if cleared_active_game {
@@ -1357,6 +1496,9 @@ impl RuntimeState {
         };
 
         inner.settings = settings;
+        if let Some(token) = detector_token {
+            inner.detector_token = Some(token);
+        }
         if cleared_active_game {
             inner.active_game = None;
         }
@@ -1395,11 +1537,21 @@ impl RuntimeState {
             .worker
             .as_ref()
             .map(service::PreparedRecorderRestart::command_sender);
-        let (old_tx, replacement_generation, cleared_active_game, waiting_for_game) = {
+        let detector_token = prepared.detector_token.take();
+        let (
+            old_tx,
+            old_pump_generation,
+            replacement_generation,
+            cleared_active_game,
+            waiting_for_game,
+        ) = {
             let mut inner = self
                 .0
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(token) = detector_token {
+                inner.detector_token = Some(token);
+            }
             let cleared_active_game = inner.active_game.is_some()
                 && !active_game_still_configured(&authoritative, inner.active_game.as_ref());
             if cleared_active_game {
@@ -1422,6 +1574,7 @@ impl RuntimeState {
             let should_run = inner.recording_desired
                 && recorder_should_run(&authoritative, inner.active_game.as_ref());
             inner.settings = authoritative;
+            let old_pump_generation = inner.tx.as_ref().map(|_| inner.recording_generation);
             let old_tx = inner.tx.take();
             let replacement_generation = if old_tx.is_some() || inner.recording_desired {
                 inner.recording_generation.checked_add(1)
@@ -1438,6 +1591,7 @@ impl RuntimeState {
             }
             (
                 old_tx,
+                old_pump_generation,
                 replacement_generation,
                 cleared_active_game,
                 inner.recording_desired && !should_run,
@@ -1446,8 +1600,10 @@ impl RuntimeState {
         if let Some(tx) = old_tx {
             let _ = tx.send(Cmd::Stop { announce: false });
         }
-        if let Some(old_pump) = self.take_event_pump() {
-            let _ = old_pump.join();
+        if let Some(generation) = old_pump_generation {
+            if let Some(old_pump) = self.take_event_pump(generation) {
+                let _ = old_pump.join();
+            }
         }
         if let Some(generation) = replacement_generation {
             let mut inner = self
@@ -1467,7 +1623,7 @@ impl RuntimeState {
                     .take()
                     .expect("running prepared restart owns a worker")
                     .commit_with_options(options);
-                self.install_event_pump(pump_events(app.clone(), stream, generation));
+                self.install_event_pump(generation, pump_events(app.clone(), stream, generation));
             }
         }
         if waiting_for_game {
@@ -1513,6 +1669,7 @@ impl RuntimeState {
         false
     }
 
+    #[cfg(test)]
     fn send(&self, cmd: Cmd) -> bool {
         if let Ok(inner) = self.0.lock() {
             if let Some(tx) = &inner.tx {
@@ -1521,6 +1678,26 @@ impl RuntimeState {
             }
         }
         false
+    }
+
+    fn shutdown_recorder_for_exit(&self) {
+        let sender = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .tx
+            .take();
+        if let Some(sender) = sender {
+            let _ = sender.send(Cmd::Stop { announce: false });
+        }
+        let pump = self
+            .3
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(pump) = pump {
+            let _ = pump.worker.join();
+        }
     }
 
     fn osu_title_events_for_window(
@@ -1838,15 +2015,6 @@ impl RuntimeState {
         self.persist_ui_preferences(&settings)
     }
 
-    fn publish_durable_settings_exclusive(
-        &self,
-        coordinator: &SettingsApplyCoordinator,
-    ) -> Result<(), String> {
-        coordinator
-            .with_exclusive(|| self.publish_durable_settings())
-            .map_err(|error| error.to_string())?
-    }
-
     fn set_recording<R: Runtime>(
         &self,
         app: AppHandle<R>,
@@ -1876,10 +2044,13 @@ impl RuntimeState {
             }
         };
         if let Some((rx, generation)) = started {
-            if let Some(old_pump) = self.take_event_pump() {
+            if let Some(old_pump) = self.take_older_event_pump(generation) {
                 let _ = old_pump.join();
             }
-            self.install_event_pump(pump_events(app, rx, generation));
+            let inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+            if inner.recording_generation == generation && inner.tx.is_some() {
+                self.install_event_pump(generation, pump_events(app, rx, generation));
+            }
         } else if let Some((generation, status)) = self.current_waiting_status() {
             let _ = app
                 .state::<crate::desktop::tauri_sink::TauriUiEventSink>()
@@ -1907,93 +2078,254 @@ impl RuntimeState {
         Ok(false)
     }
 
-    fn set_detected_game<R: Runtime>(
+    fn set_detector_token(&self, token: Option<GameDetectorToken>) {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .detector_token = token;
+    }
+
+    fn prepare_detected_game_transition(
         &self,
-        app: AppHandle<R>,
+        token: GameDetectorToken,
         detected: Option<DetectedGame>,
-    ) -> Result<(), String> {
-        let event = GameDetectionEvent::from_detected(detected.as_ref());
-        let (prepared_restart, emit_event) = {
+    ) -> Result<Option<PreparedDetectedGameTransition>, String> {
+        self.prepare_detected_game_transition_with(token, detected, |options| {
+            service::PreparedRecorderRestart::prepare(options)
+        })
+    }
+
+    fn prepare_detected_game_transition_with(
+        &self,
+        token: GameDetectorToken,
+        detected: Option<DetectedGame>,
+        prepare_worker: impl FnOnce(ServiceOptions) -> Result<service::PreparedRecorderRestart, String>,
+    ) -> Result<Option<PreparedDetectedGameTransition>, String> {
+        let (fence, osu_title_event, restart_generation, waiting_for_game, options) = {
             let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-            record_osu_title_event(&mut inner, detected.as_ref(), unix_now_i64());
-            if same_game_window(inner.active_game.as_ref(), detected.as_ref()) {
-                if game_recording_mode_changed(inner.active_game.as_ref(), detected.as_ref()) {
-                    inner.active_game = detected;
-                    (Some(Self::prepare_service_restart(&mut inner)?), true)
-                } else if inner.active_game != detected {
-                    inner.active_game = detected;
-                    (None, true)
-                } else {
-                    (None, false)
-                }
-            } else {
-                inner.active_game = detected;
-                (Some(Self::prepare_service_restart(&mut inner)?), true)
+            if inner.detector_token != Some(token) || inner.active_game == detected {
+                return Ok(None);
             }
+            let restart = !same_game_window(inner.active_game.as_ref(), detected.as_ref())
+                || game_recording_mode_changed(inner.active_game.as_ref(), detected.as_ref());
+            let restart_generation = restart
+                .then(|| checked_generation_next(inner.recording_generation, "recording"))
+                .transpose()?;
+            let should_run = restart
+                && inner.recording_desired
+                && recorder_should_run(&inner.settings, detected.as_ref());
+            let options = should_run
+                .then(|| {
+                    let mut options = Self::options_for(
+                        &inner.settings,
+                        inner.lol_url.clone(),
+                        detected.as_ref(),
+                        &inner.decodable_codecs,
+                        inner.active_files.clone(),
+                    )?;
+                    options.recover_abandoned_recordings = false;
+                    Ok::<_, String>(options)
+                })
+                .transpose()?;
+            let osu_title_event = staged_osu_title_event(&inner, detected.as_ref(), unix_now_i64());
+            if osu_title_event.is_some() && inner.osu_title_events.len() < 512 {
+                inner
+                    .osu_title_events
+                    .try_reserve(1)
+                    .map_err(|_| "allocate bounded osu title event slot".to_string())?;
+            }
+            (
+                DetectorRuntimeFence::capture(&inner),
+                osu_title_event,
+                restart_generation,
+                restart && inner.recording_desired && !should_run,
+                options,
+            )
         };
-        if let Some(prepared) = prepared_restart {
-            let waiting_for_game = prepared.waiting_for_game;
-            let waiting_generation = prepared.waiting_generation;
-            if let Some(tx) = prepared.old_tx {
-                let _ = tx.send(Cmd::Stop { announce: false });
+        let presentation = Some(GameDetectionEvent::from_detected(detected.as_ref()));
+        let worker = options.map(prepare_worker).transpose()?;
+        Ok(Some(PreparedDetectedGameTransition {
+            fence,
+            token,
+            detected,
+            presentation,
+            osu_title_event,
+            restart_generation,
+            waiting_for_game,
+            worker,
+        }))
+    }
+
+    fn commit_detected_game_state_with<E>(
+        inner: &mut RuntimeInner,
+        mut prepared: PreparedDetectedGameTransition,
+        publish: impl FnOnce(GameDetectionEvent) -> Result<(), E>,
+    ) -> Result<DetectedGameCommitOutcome, E> {
+        if !prepared.fence.matches(inner) || inner.detector_token != Some(prepared.token) {
+            return Ok(DetectedGameCommitOutcome::Stale);
+        }
+        if let Some(presentation) = prepared.presentation.take() {
+            publish(presentation)?;
+        }
+
+        if let Some(event) = prepared.osu_title_event.take() {
+            if inner.osu_title_events.len() == 512 {
+                inner.osu_title_events.remove(0);
             }
-            if let Some(old_pump) = self.take_event_pump() {
+            inner.osu_title_events.push(event);
+        }
+        inner.active_game = prepared.detected;
+        let old_tx = if let Some(generation) = prepared.restart_generation {
+            let old_tx = inner.tx.take();
+            inner.recording_generation = generation;
+            inner.tx = prepared
+                .worker
+                .as_ref()
+                .map(service::PreparedRecorderRestart::command_sender);
+            inner.last_save_request = None;
+            old_tx
+        } else {
+            None
+        };
+        let old_pump_generation = old_tx.as_ref().map(|_| prepared.fence.recording_generation);
+        Ok(DetectedGameCommitOutcome::Applied(
+            CommittedDetectedGameTransition {
+                old_tx,
+                old_pump_generation,
+                restart_generation: prepared.restart_generation,
+                waiting_generation: if prepared.waiting_for_game {
+                    Some(
+                        prepared
+                            .restart_generation
+                            .expect("waiting transition reserves a recording generation"),
+                    )
+                } else {
+                    None
+                },
+                worker: prepared.worker,
+            },
+        ))
+    }
+
+    fn try_accept_detected_game<R: Runtime>(
+        &self,
+        app: &AppHandle<R>,
+        token: GameDetectorToken,
+        detected: Option<DetectedGame>,
+    ) -> Result<(), GameDetectorSinkError> {
+        let Some(prepared) = self
+            .prepare_detected_game_transition(token, detected)
+            .map_err(GameDetectorSinkError::Failed)?
+        else {
+            return Ok(());
+        };
+        let committed = {
+            let mut inner = self
+                .0
+                .lock()
+                .map_err(|_| GameDetectorSinkError::Failed("runtime state lock poisoned".into()))?;
+            Self::commit_detected_game_state_with(&mut inner, prepared, |presentation| {
+                try_publish_game_detection(app, presentation)
+            })?
+        };
+        let DetectedGameCommitOutcome::Applied(mut committed) = committed else {
+            return Ok(());
+        };
+        if let Some(tx) = committed.old_tx.take() {
+            let _ = tx.send(Cmd::Stop { announce: false });
+        }
+        if let Some(generation) = committed.old_pump_generation {
+            if let Some(old_pump) = self.take_event_pump(generation) {
                 let _ = old_pump.join();
             }
-            if let Some((options, restart_generation)) = prepared.replacement {
-                let (tx, rx) = service::spawn(options)?;
-                let installed = {
-                    let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-                    Self::install_prepared_service_restart(&mut inner, restart_generation, tx)
-                };
-                match installed {
-                    Ok(generation) => {
-                        self.install_event_pump(pump_events(app.clone(), rx, generation));
-                    }
-                    Err(tx) => {
-                        let _ = tx.send(Cmd::Stop { announce: false });
-                    }
-                }
-            }
-            if let Some(generation) = waiting_generation.filter(|generation| {
-                waiting_for_game && self.waiting_generation_is_current(*generation)
-            }) {
-                emit_waiting_for_game(&app, generation);
+        }
+        if let Some(worker) = committed.worker.take() {
+            let inner = self
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if Some(inner.recording_generation) == committed.restart_generation
+                && inner.tx.is_some()
+            {
+                let generation = committed
+                    .restart_generation
+                    .expect("prepared recorder owns a recording generation");
+                let stream = worker.commit();
+                self.install_event_pump(generation, pump_events(app.clone(), stream, generation));
             }
         }
-        if emit_event {
-            publish_game_detection(&app, event)?;
+        if let Some(generation) = committed
+            .waiting_generation
+            .filter(|generation| self.waiting_generation_is_current(*generation))
+        {
+            emit_waiting_for_game(app, generation);
         }
         Ok(())
     }
 }
 
-fn record_osu_title_event(inner: &mut RuntimeInner, detected: Option<&DetectedGame>, unix_s: i64) {
-    const MAX_OSU_TITLE_EVENTS: usize = 512;
-    let Some(game) = detected else {
-        return;
-    };
+impl DetectorRuntimeFence {
+    fn capture(inner: &RuntimeInner) -> Self {
+        Self {
+            recording_generation: inner.recording_generation,
+            recording_desired: inner.recording_desired,
+            sender_installed: inner.tx.is_some(),
+            settings: inner.settings.clone(),
+            lol_url: inner.lol_url.clone(),
+            active_game: inner.active_game.clone(),
+            detector_token: inner.detector_token,
+            decodable_codecs: inner.decodable_codecs.clone(),
+        }
+    }
+
+    fn matches(&self, inner: &RuntimeInner) -> bool {
+        self.recording_generation == inner.recording_generation
+            && self.recording_desired == inner.recording_desired
+            && self.sender_installed == inner.tx.is_some()
+            && self.settings == inner.settings
+            && self.lol_url == inner.lol_url
+            && self.active_game == inner.active_game
+            && self.detector_token == inner.detector_token
+            && self.decodable_codecs == inner.decodable_codecs
+    }
+}
+
+fn staged_osu_title_event(
+    inner: &RuntimeInner,
+    detected: Option<&DetectedGame>,
+    unix_s: i64,
+) -> Option<OsuTitleEvent> {
+    let game = detected?;
     if !game
         .identity
         .is_built_in_plugin(crate::game_plugins::OSU_ID)
     {
-        return;
+        return None;
     }
     let title = game.window_title.trim();
     if title.is_empty() {
-        return;
+        return None;
     }
     if inner
         .osu_title_events
         .last()
         .is_some_and(|event| event.title == title)
     {
-        return;
+        return None;
     }
-    inner.osu_title_events.push(OsuTitleEvent {
+    Some(OsuTitleEvent {
         unix_s,
         title: title.to_string(),
-    });
+    })
+}
+
+#[cfg(test)]
+fn record_osu_title_event(inner: &mut RuntimeInner, detected: Option<&DetectedGame>, unix_s: i64) {
+    const MAX_OSU_TITLE_EVENTS: usize = 512;
+    let Some(event) = staged_osu_title_event(inner, detected, unix_s) else {
+        return;
+    };
+    inner.osu_title_events.push(event);
     if inner.osu_title_events.len() > MAX_OSU_TITLE_EVENTS {
         let overflow = inner.osu_title_events.len() - MAX_OSU_TITLE_EVENTS;
         inner.osu_title_events.drain(0..overflow);
@@ -2429,6 +2761,11 @@ fn shutdown_app<R: Runtime>(
     let shutdown_owner = shutdown_gate.begin(ShutdownReason::Quit)?;
     let update_gate = app.state::<UpdateOperationGate>();
     let updates_quiesced = update_gate.quiesce_and_wait(UPDATE_QUIESCE_TIMEOUT)?;
+    let mut detector_quiesced =
+        DetectorQuiescence::begin(app).map_err(|message| TauriShellError::Action {
+            command: ShellCommand::Quit,
+            message,
+        })?;
     let mut uploads_quiesced =
         UploadQuiescence::begin(app).map_err(|message| TauriShellError::Action {
             command: ShellCommand::Quit,
@@ -2446,7 +2783,7 @@ fn shutdown_app<R: Runtime>(
         effect = match effect {
             ShutdownEffect::PublishDurableState { generation } => {
                 app.state::<RuntimeState>()
-                    .publish_durable_settings_exclusive(&app.state::<SettingsApplyCoordinator>())
+                    .publish_durable_settings()
                     .map_err(|message| TauriShellError::Action {
                         command: ShellCommand::Quit,
                         message,
@@ -2503,6 +2840,7 @@ fn shutdown_app<R: Runtime>(
                     command: ShellCommand::Quit,
                     message,
                 })?;
+                detector_quiesced.commit_shutdown();
                 uploads_quiesced.commit_shutdown();
                 shutdown_owner.commit_exit();
                 updates_quiesced.commit_exit();
@@ -2543,6 +2881,65 @@ where
 
 struct UploadQuiescence {
     service: Option<UploadService>,
+}
+
+struct DetectorQuiescence<R: Runtime> {
+    app: AppHandle<R>,
+    service: Option<GameDetectorService>,
+    settings: Option<SettingsApplyQuiescence>,
+}
+
+impl<R: Runtime> DetectorQuiescence<R> {
+    fn begin(app: &AppHandle<R>) -> Result<Self, String> {
+        let settings = app
+            .state::<SettingsApplyCoordinator>()
+            .quiesce()
+            .map_err(|error| error.to_string())?;
+        let service = app
+            .try_state::<GameDetectorService>()
+            .ok_or_else(|| "game detector service is unavailable".to_string())?
+            .inner()
+            .clone();
+        if let Err(error) = service.quiesce() {
+            drop(settings);
+            return Err(error.to_string());
+        }
+        app.state::<RuntimeState>().set_detector_token(None);
+        Ok(Self {
+            app: app.clone(),
+            service: Some(service),
+            settings: Some(settings),
+        })
+    }
+
+    fn commit_shutdown(&mut self) {
+        self.app.state::<RuntimeState>().set_detector_token(None);
+        if let Some(service) = self.service.take() {
+            if let Err(error) = service.shutdown() {
+                log_diagnostic(format!("game detector shutdown failed: {error}"));
+            }
+        }
+        if let Some(settings) = self.settings.take() {
+            settings.commit_shutdown();
+        }
+    }
+}
+
+impl<R: Runtime> Drop for DetectorQuiescence<R> {
+    fn drop(&mut self) {
+        let Some(service) = self.service.take() else {
+            return;
+        };
+        let token = service.active_token();
+        self.app
+            .state::<RuntimeState>()
+            .set_detector_token(Some(token));
+        if let Err(error) = service.resume() {
+            self.app.state::<RuntimeState>().set_detector_token(None);
+            log_diagnostic(format!("game detector resume failed: {error}"));
+        }
+        drop(self.settings.take());
+    }
 }
 
 impl UploadQuiescence {
@@ -2815,6 +3212,7 @@ struct AppUpdateShutdownError(String);
 struct TauriUpdateShutdown<'a, R: Runtime> {
     app: &'a AppHandle<R>,
     state: &'a RuntimeState,
+    detector: Option<DetectorQuiescence<R>>,
     uploads: Option<UploadQuiescence>,
 }
 
@@ -2822,11 +3220,15 @@ impl<R: Runtime> UpdateShutdown for TauriUpdateShutdown<'_, R> {
     type Error = AppUpdateShutdownError;
 
     fn publish_durable_state(&mut self) -> Result<(), Self::Error> {
+        if self.detector.is_none() {
+            self.detector =
+                Some(DetectorQuiescence::begin(self.app).map_err(AppUpdateShutdownError)?);
+        }
         if self.uploads.is_none() {
             self.uploads = Some(UploadQuiescence::begin(self.app).map_err(AppUpdateShutdownError)?);
         }
         self.state
-            .publish_durable_settings_exclusive(&self.app.state::<SettingsApplyCoordinator>())
+            .publish_durable_settings()
             .map_err(AppUpdateShutdownError)
     }
 
@@ -2850,6 +3252,9 @@ impl<R: Runtime> UpdateShutdown for TauriUpdateShutdown<'_, R> {
     }
 
     fn request_exit(&mut self) -> Result<(), Self::Error> {
+        if let Some(detector) = self.detector.as_mut() {
+            detector.commit_shutdown();
+        }
         if let Some(uploads) = self.uploads.as_mut() {
             uploads.commit_shutdown();
         }
@@ -2933,6 +3338,7 @@ async fn install_update_inner<R: Runtime>(
     let mut shutdown = TauriUpdateShutdown {
         app,
         state,
+        detector: None,
         uploads: None,
     };
     let receipt = install_verified(&mut launcher, &mut shutdown, verified)
@@ -3343,6 +3749,7 @@ struct TauriSettingsApplyPorts<'a, R: Runtime> {
     tray: &'a TrayItems<R>,
     storage: &'a crate::library::StorageSettings,
     authorization: &'a NativeMediaFolderAuthorization,
+    prepared_detector_token: Option<GameDetectorToken>,
 }
 
 #[cfg(test)]
@@ -3362,10 +3769,7 @@ impl<R: Runtime> SettingsApplyPorts for TauriSettingsApplyPorts<'_, R> {
     type HotkeyReceipt = HotkeyReplacementReceipt;
     type TrayReceipt = TrayLabelReceipt;
     type AutostartReceipt = Option<AutostartChange>;
-    // The shipping compatibility detector still reads RuntimeState only
-    // after recorder commit. The next Task 8 cutover replaces this unit
-    // receipt with PreparedDetectorReconfiguration.
-    type PreparedDetector = ();
+    type PreparedDetector = PreparedDetectorReconfiguration;
     type PreparedRecorder = PreparedRuntimeRestart;
 
     fn prepare_preflight(
@@ -3442,9 +3846,20 @@ impl<R: Runtime> SettingsApplyPorts for TauriSettingsApplyPorts<'_, R> {
 
     fn prepare_detector(
         &mut self,
-        _candidate: &SettingsPreferences,
+        candidate: &SettingsPreferences,
     ) -> Result<Self::PreparedDetector, String> {
-        Ok(())
+        let mut document = self.runtime.settings();
+        candidate.apply_to_document(&mut document)?;
+        let detector = self.app.state::<GameDetectorService>();
+        let prepared = detector
+            .prepare_reconfiguration(document.games)
+            .map_err(|error| error.to_string())?;
+        let token = GameDetectorToken {
+            generation: prepared.generation(),
+            work_epoch: detector.active_token().work_epoch,
+        };
+        self.prepared_detector_token = Some(token);
+        Ok(prepared)
     }
 
     fn prepare_recorder(
@@ -3453,7 +3868,11 @@ impl<R: Runtime> SettingsApplyPorts for TauriSettingsApplyPorts<'_, R> {
     ) -> Result<Self::PreparedRecorder, String> {
         let mut document = self.runtime.settings();
         candidate.apply_to_document(&mut document)?;
-        self.runtime.prepare_settings_restart(document)
+        let token = self
+            .prepared_detector_token
+            .ok_or_else(|| "detector configuration was not prepared".to_string())?;
+        self.runtime
+            .prepare_settings_restart_with_detector(document, Some(token))
     }
 
     fn persist_preferences(
@@ -3483,9 +3902,15 @@ impl<R: Runtime> SettingsApplyPorts for TauriSettingsApplyPorts<'_, R> {
 
     fn commit_detector(
         &mut self,
-        _prepared: Self::PreparedDetector,
+        prepared: Self::PreparedDetector,
         _authoritative: &SettingsSnapshot,
     ) {
+        let committed = prepared.commit();
+        assert_eq!(
+            Some(committed),
+            self.prepared_detector_token,
+            "prepared detector token changed before the Settings commit tail"
+        );
     }
 
     fn commit_preflight(
@@ -3524,6 +3949,7 @@ async fn save_settings<R: Runtime>(
             tray: &tray_items,
             storage: &storage_settings,
             authorization: &media_folder_authorization,
+            prepared_detector_token: None,
         };
         let success = coordinator
             .apply(&mut ports, baseline, candidate)
@@ -3723,6 +4149,15 @@ pub fn run(
                 app.handle().clone(),
                 ui_event_receiver,
             )?;
+            let detector = GameDetectorService::start(
+                settings.games.clone(),
+                GAME_DETECTOR_INTERVAL,
+                Arc::new(WindowsGameDetectionProbe),
+                Arc::new(TauriGameDetectionSink(app.handle().clone())),
+            )?;
+            app.state::<RuntimeState>()
+                .set_detector_token(Some(detector.active_token()));
+            app.manage(detector);
             configure_bundled_ffmpeg(app);
             let osu_app = app.handle().clone();
             let osu_media_root = media_dir_for_setup.clone();
@@ -3892,8 +4327,6 @@ pub fn run(
             {
                 tracing::error!(event = "desktop_recorder_state_failed", error = %error);
             }
-            spawn_game_detector(app.handle().clone());
-
             // The main window is created hidden by default so autostart launches
             // don't flash it. Show it for normal launches.
             if !launched_by_autostart {
@@ -3979,6 +4412,12 @@ pub fn run(
             }
             tauri::RunEvent::Exit => {
                 log_diagnostic("run event: exit");
+                if let Some(detector) = app.try_state::<GameDetectorService>() {
+                    app.state::<RuntimeState>().set_detector_token(None);
+                    if let Err(error) = detector.shutdown() {
+                        log_diagnostic(format!("game detector shutdown failed: {error}"));
+                    }
+                }
                 if let Some(uploads) =
                     app.try_state::<crate::cloud_upload::TauriUploadState>()
                 {
@@ -3990,8 +4429,7 @@ pub fn run(
                 {
                     log_diagnostic(format!("microphone monitor shutdown failed: {error}"));
                 }
-                app.state::<RuntimeState>()
-                    .send(Cmd::Stop { announce: false });
+                app.state::<RuntimeState>().shutdown_recorder_for_exit();
             }
             _ => {}
         });
@@ -4001,35 +4439,6 @@ pub fn run(
         log_diagnostic(format!("single-instance listener shutdown failed: {error}"));
         tracing::error!(event = "single_instance_shutdown_failed", error = %error);
     }
-}
-
-fn spawn_game_detector<R: Runtime>(app: AppHandle<R>) {
-    std::thread::Builder::new()
-        .name("clipline-game-detector".into())
-        .spawn(move || {
-            let mut last_error = None::<String>;
-            loop {
-                std::thread::sleep(GAME_DETECTOR_INTERVAL);
-                let settings = app.state::<RuntimeState>().settings();
-                let detected = crate::games::detect_active_game(&settings.games);
-                match app
-                    .state::<RuntimeState>()
-                    .set_detected_game(app.clone(), detected)
-                {
-                    Ok(()) => last_error = None,
-                    Err(e) if last_error.as_deref() != Some(e.as_str()) => {
-                        last_error = Some(e.clone());
-                        let _ = app
-                            .state::<crate::desktop::tauri_sink::TauriUiEventSink>()
-                            .try_publish(UiEvent::UserError {
-                                message: format!("game detection: {e}"),
-                            });
-                    }
-                    Err(_) => {}
-                }
-            }
-        })
-        .expect("spawn game detector thread");
 }
 
 fn open_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
@@ -4316,6 +4725,40 @@ mod tests {
     };
     use clipline_test_utils::TestDir;
     use std::sync::Arc;
+
+    struct TestDetectorProbe;
+
+    impl GameDetectionProbe for TestDetectorProbe {
+        fn detect(
+            &self,
+            _settings: &clipline_settings::games::GameSettings,
+            checkpoint: &GameDetectorCheckpoint,
+        ) -> Result<Option<DetectedGame>, String> {
+            checkpoint.check().map_err(|error| error.to_string())?;
+            Ok(None)
+        }
+    }
+
+    struct TestDetectorSink;
+
+    impl GameDetectionSink for TestDetectorSink {
+        fn try_publish(
+            &self,
+            _event: DetectorEvent,
+        ) -> Result<(), Box<RejectedGameDetectionEvent>> {
+            Ok(())
+        }
+    }
+
+    fn test_detector_service() -> GameDetectorService {
+        GameDetectorService::start(
+            clipline_settings::games::GameSettings::default(),
+            Duration::from_secs(60),
+            Arc::new(TestDetectorProbe),
+            Arc::new(TestDetectorSink),
+        )
+        .unwrap()
+    }
 
     fn durable_upload_record(
         local_clip_id: &str,
@@ -5136,6 +5579,183 @@ mod tests {
     }
 
     #[test]
+    fn rejected_detection_publication_preserves_runtime_and_old_recorder() {
+        let detector = test_detector_service();
+        let token = detector.active_token();
+        let (tx, rx) = mpsc::channel();
+        let state = RuntimeState::with_sender(tx, AppSettings::default(), None);
+        state.set_detector_token(Some(token));
+        let before_generation = state.0.lock().unwrap().recording_generation;
+        let prepared = state
+            .prepare_detected_game_transition_with(
+                token,
+                Some(detected_game("new-game", "New Game", 42)),
+                service::PreparedRecorderRestart::prepare,
+            )
+            .unwrap()
+            .unwrap();
+
+        let result = {
+            let mut inner = state.0.lock().unwrap();
+            RuntimeState::commit_detected_game_state_with(&mut inner, prepared, |_| {
+                Err::<(), _>("full")
+            })
+        };
+        assert!(matches!(result, Err("full")));
+        let inner = state.0.lock().unwrap();
+        assert_eq!(inner.recording_generation, before_generation);
+        assert!(inner.active_game.is_none());
+        assert!(inner.tx.is_some());
+        assert!(inner.osu_title_events.is_empty());
+        drop(inner);
+        assert!(state.send(Cmd::Save));
+        assert!(matches!(rx.try_recv(), Ok(Cmd::Save)));
+        detector.shutdown().unwrap();
+    }
+
+    #[test]
+    fn delayed_detector_cleanup_cannot_take_a_newer_settings_event_pump() {
+        let state = Arc::new(RuntimeState::new(AppSettings::default(), None));
+        let (release_tx, release_rx) = mpsc::channel();
+        let settings_pump = std::thread::spawn(move || {
+            let _ = release_rx.recv();
+        });
+        *state
+            .3
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(RecorderEventPump {
+            generation: 42,
+            worker: settings_pump,
+        });
+
+        let delayed_detector = Arc::clone(&state);
+        let cleanup = std::thread::spawn(move || delayed_detector.take_event_pump(41).is_some());
+        assert!(
+            !cleanup.join().unwrap(),
+            "the superseded detector generation must not take Settings pump ownership"
+        );
+        assert_eq!(
+            state
+                .3
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_ref()
+                .map(|pump| pump.generation),
+            Some(42)
+        );
+
+        release_tx.send(()).unwrap();
+        state.take_event_pump(42).unwrap().join().unwrap();
+    }
+
+    #[test]
+    fn detector_recorder_preparation_failure_never_mutates_or_publishes() {
+        let detector = test_detector_service();
+        let token = detector.active_token();
+        let (tx, rx) = mpsc::channel();
+        let state = RuntimeState::with_sender(tx, AppSettings::default(), None);
+        state.set_detector_token(Some(token));
+        let before_generation = state.0.lock().unwrap().recording_generation;
+        let error = match state.prepare_detected_game_transition_with(
+            token,
+            Some(detected_game("new-game", "New Game", 42)),
+            |_| Err("injected parked-worker failure".into()),
+        ) {
+            Ok(_) => panic!("injected recorder preparation failure must reject the transition"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error, "injected parked-worker failure");
+        let inner = state.0.lock().unwrap();
+        assert_eq!(inner.recording_generation, before_generation);
+        assert!(inner.active_game.is_none());
+        assert!(inner.tx.is_some());
+        drop(inner);
+        assert!(state.send(Cmd::Save));
+        assert!(matches!(rx.try_recv(), Ok(Cmd::Save)));
+        detector.shutdown().unwrap();
+    }
+
+    #[test]
+    fn title_only_detection_publishes_without_preparing_or_restarting_recorder() {
+        let detector = test_detector_service();
+        let token = detector.active_token();
+        let (tx, rx) = mpsc::channel();
+        let state = RuntimeState::with_sender(tx, AppSettings::default(), None);
+        let current = detected_game("same-game", "Same Game", 42);
+        {
+            let mut inner = state.0.lock().unwrap();
+            inner.detector_token = Some(token);
+            inner.active_game = Some(current.clone());
+        }
+        let before_generation = state.0.lock().unwrap().recording_generation;
+        let updated = DetectedGame {
+            window_title: "Updated title".into(),
+            ..current
+        };
+        let prepared = state
+            .prepare_detected_game_transition_with(token, Some(updated), |_| {
+                panic!("title-only detection must not prepare a recorder")
+            })
+            .unwrap()
+            .unwrap();
+        let mut published = false;
+        let committed = {
+            let mut inner = state.0.lock().unwrap();
+            RuntimeState::commit_detected_game_state_with(&mut inner, prepared, |_| {
+                published = true;
+                Ok::<_, ()>(())
+            })
+            .unwrap()
+        };
+        assert!(matches!(
+            committed,
+            DetectedGameCommitOutcome::Applied(CommittedDetectedGameTransition {
+                restart_generation: None,
+                ..
+            })
+        ));
+        assert!(published);
+        let inner = state.0.lock().unwrap();
+        assert_eq!(inner.recording_generation, before_generation);
+        assert_eq!(
+            inner
+                .active_game
+                .as_ref()
+                .map(|game| game.window_title.as_str()),
+            Some("Updated title")
+        );
+        assert!(inner.tx.is_some());
+        drop(inner);
+        assert!(state.send(Cmd::Save));
+        assert!(matches!(rx.try_recv(), Ok(Cmd::Save)));
+        detector.shutdown().unwrap();
+    }
+
+    #[test]
+    fn settings_installed_detector_token_rejects_an_old_configuration_result() {
+        let detector = test_detector_service();
+        let old = detector.active_token();
+        let prepared = detector
+            .prepare_reconfiguration(clipline_settings::games::GameSettings::default())
+            .unwrap();
+        let current = prepared.commit();
+        let state = RuntimeState::new(AppSettings::default(), None);
+        state.set_detector_token(Some(current));
+
+        assert!(state
+            .prepare_detected_game_transition_with(
+                old,
+                Some(detected_game("stale-game", "Stale Game", 42)),
+                |_| panic!("stale detector work must not prepare a recorder"),
+            )
+            .unwrap()
+            .is_none());
+        assert!(state.0.lock().unwrap().active_game.is_none());
+        detector.shutdown().unwrap();
+    }
+
+    #[test]
     fn elevated_game_warning_requires_lower_privilege_clipline() {
         let game = detected_game("endfield", "Arknights: Endfield", 42);
 
@@ -5222,6 +5842,7 @@ mod tests {
             settings,
             active_files: ActiveFileRegistry::new(),
             lol_url: None,
+            detector_token: None,
             active_game: None,
             osu_title_events: Vec::new(),
             last_save_request: Some(Instant::now()),
@@ -5251,6 +5872,7 @@ mod tests {
             settings,
             active_files: ActiveFileRegistry::new(),
             lol_url: None,
+            detector_token: None,
             active_game: Some(detected_game("custom-game", "Game", 42)),
             osu_title_events: Vec::new(),
             last_save_request: None,
@@ -5479,6 +6101,7 @@ mod tests {
             settings: invalid_disk_replay_settings(),
             options: None,
             worker: None,
+            detector_token: None,
         };
 
         let mut spawned = false;
@@ -5509,6 +6132,7 @@ mod tests {
             settings: invalid_disk_replay_settings(),
             active_files: ActiveFileRegistry::new(),
             lol_url: None,
+            detector_token: None,
             active_game: None,
             osu_title_events: Vec::new(),
             last_save_request: Some(Instant::now()),
@@ -5543,6 +6167,7 @@ mod tests {
             settings: AppSettings::default(),
             active_files: ActiveFileRegistry::new(),
             lol_url: None,
+            detector_token: None,
             active_game: None,
             osu_title_events: Vec::new(),
             last_save_request: Some(Instant::now()),
@@ -5706,6 +6331,7 @@ mod tests {
             settings: invalid_disk_replay_settings(),
             active_files: ActiveFileRegistry::new(),
             lol_url: None,
+            detector_token: None,
             active_game: Some(DetectedGame {
                 identity: crate::game_identity::GameIdentity::custom("custom-game"),
                 name: "Game".into(),
@@ -5745,6 +6371,7 @@ mod tests {
             settings: invalid_disk_replay_settings(),
             active_files: ActiveFileRegistry::new(),
             lol_url: None,
+            detector_token: None,
             active_game: None,
             osu_title_events: Vec::new(),
             last_save_request: None,
@@ -5836,6 +6463,7 @@ mod tests {
             settings: AppSettings::default(),
             active_files: ActiveFileRegistry::new(),
             lol_url: None,
+            detector_token: None,
             active_game: None,
             osu_title_events: Vec::new(),
             last_save_request: None,
@@ -6037,8 +6665,8 @@ mod tests {
         let run_start = app.find("pub fn run(").expect("run function should exist");
         let run_body = &app[run_start..];
         let run_end = run_body
-            .find("\nfn spawn_game_detector")
-            .expect("run function should be followed by spawn_game_detector");
+            .find("\nfn open_main_window")
+            .expect("run function should be followed by open_main_window");
         let run_body = &run_body[..run_end];
         let setup = run_body
             .find(".setup(move |app|")
@@ -6567,6 +7195,7 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
             settings: AppSettings::default(),
             active_files: ActiveFileRegistry::new(),
             lol_url: None,
+            detector_token: None,
             active_game: Some(DetectedGame {
                 identity: crate::game_identity::GameIdentity::custom(
                     crate::game_plugins::LEAGUE_OF_LEGENDS_ID,
@@ -6613,6 +7242,7 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
             settings: AppSettings::default(),
             active_files: ActiveFileRegistry::new(),
             lol_url: Some("http://mock".into()),
+            detector_token: None,
             active_game: Some(DetectedGame {
                 identity: crate::game_identity::GameIdentity::built_in_plugin(
                     crate::game_plugins::LEAGUE_OF_LEGENDS_ID,

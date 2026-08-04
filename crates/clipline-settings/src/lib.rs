@@ -38,7 +38,8 @@ pub use cloud::{
     MAX_CLOUD_UPLOAD_ID_BYTES, MAX_CLOUD_UPLOAD_PATH_BYTES, MAX_CLOUD_UPLOAD_URL_BYTES,
 };
 pub use coordinator::{
-    SettingsApplyCoordinator, SettingsApplyError, SettingsApplyPorts, SettingsApplySuccess,
+    SettingsApplyCoordinator, SettingsApplyError, SettingsApplyPorts, SettingsApplyQuiescence,
+    SettingsApplySuccess,
 };
 pub use draft::{
     CloseRequest, CloseResult, CloudAccountDisplay, CloudAccountOwner, CloudConfigurationOwner,

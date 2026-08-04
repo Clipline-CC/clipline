@@ -5,7 +5,8 @@
 //! authorization, and desktop publication happen only after persistence and
 //! therefore form an infallible commit tail.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
 
 use thiserror::Error;
 
@@ -158,9 +159,21 @@ impl SettingsApplyError {
 ///
 /// The lease serializes Settings windows without blocking independent Cloud,
 /// upload, profile, or osu! transactions on the store's commit gate.
-#[derive(Debug, Default)]
+const SETTINGS_IDLE: u8 = 0;
+const SETTINGS_APPLYING: u8 = 1;
+const SETTINGS_QUIESCED: u8 = 2;
+
+#[derive(Debug, Clone)]
 pub struct SettingsApplyCoordinator {
-    active: AtomicBool,
+    state: Arc<AtomicU8>,
+}
+
+impl Default for SettingsApplyCoordinator {
+    fn default() -> Self {
+        Self {
+            state: Arc::new(AtomicU8::new(SETTINGS_IDLE)),
+        }
+    }
 }
 
 impl SettingsApplyCoordinator {
@@ -187,31 +200,81 @@ impl SettingsApplyCoordinator {
     }
 
     pub fn is_active(&self) -> bool {
-        self.active.load(Ordering::Acquire)
+        self.state.load(Ordering::Acquire) == SETTINGS_APPLYING
     }
 
-    fn try_acquire(&self) -> Result<SettingsApplyLease<'_>, SettingsApplyError> {
-        self.active
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+    /// Exclude new Settings applies across a reversible application shutdown.
+    /// The returned owned guard may outlive a frontend state borrow.
+    pub fn quiesce(&self) -> Result<SettingsApplyQuiescence, SettingsApplyError> {
+        self.state
+            .compare_exchange(
+                SETTINGS_IDLE,
+                SETTINGS_QUIESCED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
             .map_err(|_| {
                 SettingsApplyError::new(
                     "another settings apply is already in progress".into(),
                     Vec::new(),
                 )
             })?;
-        Ok(SettingsApplyLease {
-            active: &self.active,
+        Ok(SettingsApplyQuiescence {
+            state: Arc::clone(&self.state),
+            resume_on_drop: true,
         })
+    }
+
+    fn try_acquire(&self) -> Result<SettingsApplyLease<'_>, SettingsApplyError> {
+        self.state
+            .compare_exchange(
+                SETTINGS_IDLE,
+                SETTINGS_APPLYING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map_err(|_| {
+                SettingsApplyError::new(
+                    "another settings apply is already in progress".into(),
+                    Vec::new(),
+                )
+            })?;
+        Ok(SettingsApplyLease { state: &self.state })
     }
 }
 
 struct SettingsApplyLease<'a> {
-    active: &'a AtomicBool,
+    state: &'a AtomicU8,
 }
 
 impl Drop for SettingsApplyLease<'_> {
     fn drop(&mut self) {
-        self.active.store(false, Ordering::Release);
+        self.state.store(SETTINGS_IDLE, Ordering::Release);
+    }
+}
+
+pub struct SettingsApplyQuiescence {
+    state: Arc<AtomicU8>,
+    resume_on_drop: bool,
+}
+
+impl SettingsApplyQuiescence {
+    /// Keep Settings admission closed because process exit is now inevitable.
+    pub fn commit_shutdown(mut self) {
+        self.resume_on_drop = false;
+    }
+}
+
+impl Drop for SettingsApplyQuiescence {
+    fn drop(&mut self) {
+        if self.resume_on_drop {
+            let _ = self.state.compare_exchange(
+                SETTINGS_QUIESCED,
+                SETTINGS_IDLE,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+        }
     }
 }
 

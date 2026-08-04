@@ -448,3 +448,39 @@ fn exclusive_shutdown_publication_cannot_overlap_an_active_apply() {
         .unwrap();
     assert!(publication_ran.load(Ordering::Acquire));
 }
+
+#[test]
+fn reversible_quiescence_rejects_apply_until_the_owned_guard_drops() {
+    let coordinator = SettingsApplyCoordinator::default();
+    let guard = coordinator.quiesce().unwrap();
+    let (document, baseline, candidate) = documents();
+    let mut ports = FakePorts::new(document.clone(), None);
+    let error = coordinator
+        .apply(&mut ports, baseline, candidate)
+        .unwrap_err();
+    assert_eq!(
+        error.primary(),
+        "another settings apply is already in progress"
+    );
+    assert!(ports.events().is_empty());
+
+    drop(guard);
+    let (_, baseline, candidate) = documents();
+    coordinator
+        .apply(&mut FakePorts::new(document, None), baseline, candidate)
+        .unwrap();
+}
+
+#[test]
+fn committed_settings_quiescence_never_reopens_admission() {
+    let coordinator = SettingsApplyCoordinator::default();
+    coordinator.quiesce().unwrap().commit_shutdown();
+    let (document, baseline, candidate) = documents();
+    let error = coordinator
+        .apply(&mut FakePorts::new(document, None), baseline, candidate)
+        .unwrap_err();
+    assert_eq!(
+        error.primary(),
+        "another settings apply is already in progress"
+    );
+}

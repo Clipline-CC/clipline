@@ -87,10 +87,15 @@ fn post_persistence_runtime_commit_is_not_fallible() {
 }
 
 #[test]
-fn shutdown_publication_uses_the_settings_apply_lease() {
+fn shutdown_publication_holds_reversible_settings_quiescence() {
     let source = app_source();
-    assert!(source.contains("fn publish_durable_settings_exclusive("));
-    assert!(source.contains(".with_exclusive(|| self.publish_durable_settings())"));
+    let quiescence = source
+        .find("struct DetectorQuiescence<R: Runtime>")
+        .expect("detector/settings shutdown guard");
+    let quiescence = &source[quiescence..];
+    assert!(quiescence.contains(".state::<SettingsApplyCoordinator>()"));
+    assert!(quiescence.contains(".quiesce()"));
+    assert!(quiescence.contains("settings.commit_shutdown()"));
 
     let shutdown = source
         .find("fn shutdown_app<R: Runtime>(")
@@ -98,6 +103,8 @@ fn shutdown_publication_uses_the_settings_apply_lease() {
     let update = source
         .find("impl<R: Runtime> UpdateShutdown")
         .expect("shipping updater shutdown");
-    assert!(source[shutdown..].contains("publish_durable_settings_exclusive("));
-    assert!(source[update..].contains("publish_durable_settings_exclusive("));
+    assert!(source[shutdown..].contains("DetectorQuiescence::begin(app)"));
+    assert!(source[shutdown..].contains(".publish_durable_settings()"));
+    assert!(source[update..].contains("DetectorQuiescence::begin(self.app)"));
+    assert!(source[update..].contains(".publish_durable_settings()"));
 }

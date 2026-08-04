@@ -205,7 +205,7 @@ fn scan_race_and_ten_thousand_save_storm_publish_only_the_latest_generation() {
     for marker in 2..=10_001 {
         let prepared = service.prepare_reconfiguration(config(marker)).unwrap();
         latest = prepared.generation();
-        prepared.commit();
+        let _ = prepared.commit();
     }
     probe.release();
     probe.wait_for_calls(2);
@@ -332,7 +332,7 @@ fn identical_failure_is_published_once_for_each_exact_configuration_generation()
     let first = service.active_generation();
     let prepared = service.prepare_reconfiguration(config(2)).unwrap();
     let second = prepared.generation();
-    prepared.commit();
+    let _ = prepared.commit();
     sink.wait_for_accepted(2);
     assert_eq!(
         sink.accepted
@@ -431,7 +431,7 @@ fn configuration_commit_linearizes_after_inflight_recorder_and_event_intent() {
     assert_eq!(service.active_generation(), initial);
     *sink.release.lock().unwrap() = true;
     sink.changed.notify_all();
-    commit.join().unwrap();
+    let _ = commit.join().unwrap();
     assert_eq!(service.active_generation(), replacement);
     service.shutdown().unwrap();
 }
@@ -508,7 +508,7 @@ fn reversible_quiescence_stops_publication_and_resume_uses_the_latest_config() {
     let attempts = sink.attempts.load(Ordering::Acquire);
     let prepared = service.prepare_reconfiguration(config(2)).unwrap();
     let latest = prepared.generation();
-    prepared.commit();
+    let _ = prepared.commit();
     std::thread::sleep(Duration::from_millis(20));
     assert_eq!(sink.attempts.load(Ordering::Acquire), attempts);
     service.resume().unwrap();

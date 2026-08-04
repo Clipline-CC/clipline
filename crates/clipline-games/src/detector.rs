@@ -305,7 +305,8 @@ impl PreparedDetectorReconfiguration {
     /// Commit is allocation-free and infallible while this exact receipt is
     /// live: shutdown refuses outstanding preparations and only one receipt
     /// may exist at a time.
-    pub fn commit(mut self) {
+    #[must_use]
+    pub fn commit(mut self) -> GameDetectorToken {
         let settings = self
             .settings
             .take()
@@ -326,7 +327,12 @@ impl PreparedDetectorReconfiguration {
             settings,
         };
         state.prepared_generation = None;
+        let token = GameDetectorToken {
+            generation: self.generation,
+            work_epoch: state.work_epoch,
+        };
         self.core.shared.changed.notify_all();
+        token
     }
 }
 
@@ -343,6 +349,7 @@ impl Drop for PreparedDetectorReconfiguration {
     }
 }
 
+#[derive(Clone)]
 pub struct GameDetectorService {
     core: Arc<DetectorCore>,
 }

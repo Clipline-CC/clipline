@@ -55,7 +55,7 @@ Detach advances both, releases every catalog and selection, and publishes one ho
 summary. Games all-target tests, strict package Clippy, workspace tests, and the final independent
 controller audit are green.
 
-The next detector foundation is staged but not yet cut over in Tauri.
+The shipping Tauri app now uses the shared detector foundation.
 `GameDetectorService` owns one joined process worker, a checked configuration generation, at most
 one staged reconfiguration and one recoverable result, and exact generation-plus-work-epoch
 checkpoint cancellation. Reversible quiescence advances the work epoch, so neither a pre-quiesce
@@ -67,8 +67,26 @@ mutex linearizes each accepted event/recorder intent against reconfiguration, qu
 shutdown. The 10,000-save storm publishes only the final generation; identical failures publish
 once again for each new generation. Settings apply now stages this receipt before recorder
 preparation, cancels it in exact reverse order on later failure, and commits it only after durable
-preferences and the prepared recorder. The shipping adapter deliberately uses a documented unit
-receipt until the next cutover commit, so the existing detached detector behavior remains intact.
+preferences and the prepared recorder.
+
+Tauri installs the service's exact generation-plus-work-epoch token in `RuntimeState`. A changed
+detection stages its presentation, osu! title event, checked recording generation, and any required
+recorder worker behind the recorder start latch while the old recorder remains installed. The
+bounded desktop publication is the commit point: `Full`, disconnect, stale runtime state, or
+recorder preparation failure leaves the active game, recording generation/sender, osu! history,
+and old worker unchanged. After acceptance, the state swap is atomic; only then is the old recorder
+stopped and joined and the still-current parked replacement released. Settings commits install the
+future detector token under the same runtime lock as authoritative preferences before activating
+the new detector configuration, so old results cannot cross the commit boundary. Recorder event-pump
+ownership is tagged by recording generation: delayed detector cleanup can take only its exact old
+pump and therefore cannot join a newer Settings-created recorder.
+
+Quit and updater preparation now hold one reversible detector/settings quiescence guard. It closes
+Settings admission, advances the detector work epoch, and invalidates runtime acceptance before
+durable publication. Any pre-exit failure reinstalls the new exact token before resuming the worker
+and reopening Settings; actual exit permanently closes Settings admission and joins the sole
+detector worker. `RunEvent::Exit` is an idempotent joined-shutdown backstop. The detached Tauri
+detector loop and duplicate application-side detection wrapper are gone.
 
 osu! settings now persist a checked nonzero account generation, migrate legacy profiles to generation
 1, retain shipping `u64` client-id semantics, and enforce per-field, cleanup-list, and 64 KiB aggregate
@@ -77,10 +95,8 @@ fence: the later osu service/CAS slice must enforce exact transitions under the 
 before asynchronous work trusts it. The explicit 100/125/150/200% DPI and negative-half-tie matrix is
 green.
 
-Next: finish Task 8 slice 4 by replacing Tauri's detached loop with this service, preparing detected
-game recorder replacements behind the existing start latch, fencing runtime acceptance, and wiring
-quit/update quiescence. Then implement the hotkey reducer, osu! secret/CAS/HTTP/enrichment slices,
-and the remaining thin Tauri compatibility cutover.
+Next: implement the Task 8 hotkey reducer, then the osu! secret/CAS/HTTP/enrichment slices and the
+remaining thin Tauri compatibility cutover.
 `artifacts/`, `paseo.json`, and unrelated poster formatting remain local and excluded.
 
 ## Checkpoint (2026-08-04): Slint replacement Milestone 8, Task 7 joined microphone monitor

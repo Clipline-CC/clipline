@@ -1194,6 +1194,19 @@ fn shared_games_foundation_has_one_owner_and_confines_windows_code() {
         );
     }
 
+    let app = fs::read_to_string(root.join("apps/clipline-app/src/app.rs"))
+        .expect("read shipping app source");
+    assert!(app.contains("GameDetectorService::start("));
+    assert!(app.contains("app.manage(detector)"));
+    assert!(
+        !app.contains("fn spawn_game_detector("),
+        "shipping app must not restore the detached detector loop"
+    );
+    assert!(
+        !adapters.contains("fn detect_active_game("),
+        "Tauri adapters must not restore the duplicate detector wrapper"
+    );
+
     let settings_games =
         fs::read_to_string(root.join("crates/clipline-settings/src/games.rs")).unwrap();
     assert_eq!(settings_games.matches("BUILT_IN_GAME_IDS").count(), 2);
