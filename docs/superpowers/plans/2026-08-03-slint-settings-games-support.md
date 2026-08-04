@@ -467,7 +467,9 @@ absolute memory, CPU, handle, worker, or lifecycle gates fail.
 - Create: `crates/clipline-games/tests/osu_enrichment.rs`
 - Modify: `crates/clipline-games/src/lib.rs`
 - Modify: `crates/clipline-games/src/identity.rs`
+- Modify: `crates/clipline-games/src/discovery.rs`
 - Modify: `crates/clipline-games/tests/identity.rs`
+- Modify: `crates/clipline-games/tests/discovery.rs`
 - Modify: `crates/clipline-games/src/windows/icon.rs`
 - Modify: `crates/clipline-settings/src/games.rs`
 - Modify: `crates/clipline-settings/src/osu.rs`
