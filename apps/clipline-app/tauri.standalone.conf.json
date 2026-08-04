@@ -3,12 +3,12 @@
   "bundle": {
     "resources": [
       "ffmpeg/",
-      "webview2-fixed/Microsoft.WebView2.FixedVersionRuntime.150.0.4078.83.x64/**/*"
+      "webview2-fixed/Microsoft.WebView2.FixedVersionRuntime.151.0.4129.59.x64/**/*"
     ],
     "windows": {
       "webviewInstallMode": {
         "type": "fixedRuntime",
-        "path": "./webview2-fixed/Microsoft.WebView2.FixedVersionRuntime.150.0.4078.83.x64",
+        "path": "./webview2-fixed/Microsoft.WebView2.FixedVersionRuntime.151.0.4129.59.x64",
         "silent": null
       }
     }

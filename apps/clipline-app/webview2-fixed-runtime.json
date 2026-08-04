@@ -1,9 +1,9 @@
 {
   "product": "Microsoft Edge WebView2 Fixed Version Runtime",
-  "version": "150.0.4078.83",
+  "version": "151.0.4129.59",
   "architecture": "x64",
-  "reviewed_on": "2026-08-02",
-  "review_due_on": "2026-09-01",
+  "reviewed_on": "2026-08-04",
+  "review_due_on": "2026-09-03",
   "max_review_age_days": 30,
   "source_url": "https://developer.microsoft.com/en-us/microsoft-edge/webview2/",
   "release_notes_url": "https://learn.microsoft.com/en-us/microsoft-edge/webview2/release-notes/"

@@ -4,6 +4,25 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-04): Nightly 0.1.45
+
+Plan: `docs/superpowers/plans/2026-08-04-nightly-0.1.45.md` (`59a358b`).
+
+Nightly 0.1.45 publishes **#138**, the review-playback first-frame flicker fix. New finalized
+recordings no longer preserve positive internal video gaps shorter than the preceding frame as
+empty MP4 edits. Instead, the shared writer extends that preceding frame through the unpresentable
+rounding gap while retaining leading gaps, frame-sized or larger gaps, all audio gaps, and backward
+timestamp rejection. Trims and selected-audio remuxes use the same normalized writer path.
+
+PR #138 merged to `develop` as `673cde5` after green Ubuntu, Windows, and Greptile checks and a
+non-blocking review. Microsoft's live Fixed Version selector now offers 151.0.4129.59 for x64, so
+the standalone runtime advances from 150.0.4078.83 for this release. The official x64 CAB is
+304,114,944 bytes with SHA-256
+`056858a027a7bf29893b6013c0eb0c6ea7e29755a20c9d043be469d9d78657dc`.
+
+Both release-input preflights, full workspace tests, fresh-cache warning-denied workspace Clippy,
+release-version metadata validation, and the release-only diff check are green.
+
 ## Checkpoint (2026-08-04): review video edit-list flicker
 
 Plan: `docs/superpowers/plans/2026-08-04-review-video-edit-list-flicker.md` (`77fa3de`).
