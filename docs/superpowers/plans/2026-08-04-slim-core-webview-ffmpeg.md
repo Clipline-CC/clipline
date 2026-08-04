@@ -319,15 +319,15 @@
 
 ### Task C1: Publish the new budgets
 
-- [ ] Update `ddoc.md` idle/installer budgets to match measured destroyable-shell reality and
+- [x] Update `ddoc.md` idle/installer budgets to match measured destroyable-shell reality and
       on-demand FFmpeg (PWS ≤120 hard / ≤90 stretch; regular setup ≤25 MB; FFmpeg optional).
-- [ ] Update `handoff.md` with the Core vs Optional map and the destroy/recreate + managed
+- [x] Update `handoff.md` with the Core vs Optional map and the destroy/recreate + managed
       FFmpeg operator notes.
-- [ ] Point release notes / nightly notes at the slim-core plan outcomes.
+- [x] Point release notes / nightly notes at the slim-core plan outcomes.
 
 ### Task C2: Stop conditions / follow-ups
 
-- [ ] Do not default disk replay on.
-- [ ] Do not remove Cloud from Core.
-- [ ] Deferred: FFmpeg-free shareable clipboard export; native HEVC/AV1 preview; custom ultra-minimal
+- [x] Do not default disk replay on.
+- [x] Do not remove Cloud from Core.
+- [x] Deferred: FFmpeg-free shareable clipboard export; native HEVC/AV1 preview; custom ultra-minimal
       FFmpeg build.
