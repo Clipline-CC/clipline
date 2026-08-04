@@ -256,6 +256,32 @@ fn dpi_conversion_round_trips_negative_points_and_positive_sizes() {
 }
 
 #[test]
+fn dpi_conversion_matches_js_rounding_at_common_scales_and_negative_half_ties() {
+    for (scale, expected_x) in [(1.0, -100), (1.25, -125), (1.5, -150), (2.0, -200)] {
+        let dpi = DpiScale::new(scale).unwrap();
+        assert_eq!(
+            dpi.logical_to_physical_point(LogicalPoint::new(-100.0, 100.0).unwrap())
+                .unwrap(),
+            PhysicalPoint {
+                x: expected_x,
+                y: -expected_x,
+            },
+            "{}% DPI",
+            scale * 100.0
+        );
+
+        // JavaScript Math.round(-1.5) is -1 and Math.round(0.5) is 1.
+        assert_eq!(
+            dpi.logical_to_physical_point(LogicalPoint::new(-1.5 / scale, 0.5 / scale).unwrap())
+                .unwrap(),
+            PhysicalPoint { x: -1, y: 1 },
+            "{}% DPI half ties",
+            scale * 100.0
+        );
+    }
+}
+
+#[test]
 fn dpi_conversion_is_checked_and_never_saturates_silently() {
     let dpi = DpiScale::new(2.0).unwrap();
     assert_eq!(

@@ -104,6 +104,7 @@ fn preference_cas_preserves_cloud_account_aba_upload_progress_and_osu_bytes() {
         ))
         .unwrap();
     let osu = OsuApiSettings {
+        account_generation: clipline_settings::OsuAccountGeneration::INITIAL,
         client_id: Some("12345".into()),
         user: Some("dain".into()),
         credential_target: Some(osu_credential_target("12345", "dain")),

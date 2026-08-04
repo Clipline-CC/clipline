@@ -38,6 +38,7 @@ fn backend_populated_document() -> AppSettings {
         },
     );
     document.osu = OsuApiSettings {
+        account_generation: clipline_settings::OsuAccountGeneration::INITIAL,
         client_id: Some("12345".into()),
         user: Some("player".into()),
         credential_target: Some("Clipline osu!:12345:player".into()),

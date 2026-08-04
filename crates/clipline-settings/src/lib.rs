@@ -53,7 +53,11 @@ pub use games::{
     OSU_ID, VALORANT_ID,
 };
 pub use hotkey::{normalize_hotkey, parse_hotkey};
-pub use osu::OsuApiSettings;
+pub use osu::{
+    OsuAccountGeneration, OsuAccountGenerationError, OsuApiSettings, MAX_OSU_CLIENT_ID_DIGITS,
+    MAX_OSU_CONNECTED_USERNAME_BYTES, MAX_OSU_CREDENTIAL_CLEANUP_TARGETS,
+    MAX_OSU_CREDENTIAL_TARGET_BYTES, MAX_OSU_PROFILE_BYTES, MAX_OSU_USER_BYTES,
+};
 pub use persistence::{
     audio_preview_cache_dir, cloud_paths_equivalent, icon_cache_dir, normalize_media_dir,
     normalize_replay_cache_dir, quota_bytes_from_gb, replay_cache_quota_bytes_from_gb,

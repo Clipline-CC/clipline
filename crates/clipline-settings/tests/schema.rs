@@ -1464,6 +1464,7 @@ fn cloud_settings_normalize_connected_display_name() {
 fn osu_api_settings_round_trip_without_secret() {
     let settings = AppSettings {
         osu: OsuApiSettings {
+            account_generation: clipline_settings::OsuAccountGeneration::INITIAL,
             client_id: Some("61835".into()),
             user: Some("3426414".into()),
             credential_target: Some("Clipline osu!:61835:3426414".into()),
