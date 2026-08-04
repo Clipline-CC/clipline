@@ -21,7 +21,7 @@ pub enum ApplyEventOutcome {
     Stale,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DispatchOutcome {
     pub effect: UiEffect,
     pub changed: bool,
@@ -160,7 +160,9 @@ where
             }
             UiAction::SaveReplay
             | UiAction::SetRecording { .. }
-            | UiAction::SetLifecycle { .. } => {}
+            | UiAction::SetLifecycle { .. }
+            | UiAction::StartMicrophoneMonitor { .. }
+            | UiAction::StopMicrophoneMonitor => {}
         }
         Ok(DispatchOutcome {
             effect,
@@ -240,6 +242,11 @@ where
             UiEvent::MicTestStopped { generation } => {
                 if microphone_event_is_stale(&next.microphone, generation) {
                     return Ok(ApplyEventOutcome::Stale);
+                }
+                if next.microphone.generation == generation
+                    && next.microphone.phase == MicrophonePhase::Failed
+                {
+                    return Ok(ApplyEventOutcome::Unchanged);
                 }
                 let replacement = MicrophoneSnapshot {
                     generation,

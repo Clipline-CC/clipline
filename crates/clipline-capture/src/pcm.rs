@@ -301,6 +301,15 @@ impl LoopbackAssembler {
 
     /// One 20 ms frame once enough samples are buffered.
     pub fn pop_frame(&mut self) -> Option<PcmFrame> {
+        let mut samples = Vec::with_capacity(FRAME_LEN);
+        let pts = self.pop_frame_into(&mut samples)?;
+        Some((pts, samples))
+    }
+
+    /// Append one 20 ms frame into caller-owned storage. The monitor path
+    /// reserves its fixed output once and uses this to avoid a per-poll frame
+    /// allocation; recording retains the owned-frame wrapper above.
+    pub fn pop_frame_into(&mut self, samples: &mut Vec<f32>) -> Option<f64> {
         if self.buffered.len() < FRAME_LEN {
             return None;
         }
@@ -314,9 +323,9 @@ impl LoopbackAssembler {
         }
         let anchor = self.anchors.front()?;
         let pts = anchor.pts_s + (pair_index - anchor.pair_index) as f64 / SAMPLE_RATE;
-        let frame: Vec<f32> = self.buffered.drain(..FRAME_LEN).collect();
+        samples.extend(self.buffered.drain(..FRAME_LEN));
         self.frames_popped += 1;
-        Some((pts, frame))
+        Some(pts)
     }
 
     fn written_pairs(&self) -> u64 {
@@ -371,11 +380,19 @@ impl LoopbackAssembler {
 pub fn extract_stereo(samples: &[f32], channels: u16) -> Vec<f32> {
     let ch = channels.max(1) as usize;
     let mut out = Vec::with_capacity(samples.len() / ch * 2);
+    extract_stereo_into(samples, channels, &mut out);
+    out
+}
+
+/// Extract stereo into caller-owned storage so real-time monitor paths can
+/// reserve once at endpoint activation.
+pub fn extract_stereo_into(samples: &[f32], channels: u16, out: &mut Vec<f32>) {
+    out.clear();
+    let ch = channels.max(1) as usize;
     for frame in samples.chunks_exact(ch) {
         out.push(frame[0]);
         out.push(if ch >= 2 { frame[1] } else { frame[0] });
     }
-    out
 }
 
 /// Average every source channel into a centered stereo pair. A stereo mic
@@ -383,12 +400,19 @@ pub fn extract_stereo(samples: &[f32], channels: u16) -> Vec<f32> {
 pub fn extract_mono_centered(samples: &[f32], channels: u16) -> Vec<f32> {
     let ch = channels.max(1) as usize;
     let mut out = Vec::with_capacity(samples.len() / ch * 2);
+    extract_mono_centered_into(samples, channels, &mut out);
+    out
+}
+
+/// Center all source channels into caller-owned stereo storage.
+pub fn extract_mono_centered_into(samples: &[f32], channels: u16, out: &mut Vec<f32>) {
+    out.clear();
+    let ch = channels.max(1) as usize;
     for frame in samples.chunks_exact(ch) {
         let mono = frame.iter().sum::<f32>() / ch as f32;
         out.push(mono);
         out.push(mono);
     }
-    out
 }
 
 pub fn apply_gain(samples: &mut [f32], gain: f32) {
@@ -418,25 +442,33 @@ impl StereoResampler {
     }
 
     pub fn resample(&mut self, samples: &[f32]) -> Vec<f32> {
+        let mut out = Vec::new();
+        self.resample_into(samples, &mut out);
+        out
+    }
+
+    /// Stateful conversion into caller-owned storage. Callers that reserve
+    /// [`maximum_resampled_stereo_samples`] once do not allocate per chunk.
+    pub fn resample_into(&mut self, samples: &[f32], out: &mut Vec<f32>) {
+        out.clear();
         if samples.is_empty() || self.from_rate == 0 || self.to_rate == 0 {
-            return Vec::new();
+            return;
         }
         let in_frames = samples.len() / 2;
         if in_frames == 0 {
-            return Vec::new();
+            return;
         }
         if self.from_rate == self.to_rate {
             self.input_frames_seen += in_frames as u64;
             self.next_source_frame = self.input_frames_seen as f64;
             self.last_frame = Some(last_stereo_frame(samples, in_frames));
-            return samples[..in_frames * 2].to_vec();
+            out.extend_from_slice(&samples[..in_frames * 2]);
+            return;
         }
 
         let chunk_start = self.input_frames_seen as f64;
         let chunk_end = chunk_start + in_frames as f64;
         let step = self.from_rate as f64 / self.to_rate as f64;
-        let mut out = Vec::new();
-
         while self.next_source_frame < chunk_end - 1e-12 {
             let relative_pos = self.next_source_frame - chunk_start;
             let [left, right] = self.sample_at(samples, in_frames, relative_pos);
@@ -447,7 +479,6 @@ impl StereoResampler {
 
         self.input_frames_seen += in_frames as u64;
         self.last_frame = Some(last_stereo_frame(samples, in_frames));
-        out
     }
 
     fn sample_at(&self, samples: &[f32], in_frames: usize, relative_pos: f64) -> [f32; 2] {
@@ -472,6 +503,25 @@ impl StereoResampler {
             samples[a * 2 + 1] + (samples[b * 2 + 1] - samples[a * 2 + 1]) * t,
         ]
     }
+}
+
+/// Conservative output bound for one stereo resampler call, including the
+/// one-frame interpolation carry at each chunk boundary.
+#[must_use]
+pub fn maximum_resampled_stereo_samples(
+    input_frames: usize,
+    from_rate: u32,
+    to_rate: u32,
+) -> Option<usize> {
+    if from_rate == 0 || to_rate == 0 {
+        return Some(0);
+    }
+    let frames = input_frames
+        .checked_mul(to_rate as usize)?
+        .checked_add(from_rate as usize - 1)?
+        .checked_div(from_rate as usize)?
+        .checked_add(1)?;
+    frames.checked_mul(2)
 }
 
 fn last_stereo_frame(samples: &[f32], in_frames: usize) -> [f32; 2] {
@@ -821,6 +871,24 @@ mod tests {
         let up = resample_stereo_linear(&[0.0, 1.0, 1.0, 0.0], 24_000, 48_000);
         assert_eq!(up.len(), 8);
         assert_eq!(&up[..4], &[0.0, 1.0, 0.5, 0.5]);
+    }
+
+    #[test]
+    fn caller_owned_conversion_buffers_keep_stable_capacity() {
+        let input = vec![0.25; 960 * 2];
+        let mut stereo = Vec::with_capacity(input.len());
+        let stereo_capacity = stereo.capacity();
+        let resampled_capacity = maximum_resampled_stereo_samples(960, 44_100, 48_000).unwrap();
+        let mut resampled = Vec::with_capacity(resampled_capacity);
+        let mut converter = StereoResampler::new(44_100, 48_000);
+
+        for _ in 0..100 {
+            extract_stereo_into(&input, 2, &mut stereo);
+            converter.resample_into(&stereo, &mut resampled);
+            assert_eq!(stereo.capacity(), stereo_capacity);
+            assert_eq!(resampled.capacity(), resampled_capacity);
+            assert!(resampled.len() <= resampled_capacity);
+        }
     }
 
     #[test]

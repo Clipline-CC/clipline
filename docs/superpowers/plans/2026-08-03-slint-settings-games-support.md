@@ -407,16 +407,23 @@ absolute memory, CPU, handle, worker, or lifecycle gates fail.
 - Create: `crates/clipline-recorder/tests/windows_microphone.rs`
 - Modify: `crates/clipline-recorder/Cargo.toml`
 - Modify: `crates/clipline-recorder/src/lib.rs`
+- Modify: `crates/clipline-capture/src/pcm.rs`
+- Modify: `crates/clipline-capture/src/windows/mod.rs`
 - Modify: `crates/clipline-capture/src/windows/wasapi.rs`
 - Modify: `crates/clipline-playback/src/windows/wasapi_render.rs`
+- Modify: `crates/clipline-playback/tests/windows_audio.rs`
 - Modify: `crates/clipline-desktop/src/action.rs`
 - Modify: `crates/clipline-desktop/src/event.rs`
 - Modify: `crates/clipline-desktop/src/channel.rs`
 - Modify: `crates/clipline-desktop/src/controller.rs`
+- Modify: `crates/clipline-desktop/src/lib.rs`
 - Modify: `crates/clipline-desktop/tests/channel.rs`
 - Modify: `crates/clipline-desktop/tests/controller.rs`
+- Modify: `crates/clipline-desktop/tests/contracts.rs`
 - Modify: `apps/clipline-app/src/app.rs`
 - Modify: `apps/clipline-app/src/desktop/tauri_sink.rs`
+- Modify: `apps/clipline-slint-spike/Cargo.toml`
+- Modify: `apps/clipline-slint-spike/src/shell.rs`
 
 **Test first**
 

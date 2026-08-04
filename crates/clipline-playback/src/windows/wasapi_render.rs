@@ -153,6 +153,15 @@ impl WindowsWasapiRenderer {
         self.telemetry.clone()
     }
 
+    /// Check whether Windows moved the healthy default render role to a
+    /// different endpoint. Invalidation HRESULTs alone do not cover this
+    /// user-visible device-switch case.
+    pub fn default_endpoint_changed(&self) -> Result<bool, BackendError> {
+        current_default_render_endpoint_id()
+            .map(|current| current != self.telemetry.endpoint_id)
+            .map_err(|error| operation_error("query the default render endpoint", &error))
+    }
+
     /// Recreates only the audio endpoint and assigns it a process-unique epoch.
     /// Timeline rebasing remains the neutral scheduler's responsibility.
     pub fn reopen(&mut self, token: PipelineToken) -> Result<(), BackendError> {
@@ -716,6 +725,16 @@ fn activate_default_endpoint() -> windows_core::Result<ActivatedEndpoint> {
             initialization_path,
             engine_period_frames,
         })
+    }
+}
+
+fn current_default_render_endpoint_id() -> windows_core::Result<String> {
+    // SAFETY: standard MMDevice enumeration and owned task-string conversion.
+    unsafe {
+        let enumerator: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+        let device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole)?;
+        CoTaskString::new(device.GetId()?)?.to_string()
     }
 }
 

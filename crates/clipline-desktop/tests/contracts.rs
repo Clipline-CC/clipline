@@ -1,9 +1,9 @@
 use clipline_desktop::{
     CatalogSummarySnapshot, CatalogSummarySource, CloudAccountOwner, CloudAccountScope,
     CloudUploadProgress, CloudUploadUpdateKind, DesktopController, GameDetection, Generation,
-    GenerationError, MicMonitor, RecorderEvent, Revision, UiAction, UiEffect, UiEvent,
-    WindowLifecycleMode, WindowLifecycleSnapshot, MAX_CLOUD_ACCOUNT_KEY_BYTES,
-    MAX_MIC_MONITOR_SAMPLES,
+    GenerationError, MicMonitor, MicrophoneMonitorOutput, MicrophoneMonitorRequest, RecorderEvent,
+    Revision, UiAction, UiEffect, UiEvent, WindowLifecycleMode, WindowLifecycleSnapshot,
+    MAX_CLOUD_ACCOUNT_KEY_BYTES, MAX_MIC_MONITOR_SAMPLES,
 };
 use serde_json::json;
 
@@ -27,6 +27,23 @@ fn actions_are_owned_typed_and_map_to_shell_independent_effects() {
     assert_eq!(
         serde_json::to_value(save).unwrap(),
         json!({ "kind": "save_replay" })
+    );
+    let request = MicrophoneMonitorRequest {
+        device_id: Some("mic-id".into()),
+        volume: 0.5,
+        mono: true,
+        output: MicrophoneMonitorOutput::NativeRenderer,
+    };
+    assert_eq!(
+        UiAction::StartMicrophoneMonitor {
+            request: request.clone(),
+        }
+        .effect(),
+        UiEffect::StartMicrophoneMonitor { request }
+    );
+    assert_eq!(
+        UiAction::StopMicrophoneMonitor.effect(),
+        UiEffect::StopMicrophoneMonitor
     );
 }
 

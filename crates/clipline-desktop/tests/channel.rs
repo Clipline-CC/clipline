@@ -542,14 +542,14 @@ fn coalescing_preserves_monotonic_delivery_order() {
 }
 
 #[test]
-fn capacity_reserves_one_terminal_slot_and_full_is_atomic() {
+fn capacity_reserves_a_durable_barrier_and_the_microphone_terminal_pair() {
     let (sender, receiver) = ui_event_channel();
     let account = owner("account-a", 1);
     sender
         .try_publish(account_changed(account.clone()))
         .unwrap();
     receiver.try_recv().unwrap();
-    for index in 0..(UI_EVENT_CAPACITY - 1) {
+    for index in 0..UI_EVENT_CAPACITY {
         sender
             .try_publish(cloud_state(
                 account.clone(),
@@ -564,21 +564,28 @@ fn capacity_reserves_one_terminal_slot_and_full_is_atomic() {
             .try_publish(cloud(1, format!("clip-{index}"), index as u64))
             .unwrap();
     }
-    assert_eq!(receiver.len(), UI_EVENT_CAPACITY - 1);
+    assert_eq!(receiver.len(), UI_EVENT_CAPACITY);
     assert_eq!(
         sender.try_publish(cloud(1, "overflow", 1)),
         Err(UiEventSendError::Full {
             capacity: UI_EVENT_CAPACITY
         })
     );
-    assert_eq!(receiver.len(), UI_EVENT_CAPACITY - 1);
+    assert_eq!(receiver.len(), UI_EVENT_CAPACITY);
 
+    sender
+        .try_publish(UiEvent::MicTestError {
+            generation: Generation::new(3),
+            message: "device failed".into(),
+        })
+        .unwrap();
+    assert_eq!(receiver.len(), UI_EVENT_CAPACITY + 1);
     sender
         .try_publish(UiEvent::MicTestStopped {
             generation: Generation::new(3),
         })
         .unwrap();
-    assert_eq!(receiver.len(), UI_EVENT_CAPACITY);
+    assert_eq!(receiver.len(), UI_EVENT_CAPACITY + 2);
     assert_eq!(
         sender.try_publish(UiEvent::UserError {
             message: "still full".to_owned(),
@@ -587,7 +594,7 @@ fn capacity_reserves_one_terminal_slot_and_full_is_atomic() {
             capacity: UI_EVENT_CAPACITY
         })
     );
-    assert_eq!(receiver.len(), UI_EVENT_CAPACITY);
+    assert_eq!(receiver.len(), UI_EVENT_CAPACITY + 2);
 }
 
 #[test]

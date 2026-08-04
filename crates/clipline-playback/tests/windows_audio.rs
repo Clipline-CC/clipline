@@ -80,6 +80,12 @@ fn default_renderer_is_bounded_clocked_and_reopenable() {
     assert_eq!(telemetry.buffer_frames, info.buffer_frames);
     assert_eq!(telemetry.endpoint_epoch, info.endpoint_epoch);
     assert!(!telemetry.endpoint_id().is_empty());
+    assert!(
+        !renderer
+            .default_endpoint_changed()
+            .expect("recheck stable default render endpoint"),
+        "the live default endpoint should match the renderer just opened"
+    );
     assert!(!telemetry.device_format().is_empty());
     assert!(telemetry.device_sample_rate > 0);
     assert!(telemetry.device_channels > 0);

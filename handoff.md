@@ -4,6 +4,37 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-04): Slint replacement Milestone 8, Task 7 joined microphone monitor
+
+Milestone 8 Task 7 is implemented. `clipline-recorder::MicrophoneMonitorService` owns one joined
+worker with checked generations, synchronous replacement/stop/shutdown, panic containment, and
+exact Error-then-Stopped terminal publication. Tauri mode preserves the bounded legacy PCM event
+shape without opening a renderer. Native mode publishes compact levels and writes directly to
+`WindowsWasapiRenderer`, so Slint never queues PCM or double-plays it. Background, window detach,
+quit, updater preparation, and process exit now wait until the microphone source, renderer, and
+worker are dropped.
+
+The Windows capture path is Opus-free for monitoring and reuses activation-sized decode, stereo,
+and resampling scratch. It caps endpoint packets, formats, output, and retained backlog (two 20 ms
+frames), rejects hostile shapes before allocation, and follows healthy default capture/render
+endpoint changes. One thread-affine, last-dropped COM apartment owns each capture for its full
+lifetime; recovery and periodic identity checks no longer increment COM initialization counts.
+Short-lived enumeration probes retain their own balanced apartment.
+
+Desktop delivery keeps its 128-event compatibility capacity plus exactly two physical terminal
+slots for microphone Error and Stopped. The controller preserves the bounded failure snapshot while
+the Tauri adapter still emits both legacy events. Neutral coverage includes replacement during
+activation, cancellation at every blocking stage, source and renderer failures, panic containment,
+backpressure, 100 start/stop cycles, shutdown, and no samples after stop. The live Windows device
+test recorded the actual default 48 kHz stereo-f32 microphone path and renderer epoch. Validation is
+green: `cargo test --workspace`, warning-denied workspace Clippy, the complete Slint-spike test
+workspace, and warning-denied Slint-spike Clippy. The final read-only audit found no P0/P1. The
+installed Clipline process and profile remained untouched; `artifacts/` and `paseo.json` remain
+local scratch and are excluded.
+
+Next: Task 8, implement the bounded Games/custom-game and osu! services, keeping credentials out of
+desktop snapshots and Slint models.
+
 ## Checkpoint (2026-08-04): Slint replacement Milestone 8, Task 6 native playback truth
 
 Milestone 8 Task 6 is implemented. `clipline-playback::PlaybackCapabilities` reports H.264 only as

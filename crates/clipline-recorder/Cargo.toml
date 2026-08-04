@@ -11,6 +11,7 @@ clipline-games = { path = "../clipline-games" }
 clipline-lol = { path = "../clipline-lol" }
 clipline-settings = { path = "../clipline-settings" }
 serde = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = "0.1"
 

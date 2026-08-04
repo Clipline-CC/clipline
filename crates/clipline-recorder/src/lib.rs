@@ -2,6 +2,7 @@
 
 pub mod marker_source;
 pub mod media_root;
+pub mod microphone;
 pub mod probe;
 #[cfg(windows)]
 pub mod restart;

@@ -325,7 +325,7 @@ mod windows_runtime {
     use std::time::Duration;
 
     use clipline_desktop::{
-        CloudAccountOwner as DesktopCloudAccountOwner, CloudAccountScope, Generation,
+        CloudAccountOwner as DesktopCloudAccountOwner, CloudAccountScope, Generation, MicMonitor,
         RecorderEvent, Revision, UiEvent, WindowLifecycleMode, WindowLifecycleSnapshot,
     };
     use clipline_library::{
@@ -338,6 +338,10 @@ mod windows_runtime {
         WindowAttachmentGeneration, WindowWorkToken, CATALOG_RESULT_CAPACITY,
     };
     use clipline_playback::windows::{WindowsD3D11Publisher, WindowsVideoHost};
+    use clipline_recorder::microphone::{
+        MicrophoneMonitorEvent, MicrophoneMonitorEventSink, MicrophoneMonitorService,
+        WindowsMicrophoneMonitorFactory,
+    };
     use clipline_settings::LibraryConfig;
     use clipline_shell::activation::ActivationCommand;
     use clipline_shell::windows::activation::{
@@ -442,6 +446,7 @@ mod windows_runtime {
         hotkeys: Option<WindowsHotkeyService>,
         tray: SpikeTray,
         desktop: SlintDesktopAdapter,
+        microphone_monitor: MicrophoneMonitorService,
         _settings: CandidateSettings,
         cloud_thumbnails: Option<CloudThumbnailImageOwner>,
         cloud_profile: Option<CloudProfileImageOwner>,
@@ -470,6 +475,7 @@ mod windows_runtime {
 
     impl Drop for SlintShell {
         fn drop(&mut self) {
+            let _ = self.microphone_monitor.shutdown();
             if let Some(resources) = self.window.as_ref() {
                 resources
                     .window
@@ -502,6 +508,45 @@ mod windows_runtime {
                 }
             }
             let _ = self.catalog_cloud.shutdown_cloud();
+        }
+    }
+
+    struct SlintMicrophoneMonitorSink(clipline_desktop::UiEventSender);
+
+    impl MicrophoneMonitorEventSink for SlintMicrophoneMonitorSink {
+        fn try_publish(&self, event: MicrophoneMonitorEvent) -> Result<(), String> {
+            let event = match event {
+                MicrophoneMonitorEvent::Monitor {
+                    generation,
+                    rms,
+                    peak,
+                    sample_count,
+                    pcm_i16,
+                } => UiEvent::MicMonitor {
+                    generation: Generation::new(generation),
+                    monitor: MicMonitor::from_parts(
+                        rms,
+                        peak,
+                        sample_count,
+                        pcm_i16.unwrap_or_default(),
+                    )
+                    .map_err(|error| error.to_string())?,
+                },
+                MicrophoneMonitorEvent::Error {
+                    generation,
+                    message,
+                } => UiEvent::MicTestError {
+                    generation: Generation::new(generation),
+                    message,
+                },
+                MicrophoneMonitorEvent::Stopped { generation } => UiEvent::MicTestStopped {
+                    generation: Generation::new(generation),
+                },
+            };
+            self.0
+                .try_publish(event)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
         }
     }
 
@@ -714,6 +759,10 @@ mod windows_runtime {
         tray.set_tray_icon(tray_icon());
         let desktop = SlintDesktopAdapter::start_with_tray(tray.as_weak())?;
         publish_recorder_snapshot(&desktop)?;
+        let microphone_monitor = MicrophoneMonitorService::new(
+            Arc::new(WindowsMicrophoneMonitorFactory),
+            Arc::new(SlintMicrophoneMonitorSink(desktop.event_sender())),
+        );
         let upload_fanout =
             NativeUploadEventFanout::new(catalog_sender.clone(), desktop.event_sender());
         let (cloud, cloud_owner, cloud_preferences, cloud_startup_error) =
@@ -842,6 +891,7 @@ mod windows_runtime {
             hotkeys: Some(hotkeys),
             tray,
             desktop,
+            microphone_monitor,
             _settings: settings,
             cloud_thumbnails,
             cloud_profile,
@@ -2317,6 +2367,11 @@ mod windows_runtime {
                 return Err("window teardown requested for a stale attachment".into());
             }
         }
+        runtime
+            .borrow()
+            .microphone_monitor
+            .stop()
+            .map_err(|error| format!("stop microphone monitor before window detach: {error}"))?;
         {
             let mut runtime_ref = runtime.borrow_mut();
             publish_lifecycle(&mut runtime_ref, WindowLifecycleMode::Tray)?;
@@ -2489,6 +2544,12 @@ mod windows_runtime {
             if let Err(error) = drop_window(runtime, attachment) {
                 remember_first_error(&mut first_error, error);
             }
+        }
+        if let Err(error) = runtime.borrow().microphone_monitor.shutdown() {
+            remember_first_error(
+                &mut first_error,
+                format!("shut down microphone monitor: {error}"),
+            );
         }
         let (
             hotkeys,

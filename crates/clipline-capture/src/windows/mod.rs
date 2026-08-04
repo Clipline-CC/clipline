@@ -14,7 +14,7 @@ pub mod window;
 
 pub use dxgi_dup::DxgiDuplicationCapture;
 pub use mft::{MftConfig, MftH264Encoder, SoftwareMftH264Encoder};
-pub use wasapi::WasapiLoopback;
+pub use wasapi::{WasapiLoopback, WasapiMicrophoneMonitor, WasapiMicrophoneMonitorInfo};
 pub use wgc::WgcCapture;
 pub use window::{
     enumerate_capturable_windows, enumerate_capturable_windows_with_checkpoint,

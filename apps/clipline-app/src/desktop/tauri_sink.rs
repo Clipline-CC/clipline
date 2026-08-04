@@ -98,7 +98,22 @@ pub fn spawn_event_pump<R: Runtime>(
                                 }
                             }
                         }
-                        Ok(ApplyEventOutcome::Unchanged | ApplyEventOutcome::Stale) => {
+                        Ok(ApplyEventOutcome::Unchanged) => {
+                            let snapshot = state.snapshot();
+                            emit_sequence(&app, update.sequence, &snapshot);
+                            if should_emit_unchanged_event(&update.event) {
+                                for emission in tauri_emissions(&update.event) {
+                                    if let Err(error) = app.emit(emission.name, emission.payload) {
+                                        tracing::error!(
+                                            event = "tauri_ui_event_emit_failed",
+                                            name = emission.name,
+                                            error = %error
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        Ok(ApplyEventOutcome::Stale) => {
                             let snapshot = state.snapshot();
                             emit_sequence(&app, update.sequence, &snapshot);
                         }
@@ -114,6 +129,10 @@ pub fn spawn_event_pump<R: Runtime>(
         })
         .map(|_| ())
         .map_err(|error| format!("spawn Tauri UI event pump: {error}"))
+}
+
+fn should_emit_unchanged_event(event: &UiEvent) -> bool {
+    matches!(event, UiEvent::MicTestStopped { .. })
 }
 
 fn emit_sequence<R: Runtime>(
@@ -156,10 +175,9 @@ fn tauri_emissions(event: &UiEvent) -> Vec<TauriEmission> {
         ),
         UiEvent::MicMonitor { monitor, .. } => serde_json::to_value(monitor)
             .map_or_else(|_| Vec::new(), |payload| one("mic-test", payload)),
-        UiEvent::MicTestError { message, .. } => vec![
-            emission("mic-test-error", Value::String(message.clone())),
-            emission("mic-test-stopped", Value::Null),
-        ],
+        UiEvent::MicTestError { message, .. } => {
+            one("mic-test-error", Value::String(message.clone()))
+        }
         UiEvent::MicTestStopped { .. } => one("mic-test-stopped", Value::Null),
         UiEvent::GameDetection { detection, .. } => serde_json::to_value(detection)
             .map_or_else(|_| Vec::new(), |payload| one("game-detection", payload)),
@@ -192,7 +210,7 @@ mod tests {
     };
     use serde_json::json;
 
-    use super::{tauri_emissions, DesktopEventSequence};
+    use super::{should_emit_unchanged_event, tauri_emissions, DesktopEventSequence};
     use crate::desktop::DesktopState;
     use crate::settings::AppSettings;
 
@@ -261,13 +279,27 @@ mod tests {
 
     #[test]
     fn microphone_failure_preserves_legacy_error_then_stopped_order() {
-        let emissions = tauri_emissions(&UiEvent::MicTestError {
+        let mut emissions = tauri_emissions(&UiEvent::MicTestError {
             generation: Generation::new(2),
             message: "device lost".into(),
         });
+        emissions.extend(tauri_emissions(&UiEvent::MicTestStopped {
+            generation: Generation::new(2),
+        }));
         assert_eq!(emissions.len(), 2);
         assert_eq!(emissions[0].name, "mic-test-error");
         assert_eq!(emissions[1].name, "mic-test-stopped");
+    }
+
+    #[test]
+    fn accepted_unchanged_microphone_stop_is_the_only_forwarded_unchanged_event() {
+        assert!(should_emit_unchanged_event(&UiEvent::MicTestStopped {
+            generation: Generation::new(2),
+        }));
+        assert!(!should_emit_unchanged_event(&UiEvent::MicMonitor {
+            generation: Generation::new(2),
+            monitor: clipline_desktop::MicMonitor::new(0.0, 0.0, Vec::new()).unwrap(),
+        }));
     }
 
     #[test]

@@ -11,6 +11,10 @@ use crate::{
 };
 
 pub const UI_EVENT_CAPACITY: usize = 128;
+/// Fixed terminal headroom beyond the legacy 128-event producer budget.
+/// This keeps one microphone Error -> Stopped pair admissible even when an
+/// existing frontend has filled the compatibility queue completely.
+pub const UI_EVENT_MAX_BUFFERED: usize = UI_EVENT_CAPACITY + 2;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SequencedUiEvent {
@@ -105,6 +109,7 @@ struct ChannelState {
     receiver_connected: bool,
     sender_count: usize,
     generations: HashMap<GenerationDomain, Generation>,
+    microphone_error: Option<Generation>,
     microphone_terminal: Option<Generation>,
     lifecycle: Option<(Revision, WindowLifecycleMode)>,
     catalog: Option<CatalogSummarySnapshot>,
@@ -185,11 +190,7 @@ impl UiEventSender {
                     (coalescing_key(&queued.event).as_ref() == Some(&key)).then_some(index)
                 })
         });
-        let limit = if uses_reserved_slot(&event) {
-            UI_EVENT_CAPACITY
-        } else {
-            UI_EVENT_CAPACITY - 1
-        };
+        let limit = queue_limit(&event);
         if replacement.is_none() && state.queue.len() >= limit {
             return Err(UiEventSendError::Full {
                 capacity: UI_EVENT_CAPACITY,
@@ -408,15 +409,20 @@ fn validate_generation(state: &ChannelState, event: &UiEvent) -> Result<(), UiEv
             return Err(UiEventSendError::Stale { current, received });
         }
     }
-    if domain == GenerationDomain::Microphone
-        && state
+    if domain == GenerationDomain::Microphone {
+        if let Some(current) = state
             .microphone_terminal
-            .is_some_and(|current| received <= current)
-    {
-        return Err(UiEventSendError::Stale {
-            current: state.microphone_terminal.unwrap_or(received),
-            received,
-        });
+            .filter(|current| received <= *current)
+        {
+            return Err(UiEventSendError::Stale { current, received });
+        }
+        if let Some(current) = state.microphone_error {
+            let allowed_stop =
+                received == current && matches!(event, UiEvent::MicTestStopped { .. });
+            if received < current || (received == current && !allowed_stop) {
+                return Err(UiEventSendError::Stale { current, received });
+            }
+        }
     }
     Ok(())
 }
@@ -451,9 +457,10 @@ fn record_generation(state: &mut ChannelState, event: &UiEvent) {
             .generations
             .retain(|domain, _| !matches!(domain, GenerationDomain::CloudUpload(_, _)));
     }
-    if let UiEvent::MicTestError { generation, .. } | UiEvent::MicTestStopped { generation } = event
-    {
-        state.microphone_terminal = Some(*generation);
+    match event {
+        UiEvent::MicTestError { generation, .. } => state.microphone_error = Some(*generation),
+        UiEvent::MicTestStopped { generation } => state.microphone_terminal = Some(*generation),
+        _ => {}
     }
 }
 
@@ -536,15 +543,10 @@ fn validate_probe_transition(
     Ok(())
 }
 
-fn uses_reserved_slot(event: &UiEvent) -> bool {
-    is_durable_barrier(event)
-        || matches!(
-            event,
-            UiEvent::WindowLifecycle {
-                snapshot: crate::WindowLifecycleSnapshot {
-                    backgrounded: true,
-                    ..
-                }
-            }
-        )
+fn queue_limit(event: &UiEvent) -> usize {
+    match event {
+        UiEvent::MicTestError { .. } => UI_EVENT_CAPACITY + 1,
+        UiEvent::MicTestStopped { .. } => UI_EVENT_MAX_BUFFERED,
+        _ => UI_EVENT_CAPACITY,
+    }
 }

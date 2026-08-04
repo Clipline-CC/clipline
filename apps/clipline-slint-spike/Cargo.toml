@@ -25,6 +25,7 @@ clipline-library = { path = "../../crates/clipline-library" }
 clipline-shell = { path = "../../crates/clipline-shell" }
 clipline-mp4 = { path = "../../crates/clipline-mp4" }
 clipline-playback = { path = "../../crates/clipline-playback" }
+clipline-recorder = { path = "../../crates/clipline-recorder" }
 clipline-settings = { path = "../../crates/clipline-settings" }
 raw-window-handle = "0.6"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }

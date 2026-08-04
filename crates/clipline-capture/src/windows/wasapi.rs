@@ -2,8 +2,10 @@
 //! (ddoc §10), QPC-stamped against the shared capture clock, assembled
 //! into 20 ms frames and Opus-encoded behind `AudioSource`.
 
+use std::marker::PhantomData;
 use std::mem::{size_of, ManuallyDrop};
 use std::path::Path;
+use std::rc::Rc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -47,10 +49,12 @@ use clipline_mp4::AudioTrackConfig;
 
 use crate::clock::RelativeClock;
 use crate::diagnostics::{emit_diagnostic, CaptureDiagnostic, DiagnosticRateLimiter};
-use crate::opus::{OpusFrameEncoder, FRAME_DURATION_S};
+use crate::opus::{OpusFrameEncoder, FRAME_DURATION_S, FRAME_LEN};
 use crate::pcm::{
-    apply_gain, extract_mono_centered, extract_stereo, DevicePacketPlacement, DevicePacketTimeline,
-    DeviceReactivation, DiscontinuityFade, LoopbackAssembler, PcmFrame, StereoResampler,
+    apply_gain, extract_mono_centered, extract_mono_centered_into, extract_stereo,
+    extract_stereo_into, maximum_resampled_stereo_samples, DevicePacketPlacement,
+    DevicePacketTimeline, DeviceReactivation, DiscontinuityFade, LoopbackAssembler, PcmFrame,
+    StereoResampler,
 };
 use crate::traits::{AudioPacket, AudioSource, CaptureError};
 
@@ -60,9 +64,16 @@ const PROCESS_LOOPBACK_ACTIVATION_TIMEOUT: Duration = Duration::from_millis(1500
 const AUDIO_DELIVERY_HEADROOM_S: f64 = FRAME_DURATION_S + 0.010;
 const TERMINAL_AUDIO_DRAIN_S: f64 = FRAME_DURATION_S * 3.0;
 const DEVICE_REACTIVATION_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+const DEFAULT_ENDPOINT_RECHECK_INTERVAL: Duration = Duration::from_secs(1);
 pub const MAX_AUDIO_ENDPOINTS_PER_DIRECTION: usize = 128;
 pub const MAX_AUDIO_ENDPOINT_TEXT_BYTES: usize = 16 * 1024;
 pub const MAX_AUDIO_ENDPOINT_CATALOG_BYTES: usize = 512 * 1024;
+pub const MAX_MONITOR_SAMPLES: usize = 4_096;
+const MAX_MONITOR_BACKLOG_SAMPLES: usize = FRAME_LEN * 2;
+const MAX_MONITOR_PACKET_FRAMES: usize = 192_000;
+const MAX_MONITOR_SOURCE_CHANNELS: usize = 32;
+const MIN_MONITOR_SOURCE_SAMPLE_RATE: u32 = 8_000;
+const MAX_MONITOR_SOURCE_SAMPLE_RATE: u32 = 384_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct AudioDeviceInfo {
@@ -96,12 +107,6 @@ pub struct AudioLevel {
     pub rms: f32,
     pub peak: f32,
     pub sample_count: usize,
-}
-
-#[derive(Debug, Clone)]
-pub struct WasapiMonitorChunk {
-    pub level: AudioLevel,
-    pub samples: Vec<f32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,7 +189,6 @@ impl EndpointTarget {
                 selected_endpoint_fallback_allowed(device_id.as_deref(), phase),
             ),
             Self::ProcessOutput { pid, .. } => {
-                init_com()?;
                 let client = activate_process_loopback_client(*pid)?;
                 let (streamflags, buffer_duration_100ns) = process_loopback_stream_config();
                 initialize_client(
@@ -216,6 +220,16 @@ impl EndpointTarget {
             Self::OutputLoopback { .. } | Self::Microphone { .. } => true,
         }
     }
+
+    fn default_dataflow(&self) -> Option<EDataFlow> {
+        match self {
+            Self::OutputLoopback { device_id } if device_id.is_none() => Some(eRender),
+            Self::Microphone { device_id, .. } if device_id.is_none() => Some(eCapture),
+            Self::OutputLoopback { .. } | Self::Microphone { .. } | Self::ProcessOutput { .. } => {
+                None
+            }
+        }
+    }
 }
 
 /// A freshly activated and started WASAPI endpoint.
@@ -224,6 +238,7 @@ struct ActivatedDevice {
     capture: IAudioCaptureClient,
     mix: MixFormat,
     endpoint_id: Option<String>,
+    buffer_frames: usize,
 }
 
 impl ActivatedDevice {
@@ -240,7 +255,6 @@ fn activate_endpoint(
     device_id: Option<&str>,
     allow_selected_device_fallback: bool,
 ) -> Result<ActivatedDevice, CaptureError> {
-    init_com()?;
     // SAFETY: standard MMDevice activation chain; all results checked.
     unsafe {
         let enumerator: IMMDeviceEnumerator =
@@ -258,6 +272,19 @@ fn activate_endpoint(
             initialize_client(client, streamflags, POLLING_BUFFER_DURATION_100NS, None)?;
         activated.endpoint_id = Some(endpoint_id);
         Ok(activated)
+    }
+}
+
+fn default_endpoint_id(dataflow: EDataFlow) -> Result<String, CaptureError> {
+    // SAFETY: standard MMDevice enumeration; the returned task string is
+    // copied before its COM owner is released.
+    unsafe {
+        let enumerator: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).map_err(init)?;
+        let device = enumerator
+            .GetDefaultAudioEndpoint(dataflow, eConsole)
+            .map_err(init)?;
+        device_id_string(&device)
     }
 }
 
@@ -308,6 +335,10 @@ fn initialize_client(
         let capture: IAudioCaptureClient = client
             .GetService()
             .map_err(|e| CaptureError::Init(format!("WASAPI GetService: {e}")))?;
+        let buffer_frames = client
+            .GetBufferSize()
+            .map_err(|e| CaptureError::Init(format!("WASAPI GetBufferSize: {e}")))?
+            as usize;
         client
             .Start()
             .map_err(|e| CaptureError::Init(format!("WASAPI Start: {e}")))?;
@@ -317,6 +348,7 @@ fn initialize_client(
             capture,
             mix,
             endpoint_id: None,
+            buffer_frames,
         })
     }
 }
@@ -381,6 +413,17 @@ enum SampleFormat {
     Pcm16,
     Pcm24,
     Pcm32,
+}
+
+impl SampleFormat {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Float32 => "f32",
+            Self::Pcm16 => "pcm16",
+            Self::Pcm24 => "pcm24",
+            Self::Pcm32 => "pcm32",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -483,12 +526,95 @@ impl From<windows::core::Error> for DrainFailure {
     }
 }
 
+struct MonitorScratch {
+    max_packet_frames: usize,
+    decoded: Vec<f32>,
+    stereo: Vec<f32>,
+    resampled: Vec<f32>,
+    backlog: std::collections::VecDeque<f32>,
+}
+
+impl MonitorScratch {
+    fn new(device: &ActivatedDevice) -> Result<Self, CaptureError> {
+        validate_monitor_device(device)?;
+        let mut scratch = Self {
+            max_packet_frames: device.buffer_frames,
+            decoded: Vec::new(),
+            stereo: Vec::new(),
+            resampled: Vec::new(),
+            backlog: std::collections::VecDeque::with_capacity(MAX_MONITOR_BACKLOG_SAMPLES),
+        };
+        scratch.reserve_for(device)?;
+        Ok(scratch)
+    }
+
+    fn reserve_for(&mut self, device: &ActivatedDevice) -> Result<(), CaptureError> {
+        validate_monitor_device(device)?;
+        let decoded = device
+            .buffer_frames
+            .checked_mul(device.mix.channels as usize)
+            .ok_or_else(|| CaptureError::Init("microphone packet sample bound overflow".into()))?;
+        let stereo = device
+            .buffer_frames
+            .checked_mul(2)
+            .ok_or_else(|| CaptureError::Init("microphone stereo scratch bound overflow".into()))?;
+        let resampled = maximum_resampled_stereo_samples(
+            device.buffer_frames,
+            device.mix.sample_rate,
+            OPUS_SAMPLE_RATE,
+        )
+        .ok_or_else(|| CaptureError::Init("microphone resampler bound overflow".into()))?;
+        reserve_monitor_scratch(&mut self.decoded, decoded, "decoded")?;
+        reserve_monitor_scratch(&mut self.stereo, stereo, "stereo")?;
+        reserve_monitor_scratch(&mut self.resampled, resampled, "resampled")?;
+        self.max_packet_frames = device.buffer_frames;
+        self.backlog.clear();
+        Ok(())
+    }
+}
+
+fn validate_monitor_device(device: &ActivatedDevice) -> Result<(), CaptureError> {
+    if device.buffer_frames == 0 || device.buffer_frames > MAX_MONITOR_PACKET_FRAMES {
+        return Err(CaptureError::Init(format!(
+            "microphone endpoint buffer {} exceeds the bounded {MAX_MONITOR_PACKET_FRAMES}-frame monitor scratch",
+            device.buffer_frames
+        )));
+    }
+    if device.mix.channels == 0
+        || device.mix.channels as usize > MAX_MONITOR_SOURCE_CHANNELS
+        || !(MIN_MONITOR_SOURCE_SAMPLE_RATE..=MAX_MONITOR_SOURCE_SAMPLE_RATE)
+            .contains(&device.mix.sample_rate)
+    {
+        return Err(CaptureError::Init(
+            "microphone endpoint format exceeds the bounded monitor converter".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn reserve_monitor_scratch(
+    buffer: &mut Vec<f32>,
+    required: usize,
+    label: &str,
+) -> Result<(), CaptureError> {
+    if buffer.capacity() < required {
+        buffer
+            .try_reserve_exact(required.saturating_sub(buffer.len()))
+            .map_err(|_| {
+                CaptureError::Init(format!("reserve bounded microphone {label} scratch"))
+            })?;
+    }
+    Ok(())
+}
+
 struct WasapiPcmCapture {
     client: IAudioClient,
     capture: IAudioCaptureClient,
     clock: RelativeClock,
     channels: u16,
+    source_sample_rate: u32,
     sample_format: SampleFormat,
+    endpoint_id: Option<String>,
     mode: EndpointMode,
     target: EndpointTarget,
     volume: f32,
@@ -499,17 +625,60 @@ struct WasapiPcmCapture {
     reactivation: DeviceReactivation,
     last_device_hresult: i32,
     last_device_packet_at: Instant,
+    next_default_endpoint_check: Instant,
     assembler: LoopbackAssembler,
     queue: std::collections::VecDeque<PcmFrame>,
+    monitor: Option<MonitorScratch>,
     discontinuity_diagnostics: DiagnosticRateLimiter,
     late_audio_diagnostics: DiagnosticRateLimiter,
     device_diagnostics: DiagnosticRateLimiter,
+    // Must drop after every COM interface retained by this capture. Endpoint
+    // activation, recovery, and periodic default-device checks all run under
+    // this single apartment ownership instead of incrementing COM repeatedly.
+    _apartment: WasapiComApartment,
 }
 
 pub struct WasapiLoopback {
     pcm: WasapiPcmCapture,
     opus: OpusFrameEncoder,
     queue: Vec<AudioPacket>,
+}
+
+/// Safe, Opus-free owner of one microphone capture endpoint for live monitor
+/// use. Output is always interleaved 48 kHz stereo-f32 and is bounded to two
+/// complete 20 ms frames (3,840 samples) per poll.
+pub struct WasapiMicrophoneMonitor {
+    pcm: WasapiPcmCapture,
+    output: Vec<f32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WasapiMicrophoneMonitorInfo {
+    endpoint_id: Option<String>,
+    source_format: &'static str,
+    pub source_sample_rate: u32,
+    pub source_channels: u16,
+    pub conversion_active: bool,
+    pub output_sample_rate: u32,
+    pub output_channels: u16,
+    pub maximum_samples_per_poll: usize,
+    pub maximum_packet_frames: usize,
+    pub decoded_scratch_capacity: usize,
+    pub stereo_scratch_capacity: usize,
+    pub resampled_scratch_capacity: usize,
+    pub backlog_capacity: usize,
+}
+
+impl WasapiMicrophoneMonitorInfo {
+    #[must_use]
+    pub fn endpoint_id(&self) -> Option<&str> {
+        self.endpoint_id.as_deref()
+    }
+
+    #[must_use]
+    pub const fn source_format(&self) -> &'static str {
+        self.source_format
+    }
 }
 
 fn init(e: windows::core::Error) -> CaptureError {
@@ -564,11 +733,38 @@ impl WasapiPcmCapture {
         )
     }
 
+    fn start_microphone_monitor(
+        clock: RelativeClock,
+        device_id: Option<&str>,
+        volume: f64,
+        channels: WasapiChannelMode,
+    ) -> Result<Self, CaptureError> {
+        Self::start_with_monitor(
+            EndpointTarget::Microphone {
+                device_id: device_id.map(str::to_owned),
+                channels,
+            },
+            clock,
+            volume,
+            true,
+        )
+    }
+
     fn start(
-        mut target: EndpointTarget,
+        target: EndpointTarget,
         clock: RelativeClock,
         volume: f64,
     ) -> Result<Self, CaptureError> {
+        Self::start_with_monitor(target, clock, volume, false)
+    }
+
+    fn start_with_monitor(
+        mut target: EndpointTarget,
+        clock: RelativeClock,
+        volume: f64,
+        monitor_mode: bool,
+    ) -> Result<Self, CaptureError> {
+        let apartment = WasapiComApartment::enter()?;
         let device = target.activate(ActivationPhase::Initial)?;
         if !target.process_identity_matches() {
             device.stop();
@@ -584,12 +780,26 @@ impl WasapiPcmCapture {
         let mut assembler = LoopbackAssembler::new();
         assembler.push_chunk(0.0, &[]);
         let mode = target.mode();
+        let endpoint_id = device.endpoint_id.clone();
+        let monitor = if monitor_mode {
+            match MonitorScratch::new(&device) {
+                Ok(monitor) => Some(monitor),
+                Err(error) => {
+                    device.stop();
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
         Ok(Self {
             client: device.client,
             capture: device.capture,
             clock,
             channels: device.mix.channels,
+            source_sample_rate: device.mix.sample_rate,
             sample_format: device.mix.sample_format,
+            endpoint_id,
             mode,
             target,
             volume: (volume.clamp(0.0, 2.0)) as f32,
@@ -601,30 +811,42 @@ impl WasapiPcmCapture {
             reactivation: DeviceReactivation::new(DEVICE_REACTIVATION_RETRY_INTERVAL),
             last_device_hresult: 0,
             last_device_packet_at: Instant::now(),
+            next_default_endpoint_check: Instant::now() + DEFAULT_ENDPOINT_RECHECK_INTERVAL,
             assembler,
             queue: std::collections::VecDeque::new(),
+            monitor,
             discontinuity_diagnostics: DiagnosticRateLimiter::new(Duration::from_secs(30)),
             late_audio_diagnostics: DiagnosticRateLimiter::new(Duration::from_secs(30)),
             device_diagnostics: DiagnosticRateLimiter::new(Duration::from_secs(30)),
+            _apartment: apartment,
         })
     }
 
     /// Swap in a freshly activated endpoint after device loss. The
     /// assembler and queues survive: synthesized silence covered the
     /// outage, and the next live packet re-anchors on its QPC timestamp.
-    fn install_device(&mut self, device: ActivatedDevice) {
+    fn install_device(&mut self, device: ActivatedDevice) -> Result<(), CaptureError> {
+        if let Some(monitor) = self.monitor.as_mut() {
+            if let Err(error) = monitor.reserve_for(&device) {
+                device.stop();
+                return Err(error);
+            }
+        }
         // SAFETY: Stop on the invalidated client is a no-op error and the
         // fresh device is already started by `initialize_client`.
         let _ = unsafe { self.client.Stop() };
         self.client = device.client;
         self.capture = device.capture;
         self.channels = device.mix.channels;
+        self.source_sample_rate = device.mix.sample_rate;
         self.sample_format = device.mix.sample_format;
+        self.endpoint_id = device.endpoint_id;
         self.resampler = (device.mix.sample_rate != OPUS_SAMPLE_RATE)
             .then(|| StereoResampler::new(device.mix.sample_rate, OPUS_SAMPLE_RATE));
         self.discontinuity_fade.restart();
         self.packet_timeline.require_timestamp_anchor();
         self.last_device_packet_at = Instant::now();
+        Ok(())
     }
 
     /// Mark the endpoint dead after a recoverable WASAPI failure. The poll
@@ -667,13 +889,16 @@ impl WasapiPcmCapture {
                     self.reactivation.note_retry_failed(Instant::now());
                     return;
                 }
-                let recovered_at = Instant::now();
-                let outage = self.reactivation.note_recovered(recovered_at);
-                self.install_device(device);
-                emit_diagnostic(CaptureDiagnostic::WasapiDeviceRecovered {
-                    source: self.mode.diagnostic_label(),
-                    outage_ms: outage.map_or(0, |outage| outage.as_millis() as u64),
-                });
+                if self.install_device(device).is_ok() {
+                    let recovered_at = Instant::now();
+                    let outage = self.reactivation.note_recovered(recovered_at);
+                    emit_diagnostic(CaptureDiagnostic::WasapiDeviceRecovered {
+                        source: self.mode.diagnostic_label(),
+                        outage_ms: outage.map_or(0, |outage| outage.as_millis() as u64),
+                    });
+                } else {
+                    self.reactivation.note_retry_failed(Instant::now());
+                }
             }
             Err(_) => {
                 let failed_at = Instant::now();
@@ -687,6 +912,29 @@ impl WasapiPcmCapture {
                 }
             }
         }
+    }
+
+    fn refresh_default_endpoint_if_due(&mut self, now: Instant) {
+        if self.monitor.is_none()
+            || !self.reactivation.is_live()
+            || now < self.next_default_endpoint_check
+        {
+            return;
+        }
+        self.next_default_endpoint_check = now + DEFAULT_ENDPOINT_RECHECK_INTERVAL;
+        let Some(dataflow) = self.target.default_dataflow() else {
+            return;
+        };
+        let Ok(current) = default_endpoint_id(dataflow) else {
+            return;
+        };
+        if self.endpoint_id.as_deref() == Some(current.as_str()) {
+            return;
+        }
+        let Ok(device) = self.target.activate(ActivationPhase::Recovery) else {
+            return;
+        };
+        let _ = self.install_device(device);
     }
 
     pub fn take_level(&mut self) -> AudioLevel {
@@ -753,7 +1001,12 @@ impl WasapiPcmCapture {
     /// recoverable endpoint loss marks the device dead and returns `Ok`:
     /// the caller's silence fill covers the outage until re-activation.
     fn drain_device(&mut self) -> Result<(), CaptureError> {
-        match self.drain_available_packets() {
+        let result = if self.monitor.is_some() {
+            self.drain_monitor_packets()
+        } else {
+            self.drain_recording_packets()
+        };
+        match result {
             Ok(()) => Ok(()),
             Err(DrainFailure::Recoverable(code)) => {
                 self.note_device_lost(code);
@@ -763,7 +1016,7 @@ impl WasapiPcmCapture {
         }
     }
 
-    fn drain_available_packets(&mut self) -> Result<(), DrainFailure> {
+    fn drain_recording_packets(&mut self) -> Result<(), DrainFailure> {
         // SAFETY: GetBuffer/ReleaseBuffer pairs per the capture-client
         // contract; the data pointer is valid for `frames` frames until
         // ReleaseBuffer.
@@ -824,6 +1077,125 @@ impl WasapiPcmCapture {
         Ok(())
     }
 
+    fn drain_monitor_packets(&mut self) -> Result<(), DrainFailure> {
+        // SAFETY: this is the same checked GetBuffer/ReleaseBuffer ownership
+        // as the recording path, but conversion uses activation-sized scratch
+        // and retains only the newest two 20 ms frames.
+        unsafe {
+            while self.capture.GetNextPacketSize()? > 0 {
+                self.last_device_packet_at = Instant::now();
+                let mut data = std::ptr::null_mut();
+                let mut frames = 0u32;
+                let mut flags = 0u32;
+                self.capture
+                    .GetBuffer(&mut data, &mut frames, &mut flags, None, None)?;
+                let packet = WasapiPacket::new(&self.capture, frames);
+                let monitor = self
+                    .monitor
+                    .as_mut()
+                    .expect("monitor drain requires fixed scratch ownership");
+                let frame_count = frames as usize;
+                if frame_count > monitor.max_packet_frames {
+                    return Err(DrainFailure::Fatal(CaptureError::DeviceLost(format!(
+                        "WASAPI monitor packet {frame_count} exceeds negotiated {}-frame scratch",
+                        monitor.max_packet_frames
+                    ))));
+                }
+                let sample_count =
+                    frame_count
+                        .checked_mul(self.channels as usize)
+                        .ok_or_else(|| {
+                            DrainFailure::Fatal(CaptureError::DeviceLost(
+                                "WASAPI monitor sample count overflow".into(),
+                            ))
+                        })?;
+                if sample_count > monitor.decoded.capacity() {
+                    return Err(DrainFailure::Fatal(CaptureError::DeviceLost(
+                        "WASAPI monitor packet exceeds preallocated decode scratch".into(),
+                    )));
+                }
+                let stereo_count = frame_count.checked_mul(2).ok_or_else(|| {
+                    DrainFailure::Fatal(CaptureError::DeviceLost(
+                        "WASAPI monitor stereo count overflow".into(),
+                    ))
+                })?;
+                let resampled_count = maximum_resampled_stereo_samples(
+                    frame_count,
+                    self.source_sample_rate,
+                    OPUS_SAMPLE_RATE,
+                )
+                .ok_or_else(|| {
+                    DrainFailure::Fatal(CaptureError::DeviceLost(
+                        "WASAPI monitor resampler count overflow".into(),
+                    ))
+                })?;
+                if stereo_count > monitor.stereo.capacity()
+                    || resampled_count > monitor.resampled.capacity()
+                {
+                    return Err(DrainFailure::Fatal(CaptureError::DeviceLost(
+                        "WASAPI monitor packet exceeds preallocated conversion scratch".into(),
+                    )));
+                }
+                if flags & (AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) != 0 {
+                    monitor.decoded.clear();
+                    monitor.decoded.resize(sample_count, 0.0);
+                } else {
+                    if data.is_null() && sample_count != 0 {
+                        return Err(DrainFailure::Fatal(CaptureError::DeviceLost(
+                            "WASAPI returned a null non-silent monitor buffer".into(),
+                        )));
+                    }
+                    let byte_len = sample_count
+                        .checked_mul(self.sample_format.bytes_per_sample())
+                        .ok_or_else(|| {
+                            DrainFailure::Fatal(CaptureError::DeviceLost(
+                                "WASAPI monitor byte count overflow".into(),
+                            ))
+                        })?;
+                    let bytes = std::slice::from_raw_parts(data as *const u8, byte_len);
+                    decode_sample_bytes_into(
+                        bytes,
+                        self.sample_format,
+                        sample_count,
+                        &mut monitor.decoded,
+                    )
+                    .map_err(|message| {
+                        DrainFailure::Fatal(CaptureError::DeviceLost(message.into()))
+                    })?;
+                }
+                packet.release()?;
+
+                match self.mode {
+                    EndpointMode::OutputLoopback
+                    | EndpointMode::InputCapture(WasapiChannelMode::Stereo) => {
+                        extract_stereo_into(&monitor.decoded, self.channels, &mut monitor.stereo);
+                    }
+                    EndpointMode::InputCapture(WasapiChannelMode::Mono) => {
+                        extract_mono_centered_into(
+                            &monitor.decoded,
+                            self.channels,
+                            &mut monitor.stereo,
+                        );
+                    }
+                }
+                let samples = if let Some(resampler) = self.resampler.as_mut() {
+                    resampler.resample_into(&monitor.stereo, &mut monitor.resampled);
+                    &mut monitor.resampled
+                } else {
+                    &mut monitor.stereo
+                };
+                if flags & (AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0 as u32) != 0 {
+                    self.discontinuity_fade.restart();
+                }
+                self.discontinuity_fade.apply(samples);
+                apply_gain(samples, self.volume);
+                self.level.add(samples);
+                retain_latest_monitor_samples(&mut monitor.backlog, samples);
+            }
+        }
+        Ok(())
+    }
+
     fn collect_frames(
         &mut self,
         until_pts_s: f64,
@@ -856,8 +1228,95 @@ impl WasapiPcmCapture {
         self.collect_frames(until_pts_s, true)
     }
 
+    fn poll_monitor_samples(&mut self, output: &mut Vec<f32>) -> Result<(), CaptureError> {
+        let now = Instant::now();
+        self.refresh_default_endpoint_if_due(now);
+        self.retry_device_if_due(now);
+        if self.reactivation.is_live() {
+            self.drain_device()?;
+        }
+        output.clear();
+        let monitor = self
+            .monitor
+            .as_mut()
+            .expect("monitor poll requires fixed scratch ownership");
+        let samples = (monitor.backlog.len() / FRAME_LEN)
+            .min(MAX_MONITOR_BACKLOG_SAMPLES / FRAME_LEN)
+            * FRAME_LEN;
+        output.extend(monitor.backlog.drain(..samples));
+        Ok(())
+    }
+
     fn finish_frames(&mut self, until_pts_s: f64) -> Result<Vec<PcmFrame>, CaptureError> {
         self.collect_frames(until_pts_s, false)
+    }
+}
+
+fn retain_latest_monitor_samples(backlog: &mut std::collections::VecDeque<f32>, samples: &[f32]) {
+    let samples = if samples.len() > MAX_MONITOR_BACKLOG_SAMPLES {
+        &samples[samples.len() - MAX_MONITOR_BACKLOG_SAMPLES..]
+    } else {
+        samples
+    };
+    let overflow = backlog
+        .len()
+        .saturating_add(samples.len())
+        .saturating_sub(MAX_MONITOR_BACKLOG_SAMPLES);
+    backlog.drain(..overflow.min(backlog.len()));
+    backlog.extend(samples.iter().copied());
+}
+
+impl WasapiMicrophoneMonitor {
+    pub fn start(
+        clock: RelativeClock,
+        device_id: Option<&str>,
+        volume: f64,
+        channels: WasapiChannelMode,
+    ) -> Result<Self, CaptureError> {
+        Ok(Self {
+            pcm: WasapiPcmCapture::start_microphone_monitor(clock, device_id, volume, channels)?,
+            output: Vec::with_capacity(MAX_MONITOR_SAMPLES),
+        })
+    }
+
+    /// Reuses both the endpoint owner and the fixed output allocation. The
+    /// returned slice is invalidated by the next poll.
+    pub fn poll_samples(&mut self) -> Result<&[f32], CaptureError> {
+        self.pcm.poll_monitor_samples(&mut self.output)?;
+        Ok(&self.output)
+    }
+
+    /// Snapshot the active capture endpoint and the fixed monitor conversion
+    /// contract. Recovery updates this metadata when the default device
+    /// changes.
+    #[must_use]
+    pub fn info(&self) -> WasapiMicrophoneMonitorInfo {
+        let channel_conversion = !matches!(
+            self.pcm.mode,
+            EndpointMode::InputCapture(WasapiChannelMode::Stereo)
+        ) || self.pcm.channels != 2;
+        let monitor = self
+            .pcm
+            .monitor
+            .as_ref()
+            .expect("microphone monitor owns fixed conversion scratch");
+        WasapiMicrophoneMonitorInfo {
+            endpoint_id: self.pcm.endpoint_id.clone(),
+            source_format: self.pcm.sample_format.label(),
+            source_sample_rate: self.pcm.source_sample_rate,
+            source_channels: self.pcm.channels,
+            conversion_active: channel_conversion
+                || self.pcm.source_sample_rate != OPUS_SAMPLE_RATE
+                || self.pcm.sample_format != SampleFormat::Float32,
+            output_sample_rate: OPUS_SAMPLE_RATE,
+            output_channels: 2,
+            maximum_samples_per_poll: MAX_MONITOR_SAMPLES,
+            maximum_packet_frames: monitor.max_packet_frames,
+            decoded_scratch_capacity: monitor.decoded.capacity(),
+            stereo_scratch_capacity: monitor.stereo.capacity(),
+            resampled_scratch_capacity: monitor.resampled.capacity(),
+            backlog_capacity: monitor.backlog.capacity(),
+        }
     }
 }
 
@@ -922,19 +1381,6 @@ impl WasapiLoopback {
         self.pcm.take_level()
     }
 
-    pub fn poll_monitor_chunk(&mut self) -> Result<WasapiMonitorChunk, CaptureError> {
-        let samples = self
-            .pcm
-            .poll_frames(f64::MAX)?
-            .into_iter()
-            .flat_map(|(_, frame)| frame)
-            .collect();
-        Ok(WasapiMonitorChunk {
-            level: self.pcm.take_level(),
-            samples,
-        })
-    }
-
     fn encode_frames(&mut self, frames: Vec<PcmFrame>) -> Result<(), CaptureError> {
         for (pts_s, frame) in frames {
             let data = self
@@ -967,7 +1413,7 @@ pub fn enumerate_audio_devices() -> Result<AudioDeviceList, CaptureError> {
 pub fn enumerate_audio_devices_with_checkpoint(
     checkpoint: impl FnOnce() -> Result<(), String>,
 ) -> Result<AudioDeviceList, CaptureError> {
-    let _apartment = ProbeComApartment::enter()?;
+    let _apartment = WasapiComApartment::enter()?;
     // SAFETY: standard MMDevice enumeration; all COM results are checked.
     unsafe {
         let enumerator: IMMDeviceEnumerator =
@@ -1019,7 +1465,7 @@ pub fn validate_audio_device_catalog(devices: &AudioDeviceList) -> Result<(), Ca
 pub fn enumerate_output_processes(
     device_id: Option<&str>,
 ) -> Result<Vec<AudioProcessInfo>, CaptureError> {
-    init_com()?;
+    let _apartment = WasapiComApartment::enter()?;
     // SAFETY: standard endpoint activation/session enumeration; COM results
     // are checked and any allocated strings are freed.
     unsafe {
@@ -1726,39 +2172,43 @@ fn decode_sample_bytes(
     sample_format: SampleFormat,
     sample_count: usize,
 ) -> Result<Vec<f32>, &'static str> {
+    let mut output = Vec::with_capacity(sample_count);
+    decode_sample_bytes_into(bytes, sample_format, sample_count, &mut output)?;
+    Ok(output)
+}
+
+fn decode_sample_bytes_into(
+    bytes: &[u8],
+    sample_format: SampleFormat,
+    sample_count: usize,
+    output: &mut Vec<f32>,
+) -> Result<(), &'static str> {
     let expected_len = sample_count
         .checked_mul(sample_format.bytes_per_sample())
         .ok_or("WASAPI buffer size overflow")?;
     if bytes.len() != expected_len {
         return Err("WASAPI buffer length does not match its frame count");
     }
-    Ok(match sample_format {
-        SampleFormat::Float32 => bytes
-            .chunks_exact(4)
-            .map(|sample| f32::from_le_bytes(sample.try_into().expect("four-byte chunk")))
-            .collect(),
-        SampleFormat::Pcm16 => bytes
-            .chunks_exact(2)
-            .map(|sample| {
-                i16::from_le_bytes(sample.try_into().expect("two-byte chunk")) as f32 / 32_768.0
-            })
-            .collect(),
-        SampleFormat::Pcm24 => bytes
-            .chunks_exact(3)
-            .map(|sample| {
-                let raw = sample[0] as i32 | ((sample[1] as i32) << 8) | ((sample[2] as i32) << 16);
-                let signed = (raw << 8) >> 8;
-                signed as f32 / 8_388_608.0
-            })
-            .collect(),
-        SampleFormat::Pcm32 => bytes
-            .chunks_exact(4)
-            .map(|sample| {
-                i32::from_le_bytes(sample.try_into().expect("four-byte chunk")) as f32
-                    / 2_147_483_648.0
-            })
-            .collect(),
-    })
+    output.clear();
+    match sample_format {
+        SampleFormat::Float32 => output.extend(
+            bytes
+                .chunks_exact(4)
+                .map(|sample| f32::from_le_bytes(sample.try_into().expect("four-byte chunk"))),
+        ),
+        SampleFormat::Pcm16 => output.extend(bytes.chunks_exact(2).map(|sample| {
+            i16::from_le_bytes(sample.try_into().expect("two-byte chunk")) as f32 / 32_768.0
+        })),
+        SampleFormat::Pcm24 => output.extend(bytes.chunks_exact(3).map(|sample| {
+            let raw = sample[0] as i32 | ((sample[1] as i32) << 8) | ((sample[2] as i32) << 16);
+            let signed = (raw << 8) >> 8;
+            signed as f32 / 8_388_608.0
+        })),
+        SampleFormat::Pcm32 => output.extend(bytes.chunks_exact(4).map(|sample| {
+            i32::from_le_bytes(sample.try_into().expect("four-byte chunk")) as f32 / 2_147_483_648.0
+        })),
+    }
+    Ok(())
 }
 
 fn process_loopback_format() -> WAVEFORMATEX {
@@ -1777,31 +2227,29 @@ fn process_loopback_format() -> WAVEFORMATEX {
     }
 }
 
-/// Best-effort COM init (MTA); an STA thread is fine too.
-fn init_com() -> Result<(), CaptureError> {
-    // SAFETY: CoInitializeEx is safe to call repeatedly per thread.
-    let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
-    if hr.is_ok() || hr == RPC_E_CHANGED_MODE {
-        Ok(())
-    } else {
-        Err(CaptureError::Init(format!("CoInitializeEx: {hr}")))
-    }
-}
-
-struct ProbeComApartment {
+/// One balanced COM apartment ownership for a WASAPI owner or bounded probe.
+/// An already-initialized STA thread is also valid, but is not ours to undo.
+struct WasapiComApartment {
     uninitialize: bool,
+    // COM initialization counts are thread-local. Prevent the owning WASAPI
+    // graph from moving to a different thread before this guard drops.
+    _thread_affinity: PhantomData<Rc<()>>,
 }
 
-impl ProbeComApartment {
+impl WasapiComApartment {
     fn enter() -> Result<Self, CaptureError> {
-        // SAFETY: paired with CoUninitialize on this probe worker thread when
+        // SAFETY: paired with CoUninitialize on this WASAPI thread when
         // COM accepted or incremented this MTA initialization.
         let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
         if hr.is_ok() {
-            Ok(Self { uninitialize: true })
+            Ok(Self {
+                uninitialize: true,
+                _thread_affinity: PhantomData,
+            })
         } else if hr == RPC_E_CHANGED_MODE {
             Ok(Self {
                 uninitialize: false,
+                _thread_affinity: PhantomData,
             })
         } else {
             Err(CaptureError::Init(format!("CoInitializeEx: {hr}")))
@@ -1809,7 +2257,7 @@ impl ProbeComApartment {
     }
 }
 
-impl Drop for ProbeComApartment {
+impl Drop for WasapiComApartment {
     fn drop(&mut self) {
         if self.uninitialize {
             // SAFETY: this instance owns exactly one successful CoInitializeEx
@@ -1824,7 +2272,7 @@ mod tests {
     use super::*;
     use crate::clock::RelativeClock;
     use crate::traits::AudioSource;
-    use windows::Win32::Foundation::{E_FAIL, E_INVALIDARG};
+    use windows::Win32::Foundation::{E_FAIL, E_INVALIDARG, S_OK};
     use windows::Win32::Media::Audio::AUDCLNT_E_NOT_INITIALIZED;
 
     #[test]
@@ -1845,6 +2293,98 @@ mod tests {
                 "{fatal:?} must stay fatal"
             );
         }
+    }
+
+    #[test]
+    fn bounded_monitor_backlog_keeps_only_latest_complete_window_without_growth() {
+        let mut backlog = std::collections::VecDeque::with_capacity(MAX_MONITOR_BACKLOG_SAMPLES);
+        let capacity = backlog.capacity();
+        let samples = (0..(MAX_MONITOR_BACKLOG_SAMPLES + 512))
+            .map(|sample| sample as f32)
+            .collect::<Vec<_>>();
+
+        retain_latest_monitor_samples(&mut backlog, &samples);
+
+        assert_eq!(backlog.len(), MAX_MONITOR_BACKLOG_SAMPLES);
+        assert_eq!(backlog.capacity(), capacity);
+        assert_eq!(
+            backlog.front().copied(),
+            Some(512.0),
+            "oldest overflow is discarded instead of queued"
+        );
+    }
+
+    #[test]
+    fn monitor_decode_reuses_preallocated_storage_and_rejects_shape_mismatch() {
+        let samples = [0i16, i16::MAX, i16::MIN, 1];
+        let bytes = samples
+            .iter()
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect::<Vec<_>>();
+        let mut output = Vec::with_capacity(samples.len());
+        let capacity = output.capacity();
+
+        for _ in 0..100 {
+            decode_sample_bytes_into(&bytes, SampleFormat::Pcm16, samples.len(), &mut output)
+                .unwrap();
+            assert_eq!(output.capacity(), capacity);
+        }
+        assert!(decode_sample_bytes_into(
+            &bytes[..bytes.len() - 1],
+            SampleFormat::Pcm16,
+            samples.len(),
+            &mut output,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn only_default_selected_targets_participate_in_healthy_endpoint_rechecks() {
+        assert_eq!(
+            EndpointTarget::Microphone {
+                device_id: None,
+                channels: WasapiChannelMode::Stereo,
+            }
+            .default_dataflow(),
+            Some(eCapture)
+        );
+        assert!(EndpointTarget::Microphone {
+            device_id: Some("explicit".into()),
+            channels: WasapiChannelMode::Stereo,
+        }
+        .default_dataflow()
+        .is_none());
+        assert!(EndpointTarget::ProcessOutput {
+            pid: 1,
+            identity: ProcessIdentity { creation_time: 1 },
+        }
+        .default_dataflow()
+        .is_none());
+    }
+
+    #[test]
+    fn repeated_wasapi_apartments_and_default_checks_balance_com_initialization() {
+        std::thread::spawn(|| {
+            for _ in 0..100 {
+                let _apartment =
+                    WasapiComApartment::enter().expect("enter a fresh WASAPI apartment");
+                // A missing device is acceptable for this ownership test. The
+                // query itself must use the apartment already held by the owner.
+                let _ = default_endpoint_id(eCapture);
+            }
+
+            // A balanced loop leaves this fresh worker thread uninitialized,
+            // so the next entry returns S_OK rather than S_FALSE.
+            // SAFETY: this successful call is balanced immediately below.
+            let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+            if hr.is_ok() {
+                // SAFETY: balances exactly the direct call above.
+                unsafe { CoUninitialize() };
+            }
+            assert_eq!(hr, S_OK, "repeated WASAPI work leaked a COM reference");
+        })
+        .join()
+        .expect("COM balance worker must not panic");
     }
 
     #[test]

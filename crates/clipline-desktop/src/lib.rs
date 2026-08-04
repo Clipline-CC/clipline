@@ -11,10 +11,11 @@ mod controller;
 mod event;
 mod snapshot;
 
-pub use action::{UiAction, UiEffect};
+pub use action::{MicrophoneMonitorOutput, MicrophoneMonitorRequest, UiAction, UiEffect};
 pub use channel::{
     ui_event_channel, SequencedUiEvent, UiEventPublishOutcome, UiEventReceiveError,
     UiEventReceiver, UiEventSendError, UiEventSender, UiEventSink, UI_EVENT_CAPACITY,
+    UI_EVENT_MAX_BUFFERED,
 };
 pub use controller::{
     ApplyEventOutcome, ControllerError, DesktopController, DispatchOutcome,

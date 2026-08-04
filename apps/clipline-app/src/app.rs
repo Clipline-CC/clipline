@@ -3,8 +3,10 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::{Condvar, Mutex, MutexGuard};
+#[cfg(test)]
+use std::sync::mpsc;
+use std::sync::mpsc::Sender;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -663,107 +665,47 @@ fn display_media_folder_path(path: &Path) -> String {
     }
 }
 
-#[derive(Default)]
-struct MicTestState(Mutex<MicTestInner>);
+struct TauriMicrophoneMonitorSink(crate::desktop::tauri_sink::TauriUiEventSink);
 
-#[derive(Default)]
-struct MicTestInner {
-    last_generation: u64,
-    active: Option<MicTestSession>,
-}
-
-struct MicTestSession {
-    generation: u64,
-    stop: Sender<()>,
-}
-
-impl MicTestState {
-    fn begin(&self) -> Result<(u64, Receiver<()>), String> {
-        let (stop, receiver) = mpsc::channel();
-        let mut inner = self
-            .0
-            .lock()
-            .map_err(|_| "mic test state lock poisoned".to_string())?;
-        inner.last_generation = checked_generation_next(inner.last_generation, "microphone test")?;
-        let generation = inner.last_generation;
-        let previous = inner.active.replace(MicTestSession { generation, stop });
-        if let Some(previous) = previous {
-            // Sending is non-blocking for this unbounded control channel. Keep
-            // replacement and stop notification in one critical section so a
-            // concurrent start cannot create an untracked interval.
-            let _ = previous.stop.send(());
-        }
-        Ok((generation, receiver))
-    }
-
-    #[cfg(test)]
-    fn is_active(&self, generation: u64) -> bool {
-        self.0
-            .lock()
-            .map(|inner| {
-                inner
-                    .active
-                    .as_ref()
-                    .is_some_and(|active| active.generation == generation)
-            })
-            .unwrap_or(false)
-    }
-
-    /// Run a publication while this generation still owns the session lock.
-    /// Replacement cannot install a newer generation between the ownership
-    /// check and the event, which keeps event order authoritative for the UI.
-    fn publish_if_active(&self, generation: u64, publish: impl FnOnce()) -> bool {
-        let Ok(inner) = self.0.lock() else {
-            return false;
-        };
-        if inner
-            .active
-            .as_ref()
-            .is_none_or(|active| active.generation != generation)
-        {
-            return false;
-        }
-        publish();
-        true
-    }
-
-    fn finish_if_active_with(&self, generation: u64, finish: impl FnOnce()) -> bool {
-        let Ok(mut inner) = self.0.lock() else {
-            return false;
-        };
-        if inner
-            .active
-            .as_ref()
-            .is_none_or(|active| active.generation != generation)
-        {
-            return false;
-        }
-        inner.active.take();
-        finish();
-        true
-    }
-
-    fn finish_if_active(&self, generation: u64) -> bool {
-        self.finish_if_active_with(generation, || {})
-    }
-
-    fn stop(&self) {
-        match self.0.lock() {
-            Ok(mut inner) => {
-                if let Some(session) = inner.active.take() {
-                    // Receiver gone means the test thread already exited — not an error.
-                    let _ = session.stop.send(());
+impl clipline_recorder::microphone::MicrophoneMonitorEventSink for TauriMicrophoneMonitorSink {
+    fn try_publish(
+        &self,
+        event: clipline_recorder::microphone::MicrophoneMonitorEvent,
+    ) -> Result<(), String> {
+        let event = match event {
+            clipline_recorder::microphone::MicrophoneMonitorEvent::Monitor {
+                generation,
+                rms,
+                peak,
+                sample_count,
+                pcm_i16,
+            } => UiEvent::MicMonitor {
+                generation: Generation::new(generation),
+                monitor: clipline_desktop::MicMonitor::from_parts(
+                    rms,
+                    peak,
+                    sample_count,
+                    pcm_i16.unwrap_or_default(),
+                )
+                .map_err(|error| error.to_string())?,
+            },
+            clipline_recorder::microphone::MicrophoneMonitorEvent::Error {
+                generation,
+                message,
+            } => UiEvent::MicTestError {
+                generation: Generation::new(generation),
+                message,
+            },
+            clipline_recorder::microphone::MicrophoneMonitorEvent::Stopped { generation } => {
+                UiEvent::MicTestStopped {
+                    generation: Generation::new(generation),
                 }
             }
-            Err(e) => tracing::error!(event = "mic_test_state_lock_poisoned", error = %e),
-        }
-    }
-}
-
-fn mic_test_should_stop(receiver: &Receiver<()>) -> bool {
-    match receiver.try_recv() {
-        Ok(()) | Err(TryRecvError::Disconnected) => true,
-        Err(TryRecvError::Empty) => false,
+        };
+        self.0
+            .try_publish(event)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -2149,6 +2091,31 @@ fn dispatch_ui_action<R: Runtime>(
             }
             Ok(AppUiActionResult::None)
         }
+        UiEffect::StartMicrophoneMonitor { request } => {
+            let output = match request.output {
+                clipline_desktop::MicrophoneMonitorOutput::TauriCompatibilityPcm => {
+                    clipline_recorder::microphone::MicrophoneOutputMode::TauriCompatibilityPcm
+                }
+                clipline_desktop::MicrophoneMonitorOutput::NativeRenderer => {
+                    clipline_recorder::microphone::MicrophoneOutputMode::NativeRenderer
+                }
+            };
+            app.state::<clipline_recorder::microphone::MicrophoneMonitorService>()
+                .start(clipline_recorder::microphone::MicrophoneMonitorConfig {
+                    device_id: request.device_id,
+                    volume: request.volume,
+                    mono: request.mono,
+                    output,
+                })
+                .map_err(|error| error.to_string())?;
+            Ok(AppUiActionResult::None)
+        }
+        UiEffect::StopMicrophoneMonitor => {
+            app.state::<clipline_recorder::microphone::MicrophoneMonitorService>()
+                .stop()
+                .map_err(|error| error.to_string())?;
+            Ok(AppUiActionResult::None)
+        }
         UiEffect::None => Ok(AppUiActionResult::None),
     }
 }
@@ -2335,7 +2302,12 @@ fn publish_window_lifecycle<R: Runtime>(
 }
 
 fn publish_background_window<R: Runtime>(app: &AppHandle<R>, mode: WindowLifecycleMode) {
-    app.state::<MicTestState>().stop();
+    if let Err(error) = app
+        .state::<clipline_recorder::microphone::MicrophoneMonitorService>()
+        .stop()
+    {
+        log_diagnostic(format!("microphone monitor stop failed: {error}"));
+    }
     let background = publish_window_lifecycle(app, mode);
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -2486,7 +2458,12 @@ fn shutdown_app<R: Runtime>(
                 )?
             }
             ShutdownEffect::StopWindowMedia { generation } => {
-                app.state::<MicTestState>().stop();
+                app.state::<clipline_recorder::microphone::MicrophoneMonitorService>()
+                    .stop()
+                    .map_err(|message| TauriShellError::Action {
+                        command: ShellCommand::Quit,
+                        message: message.to_string(),
+                    })?;
                 publish_window_lifecycle(app, WindowLifecycleMode::Tray);
                 shutdown.acknowledge(
                     generation,
@@ -2854,7 +2831,10 @@ impl<R: Runtime> UpdateShutdown for TauriUpdateShutdown<'_, R> {
     }
 
     fn stop_window_media(&mut self) -> Result<(), Self::Error> {
-        self.app.state::<MicTestState>().stop();
+        self.app
+            .state::<clipline_recorder::microphone::MicrophoneMonitorService>()
+            .stop()
+            .map_err(|error| AppUpdateShutdownError(error.to_string()))?;
         publish_window_lifecycle(self.app, WindowLifecycleMode::Tray);
         Ok(())
     }
@@ -3145,103 +3125,40 @@ fn report_decode_support(state: tauri::State<RuntimeState>, codecs: Vec<String>)
 #[tauri::command]
 fn start_microphone_test<R: Runtime>(
     app: AppHandle<R>,
-    state: tauri::State<MicTestState>,
+    state: tauri::State<RuntimeState>,
     window_lifecycle: tauri::State<WindowLifecycleState>,
     device_id: Option<String>,
     volume: f64,
     mono: bool,
 ) -> Result<(), String> {
     ensure_foreground_microphone_test(&window_lifecycle)?;
-    let channels = if mono {
-        clipline_capture::windows::wasapi::WasapiChannelMode::Mono
-    } else {
-        clipline_capture::windows::wasapi::WasapiChannelMode::Stereo
-    };
-    let (generation, stop_rx) = state.begin()?;
+    dispatch_ui_action(
+        &app,
+        &state,
+        UiAction::StartMicrophoneMonitor {
+            request: clipline_desktop::MicrophoneMonitorRequest {
+                device_id,
+                volume: volume as f32,
+                mono,
+                output: clipline_desktop::MicrophoneMonitorOutput::TauriCompatibilityPcm,
+            },
+        },
+    )?;
     if let Err(error) = ensure_foreground_microphone_test(&window_lifecycle) {
-        state.finish_if_active(generation);
+        dispatch_ui_action(&app, &state, UiAction::StopMicrophoneMonitor).map_err(
+            |stop_error| format!("{error}; microphone monitor stop also failed: {stop_error}"),
+        )?;
         return Err(error);
-    }
-    let ui_sink = app
-        .state::<crate::desktop::tauri_sink::TauriUiEventSink>()
-        .inner()
-        .clone();
-    let worker_app = app.clone();
-    let worker = std::thread::Builder::new()
-        .name(format!("clipline-mic-test-{generation}"))
-        .spawn(move || {
-            let run = || -> Result<(), String> {
-                let clock = clipline_capture::clock::RelativeClock::new(
-                    clipline_capture::windows::qpc_now_ticks_100ns().map_err(|e| e.to_string())?,
-                );
-                let mut source =
-                    clipline_capture::windows::wasapi::WasapiLoopback::start_microphone(
-                        clock,
-                        device_id.as_deref(),
-                        volume,
-                        channels,
-                    )
-                    .map_err(|e| e.to_string())?;
-                loop {
-                    if mic_test_should_stop(&stop_rx) {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_millis(30));
-                    if mic_test_should_stop(&stop_rx) {
-                        break;
-                    }
-                    let chunk = source.poll_monitor_chunk().map_err(|e| e.to_string())?;
-                    let samples = chunk
-                        .samples
-                        .into_iter()
-                        .map(|sample| {
-                            let scaled = (sample.clamp(-1.0, 1.0) * 32_768.0).round();
-                            scaled.clamp(i16::MIN as f32, i16::MAX as f32) as i16
-                        })
-                        .collect();
-                    let mic_state = worker_app.state::<MicTestState>();
-                    mic_state.publish_if_active(generation, || {
-                        match clipline_desktop::MicMonitor::from_parts(
-                            chunk.level.rms,
-                            chunk.level.peak,
-                            chunk.level.sample_count,
-                            samples,
-                        ) {
-                            Ok(monitor) => {
-                                let _ = ui_sink.try_publish(UiEvent::MicMonitor {
-                                    generation: Generation::new(generation),
-                                    monitor,
-                                });
-                            }
-                            Err(error) => tracing::error!(
-                                event = "microphone_monitor_payload_rejected",
-                                error = %error
-                            ),
-                        }
-                    });
-                }
-                Ok(())
-            };
-            if let Err(e) = run() {
-                let mic_state = worker_app.state::<MicTestState>();
-                mic_state.finish_if_active_with(generation, || {
-                    let _ = ui_sink.try_publish(UiEvent::MicTestError {
-                        generation: Generation::new(generation),
-                        message: e,
-                    });
-                });
-            }
-        });
-    if let Err(error) = worker {
-        state.finish_if_active(generation);
-        return Err(format!("could not start microphone test thread: {error}"));
     }
     Ok(())
 }
 
 #[tauri::command]
-fn stop_microphone_test(state: tauri::State<MicTestState>) {
-    state.stop();
+fn stop_microphone_test<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<RuntimeState>,
+) -> Result<(), String> {
+    dispatch_ui_action(&app, &state, UiAction::StopMicrophoneMonitor).map(|_| ())
 }
 
 fn configured_hotkeys(settings: &AppSettings) -> Result<HotkeySet, String> {
@@ -3681,6 +3598,10 @@ pub fn run(
     let settings_probe_runtime =
         crate::settings_probe::SettingsProbeRuntime::new(ui_event_sink.clone())
             .expect("start bounded settings probe runtime");
+    let microphone_monitor = clipline_recorder::microphone::MicrophoneMonitorService::new(
+        Arc::new(clipline_recorder::microphone::WindowsMicrophoneMonitorFactory),
+        Arc::new(TauriMicrophoneMonitorSink(ui_event_sink.clone())),
+    );
     let launched_by_autostart = launch.mode() == LaunchMode::Autostart;
     let active_files = ActiveFileRegistry::new();
     let runtime_state = RuntimeState::with_store_and_registry(
@@ -3704,7 +3625,7 @@ pub fn run(
         .manage(UpdateOperationGate::new())
         .manage(SettingsApplyCoordinator::default())
         .manage(HotkeyServiceState::default())
-        .manage(MicTestState::default())
+        .manage(microphone_monitor)
         .manage(support::SupportState::default())
         .manage(crate::memory::MemorySampler::default())
         .manage(NativeMediaFolderAuthorization::default())
@@ -4045,7 +3966,12 @@ pub fn run(
                 {
                     uploads.shutdown();
                 }
-                app.state::<MicTestState>().stop();
+                if let Err(error) = app
+                    .state::<clipline_recorder::microphone::MicrophoneMonitorService>()
+                    .shutdown()
+                {
+                    log_diagnostic(format!("microphone monitor shutdown failed: {error}"));
+                }
                 app.state::<RuntimeState>()
                     .send(Cmd::Stop { announce: false });
             }
@@ -4419,86 +4345,11 @@ mod tests {
     }
 
     #[test]
-    fn microphone_test_stop_channel_treats_disconnect_as_shutdown() {
-        let (sender, receiver) = mpsc::channel();
-        assert!(!mic_test_should_stop(&receiver));
-        sender.send(()).unwrap();
-        assert!(mic_test_should_stop(&receiver));
-
-        let (sender, receiver) = mpsc::channel();
-        drop(sender);
-        assert!(mic_test_should_stop(&receiver));
-    }
-
-    #[test]
-    fn concurrent_microphone_test_starts_leave_one_tracked_generation() {
-        const STARTS: usize = 12;
-        let state = std::sync::Arc::new(MicTestState::default());
-        let barrier = std::sync::Arc::new(std::sync::Barrier::new(STARTS));
-        let workers = (0..STARTS)
-            .map(|_| {
-                let state = state.clone();
-                let barrier = barrier.clone();
-                std::thread::spawn(move || {
-                    barrier.wait();
-                    state.begin().expect("session replacement")
-                })
-            })
-            .collect::<Vec<_>>();
-        let sessions = workers
-            .into_iter()
-            .map(|worker| worker.join().unwrap())
-            .collect::<Vec<_>>();
-
-        let active = sessions
-            .iter()
-            .filter(|(generation, _)| state.is_active(*generation))
-            .count();
-        assert_eq!(active, 1);
-        for (generation, receiver) in &sessions {
-            assert_eq!(
-                mic_test_should_stop(receiver),
-                !state.is_active(*generation),
-                "every superseded receiver must observe shutdown"
-            );
-        }
-    }
-
-    #[test]
-    fn stale_microphone_test_cannot_publish_or_finish_active_generation() {
-        let state = MicTestState::default();
-        let (old_generation, _old_receiver) = state.begin().unwrap();
-        let (active_generation, _active_receiver) = state.begin().unwrap();
-        let published = std::sync::atomic::AtomicUsize::new(0);
-
-        assert!(!state.publish_if_active(old_generation, || {
-            published.fetch_add(1, Ordering::Relaxed);
-        }));
-        assert!(state.publish_if_active(active_generation, || {
-            published.fetch_add(1, Ordering::Relaxed);
-        }));
-        assert_eq!(published.load(Ordering::Relaxed), 1);
-
-        assert!(!state.finish_if_active(old_generation));
-        assert!(state.is_active(active_generation));
-        assert!(state.finish_if_active(active_generation));
-        assert!(!state.is_active(active_generation));
-    }
-
-    #[test]
     fn producer_generations_fail_closed_instead_of_wrapping() {
         assert_eq!(
             checked_generation_next(u64::MAX, "test").unwrap_err(),
             "test generation exhausted"
         );
-
-        let mic = MicTestState::default();
-        mic.0.lock().unwrap().last_generation = u64::MAX;
-        assert_eq!(
-            mic.begin().unwrap_err(),
-            "microphone test generation exhausted"
-        );
-        assert!(mic.0.lock().unwrap().active.is_none());
 
         let state = RuntimeState::new(AppSettings::default(), None);
         state.0.lock().unwrap().recording_generation = u64::MAX;
