@@ -900,6 +900,7 @@ dependencies = [
  "clipline-capture",
  "clipline-desktop",
  "clipline-events",
+ "clipline-games",
  "clipline-library",
  "clipline-lol",
  "clipline-mp4",
@@ -969,6 +970,22 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "clipline-games"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "clipline-capture",
+ "clipline-events",
+ "clipline-settings",
+ "clipline-test-utils",
+ "png 0.17.16",
+ "serde",
+ "serde_json",
+ "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

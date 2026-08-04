@@ -1105,6 +1105,106 @@ fn divergence_prone_paths_keep_single_production_owners() {
 }
 
 #[test]
+fn shared_games_foundation_has_one_owner_and_confines_windows_code() {
+    let root = workspace_root();
+    let source_root = root.join("crates/clipline-games/src");
+    let manifest = fs::read_to_string(root.join("crates/clipline-games/Cargo.toml"))
+        .expect("read games manifest");
+    for forbidden in [
+        "clipline-app",
+        "clipline-recorder",
+        "clipline-lol",
+        "tauri",
+        "slint",
+        "webview",
+    ] {
+        assert!(
+            !manifest.to_ascii_lowercase().contains(forbidden),
+            "shared games manifest contains reverse/framework dependency {forbidden}"
+        );
+    }
+
+    let mut shared = String::new();
+    for path in rust_sources_below(&source_root) {
+        let source = fs::read_to_string(&path).expect("read shared games source");
+        let is_windows = path.starts_with(source_root.join("windows"));
+        if !is_windows {
+            for forbidden in [
+                "windows_sys::",
+                "clipline_capture::windows",
+                "std::os::windows",
+                "CommandExt",
+            ] {
+                assert!(
+                    !source.contains(forbidden),
+                    "{} imports Windows-only {forbidden}",
+                    path.display()
+                );
+            }
+            assert!(
+                !source
+                    .split_whitespace()
+                    .any(|token| token == "unsafe" || token.starts_with("unsafe{")),
+                "unsafe must stay under clipline-games/src/windows: {}",
+                path.display()
+            );
+        }
+        assert!(
+            !source.contains("include_bytes!(\"../../../apps/")
+                && !source.contains("crate::markers")
+                && !source.contains("PollerMsg"),
+            "shared games source {} reaches into an application/event spawner",
+            path.display()
+        );
+        shared.push_str(&source);
+    }
+
+    for (owner, expected) in [
+        ("fn match_score(", 1),
+        ("fn parse_vdf(", 1),
+        ("const LEAGUE_PROFILE_MANIFEST_JSON", 1),
+        ("unsafe fn icon_to_png", 1),
+    ] {
+        assert_eq!(
+            shared.matches(owner).count(),
+            expected,
+            "shared games algorithm {owner} must have one owner"
+        );
+    }
+
+    let adapters = [
+        "game_identity.rs",
+        "game_plugins.rs",
+        "games.rs",
+        "game_discovery.rs",
+        "game_icon.rs",
+    ]
+    .into_iter()
+    .map(|name| fs::read_to_string(root.join("apps/clipline-app/src").join(name)).unwrap())
+    .collect::<String>();
+    for duplicate in [
+        "fn match_score(",
+        "fn parse_vdf(",
+        "LEAGUE_PROFILE_MANIFEST_JSON",
+        "unsafe fn icon_to_png",
+    ] {
+        assert!(
+            !adapters.contains(duplicate),
+            "Tauri game adapter duplicates shared algorithm {duplicate}"
+        );
+    }
+
+    let settings_games =
+        fs::read_to_string(root.join("crates/clipline-settings/src/games.rs")).unwrap();
+    assert_eq!(settings_games.matches("BUILT_IN_GAME_IDS").count(), 2);
+    assert!(!shared.contains("const BUILT_IN_IDS"));
+    assert!(
+        !shared.contains("clipline_settings::icon_cache_dir()"),
+        "shared game services must receive the selected profile's icon cache root"
+    );
+}
+
+#[test]
 fn large_application_surfaces_delegate_to_named_domain_owners() {
     let root = workspace_root();
     let app =

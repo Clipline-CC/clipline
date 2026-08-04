@@ -44,7 +44,8 @@ pub use draft::{
 #[allow(unused_imports)]
 pub use games::{
     GamePluginReviewSettings, GamePluginSettings, GameRecordingMode, GameSettings,
-    MatchEventSettings, TimelineMarkerSettings,
+    MatchEventSettings, TimelineMarkerSettings, BUILT_IN_GAME_IDS, CS2_ID, LEAGUE_OF_LEGENDS_ID,
+    OSU_ID, VALORANT_ID,
 };
 pub use hotkey::{normalize_hotkey, parse_hotkey};
 pub use osu::OsuApiSettings;

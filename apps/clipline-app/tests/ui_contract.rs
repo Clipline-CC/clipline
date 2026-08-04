@@ -3087,7 +3087,7 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
 fn timeline_marker_pngs_have_matching_alpha_height() {
     let marker_asset_dirs = [
         "ui/assets/markers",
-        "plugin-seeds/league_of_legends/assets/markers",
+        "../../crates/clipline-games/plugin-seeds/league_of_legends/assets/markers",
     ];
     let marker_names = [
         "assist.png",
@@ -3132,8 +3132,10 @@ fn league_event_rail_pngs_have_matching_alpha_height() {
     ];
 
     for name in event_rail_icon_names {
-        let (canvas, visible) =
-            marker_png_alpha_bounds("plugin-seeds/league_of_legends/assets/event-rail", name);
+        let (canvas, visible) = marker_png_alpha_bounds(
+            "../../crates/clipline-games/plugin-seeds/league_of_legends/assets/event-rail",
+            name,
+        );
         assert_eq!(
             canvas,
             (320, 320),
@@ -3150,7 +3152,10 @@ fn league_event_rail_pngs_have_matching_alpha_height() {
 fn league_event_rail_minion_actor_pngs_are_square_portraits() {
     for name in ["minion-100.png", "minion-200.png"] {
         assert_eq!(
-            png_dimensions("plugin-seeds/league_of_legends/assets/event-rail", name),
+            png_dimensions(
+                "../../crates/clipline-games/plugin-seeds/league_of_legends/assets/event-rail",
+                name,
+            ),
             (128, 128),
             "league event rail {name} must stay a square portrait for non-player actor slots"
         );

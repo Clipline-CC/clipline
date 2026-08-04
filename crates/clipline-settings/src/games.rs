@@ -241,13 +241,17 @@ fn normalize_game_plugin_id(raw: &str) -> String {
         .join("_")
 }
 
-const BUILT_IN_IDS: &[&str] = &["league_of_legends", "valorant", "cs2", "osu"];
+pub const LEAGUE_OF_LEGENDS_ID: &str = "league_of_legends";
+pub const VALORANT_ID: &str = "valorant";
+pub const CS2_ID: &str = "cs2";
+pub const OSU_ID: &str = "osu";
+pub const BUILT_IN_GAME_IDS: &[&str] = &[LEAGUE_OF_LEGENDS_ID, VALORANT_ID, CS2_ID, OSU_ID];
 const CUSTOM_PREFIX: &str = "custom-";
 const MIGRATED_PREFIX: &str = "custom-migrated-";
 const MAX_CUSTOM_ID_LEN: usize = 96;
 
 pub fn validate_custom_game_id(id: &str) -> Result<(), String> {
-    if BUILT_IN_IDS.contains(&id) {
+    if BUILT_IN_GAME_IDS.contains(&id) {
         return Err(format!(
             "custom game id {id:?} is reserved for a built-in game"
         ));
