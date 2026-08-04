@@ -7,9 +7,41 @@
 
 use std::fmt;
 
+use clipline_desktop::Revision;
 use clipline_shell::{
     LaunchMode, ShellCommand, ShellGeneration, WindowEvent, WindowMode, WindowPolicy,
 };
+
+/// Monotonic bridge from process-owned Library/enrichment changes to the
+/// window-owned catalog refresh lane. Observing only the newest revision
+/// coalesces bursts before they reach the already single-flight controller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LibraryRefreshCursor {
+    observed: Revision,
+}
+
+impl LibraryRefreshCursor {
+    #[must_use]
+    pub const fn new(observed: Revision) -> Self {
+        Self { observed }
+    }
+
+    /// Returns true exactly once for each newer revision while a window is
+    /// attached. Tray-only observations remain pending so the next attached
+    /// pump cannot silently retain stale catalog metadata.
+    pub fn observe_attached(&mut self, revision: Revision, attached: bool) -> bool {
+        if !attached || revision <= self.observed {
+            return false;
+        }
+        self.observed = revision;
+        true
+    }
+
+    #[must_use]
+    pub const fn observed(self) -> Revision {
+        self.observed
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AttachmentToken(ShellGeneration);
@@ -346,7 +378,9 @@ mod windows_runtime {
         LibraryItem, SpikeTray, TimelineMarker,
     };
 
-    use super::{AttachmentToken, LifecycleAction, LifecycleSnapshot, ShellLifecycle};
+    use super::{
+        AttachmentToken, LibraryRefreshCursor, LifecycleAction, LifecycleSnapshot, ShellLifecycle,
+    };
 
     const PRODUCT_IDENTITY: &str = "io.clipline.app.slint-spike";
     const PACKAGE_INSTALL_FENCE_NAME: &str = r"Local\io.clipline.app.slint-candidate.package-fence";
@@ -428,6 +462,7 @@ mod windows_runtime {
         latest_session: Option<LiveSessionReport>,
         resources: ShellResourceSnapshot,
         lifecycle_revision: Revision,
+        library_refresh: LibraryRefreshCursor,
         marker_revision: u64,
         stop_observed: bool,
         quit_event_loop_requested: bool,
@@ -827,6 +862,7 @@ mod windows_runtime {
             latest_session: None,
             resources: ShellResourceSnapshot::default(),
             lifecycle_revision: Revision::INITIAL,
+            library_refresh: LibraryRefreshCursor::new(Revision::INITIAL),
             marker_revision: 0,
             stop_observed: false,
             quit_event_loop_requested: false,
@@ -945,8 +981,37 @@ mod windows_runtime {
         pump_cloud_profile_completions(runtime)?;
         pump_cloud_thumbnail_completions(runtime)?;
         runtime.borrow().upload_fanout.pump();
+        pump_library_revision(runtime)?;
         pump_catalog_results(runtime)?;
         Ok(())
+    }
+
+    fn pump_library_revision(runtime: &Rc<RefCell<SlintShell>>) -> Result<(), String> {
+        let revision = runtime.borrow().desktop.library_revision();
+        let (effects, changed) = {
+            let mut runtime_ref = runtime.borrow_mut();
+            let catalog_revision = runtime_ref
+                .window
+                .as_ref()
+                .map(|resources| resources.catalog_revision);
+            if !runtime_ref
+                .library_refresh
+                .observe_attached(revision, catalog_revision.is_some())
+            {
+                return Ok(());
+            }
+            let catalog_revision = catalog_revision.expect("attached refresh has a catalog owner");
+            let before = runtime_ref.catalog.revision();
+            let effects = runtime_ref
+                .catalog
+                .dispatch(catalog_revision, CatalogUiIntent::Refresh)
+                .map_err(|error| error.to_string())?;
+            (effects, runtime_ref.catalog.revision() != before)
+        };
+        if changed {
+            publish_catalog_window(runtime)?;
+        }
+        route_catalog_effects(runtime, effects)
     }
 
     fn pump_cloud_profile_completions(runtime: &Rc<RefCell<SlintShell>>) -> Result<(), String> {

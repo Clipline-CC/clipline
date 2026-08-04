@@ -1,6 +1,8 @@
+use clipline_desktop::Revision;
 use clipline_shell::{LaunchMode, ShellCommand};
 use clipline_slint_spike::shell::{
-    LifecycleAction, ShellLabels, ShellLifecycle, WindowTeardownStep, WINDOW_TEARDOWN_ORDER,
+    LibraryRefreshCursor, LifecycleAction, ShellLabels, ShellLifecycle, WindowTeardownStep,
+    WINDOW_TEARDOWN_ORDER,
 };
 
 fn create_window(shell: &mut ShellLifecycle) -> clipline_slint_spike::shell::AttachmentToken {
@@ -149,4 +151,24 @@ fn save_and_diagnostics_preserve_the_durable_shell_actions() {
         shell.handle_command(ShellCommand::OpenDiagnostics).unwrap(),
         LifecycleAction::OpenDiagnostics
     );
+}
+
+#[test]
+fn library_refresh_cursor_coalesces_bursts_and_rejects_replays() {
+    let mut cursor = LibraryRefreshCursor::new(Revision::INITIAL);
+    assert!(!cursor.observe_attached(Revision::INITIAL, true));
+    assert!(cursor.observe_attached(Revision::new(3), true));
+    assert_eq!(cursor.observed(), Revision::new(3));
+    assert!(!cursor.observe_attached(Revision::new(2), true));
+    assert!(!cursor.observe_attached(Revision::new(3), true));
+    assert!(cursor.observe_attached(Revision::new(4), true));
+}
+
+#[test]
+fn tray_only_library_revision_remains_pending_for_the_next_attachment() {
+    let mut cursor = LibraryRefreshCursor::new(Revision::INITIAL);
+    assert!(!cursor.observe_attached(Revision::new(7), false));
+    assert_eq!(cursor.observed(), Revision::INITIAL);
+    assert!(cursor.observe_attached(Revision::new(7), true));
+    assert_eq!(cursor.observed(), Revision::new(7));
 }

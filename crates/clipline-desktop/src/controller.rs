@@ -117,6 +117,14 @@ where
         self.snapshot.clone()
     }
 
+    /// Read the process-owned Library invalidation cursor without cloning the
+    /// bounded desktop snapshot. Native shells poll this scalar to coalesce
+    /// refresh work while leaving upload strings and notices in place.
+    #[must_use]
+    pub const fn library_revision(&self) -> Revision {
+        self.snapshot.library_revision
+    }
+
     pub fn dispatch(&mut self, action: UiAction) -> Result<DispatchOutcome, ControllerError> {
         let effect = action.effect();
         let mut changed = false;

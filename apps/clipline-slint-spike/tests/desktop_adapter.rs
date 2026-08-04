@@ -84,11 +84,46 @@ fn projection_is_revisioned_and_bounds_the_visible_upload_model() {
     assert_eq!(projection.recorder_label, "RECORDING · H.264");
     assert_eq!(projection.notice, "warning");
     assert_eq!(projection.notice_id, Some(snapshot.notices[0].id));
+    assert_eq!(projection.library_revision, snapshot.library_revision);
+    assert_eq!(projection.library_revision, Revision::new(17));
     assert_eq!(projection.catalog_revision, Revision::new(7));
     assert_eq!(projection.catalog_source, CatalogSummarySource::Cloud);
     assert!(projection.catalog_active);
     assert_eq!(projection.uploads.len(), MAX_ACTIVE_UPLOADS);
     assert_eq!(projection.uploads[0].local_clip_id, "clip-00");
+}
+
+#[test]
+fn enrichment_and_saved_revisions_cross_the_desktop_projection_boundary() {
+    let mut controller = DesktopController::new((), Vec::new()).unwrap();
+    let initial = DesktopProjection::from_snapshot(&controller.snapshot());
+    assert_eq!(initial.library_revision, Revision::INITIAL);
+
+    controller
+        .apply_event(UiEvent::EnrichmentUpdated {
+            generation: Generation::new(3),
+        })
+        .unwrap();
+    let enriched = DesktopProjection::from_snapshot(&controller.snapshot());
+    assert_eq!(enriched.library_revision, Revision::new(1));
+}
+
+#[test]
+fn adapter_reads_the_library_revision_without_rebuilding_a_projection() {
+    let adapter = clipline_slint_spike::desktop::SlintDesktopAdapter::start_detached().unwrap();
+    assert_eq!(adapter.library_revision(), Revision::INITIAL);
+    adapter
+        .try_publish(UiEvent::EnrichmentUpdated {
+            generation: Generation::new(1),
+        })
+        .unwrap();
+    for _ in 0..100 {
+        if adapter.library_revision() == Revision::new(1) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    panic!("desktop consumer did not publish the scalar Library revision");
 }
 
 #[test]

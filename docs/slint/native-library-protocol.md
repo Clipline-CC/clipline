@@ -72,10 +72,12 @@ Supported scenarios are:
   upload-progress bursts, one bounded operation per Slint event-loop tick after the sampler's
   steady-window exercise signal;
 - `reveal-close-100`: 100 real Slint component create/show/detach/drop cycles through the shipping
-  `ShellLifecycle` and desktop attachment path, one phase per event-loop tick. If 100 cloud-media
-  open/replace/close cycles cannot safely run, only that media portion sets
-  `cloudMediaCyclesPending: true`; the real window cycles may not use a pending escape hatch, and
-  the run cannot pass the full lifecycle gate while media remains pending.
+  `ShellLifecycle` and desktop attachment path plus 100 deterministic Cloud-media
+  open/replace/close cycles through `CloudCache` playback protection. Each Cloud cycle acquires an
+  initial lease, overlaps it with the replacement lease, releases the replaced lease, then closes
+  the replacement. The fixture transport reads only the already hash-verified local MP4; it loads
+  no credentials and performs no network requests. Window, media-open, media-replace, and
+  media-close phases advance on Slint event-loop ticks and may not use a pending escape hatch.
 
 The measured process constructs and updates the real Slint Library component and its bounded
 models. A headless controller-only simulation cannot satisfy the memory or lifecycle gates.
@@ -146,8 +148,13 @@ can never pass the growth gate.
 `uploadProgressBursts`, each exactly 100, plus `executedDuringMeasuredWindow: true`.
 `reveal-close-100` records `windowRevealCloseCycles: 100`,
 `windowRevealCloseCyclesPending: false`, and
-`windowCyclesExecutedDuringMeasuredWindow: true`; Cloud media is either exactly 100 or explicitly
-pending.
+`windowCyclesExecutedDuringMeasuredWindow: true`. It also records `cloudMediaCycles: 100`, exact
+`cloudMediaOpens`, `cloudMediaReplacements`, and `cloudMediaCloses` values of 100,
+`cloudMediaCyclesPending: false`, and `cloudMediaCyclesExecutedDuringMeasuredWindow: true`.
+The lifecycle must report exactly 200 acquired and 200 released leases because each cycle contains
+one Open lease and one overlapping replacement lease. `cloudMediaCacheFills` is exactly 2: the
+initial and replacement assets are filled once from the local fixture, then all later cycles prove
+the warm-cache acceptance path.
 
 Image ownership is split but also aggregated. Poster handles cover the bounded Local
 `PosterController`; model images cover every Local or synthetic Cloud image clone published into

@@ -199,6 +199,7 @@ fn jpeg_and_png_decode_under_explicit_avatar_allocation_bounds() {
 
 struct LatestOnlyPort {
     started: Barrier,
+    release_first: Barrier,
     profile_calls: AtomicUsize,
     avatar_calls: AtomicUsize,
 }
@@ -210,6 +211,7 @@ impl LatestOnlyPort {
             while !work.is_cancelled() {
                 std::thread::sleep(Duration::from_millis(1));
             }
+            self.release_first.wait();
         }
     }
 }
@@ -240,6 +242,7 @@ impl CloudProfileRequestPort for LatestOnlyPort {
 fn worker_lanes_coalesce_pending_replacements_without_unbounded_spawn() {
     let port = Arc::new(LatestOnlyPort {
         started: Barrier::new(3),
+        release_first: Barrier::new(3),
         profile_calls: AtomicUsize::new(0),
         avatar_calls: AtomicUsize::new(0),
     });
@@ -254,6 +257,10 @@ fn worker_lanes_coalesce_pending_replacements_without_unbounded_spawn() {
     owner
         .attach(CloudRailSeed::new(token(3, 1), "Third").unwrap())
         .unwrap();
+    // Keep both first requests in flight until the second pending request has
+    // been replaced by the third. This makes the latest-only assertion about
+    // mailbox behavior deterministic rather than scheduler-dependent.
+    port.release_first.wait();
 
     let mut avatar_received = false;
     for _ in 0..100 {
@@ -267,8 +274,8 @@ fn worker_lanes_coalesce_pending_replacements_without_unbounded_spawn() {
     assert_eq!(owner.projection().name, "Latest User");
     assert!(owner.projection().has_avatar);
     assert!(avatar_received);
-    assert!(port.profile_calls.load(Ordering::SeqCst) <= 2);
-    assert!(port.avatar_calls.load(Ordering::SeqCst) <= 2);
+    assert_eq!(port.profile_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(port.avatar_calls.load(Ordering::SeqCst), 2);
     owner.detach_window();
     owner.shutdown();
 }

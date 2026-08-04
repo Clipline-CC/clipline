@@ -123,6 +123,7 @@ $libraryAst = [System.Management.Automation.Language.Parser]::ParseFile(
 foreach ($name in @(
     'Write-CliplineCreateNewText',
     'Publish-CliplineCreateNewSignal',
+    'Test-LibraryGitStatusEntryAllowed',
     'Resolve-LibraryFixture',
     'Initialize-LibraryFixtureRoot',
     'Assert-LibraryTelemetry'
@@ -141,11 +142,19 @@ foreach ($contract in @(
     'fullLifecyclePending',
     'executedDuringMeasuredWindow',
     "realGpuGate = 'pending-winit-software-does-not-exercise-the-native-video-path'",
-    "throw 'publishable Library evidence requires a clean tracked worktree'",
+    "throw 'publishable Library evidence requires a clean source worktree'",
     'Stop-LibraryOwnedTree -ObservedTree'
 )) {
     Assert-True ($librarySource.Contains($contract)) "Slint Library sampler contract missing: $contract"
 }
+Assert-Equal $true (Test-LibraryGitStatusEntryAllowed -Entry '?? artifacts/evidence.json') `
+    'owned evidence output may remain untracked during publishable sampling'
+Assert-Equal $true (Test-LibraryGitStatusEntryAllowed -Entry '?? paseo.json') `
+    'workspace orchestration metadata is not benchmark source'
+Assert-Equal $false (Test-LibraryGitStatusEntryAllowed -Entry '?? apps/new-source.rs') `
+    'untracked source must reject publishable evidence'
+Assert-Equal $false (Test-LibraryGitStatusEntryAllowed -Entry ' M src/tracked.rs') `
+    'tracked modifications must reject publishable evidence'
 
 $libraryTestRoot = Join-Path ([System.IO.Path]::GetTempPath()) `
     ("clipline-library-harness-test-{0}" -f [guid]::NewGuid())
@@ -211,6 +220,7 @@ try {
         sourceFixture = [pscustomobject]@{ path = $fixture.path; sha256 = $fixture.sha256 }
         metrics = [pscustomobject]@{
             firstUsablePageMs = 100; pageChangeP95Ms = 20; filterGroupP95Ms = 20
+            windowShownModelPublished = $true; posterSettleMs = 40
             retainedRows = 50; retainedDecodedImages = 32; posterLruEntries = 32
             posterCacheSize = 32; ffmpegChildPeak = 1; duplicateSameKeyExtractions = 0
             posterExtractionStarts = 32; singleFlightFollowers = 1
@@ -223,14 +233,17 @@ try {
             imagesAccepted = 64; imagesReleased = 64
             posterHandlesAccepted = 32; posterHandlesReleased = 32
             modelImagesPublished = 32; modelImagesReplaced = 32
-            leasesAcquired = 0; leasesReleased = 0
+            leasesAcquired = 200; leasesReleased = 200
         }
         safety = [pscustomobject]@{ productionCredentialsLoaded = $false; cloudNetworkRequests = 0 }
         churn = [pscustomobject]@{}
         reveal = [pscustomobject]@{
             windowRevealCloseCycles = 100; windowRevealCloseCyclesPending = $false
             windowCyclesExecutedDuringMeasuredWindow = $true
-            cloudMediaCycles = 0; cloudMediaCyclesPending = $true
+            cloudMediaCycles = 100; cloudMediaOpens = 100
+            cloudMediaReplacements = 100; cloudMediaCloses = 100
+            cloudMediaCacheFills = 2; cloudMediaCyclesPending = $false
+            cloudMediaCyclesExecutedDuringMeasuredWindow = $true
         }
     }
     Assert-LibraryTelemetry -Telemetry $telemetry -Fixture $fixture -Count 50 `
@@ -245,6 +258,26 @@ try {
     } catch { $pendingWindowAccepted = $false }
     Assert-Equal $false $pendingWindowAccepted `
         'real window lifecycle may not use the Cloud-media pending escape hatch'
+    $telemetry.reveal.windowRevealCloseCyclesPending = $false
+    $telemetry.reveal.cloudMediaCyclesPending = $true
+    $pendingCloudAccepted = $true
+    try {
+        Assert-LibraryTelemetry -Telemetry $telemetry -Fixture $fixture -Count 50 `
+            -ScenarioName 'reveal-close-100' -RendererName 'winit-software' `
+            -Contract $telemetryContract
+    } catch { $pendingCloudAccepted = $false }
+    Assert-Equal $false $pendingCloudAccepted `
+        'Cloud-media lifecycle may not remain pending in reveal-close-100'
+    $telemetry.reveal.cloudMediaCyclesPending = $false
+    $telemetry.lifecycle.imagesAccepted = 63
+    $unbalancedAggregateAccepted = $true
+    try {
+        Assert-LibraryTelemetry -Telemetry $telemetry -Fixture $fixture -Count 50 `
+            -ScenarioName 'reveal-close-100' -RendererName 'winit-software' `
+            -Contract $telemetryContract
+    } catch { $unbalancedAggregateAccepted = $false }
+    Assert-Equal $false $unbalancedAggregateAccepted `
+        'aggregate image counters must equal their poster and model subcategories'
 } finally {
     Remove-Item -LiteralPath $libraryTestRoot -Recurse -Force -ErrorAction SilentlyContinue
 }

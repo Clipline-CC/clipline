@@ -115,6 +115,14 @@ function Publish-CliplineCreateNewSignal {
     }
 }
 
+function Test-LibraryGitStatusEntryAllowed {
+    param([Parameter(Mandatory = $true)][string]$Entry)
+    if (-not $Entry.StartsWith('?? ', [StringComparison]::Ordinal)) { return $false }
+    $path = $Entry.Substring(3).Trim().Trim('"').Replace('\', '/')
+    return $path.Equals('paseo.json', [StringComparison]::OrdinalIgnoreCase) -or
+        $path.StartsWith('artifacts/', [StringComparison]::OrdinalIgnoreCase)
+}
+
 function Resolve-LibraryFixture {
     param(
         [Parameter(Mandatory = $true)][string]$Directory,
@@ -581,7 +589,11 @@ function Assert-LibraryTelemetry {
     if ([bool]$safety.productionCredentialsLoaded -or [long]$safety.cloudNetworkRequests -ne 0) {
         throw 'catalog harness touched credentials or a real Cloud network endpoint'
     }
+    if ($m.windowShownModelPublished -ne $true) {
+        throw 'initial bounded model was not published into a shown Slint window'
+    }
     foreach ($field in @('firstUsablePageMs', 'pageChangeP95Ms', 'filterGroupP95Ms',
+        'posterSettleMs',
         'retainedRows', 'retainedDecodedImages', 'posterLruEntries', 'posterCacheSize',
         'ffmpegChildPeak',
         'duplicateSameKeyExtractions', 'posterExtractionStarts', 'singleFlightFollowers',
@@ -624,6 +636,12 @@ function Assert-LibraryTelemetry {
             throw "lifecycle counter is missing or unbalanced: $($pair -join '/')"
         }
     }
+    if ([long]$l.imagesAccepted -ne
+            ([long]$l.posterHandlesAccepted + [long]$l.modelImagesPublished) -or
+        [long]$l.imagesReleased -ne
+            ([long]$l.posterHandlesReleased + [long]$l.modelImagesReplaced)) {
+        throw 'aggregate image lifecycle counters do not equal their owned subcategories'
+    }
     if ($Count -eq 2000 -and [double]$m.firstUsablePageMs -gt 1500.0) {
         throw 'first usable 2,000-clip page exceeded 1.5 seconds'
     }
@@ -650,9 +668,15 @@ function Assert-LibraryTelemetry {
         if ($Telemetry.reveal.windowCyclesExecutedDuringMeasuredWindow -ne $true) {
             throw 'window reveal/close cycles did not run inside the sampled steady window'
         }
-        if ([long]$Telemetry.reveal.cloudMediaCycles -ne 100 -and
-            -not [bool]$Telemetry.reveal.cloudMediaCyclesPending) {
-            throw 'cloud media cycles must equal 100 or be explicitly pending'
+        if ([bool]$Telemetry.reveal.cloudMediaCyclesPending -or
+            [long]$Telemetry.reveal.cloudMediaCycles -ne 100 -or
+            [long]$Telemetry.reveal.cloudMediaOpens -ne 100 -or
+            [long]$Telemetry.reveal.cloudMediaReplacements -ne 100 -or
+            [long]$Telemetry.reveal.cloudMediaCloses -ne 100 -or
+            [long]$Telemetry.reveal.cloudMediaCacheFills -ne 2 -or
+            $Telemetry.reveal.cloudMediaCyclesExecutedDuringMeasuredWindow -ne $true -or
+            [long]$l.leasesAcquired -ne 200 -or [long]$l.leasesReleased -ne 200) {
+            throw 'cloud media lifecycle must prove 100 exact measured open/replace/close cycles'
         }
     }
 }
@@ -1106,9 +1130,13 @@ $outputRoot = [System.IO.Path]::GetFullPath($OutputDirectory)
 New-Item -ItemType Directory -Path $outputRoot -Force | Out-Null
 $gitCommit = (& git -C $script:RepoRoot rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($gitCommit)) { throw 'cannot resolve git commit' }
-$gitDirty = @(& git -C $script:RepoRoot status --porcelain --untracked-files=no).Count -gt 0
+$gitStatus = @(& git -C $script:RepoRoot status --porcelain --untracked-files=all)
+if ($LASTEXITCODE -ne 0) { throw 'cannot inspect git worktree status' }
+$gitDirty = @($gitStatus | Where-Object {
+    -not (Test-LibraryGitStatusEntryAllowed -Entry ([string]$_))
+}).Count -gt 0
 if ($gitDirty -and -not $AllowNonBenchmarkBuild) {
-    throw 'publishable Library evidence requires a clean tracked worktree'
+    throw 'publishable Library evidence requires a clean source worktree'
 }
 $exeHash = (Get-FileHash -LiteralPath $resolvedExe -Algorithm SHA256).Hash.ToLowerInvariant()
 $exeBytes = [long](Get-Item -LiteralPath $resolvedExe).Length

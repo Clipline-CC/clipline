@@ -14,29 +14,37 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc, Barrier, Mutex,
-    atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use clipline_library::cloud::cache::{
+    AccountPublicationGuard, AvailableSpacePort, CancellationProbe, CloudAssetRequest, CloudCache,
+    CloudCacheError, CloudCancellation, CloudMediaLease, DownloadPort, DownloadReceipt,
+    DownloadSink, DownloadStatus,
+};
+use clipline_library::cloud::cache_identity::{
+    CloudAccountFence, CloudAssetKey, CloudAssetKind, CloudCacheNamespace,
+};
 use clipline_library::{
     ActiveFileRegistry, CatalogEffect, CatalogItemIdentity, CatalogResult, CatalogRevision,
     CatalogSource, CloudAccountGeneration, CloudAccountKey, CloudCatalogOwner, CloudLibraryItem,
     CloudListPageCompletion, DurableUploadToken, ForegroundGeneration, LocalClipFilter,
-    LocalClipGrouping, LocalClipId, LocalDay, LocalDayResolver, MAX_CATALOG_PAGE_ROWS,
-    MAX_DECODED_PAGE_IMAGES, MAX_POSTER_RESULT_ENTRIES, PosterCompletion, PosterController,
+    LocalClipGrouping, LocalClipId, LocalDay, LocalDayResolver, PosterCompletion, PosterController,
     PosterPageItem, PosterService, PosterWorkKind, RequestGeneration, UploadGeneration,
-    UploadSummary, WindowAttachmentGeneration, WindowWorkToken,
+    UploadSummary, WindowAttachmentGeneration, WindowWorkToken, MAX_CATALOG_PAGE_ROWS,
+    MAX_DECODED_PAGE_IMAGES, MAX_POSTER_RESULT_ENTRIES,
 };
 use clipline_shell::{LaunchMode, ShellCommand};
 use clipline_slint_spike::catalog::{
-    CatalogEffectHandler, CatalogUiIntent, LocalCatalogEffectHandler, SlintCatalogController,
-    publish_projection,
+    publish_projection, CatalogEffectHandler, CatalogUiIntent, LocalCatalogEffectHandler,
+    SlintCatalogController,
 };
 use clipline_slint_spike::desktop::{DesktopAttachment, SlintDesktopAdapter};
 use clipline_slint_spike::poster::{decode_poster_file, publish_decoded_poster};
 use clipline_slint_spike::shell::{AttachmentToken, LifecycleAction, ShellLifecycle};
-use clipline_slint_spike::{CliplineSpike, create_window};
+use clipline_slint_spike::{create_window, CliplineSpike};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use slint::{ComponentHandle, Model, Rgb8Pixel, SharedPixelBuffer};
@@ -52,7 +60,7 @@ const MAX_HARD_LINKS_PER_SEED: usize = 500;
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error>>;
 
 fn main() -> HarnessResult<()> {
-    let started_at = current_process_started_at(SystemTime::now());
+    let started_at = current_process_started_at()?;
     let options = match Options::parse(std::env::args_os()) {
         Ok(ParseOutcome::Run(options)) => options,
         Ok(ParseOutcome::Help) => {
@@ -168,7 +176,11 @@ fn run_harness(
             Rc::clone(&state),
             fixture_paths.clone(),
         )),
-        Scenario::RevealClose100 => Some(make_reveal_close_work(Rc::clone(&state))?),
+        Scenario::RevealClose100 => Some(make_reveal_close_work(
+            Rc::clone(&state),
+            options.fixture_root.join(".cloud-media-lifecycle-cache"),
+            options.source_fixture.clone(),
+        )?),
         Scenario::LocalCold | Scenario::LocalWarm | Scenario::CloudPages => None,
     };
     let event_report = run_measured_event_loop(
@@ -783,7 +795,6 @@ fn make_setup_work(
                             };
                         }
                         Scenario::RevealClose100 => {
-                            state.reveal.cloud_media_cycles_pending = true;
                             progress.stage = SetupStage::Complete;
                         }
                     }
@@ -909,15 +920,270 @@ struct RevealWindow {
     window: CliplineSpike,
 }
 
-fn make_reveal_close_work(state: Rc<RefCell<HarnessState>>) -> HarnessResult<EventLoopWork> {
+struct HarnessCloudDownload {
+    source: PathBuf,
+    calls: AtomicUsize,
+}
+
+impl DownloadPort for HarnessCloudDownload {
+    fn download(
+        &self,
+        _request: &CloudAssetRequest,
+        sink: &mut DownloadSink<'_>,
+        cancellation: &dyn CancellationProbe,
+    ) -> Result<DownloadReceipt, CloudCacheError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let mut source = File::open(&self.source)
+            .map_err(|error| CloudCacheError::Io(format!("open lifecycle fixture: {error}")))?;
+        let mut chunk = [0_u8; 64 * 1024];
+        loop {
+            if cancellation.is_cancelled() {
+                return Err(CloudCacheError::Canceled);
+            }
+            let read = source
+                .read(&mut chunk)
+                .map_err(|error| CloudCacheError::Io(format!("read lifecycle fixture: {error}")))?;
+            if read == 0 {
+                break;
+            }
+            sink.write_chunk(&chunk[..read])?;
+        }
+        Ok(DownloadReceipt {
+            status: DownloadStatus::Found,
+            advertised_size_bytes: Some(sink.written()),
+        })
+    }
+}
+
+struct HarnessCloudSpace;
+
+impl AvailableSpacePort for HarnessCloudSpace {
+    fn available_bytes(&self, _cache_root: &Path) -> Result<u64, CloudCacheError> {
+        Ok(u64::MAX)
+    }
+}
+
+struct HarnessCloudAccountGate(CloudAccountFence);
+
+impl AccountPublicationGuard for HarnessCloudAccountGate {
+    fn is_current(&self, account: &CloudAccountFence) -> bool {
+        self.0 == *account
+    }
+
+    fn publish_if_current(
+        &self,
+        account: &CloudAccountFence,
+        publication: &mut dyn FnMut() -> Result<(), CloudCacheError>,
+    ) -> Result<(), CloudCacheError> {
+        if !self.is_current(account) {
+            return Err(CloudCacheError::StaleAccount);
+        }
+        publication()
+    }
+}
+
+struct CloudMediaCycleDriver {
+    cache: CloudCache,
+    account: CloudAccountFence,
+    open_request: CloudAssetRequest,
+    replacement_request: CloudAssetRequest,
+    active: Option<CloudMediaLease>,
+    download: Arc<HarnessCloudDownload>,
+}
+
+impl CloudMediaCycleDriver {
+    fn open(cache_root: PathBuf, source: PathBuf) -> HarnessResult<Self> {
+        std::fs::create_dir(&cache_root).map_err(|error| {
+            format!(
+                "create-new lifecycle cache {}: {error}",
+                cache_root.display()
+            )
+        })?;
+        let source_size = source.metadata()?.len();
+        if source_size == 0 {
+            return Err("Cloud lifecycle fixture is empty".into());
+        }
+        let account = CloudAccountFence {
+            account_key: CloudAccountKey::new("catalog-harness")?,
+            account_generation: CloudAccountGeneration::new(1),
+            cache_namespace: CloudCacheNamespace::new("ca7a109ca7a109ca")?,
+        };
+        let download = Arc::new(HarnessCloudDownload {
+            source,
+            calls: AtomicUsize::new(0),
+        });
+        let cache = CloudCache::open(
+            cache_root,
+            download.clone(),
+            Arc::new(HarnessCloudSpace),
+            Arc::new(HarnessCloudAccountGate(account.clone())),
+        )?;
+        let request = |remote_clip_id| -> HarnessResult<CloudAssetRequest> {
+            Ok(CloudAssetRequest {
+                account: account.clone(),
+                asset: CloudAssetKey::new(remote_clip_id, CloudAssetKind::Media, 1)?,
+                expected_size_bytes: Some(source_size),
+            })
+        };
+        let open_request = request("lifecycle-open")?;
+        let replacement_request = request("lifecycle-replacement")?;
+        Ok(Self {
+            cache,
+            account,
+            open_request,
+            replacement_request,
+            active: None,
+            download,
+        })
+    }
+
+    fn acquire(&self, request: &CloudAssetRequest) -> HarnessResult<CloudMediaLease> {
+        let cancellation = CloudCancellation::default();
+        let cached = self
+            .cache
+            .get(request.clone(), &cancellation)?
+            .ok_or("deterministic Cloud lifecycle fixture was reported missing")?;
+        Ok(self
+            .cache
+            .accept_media(&self.account, cached, &cancellation)?)
+    }
+
+    fn open_cycle(&mut self, lifecycle: &mut Lifecycle, reveal: &mut Reveal) -> HarnessResult<()> {
+        if self.active.is_some() || self.active_lease_count() != 0 {
+            return Err("Cloud lifecycle Open began with an active lease".into());
+        }
+        let lease = self.acquire(&self.open_request)?;
+        lifecycle.leases_acquired = checked_add(lifecycle.leases_acquired, 1)?;
+        reveal.cloud_media_opens = checked_add(reveal.cloud_media_opens, 1)?;
+        self.active = Some(lease);
+        if self.active_lease_count() != 1 {
+            return Err("Cloud lifecycle Open did not retain exactly one lease".into());
+        }
+        Ok(())
+    }
+
+    fn replace(&mut self, lifecycle: &mut Lifecycle, reveal: &mut Reveal) -> HarnessResult<()> {
+        if self.active.is_none() || self.active_lease_count() != 1 {
+            return Err("Cloud lifecycle replacement has no exact active lease".into());
+        }
+        let replacement = self.acquire(&self.replacement_request)?;
+        lifecycle.leases_acquired = checked_add(lifecycle.leases_acquired, 1)?;
+        if self.active_lease_count() != 2 {
+            return Err("Cloud lifecycle replacement did not overlap two exact leases".into());
+        }
+        let replaced = self
+            .active
+            .replace(replacement)
+            .ok_or("Cloud lifecycle replacement lost its prior lease")?;
+        drop(replaced);
+        lifecycle.leases_released = checked_add(lifecycle.leases_released, 1)?;
+        reveal.cloud_media_replacements = checked_add(reveal.cloud_media_replacements, 1)?;
+        if self.active_lease_count() != 1 {
+            return Err("Cloud lifecycle replacement did not release the old lease".into());
+        }
+        Ok(())
+    }
+
+    fn close(
+        &mut self,
+        lifecycle: &mut Lifecycle,
+        reveal: &mut Reveal,
+        metrics: &mut Metrics,
+    ) -> HarnessResult<()> {
+        let lease = self
+            .active
+            .take()
+            .ok_or("Cloud lifecycle Close has no active lease")?;
+        drop(lease);
+        lifecycle.leases_released = checked_add(lifecycle.leases_released, 1)?;
+        reveal.cloud_media_closes = checked_add(reveal.cloud_media_closes, 1)?;
+        reveal.cloud_media_cycles = checked_add(reveal.cloud_media_cycles, 1)?;
+        metrics.active_leases_after_close = self.active_lease_count();
+        if metrics.active_leases_after_close != 0 {
+            return Err("Cloud lifecycle Close left playback protection active".into());
+        }
+        Ok(())
+    }
+
+    fn finish(
+        &self,
+        lifecycle: &Lifecycle,
+        reveal: &mut Reveal,
+        metrics: &mut Metrics,
+    ) -> HarnessResult<()> {
+        metrics.active_leases_after_close = self.active_lease_count();
+        reveal.cloud_media_cache_fills = self.download_count();
+        if self.active.is_some()
+            || metrics.active_leases_after_close != 0
+            || reveal.cloud_media_cache_fills != 2
+            || reveal.cloud_media_cycles != CHURN_CYCLES
+            || reveal.cloud_media_opens != CHURN_CYCLES
+            || reveal.cloud_media_replacements != CHURN_CYCLES
+            || reveal.cloud_media_closes != CHURN_CYCLES
+            || lifecycle.leases_acquired != CHURN_CYCLES * 2
+            || lifecycle.leases_released != CHURN_CYCLES * 2
+        {
+            return Err("Cloud media lifecycle did not prove 100 exact balanced cycles".into());
+        }
+        reveal.cloud_media_cycles_pending = false;
+        reveal.cloud_media_cycles_executed_during_measured_window = true;
+        Ok(())
+    }
+
+    fn active_lease_count(&self) -> usize {
+        self.cache.playback_lease_count()
+    }
+
+    fn download_count(&self) -> usize {
+        self.download.calls.load(Ordering::SeqCst)
+    }
+}
+
+fn make_reveal_close_work(
+    state: Rc<RefCell<HarnessState>>,
+    cache_root: PathBuf,
+    source_fixture: PathBuf,
+) -> HarnessResult<EventLoopWork> {
     let (mut shell, initial) = ShellLifecycle::for_launch(LaunchMode::Autostart)?;
     if initial != LifecycleAction::KeepTrayOnly {
         return Err("autostart reveal driver did not begin tray-only".into());
     }
     let desktop = SlintDesktopAdapter::start_detached().map_err(std::io::Error::other)?;
+    let mut cloud_media = CloudMediaCycleDriver::open(cache_root, source_fixture)?;
     let mut current: Option<RevealWindow> = None;
+    let mut media_close_pending = false;
     let mut cycles = 0_usize;
     Ok(Box::new(move || {
+        if media_close_pending {
+            let mut state = state.borrow_mut();
+            let HarnessState {
+                lifecycle,
+                reveal,
+                metrics,
+                ..
+            } = &mut *state;
+            cloud_media.close(lifecycle, reveal, metrics)?;
+            media_close_pending = false;
+            if cycles == CHURN_CYCLES {
+                cloud_media.finish(lifecycle, reveal, metrics)?;
+                let snapshot = shell.snapshot();
+                if snapshot.window_active
+                    || snapshot.counters.windows_created != CHURN_CYCLES as u64
+                    || snapshot.counters.windows_dropped != CHURN_CYCLES as u64
+                    || snapshot.counters.open_requests != CHURN_CYCLES as u64
+                    || snapshot.counters.close_requests != CHURN_CYCLES as u64
+                {
+                    return Err(
+                        "shipping lifecycle counters do not prove 100 exact window cycles".into(),
+                    );
+                }
+                reveal.window_reveal_close_cycles = CHURN_CYCLES;
+                reveal.window_reveal_close_cycles_pending = false;
+                reveal.window_cycles_executed_during_measured_window = true;
+                return Ok(true);
+            }
+            return Ok(false);
+        }
         if let Some(revealed) = current.take() {
             if shell.close_requested(revealed.attachment)?
                 != (LifecycleAction::DropToTray {
@@ -934,23 +1200,11 @@ fn make_reveal_close_work(state: Rc<RefCell<HarnessState>>) -> HarnessResult<Eve
             let mut state = state.borrow_mut();
             state.lifecycle.attachments_dropped =
                 checked_add(state.lifecycle.attachments_dropped, 1)?;
-            if cycles == CHURN_CYCLES {
-                let snapshot = shell.snapshot();
-                if snapshot.window_active
-                    || snapshot.counters.windows_created != CHURN_CYCLES as u64
-                    || snapshot.counters.windows_dropped != CHURN_CYCLES as u64
-                    || snapshot.counters.open_requests != CHURN_CYCLES as u64
-                    || snapshot.counters.close_requests != CHURN_CYCLES as u64
-                {
-                    return Err(
-                        "shipping lifecycle counters do not prove 100 exact window cycles".into(),
-                    );
-                }
-                state.reveal.window_reveal_close_cycles = CHURN_CYCLES;
-                state.reveal.window_reveal_close_cycles_pending = false;
-                state.reveal.window_cycles_executed_during_measured_window = true;
-                return Ok(true);
-            }
+            let HarnessState {
+                lifecycle, reveal, ..
+            } = &mut *state;
+            cloud_media.replace(lifecycle, reveal)?;
+            media_close_pending = true;
             return Ok(false);
         }
 
@@ -970,6 +1224,10 @@ fn make_reveal_close_work(state: Rc<RefCell<HarnessState>>) -> HarnessResult<Eve
         shell.window_created(attachment)?;
         let mut state = state.borrow_mut();
         state.lifecycle.attachments_created = checked_add(state.lifecycle.attachments_created, 1)?;
+        let HarnessState {
+            lifecycle, reveal, ..
+        } = &mut *state;
+        cloud_media.open_cycle(lifecycle, reveal)?;
         drop(state);
         current = Some(RevealWindow {
             attachment,
@@ -1008,7 +1266,12 @@ struct Reveal {
     window_reveal_close_cycles_pending: bool,
     window_cycles_executed_during_measured_window: bool,
     cloud_media_cycles: usize,
+    cloud_media_opens: usize,
+    cloud_media_replacements: usize,
+    cloud_media_closes: usize,
+    cloud_media_cache_fills: usize,
     cloud_media_cycles_pending: bool,
+    cloud_media_cycles_executed_during_measured_window: bool,
 }
 
 #[derive(Serialize)]
@@ -1078,9 +1341,7 @@ fn publish_and_record(
             .filter(|identity| !projected.contains(identity))
             .count(),
     );
-    metrics.retained_decoded_images = metrics
-        .retained_decoded_images
-        .max(images.len().min(MAX_DECODED_PAGE_IMAGES));
+    record_retained_decoded_images(metrics, images.len())?;
     lifecycle.replace_model_images(retained_model_images, images.len())?;
     Ok(())
 }
@@ -1156,9 +1417,7 @@ fn settle_local_posters(
     metrics.duplicate_same_key_extractions = metrics
         .poster_extraction_starts
         .saturating_sub(extraction_keys.len());
-    metrics.retained_decoded_images = metrics
-        .retained_decoded_images
-        .max(controller.retained_image_count());
+    record_retained_decoded_images(metrics, controller.retained_image_count())?;
     let retained_on_page = page_identities
         .iter()
         .filter(|identity| controller.retained_image(identity).is_some())
@@ -1506,6 +1765,17 @@ fn validate_warm_cache(paths: &[PathBuf]) -> HarnessResult<()> {
     Ok(())
 }
 
+fn record_retained_decoded_images(metrics: &mut Metrics, actual: usize) -> HarnessResult<()> {
+    if actual > MAX_DECODED_PAGE_IMAGES {
+        return Err(format!(
+            "retained decoded image collection has {actual} entries; limit is {MAX_DECODED_PAGE_IMAGES}"
+        )
+        .into());
+    }
+    metrics.retained_decoded_images = metrics.retained_decoded_images.max(actual);
+    Ok(())
+}
+
 fn validate_internal_gates(
     metrics: &mut Metrics,
     lifecycle: &Lifecycle,
@@ -1561,9 +1831,17 @@ fn validate_internal_gates(
     if scenario == Scenario::RevealClose100
         && (lifecycle.attachments_created != CHURN_CYCLES + 1
             || lifecycle.attachments_dropped != CHURN_CYCLES + 1
+            || lifecycle.leases_acquired != CHURN_CYCLES * 2
+            || lifecycle.leases_released != CHURN_CYCLES * 2
             || reveal.window_reveal_close_cycles != CHURN_CYCLES
             || reveal.window_reveal_close_cycles_pending
-            || !reveal.window_cycles_executed_during_measured_window)
+            || !reveal.window_cycles_executed_during_measured_window
+            || reveal.cloud_media_cycles != CHURN_CYCLES
+            || reveal.cloud_media_opens != CHURN_CYCLES
+            || reveal.cloud_media_replacements != CHURN_CYCLES
+            || reveal.cloud_media_closes != CHURN_CYCLES
+            || reveal.cloud_media_cycles_pending
+            || !reveal.cloud_media_cycles_executed_during_measured_window)
     {
         return Err("reveal/close lifecycle did not complete inside the measured window".into());
     }
@@ -1873,17 +2151,22 @@ fn system_time_from_windows_filetime(filetime_100ns: u64) -> Option<SystemTime> 
     Some(UNIX_EPOCH + Duration::from_nanos(nanos))
 }
 
+#[cfg(any(windows, test))]
+fn checked_windows_process_started_at(filetime_100ns: u64) -> HarnessResult<SystemTime> {
+    system_time_from_windows_filetime(filetime_100ns)
+        .ok_or_else(|| "catalog harness process creation time is outside SystemTime bounds".into())
+}
+
 #[cfg(windows)]
-fn current_process_started_at(fallback: SystemTime) -> SystemTime {
-    clipline_shell::windows::process::process_identity(std::process::id())
-        .ok()
-        .and_then(|identity| system_time_from_windows_filetime(identity.creation_time()))
-        .unwrap_or(fallback)
+fn current_process_started_at() -> HarnessResult<SystemTime> {
+    let identity = clipline_shell::windows::process::process_identity(std::process::id())
+        .map_err(|error| format!("query catalog harness process creation time: {error}"))?;
+    checked_windows_process_started_at(identity.creation_time())
 }
 
 #[cfg(not(windows))]
-fn current_process_started_at(fallback: SystemTime) -> SystemTime {
-    fallback
+fn current_process_started_at() -> HarnessResult<SystemTime> {
+    Ok(SystemTime::now())
 }
 
 fn utc_timestamp(now: SystemTime) -> String {
@@ -2046,6 +2329,59 @@ mod tests {
     }
 
     #[test]
+    fn cloud_media_gate_runs_exact_open_replace_close_cycles_without_leaks() {
+        let root = std::env::temp_dir().join(format!(
+            "clipline-catalog-cloud-lifecycle-test-{}-{}",
+            std::process::id(),
+            unix_millis(SystemTime::now())
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let source = root.join("source.mp4");
+        std::fs::write(&source, b"deterministic fixture media").unwrap();
+        let mut driver = CloudMediaCycleDriver::open(root.join("cache"), source).unwrap();
+        let mut lifecycle = Lifecycle::default();
+        let mut reveal = Reveal::default();
+        let mut metrics = Metrics::default();
+
+        for _ in 0..CHURN_CYCLES {
+            driver.open_cycle(&mut lifecycle, &mut reveal).unwrap();
+            assert_eq!(driver.active_lease_count(), 1);
+            driver.replace(&mut lifecycle, &mut reveal).unwrap();
+            assert_eq!(driver.active_lease_count(), 1);
+            driver
+                .close(&mut lifecycle, &mut reveal, &mut metrics)
+                .unwrap();
+            assert_eq!(driver.active_lease_count(), 0);
+        }
+
+        driver
+            .finish(&lifecycle, &mut reveal, &mut metrics)
+            .unwrap();
+        assert_eq!(driver.download_count(), 2);
+        assert_eq!(reveal.cloud_media_cycles, CHURN_CYCLES);
+        assert_eq!(reveal.cloud_media_opens, CHURN_CYCLES);
+        assert_eq!(reveal.cloud_media_replacements, CHURN_CYCLES);
+        assert_eq!(reveal.cloud_media_closes, CHURN_CYCLES);
+        assert_eq!(reveal.cloud_media_cache_fills, 2);
+        assert!(!reveal.cloud_media_cycles_pending);
+        assert!(reveal.cloud_media_cycles_executed_during_measured_window);
+        assert_eq!(lifecycle.leases_acquired, CHURN_CYCLES * 2);
+        assert_eq!(lifecycle.leases_released, CHURN_CYCLES * 2);
+        assert_eq!(metrics.active_leases_after_close, 0);
+        drop(driver);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retained_decoded_image_metric_is_exact_and_fails_over_the_bound() {
+        let mut metrics = Metrics::default();
+        record_retained_decoded_images(&mut metrics, MAX_DECODED_PAGE_IMAGES).unwrap();
+        assert_eq!(metrics.retained_decoded_images, MAX_DECODED_PAGE_IMAGES);
+        assert!(record_retained_decoded_images(&mut metrics, MAX_DECODED_PAGE_IMAGES + 1).is_err());
+        assert_eq!(metrics.retained_decoded_images, MAX_DECODED_PAGE_IMAGES);
+    }
+
+    #[test]
     fn marker_timestamp_is_rfc3339_utc() {
         assert_eq!(
             utc_timestamp(UNIX_EPOCH + Duration::from_millis(1_719_843_845_678)),
@@ -2063,5 +2399,6 @@ mod tests {
             system_time_from_windows_filetime(WINDOWS_UNIX_EPOCH_OFFSET_100NS + 123_450_000),
             Some(UNIX_EPOCH + Duration::from_millis(12_345))
         );
+        assert!(checked_windows_process_started_at(0).is_err());
     }
 }

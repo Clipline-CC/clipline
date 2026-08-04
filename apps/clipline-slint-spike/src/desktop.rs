@@ -24,6 +24,7 @@ pub struct DesktopUploadProjection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesktopProjection {
     pub revision: Revision,
+    pub library_revision: Revision,
     pub catalog_revision: Revision,
     pub catalog_source: CatalogSummarySource,
     pub catalog_active: bool,
@@ -71,6 +72,7 @@ impl DesktopProjection {
             .collect();
         Self {
             revision: snapshot.revision,
+            library_revision: snapshot.library_revision,
             catalog_revision: snapshot.catalog.revision,
             catalog_source: snapshot.catalog.source,
             catalog_active: snapshot.catalog.active,
@@ -345,6 +347,15 @@ impl SlintDesktopAdapter {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         DesktopProjection::from_snapshot(&state.controller.snapshot())
+    }
+
+    #[must_use]
+    pub fn library_revision(&self) -> Revision {
+        self.state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .controller
+            .library_revision()
     }
 
     pub fn try_publish(&self, event: UiEvent) -> Result<UiEventPublishOutcome, UiEventSendError> {
