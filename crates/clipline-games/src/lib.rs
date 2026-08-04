@@ -1,5 +1,6 @@
 //! Shared, frontend-independent game identity and discovery services.
 
+pub mod channel;
 pub mod detection;
 pub mod discovery;
 pub mod icon;

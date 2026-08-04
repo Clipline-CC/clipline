@@ -6,8 +6,8 @@
 
 ## Checkpoint (2026-08-04): Slint replacement Milestone 8, Task 8 Games foundations
 
-Task 8 is in progress through its bounded identity, settings, presentation, and icon-decode
-foundations. Games now uses disjoint validated plugin/custom/candidate identities. Candidate
+Task 8 is in progress through its bounded identity, settings, presentation, icon-decode, and
+result-delivery foundations. Games now uses disjoint validated plugin/custom/candidate identities. Candidate
 authority is minted only by an owning `InstalledGameIdentityCatalog` or `GameWindowIdentityCatalog`
 over the real Task 5 payload, carries the exact probe token, uses complete canonical source authority,
 and resolves every mutation through current-catalog membership. Duplicate authority, an injected
@@ -31,6 +31,13 @@ handle construction; admission pressure and ticket exhaustion degrade only the a
 cache exposes no clonable retained handle yet: the later Slint adapter must add an explicit bounded
 display lease instead of allowing a surface clone to escape accounting.
 
+The native Games result channel owns at most 64 results and 32 MiB, with 60 normal slots plus four
+terminal/barrier slots. Probe catalogs coalesce only by exact Settings owner and probe kind, only to
+a strictly newer request generation, and never across draft/save/discard/detach/shutdown barriers.
+Decoded icon completions never coalesce because every completion must retire its exact cache work
+slot. Full, stale, byte-cap, and disconnected rejection returns the move-owned payload to the
+producer, while dropping the receiver releases every queued catalog and decoded image.
+
 osu! settings now persist a checked nonzero account generation, migrate legacy profiles to generation
 1, retain shipping `u64` client-id semantics, and enforce per-field, cleanup-list, and 64 KiB aggregate
 bounds before normalization can hide hostile input. The generation is not yet an authoritative ABA
@@ -38,8 +45,9 @@ fence: the later osu service/CAS slice must enforce exact transitions under the 
 before asynchronous work trusts it. The explicit 100/125/150/200% DPI and negative-half-tie matrix is
 green.
 
-Next: build the Games controller/channel over the existing Task 5 catalogs, moving those catalogs
-instead of cloning or re-enumerating them and keeping full rows out of `DesktopSnapshot`.
+Next: build the Games controller over the existing Task 5 catalogs and bounded result channel,
+moving those catalogs instead of cloning or re-enumerating them and keeping full rows out of
+`DesktopSnapshot`.
 `artifacts/`, `paseo.json`, and unrelated poster formatting remain local and excluded.
 
 ## Checkpoint (2026-08-04): Slint replacement Milestone 8, Task 7 joined microphone monitor
