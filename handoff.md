@@ -23,6 +23,37 @@ the standalone runtime advances from 150.0.4078.83 for this release. The officia
 Both release-input preflights, full workspace tests, fresh-cache warning-denied workspace Clippy,
 release-version metadata validation, and the release-only diff check are green.
 
+**Published** on the rolling `nightly` prerelease from `develop` commit `1493535`, seven assets.
+The `nightly` tag and release both resolve to full commit
+`14935359c9e865db4e6ad7a406c8119b4a235ff7`. Every public asset was downloaded again and matched
+the staged SHA-256 digest and GitHub's reported digest.
+
+| asset | bytes | sha256 |
+| --- | ---: | --- |
+| `Clipline_0.1.45_x64-setup.exe` | 54,318,090 | `6a56ef81be050e486d1cee60ce6dc66ad3a656c8e62dce13852aa116aec04a4c` |
+| `Clipline_0.1.45_x64-setup.exe.sig` | 420 | `c5a72cbe2e20b6d38c7c4ed7cde8132a35c50032fb856397622ea968051a2117` |
+| `Clipline_0.1.45_x64-standalone-setup.exe` | 282,607,582 | `0a102ec9cf135dc65fd513b2aafd630fc69a3127ac7e2bfb90651c697803c893` |
+| `Clipline_0.1.45_x64-standalone-setup.exe.sig` | 436 | `02868fe3b820a6121876ad285d32bb31b38e45cc6df7ceae4d5556416338b589` |
+| `latest.json` | 1,407 | `6df7c9c5a4d10dc7b06c0157eb2b27a8de41ed2913602ba1d496a9ae7652f64a` |
+| `latest-standalone.json` | 1,433 | `04e104c2e29d4e8ef8f362d74628c2c6bbb00271092cf88ad8be046661efa8d1` |
+| `release-notes-0.1.45.md` | 2,446 | `783c31eca2c48c99bb2146c69e00229c8c6967af75869431a0638727c600160e` |
+
+Both downloaded manifests parse as version 0.1.45, point at their expected rolling release URLs,
+and contain the exact downloaded sidecar signatures. Both public installers verify under the
+updater public key compiled into Clipline; both crossed installer/signature pairs are correctly
+rejected.
+
+The standalone installer was extracted without installation and launched against isolated app
+data. Its packaged 0.1.45 app and all seven WebView2 children used the bundled, Authenticode-valid
+Microsoft 151.0.4129.59 runtime. The reporter's 29.007-second H.264 clip loaded with both audio
+tracks selected and played through `ended` with monotonic media time and no media, page, console,
+or app-log error. Runtime probing enabled H.264 and correctly left unavailable HEVC and AV1
+disabled on this machine.
+
+GitHub CI does not run on the release-only push to `develop`. The release commit's application
+source is identical to CI-green merge `673cde5`; its delta is limited to version metadata, WebView2
+runtime metadata/configuration, and release documentation.
+
 ## Checkpoint (2026-08-04): review video edit-list flicker
 
 Plan: `docs/superpowers/plans/2026-08-04-review-video-edit-list-flicker.md` (`77fa3de`).
