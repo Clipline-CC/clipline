@@ -287,14 +287,14 @@
 287:
 288:### Task B4: Replaceable FFmpeg capability cache
 289:
-290:- [ ] Split `service.rs` encoder capability caching:
+290:- [x] Split `service.rs` encoder capability caching:
 291:  - MFT capabilities may remain process-static
 292:  - FFmpeg capabilities are stored in a replaceable/versioned slot keyed by managed runtime
 293:    identity (path + provenance/version) or “external/missing”
-294:- [ ] After managed publish/repair, refresh only the FFmpeg half and republish encoder options to
+294:- [x] After managed publish/repair, refresh only the FFmpeg half and republish encoder options to
 295:      the UI without requiring app restart.
-296:- [ ] Do **not** claim `locate()` has a cache to clear; it does not.
-297:- [ ] Test: probe before install sees no SVT/FFmpeg backends (or only external if present); complete
+296:- [x] Do **not** claim `locate()` has a cache to clear; it does not.
+297:- [x] Test: probe before install sees no SVT/FFmpeg backends (or only external if present); complete
 298:      managed install; probe/options update in-process; recorder can select a newly available FFmpeg
 299:      encoder without restart.
 300:

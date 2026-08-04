@@ -3851,6 +3851,34 @@ fn deck_status_success_toasts_auto_clear() {
 }
 
 #[test]
+fn ffmpeg_capability_cache_is_replaceable_after_managed_install() {
+    let service = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/service.rs"),
+    )
+    .expect("read service.rs");
+    let install = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ffmpeg_install.rs"),
+    )
+    .expect("read ffmpeg_install.rs");
+    assert!(
+        service.contains("fn mft_capabilities_cached(")
+            && service.contains("fn ffmpeg_capabilities_cached(")
+            && service.contains("fn refresh_ffmpeg_encoder_capabilities(")
+            && service.contains("fn ffmpeg_capability_identity("),
+        "service must split process-static MFT caps from replaceable FFmpeg caps"
+    );
+    assert!(
+        !service.contains("static CAPS: OnceLock<Vec<EncoderCapability>>"),
+        "combined OnceLock encoder cache must be gone"
+    );
+    assert!(
+        install.contains("refresh_ffmpeg_encoder_capabilities()")
+            && install.contains("encoders-changed"),
+        "managed ensure must refresh FFmpeg caps and notify the UI"
+    );
+}
+
+#[test]
 fn ffmpeg_install_commands_are_native_and_queryable() {
     let install = fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ffmpeg_install.rs"),

@@ -653,6 +653,8 @@ pub async fn ensure_ffmpeg_runtime(
     match result {
         Ok(_info) => {
             controller.end_job(FfmpegInstallState::Ready);
+            let options = crate::service::refresh_ffmpeg_encoder_capabilities();
+            let _ = app2.emit("encoders-changed", &options);
             let snap = status_snapshot(&controller)?;
             let _ = app2.emit(FFMPEG_INSTALL_EVENT, snap.clone());
             Ok(snap)
