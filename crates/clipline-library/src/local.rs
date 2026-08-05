@@ -26,7 +26,9 @@ use crate::{
 /// Maximum object/array depth accepted before JSON deserialization.
 pub const MAX_CLIP_SIDECAR_JSON_DEPTH: usize = 32;
 /// Maximum plays retained in a bounded compatibility marker document.
-pub const MAX_CLIP_SIDECAR_PLAYS: usize = 256;
+// The recorder retains up to 512 osu! title transitions. The API path retains
+// at most 500 scores, so 512 is the compatibility ceiling for either source.
+pub const MAX_CLIP_SIDECAR_PLAYS: usize = 512;
 /// Maximum total entries in all marker-sidecar vectors, including nested vectors.
 pub const MAX_CLIP_SIDECAR_NESTED_ENTRIES: usize = 50_000;
 /// Maximum total JSON object members and array elements, including unknown
@@ -234,6 +236,22 @@ pub fn parse_marker_sidecar(bytes: &[u8]) -> Result<ParsedMarkerSidecar, LocalSi
     let markers: ClipMarkers = serde_json::from_value(value)
         .map_err(|source| LocalSidecarError::InvalidJson { source })?;
     ParsedMarkerSidecar::new(bytes.len(), markers)
+}
+
+/// Parse and validate a bounded marker document without applying the catalog's
+/// review-event filter. Mutation services use this form when replacing one
+/// field while preserving every shipping compatibility marker byte-for-byte at
+/// the data-model level.
+pub fn parse_marker_sidecar_preserving_all(bytes: &[u8]) -> Result<ClipMarkers, LocalSidecarError> {
+    check_maximum("sidecar.bytes", bytes.len(), MAX_CLIP_DETAIL_SIDECAR_BYTES)?;
+    validate_json_depth(bytes)?;
+    let value: Value = serde_json::from_slice(bytes)
+        .map_err(|source| LocalSidecarError::InvalidJson { source })?;
+    validate_json_strings(&value)?;
+    let mut markers: ClipMarkers = serde_json::from_value(value)
+        .map_err(|source| LocalSidecarError::InvalidJson { source })?;
+    validate_marker_document(&mut markers)?;
+    Ok(markers)
 }
 
 /// Read `<clip>.markers.json` with an allocation and read ceiling. Missing

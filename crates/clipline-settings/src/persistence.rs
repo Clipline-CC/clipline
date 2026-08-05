@@ -1407,6 +1407,59 @@ impl SettingsStore {
         Ok(publication())
     }
 
+    /// Run one bounded external publication only while the durable osu!
+    /// account owner remains exact, under the same profile gate used by
+    /// save/test/disconnect CAS operations. Cleanup-only reconciliation does
+    /// not invalidate work because it cannot change account authority.
+    ///
+    /// # Non-reentrant
+    ///
+    /// `publication` must not call a [`SettingsStore`] mutation/publication API
+    /// for this profile; those APIs acquire the same non-reentrant commit gate.
+    pub fn publish_if_osu_profile_current<T, E>(
+        &self,
+        expected: &OsuApiSettings,
+        publication: impl FnOnce() -> Result<T, E>,
+    ) -> Result<Result<T, E>, SettingsTransactionError> {
+        let shared = self
+            .inner
+            .commit_lock
+            .lock()
+            .map_err(|_| SettingsTransactionError::LockPoisoned)?;
+        let state = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| SettingsTransactionError::LockPoisoned)?;
+        let current_primary = read_primary_state(self.inner.profile.settings_path());
+        if current_primary != shared.primary {
+            return Err(SettingsTransactionError::ExternalModification);
+        }
+        let current = match &current_primary {
+            PrimaryState::Missing
+                if state.primary == PrimaryState::Missing
+                    && state.snapshot.revision == shared.revision =>
+            {
+                state.snapshot.document.clone()
+            }
+            PrimaryState::File { bytes, .. } => {
+                AppSettings::load_from_json_bytes(bytes).map_err(|error| {
+                    SettingsTransactionError::Validation(format!(
+                        "current durable settings are invalid: {}",
+                        error.describe()
+                    ))
+                })?
+            }
+            PrimaryState::Missing | PrimaryState::Unreadable(_) => {
+                return Err(SettingsTransactionError::ExternalModification)
+            }
+        };
+        if !osu_publication_owner_matches(&current.osu, expected) {
+            return Err(SettingsTransactionError::StaleOsuProfile);
+        }
+        Ok(publication())
+    }
+
     fn commit_locked(
         &self,
         shared: &mut SharedCommitState,
@@ -1759,6 +1812,13 @@ fn invalid_osu_profile_cas(message: impl Into<String>) -> Result<(), SettingsTra
         "invalid osu! profile CAS: {}",
         message.into()
     )))
+}
+
+fn osu_publication_owner_matches(current: &OsuApiSettings, expected: &OsuApiSettings) -> bool {
+    current.account_generation == expected.account_generation
+        && current.client_id == expected.client_id
+        && current.user == expected.user
+        && current.credential_target == expected.credential_target
 }
 
 fn validate_cloud_profile_cas(change: &CloudProfileCas) -> Result<(), SettingsTransactionError> {

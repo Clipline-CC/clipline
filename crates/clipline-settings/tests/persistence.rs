@@ -739,6 +739,88 @@ fn osu_profile_cas_preserves_unrelated_writes_and_advances_the_exact_owner() {
 }
 
 #[test]
+fn osu_publication_gate_tolerates_cleanup_reconciliation_but_rejects_account_replacement() {
+    let dir = TestDir::new("clipline-settings", "osu-publication-gate");
+    let profile = SettingsProfile::isolated(dir.path());
+    let publisher = SettingsStore::open(profile.clone());
+    let mutator = SettingsStore::open(profile);
+    let initial = publisher.snapshot().unwrap();
+    let configured = configured_osu_profile(
+        initial
+            .document
+            .osu
+            .account_generation
+            .checked_next()
+            .unwrap(),
+        "12345",
+        "Dain",
+    );
+    let configured = publisher
+        .compare_exchange_osu_profile(OsuProfileCas {
+            kind: OsuProfileCasKind::Save,
+            expected: initial.document.osu,
+            replacement: configured,
+        })
+        .unwrap();
+    let expected_owner = configured.document.osu.clone();
+
+    let mut reconciled = expected_owner.clone();
+    reconciled
+        .credential_cleanup_targets
+        .push(osu_credential_target("1", "retired"));
+    reconciled.normalize();
+    let reconciled = mutator
+        .compare_exchange_osu_profile(OsuProfileCas {
+            kind: OsuProfileCasKind::Reconcile,
+            expected: expected_owner.clone(),
+            replacement: reconciled,
+        })
+        .unwrap();
+
+    let mut published = false;
+    publisher
+        .publish_if_osu_profile_current(&expected_owner, || {
+            published = true;
+            Ok::<_, ()>(())
+        })
+        .unwrap()
+        .unwrap();
+    assert!(
+        published,
+        "cleanup-only reconciliation must retain ownership"
+    );
+
+    let mut replacement = configured_osu_profile(
+        expected_owner.account_generation.checked_next().unwrap(),
+        "12345",
+        "3426414",
+    );
+    replacement.credential_cleanup_targets =
+        reconciled.document.osu.credential_cleanup_targets.clone();
+    replacement
+        .credential_cleanup_targets
+        .push(expected_owner.credential_target.clone().unwrap());
+    replacement.normalize();
+    mutator
+        .compare_exchange_osu_profile(OsuProfileCas {
+            kind: OsuProfileCasKind::Test,
+            expected: reconciled.document.osu,
+            replacement,
+        })
+        .unwrap();
+
+    let mut stale_publication_ran = false;
+    let error = publisher
+        .publish_if_osu_profile_current(&expected_owner, || {
+            stale_publication_ran = true;
+            Ok::<_, ()>(())
+        })
+        .unwrap_err();
+    assert_eq!(error, SettingsTransactionError::StaleOsuProfile);
+    assert!(!stale_publication_ran);
+}
+
+#[test]
 fn osu_profile_cas_rejects_stale_and_aba_owners_byte_identically() {
     let dir = TestDir::new("clipline-settings", "osu-profile-cas-aba");
     let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));

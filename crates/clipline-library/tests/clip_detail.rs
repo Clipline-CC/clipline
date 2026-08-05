@@ -3,12 +3,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use clipline_library::{
     load_clip_detail, load_marker_sidecar_with_probe, marker_sidecar_path, parse_marker_sidecar,
-    read_marker_sidecar, ClipDetailRequest, ClipPathIdentity, ForegroundGeneration,
-    LegacyAudioTrackProbe, LocalSidecarError, RequestGeneration, WindowAttachmentGeneration,
-    WindowWorkToken, MAX_CATALOG_STRING_BYTES, MAX_CLIP_DETAIL_AUDIO_TRACKS,
-    MAX_CLIP_DETAIL_FIELD_BYTES, MAX_CLIP_DETAIL_MARKERS, MAX_CLIP_DETAIL_SIDECAR_BYTES,
-    MAX_CLIP_SIDECAR_JSON_DEPTH, MAX_CLIP_SIDECAR_JSON_ENTRIES, MAX_CLIP_SIDECAR_NESTED_ENTRIES,
-    MAX_CLIP_SIDECAR_PLAYS, MAX_CLIP_SIDECAR_STRING_BYTES,
+    parse_marker_sidecar_preserving_all, read_marker_sidecar, ClipDetailRequest, ClipPathIdentity,
+    ForegroundGeneration, LegacyAudioTrackProbe, LocalSidecarError, RequestGeneration,
+    WindowAttachmentGeneration, WindowWorkToken, MAX_CATALOG_STRING_BYTES,
+    MAX_CLIP_DETAIL_AUDIO_TRACKS, MAX_CLIP_DETAIL_FIELD_BYTES, MAX_CLIP_DETAIL_MARKERS,
+    MAX_CLIP_DETAIL_SIDECAR_BYTES, MAX_CLIP_SIDECAR_JSON_DEPTH, MAX_CLIP_SIDECAR_JSON_ENTRIES,
+    MAX_CLIP_SIDECAR_NESTED_ENTRIES, MAX_CLIP_SIDECAR_PLAYS, MAX_CLIP_SIDECAR_STRING_BYTES,
 };
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -164,6 +164,19 @@ fn one_bounded_parse_supports_full_compatibility_and_compact_projections() {
         assert!(summary.search_text.contains(term), "missing {term:?}");
     }
     assert!(summary.search_text.len() <= MAX_CLIP_DETAIL_FIELD_BYTES);
+}
+
+#[test]
+fn preserving_parse_keeps_non_review_markers_for_field_replacement() {
+    let preserved = parse_marker_sidecar_preserving_all(&json_bytes(&sidecar())).unwrap();
+    assert_eq!(preserved.markers.len(), 2);
+    assert!(preserved
+        .markers
+        .iter()
+        .any(|marker| marker.event.kind == clipline_events::EventKind::GameStart));
+
+    let projected = parse_marker_sidecar(&json_bytes(&sidecar())).unwrap();
+    assert_eq!(projected.markers().markers.len(), 1);
 }
 
 #[test]

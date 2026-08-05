@@ -6,13 +6,19 @@ license.workspace = true
 publish = false
 
 [dependencies]
+clipline-events = { path = "../clipline-events" }
+clipline-library = { path = "../clipline-library" }
 clipline-settings = { path = "../clipline-settings" }
 clipline-shell = { path = "../clipline-shell" }
 base64 = "0.22"
+chrono = "0.4.45"
 png = "0.17"
+reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time"] }
 tracing = "0.1"
 zeroize = { workspace = true }
 uuid = { version = "1", features = ["v4"] }
@@ -31,4 +37,5 @@ windows-sys = { version = "0.61", features = [
 [dev-dependencies]
 clipline-test-utils = { path = "../clipline-test-utils" }
 clipline-events = { path = "../clipline-events" }
+httpmock = { workspace = true }
 static_assertions = "1"

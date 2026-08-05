@@ -2,6 +2,8 @@
 
 use std::error::Error;
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Mutex;
 
 use clipline_settings::osu::osu_credential_target_for_operation;
@@ -11,6 +13,11 @@ use clipline_settings::{
 };
 use clipline_shell::secret::SecretString;
 use serde::de::Visitor;
+
+use crate::osu_http::{
+    OsuHttpClient, OsuHttpConfig, OsuHttpError, OsuHttpErrorKind, OsuHttpOwner, OsuRecentFetch,
+    OsuRequestFence,
+};
 
 pub const MAX_OSU_CLIENT_SECRET_BYTES: usize = 2_560;
 pub const MAX_OSU_ACCESS_TOKEN_BYTES: usize = 64 * 1024;
@@ -235,6 +242,37 @@ pub struct OsuAccountStatus {
     pub username: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OsuAccountTestResult {
+    pub status: OsuAccountStatus,
+    pub score_count: usize,
+    pub failed_count: usize,
+    pub started_at_count: usize,
+    pub ended_at_count: usize,
+    pub pagination_ceiling_reached: bool,
+}
+
+pub type OsuAccountTestFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<OsuRecentFetch, OsuHttpError>> + Send + 'a>>;
+
+pub trait OsuAccountTestPort: Send + Sync {
+    fn test<'a>(
+        &'a self,
+        config: OsuHttpConfig,
+        fence: &'a dyn OsuRequestFence,
+    ) -> OsuAccountTestFuture<'a>;
+}
+
+impl OsuAccountTestPort for OsuHttpClient {
+    fn test<'a>(
+        &'a self,
+        config: OsuHttpConfig,
+        fence: &'a dyn OsuRequestFence,
+    ) -> OsuAccountTestFuture<'a> {
+        Box::pin(async move { self.fetch_recent_scores(&config, None, fence).await })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OsuAccountServiceError {
     InvalidClientId,
@@ -249,6 +287,7 @@ pub enum OsuAccountServiceError {
     SettingsUnavailable,
     CleanupCapacity,
     RollbackIncomplete,
+    Http(OsuHttpErrorKind),
 }
 
 impl fmt::Display for OsuAccountServiceError {
@@ -272,6 +311,7 @@ impl fmt::Display for OsuAccountServiceError {
             Self::RollbackIncomplete => {
                 formatter.write_str("osu! credential rollback requires cleanup")
             }
+            Self::Http(kind) => write!(formatter, "osu! account test failed: {kind:?}"),
         }
     }
 }
@@ -448,6 +488,147 @@ where
         self.status_for(&reconciled)
     }
 
+    /// Verify the configured account without holding the settings transaction
+    /// gate across network I/O, then advance the exact durable account owner.
+    /// A concurrent save/test/disconnect makes the final CAS fail stale.
+    pub async fn test<H: OsuAccountTestPort, F: OsuRequestFence>(
+        &self,
+        http: &H,
+        fence: &F,
+    ) -> Result<OsuAccountTestResult, OsuAccountServiceError> {
+        let (expected_owner, config) = {
+            let _operation = OSU_ACCOUNT_OPERATION
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let loaded = self.load_profile()?;
+            let expected = self.reconcile_cleanup(&loaded)?;
+            let client_id = expected
+                .client_id
+                .clone()
+                .ok_or(OsuAccountServiceError::InvalidClientId)?;
+            let user = expected
+                .user
+                .clone()
+                .ok_or(OsuAccountServiceError::InvalidUser)?;
+            let target = expected
+                .credential_target
+                .as_deref()
+                .ok_or(OsuAccountServiceError::MissingSecret)?;
+            let secret = self
+                .read_secret(target)?
+                .ok_or(OsuAccountServiceError::MissingSecret)?;
+            let config = OsuHttpConfig::new(
+                OsuHttpOwner::new(expected.account_generation),
+                client_id,
+                user,
+                secret,
+            )
+            .map_err(map_http_error)?;
+            (expected, config)
+        };
+
+        let fetch = http.test(config, fence).await.map_err(map_http_error)?;
+        if fetch.owner.account_generation != expected_owner.account_generation {
+            return Err(OsuAccountServiceError::StaleProfile);
+        }
+
+        let _operation = OSU_ACCOUNT_OPERATION
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let loaded = self.load_profile()?;
+        if !same_osu_account_owner(&loaded, &expected_owner) {
+            return Err(OsuAccountServiceError::StaleProfile);
+        }
+        let expected = self.reconcile_cleanup(&loaded)?;
+        let next_generation = expected
+            .account_generation
+            .checked_next()
+            .map_err(|_| OsuAccountServiceError::GenerationExhausted)?;
+        let client_id = expected
+            .client_id
+            .clone()
+            .ok_or(OsuAccountServiceError::InvalidClientId)?;
+        let user_id = normalize_user(fetch.user_id.clone())?;
+        let old_target = expected
+            .credential_target
+            .clone()
+            .ok_or(OsuAccountServiceError::MissingSecret)?;
+        let secret = self
+            .read_secret(&old_target)?
+            .ok_or(OsuAccountServiceError::MissingSecret)?;
+        let operation_id = uuid::Uuid::new_v4().simple().to_string();
+        let target = osu_credential_target_for_operation(next_generation, &operation_id)
+            .map_err(|_| OsuAccountServiceError::SettingsUnavailable)?;
+        if expected.credential_cleanup_targets.len() >= MAX_OSU_CREDENTIAL_CLEANUP_TARGETS {
+            return Err(OsuAccountServiceError::CleanupCapacity);
+        }
+        if self.read_secret(&target)?.is_some() {
+            return Err(OsuAccountServiceError::CredentialTargetCollision);
+        }
+
+        let mut reserved = expected.clone();
+        push_cleanup_target(&mut reserved, target.clone())?;
+        reserved.normalize();
+        let reserved = self
+            .settings
+            .compare_exchange(OsuProfileCas {
+                kind: OsuProfileCasKind::Reconcile,
+                expected,
+                replacement: reserved,
+            })
+            .map_err(map_settings_error)?;
+        if self.credentials.write(&target, &user_id, &secret).is_err() {
+            let _ = self.reconcile_cleanup(&reserved);
+            return Err(OsuAccountServiceError::CredentialWrite);
+        }
+
+        let mut replacement = reserved.clone();
+        replacement.account_generation = next_generation;
+        replacement.client_id = Some(client_id);
+        replacement.user = Some(user_id);
+        replacement.credential_target = Some(target.clone());
+        replacement.last_connected_username = fetch.username.clone();
+        replacement
+            .credential_cleanup_targets
+            .retain(|candidate| candidate != &target);
+        if old_target != target {
+            push_cleanup_target(&mut replacement, old_target)?;
+        }
+        replacement.normalize();
+        let profile = match self.settings.compare_exchange(OsuProfileCas {
+            kind: OsuProfileCasKind::Test,
+            expected: reserved,
+            replacement,
+        }) {
+            Ok(profile) => profile,
+            Err(primary) => {
+                if let Ok(current) = self.load_profile() {
+                    if current.credential_target.as_deref() != Some(target.as_str()) {
+                        if !current.credential_cleanup_targets.contains(&target)
+                            && self.schedule_cleanup(target.clone()).is_err()
+                        {
+                            return Err(OsuAccountServiceError::RollbackIncomplete);
+                        }
+                        if let Ok(scheduled) = self.load_profile() {
+                            let _ = self.reconcile_cleanup(&scheduled);
+                        }
+                    }
+                }
+                return Err(map_settings_error(primary));
+            }
+        };
+        let profile = self.reconcile_cleanup(&profile).unwrap_or(profile);
+        let status = self.status_for(&profile)?;
+        Ok(OsuAccountTestResult {
+            status,
+            score_count: fetch.scores.len(),
+            failed_count: fetch.failed_count,
+            started_at_count: fetch.started_at_count,
+            ended_at_count: fetch.ended_at_count,
+            pagination_ceiling_reached: fetch.pagination_ceiling_reached,
+        })
+    }
+
     fn load_profile(&self) -> Result<OsuApiSettings, OsuAccountServiceError> {
         self.settings.load().map_err(map_settings_error)
     }
@@ -575,6 +756,22 @@ fn map_settings_error(error: OsuSettingsPortError) -> OsuAccountServiceError {
         OsuSettingsPortError::GenerationExhausted => OsuAccountServiceError::GenerationExhausted,
         OsuSettingsPortError::Unavailable => OsuAccountServiceError::SettingsUnavailable,
     }
+}
+
+fn map_http_error(error: OsuHttpError) -> OsuAccountServiceError {
+    match error.kind() {
+        OsuHttpErrorKind::AccountChanged | OsuHttpErrorKind::Canceled => {
+            OsuAccountServiceError::StaleProfile
+        }
+        kind => OsuAccountServiceError::Http(kind),
+    }
+}
+
+fn same_osu_account_owner(current: &OsuApiSettings, expected: &OsuApiSettings) -> bool {
+    current.account_generation == expected.account_generation
+        && current.client_id == expected.client_id
+        && current.user == expected.user
+        && current.credential_target == expected.credential_target
 }
 
 impl OsuSettingsPort for clipline_settings::SettingsStore {

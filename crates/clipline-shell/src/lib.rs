@@ -376,6 +376,13 @@ impl DirectoryAuthority {
         create_new_regular_file_in_directory(&self.directory, &self.display_path, name)
     }
 
+    /// Open one existing regular-file child without following links.
+    pub fn open_regular_file(&self, name: &std::ffi::OsStr) -> std::io::Result<std::fs::File> {
+        validate_child_name(name)?;
+        require_directory_authority(self)?;
+        open_regular_file_in_directory(&self.directory, &self.display_path, name)
+    }
+
     /// Return the stable identity of one existing regular-file child, or `None` when absent.
     pub fn regular_file_identity(
         &self,

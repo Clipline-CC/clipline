@@ -1,11 +1,16 @@
 use std::collections::BTreeMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use clipline_games::osu::{
-    OsuAccessToken, OsuAccountService, OsuAccountServiceError, OsuClientSecret, OsuCredentialPort,
-    OsuCredentialPortError, OsuSaveRequest, OsuSettingsPort, OsuSettingsPortError,
-    MAX_OSU_ACCESS_TOKEN_BYTES, MAX_OSU_CLIENT_SECRET_BYTES,
+    OsuAccessToken, OsuAccountService, OsuAccountServiceError, OsuAccountTestFuture,
+    OsuAccountTestPort, OsuClientSecret, OsuCredentialPort, OsuCredentialPortError, OsuSaveRequest,
+    OsuSettingsPort, OsuSettingsPortError, MAX_OSU_ACCESS_TOKEN_BYTES, MAX_OSU_CLIENT_SECRET_BYTES,
+};
+use clipline_games::osu_http::{
+    OsuCancellationFuture, OsuHttpConfig, OsuHttpOwner, OsuRecentFetch, OsuRequestFence,
 };
 use clipline_settings::{
     OsuAccountGeneration, OsuApiSettings, OsuProfileCas, SettingsProfile, SettingsStore,
@@ -106,6 +111,77 @@ fn configured_profile(client_id: &str, user: &str, secret: &str) -> (Fixture, St
         ..OsuApiSettings::default()
     };
     (fixture, target)
+}
+
+#[derive(Clone, Copy)]
+struct CurrentFence;
+
+impl OsuRequestFence for CurrentFence {
+    fn is_current(&self, _owner: OsuHttpOwner) -> bool {
+        true
+    }
+
+    fn cancelled<'a>(&'a self, _owner: OsuHttpOwner) -> OsuCancellationFuture<'a> {
+        Box::pin(std::future::pending())
+    }
+}
+
+struct SuccessfulTestPort;
+
+impl OsuAccountTestPort for SuccessfulTestPort {
+    fn test<'a>(
+        &'a self,
+        config: OsuHttpConfig,
+        _fence: &'a dyn OsuRequestFence,
+    ) -> OsuAccountTestFuture<'a> {
+        Box::pin(async move {
+            Ok(OsuRecentFetch {
+                owner: config.owner(),
+                user_id: "3426414".into(),
+                scores: Vec::new(),
+                failed_count: 7,
+                started_at_count: 8,
+                ended_at_count: 9,
+                pagination_ceiling_reached: true,
+                username: Some("Dain".into()),
+            })
+        })
+    }
+}
+
+struct ReplacingTestPort {
+    fixture: Fixture,
+}
+
+impl OsuAccountTestPort for ReplacingTestPort {
+    fn test<'a>(
+        &'a self,
+        config: OsuHttpConfig,
+        _fence: &'a dyn OsuRequestFence,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<OsuRecentFetch, clipline_games::osu_http::OsuHttpError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            let mut profile = self.fixture.profile.lock().unwrap();
+            profile.account_generation = profile.account_generation.checked_next().unwrap();
+            profile.user = Some("replacement".into());
+            drop(profile);
+            Ok(OsuRecentFetch {
+                owner: config.owner(),
+                user_id: "3426414".into(),
+                scores: Vec::new(),
+                failed_count: 0,
+                started_at_count: 0,
+                ended_at_count: 0,
+                pagination_ceiling_reached: false,
+                username: Some("Dain".into()),
+            })
+        })
+    }
 }
 
 #[test]
@@ -539,4 +615,64 @@ fn save_request_debug_never_contains_the_secret() {
     let debug = format!("{request:?}");
     assert!(!debug.contains("never-print-me"));
     assert!(debug.contains("[REDACTED]"));
+}
+
+#[tokio::test]
+async fn account_test_advances_owner_after_http_and_migrates_the_secret() {
+    let (fixture, old_target) = configured_profile("12345", "Dain", "secret");
+    let service = OsuAccountService::new(fixture.clone(), fixture.clone());
+
+    let result = service
+        .test(&SuccessfulTestPort, &CurrentFence)
+        .await
+        .unwrap();
+
+    assert_eq!(result.status.account_generation.get(), 2);
+    assert_eq!(result.status.user.as_deref(), Some("3426414"));
+    assert_eq!(result.status.username.as_deref(), Some("Dain"));
+    assert_eq!(result.score_count, 0);
+    assert_eq!(result.failed_count, 7);
+    assert_eq!(result.started_at_count, 8);
+    assert_eq!(result.ended_at_count, 9);
+    assert!(result.pagination_ceiling_reached);
+    let profile = fixture.profile.lock().unwrap().clone();
+    let new_target = profile.credential_target.expect("tested target");
+    assert_ne!(new_target, old_target);
+    let credentials = fixture.credentials.lock().unwrap();
+    assert_eq!(credentials.len(), 1);
+    assert_eq!(credentials[&new_target].as_str(), "secret");
+}
+
+#[tokio::test]
+async fn account_replacement_during_http_rejects_stale_test_without_credential_write() {
+    let (fixture, active_target) = configured_profile("12345", "Dain", "secret");
+    let service = OsuAccountService::new(fixture.clone(), fixture.clone());
+    let port = ReplacingTestPort {
+        fixture: fixture.clone(),
+    };
+    let writes_before = fixture
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|event| **event == "credential.write")
+        .count();
+
+    let error = service.test(&port, &CurrentFence).await.unwrap_err();
+
+    assert_eq!(error, OsuAccountServiceError::StaleProfile);
+    assert_eq!(fixture.credentials.lock().unwrap().len(), 1);
+    assert!(fixture
+        .credentials
+        .lock()
+        .unwrap()
+        .contains_key(&active_target));
+    let writes_after = fixture
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|event| **event == "credential.write")
+        .count();
+    assert_eq!(writes_after, writes_before);
 }

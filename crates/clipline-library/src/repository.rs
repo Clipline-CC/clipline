@@ -29,7 +29,7 @@ const METADATA_COLLISION_ERROR: &str = "a clip metadata sidecar with that name a
 const PENDING_OSU_COLLISION_ERROR: &str =
     "an osu! enrichment sidecar with that name already exists";
 const POSTER_COLLISION_ERROR: &str = "a poster sidecar with that name already exists";
-const MAX_PENDING_OSU_BYTES: u64 = 8 * 1024 * 1024;
+pub const MAX_PENDING_OSU_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_CLIP_METADATA_BYTES: u64 = 64 * 1024;
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 

@@ -1,5 +1,5 @@
 use std::ffi::OsStr;
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -135,6 +135,13 @@ fn directory_authority_bounds_child_names_and_lifecycle_operations() {
             .unwrap(),
         Some(identity)
     );
+    let mut opened = authority
+        .open_regular_file(OsStr::new("poster.tmp"))
+        .unwrap();
+    let mut contents = String::new();
+    opened.read_to_string(&mut contents).unwrap();
+    assert_eq!(contents, "poster");
+    drop(opened);
     authority
         .rename_file_noreplace_if_identity(
             OsStr::new("poster.tmp"),
@@ -195,6 +202,16 @@ fn directory_authority_uses_the_selected_parent_after_its_display_path_is_replac
     std::fs::create_dir(directory.path()).unwrap();
     let foreign_target = directory.path().join("poster.jpg");
     std::fs::write(&foreign_target, b"foreign").unwrap();
+
+    assert_eq!(
+        std::fs::read(
+            authority
+                .open_regular_file(OsStr::new("poster.jpg"))
+                .unwrap()
+        )
+        .unwrap(),
+        b"selected-old"
+    );
 
     let mut replacement = authority
         .create_new_regular_file(OsStr::new("poster.tmp"))

@@ -115,8 +115,36 @@ independently constructed services; cross-process exclusion relies on Clipline's
 authenticated single-instance boundary. The legacy plaintext credential read and whole-profile
 replacement routes remain only for the thin Tauri compatibility cutover.
 
-Next: implement the Task 8 bounded osu! HTTP/enrichment slice, then complete the thin Tauri
-compatibility cutover.
+The bounded osu! transport and enrichment domain are now shared as well. One redirect-free rustls
+client owns a single 30-second operation deadline across token, optional username lookup, and at
+most five 100-score pages. Success/error bodies are capped at 4 MiB/64 KiB; page deserialization
+itself stops at 101 entries; the retained result caps at 500 scores and 4 MiB of validated strings.
+Every request phase and score append is account/cancellation fenced. Client secrets, access tokens,
+and response buffers remain move-only/redacted/zeroizing, and the production endpoint cannot be
+overridden outside debug test builds.
+
+Account Test is a two-phase transaction: it releases the process operation gate for HTTP, then
+rechecks the exact client/user/generation/credential owner before reserving a new generation-owned
+credential, copying the secret, and committing `OsuProfileCasKind::Test`. Save, Test, and Disconnect
+therefore all advance the checked account generation and reject ABA/stale completions. The settings
+publication fence ignores cleanup-only reconciliation but linearizes every retry/failure/marker/
+pending mutation with the durable account gate.
+
+Pending enrichment discovery is bounded to 10,000 jobs/50,000 directory entries and retains exact
+root, clip, pending-file, and parent-directory authority. It never uses the serialized clip path as
+I/O authority. Sidecars publish through create-new, sync, and identity-CAS replacement; cleanup and
+foreign races are identity checked. Marker replacement changes only `plays`, preserves non-review
+events, fails closed on corrupt/oversized input, and shares a 512-play ceiling with gallery/detail
+parsing. The 8 MiB pending-file limit is now one library constant. `MutationLease` excludes active
+upload/playback/destructive work for the whole publication.
+
+`JoinedOsuEnrichmentService` owns one joined coordinator thread, at most eight root-identity slots,
+and only the latest pending request behind each active root. Displaced callers receive
+`Superseded`; shutdown returns queued ownership; a pass panic is contained and the pending request
+still runs. Focused Games/Settings/Library suites, workspace no-run compilation, changed-crate
+all-target Clippy, and identity/account/mutation/coalescing regressions are green.
+
+Next: complete the Task 8 thin Tauri compatibility cutover and duplicate-algorithm rejection tests.
 `artifacts/`, `paseo.json`, and unrelated poster formatting remain local and excluded.
 
 ## Checkpoint (2026-08-04): Slint replacement Milestone 8, Task 7 joined microphone monitor
