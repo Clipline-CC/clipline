@@ -184,7 +184,10 @@ pub struct Recorder<C: CaptureEngine, E: Encoder> {
     pending_audio_bytes: usize,
     pending_byte_budget: usize,
     pre_keyframe_bytes: usize,
-    pending_started_pts_s: Option<f64>,
+    pending_video_frames: usize,
+    /// Encoders stamp the first sample with the configured frame duration;
+    /// later variable-rate samples may span long static-screen gaps.
+    nominal_video_duration_s: Option<f64>,
     audio_sources: Vec<Box<dyn AudioSource>>,
     pending_audio: Vec<Vec<AudioPacket>>,
     /// pts of the first video packet — the recording's timeline start.
@@ -218,7 +221,8 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
             pending_audio_bytes: 0,
             pending_byte_budget: pending_byte_budget(max_buffer_bytes),
             pre_keyframe_bytes: 0,
-            pending_started_pts_s: None,
+            pending_video_frames: 0,
+            nominal_video_duration_s: None,
             audio_sources: Vec::new(),
             pending_audio: Vec::new(),
             video_start_pts_s: None,
@@ -255,7 +259,8 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
             pending_audio_bytes: 0,
             pending_byte_budget: pending_byte_budget(storage_max_bytes),
             pre_keyframe_bytes: 0,
-            pending_started_pts_s: None,
+            pending_video_frames: 0,
+            nominal_video_duration_s: None,
             audio_sources: Vec::new(),
             pending_audio: Vec::new(),
             video_start_pts_s: None,
@@ -294,7 +299,7 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
         for pkt in self.encoder.encode(&frame)? {
             self.push_encoded_packet(pkt)?;
         }
-        self.validate_pending_limits(frame.pts_s)?;
+        self.validate_pending_limits()?;
         Ok(true)
     }
 
@@ -321,7 +326,7 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
                 .map(|p| p.pts_s + p.duration_s)
                 .unwrap_or(0.0);
             self.finish_audio_until(end)?;
-            self.validate_pending_limits(end)?;
+            self.validate_pending_limits()?;
             self.seal_pending(f64::INFINITY)?;
         }
         Ok(())
@@ -566,13 +571,7 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
             audio.push(track);
         }
         self.recount_pending_audio_bytes();
-        self.pending_started_pts_s = self
-            .pending_audio
-            .iter()
-            .flat_map(|track| track.iter())
-            .map(|packet| packet.pts_s)
-            .filter(|pts| pts.is_finite())
-            .min_by(f64::total_cmp);
+        self.pending_video_frames = 0;
 
         let seg = Arc::new(Segment {
             starts_with_keyframe,
@@ -596,23 +595,23 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
     fn push_encoded_packet(&mut self, pkt: EncodedPacket) -> Result<(), PipelineError> {
         if self.video_start_pts_s.is_none() {
             if !pkt.is_keyframe {
-                self.note_pending_start(pkt.pts_s);
+                self.note_pending_video_frame(&pkt);
                 self.pre_keyframe_bytes = self.pre_keyframe_bytes.saturating_add(pkt.data.len());
                 return Ok(());
             }
             self.video_start_pts_s = Some(pkt.pts_s);
             self.pre_keyframe_bytes = 0;
+            self.pending_video_frames = 0;
             drop_audio_before_timeline(&mut self.pending_audio, pkt.pts_s);
             self.recount_pending_audio_bytes();
-            self.pending_started_pts_s = Some(pkt.pts_s);
         }
 
         if pkt.is_keyframe && !self.pending.is_empty() {
-            self.validate_pending_limits(pkt.pts_s)?;
+            self.validate_pending_limits()?;
             self.seal_pending(pkt.pts_s)?;
         }
 
-        self.note_pending_start(pkt.pts_s);
+        self.note_pending_video_frame(&pkt);
         self.pending_bytes = self.pending_bytes.saturating_add(pkt.data.len());
         self.pending.push(pkt);
         Ok(())
@@ -620,58 +619,38 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
 
     fn poll_audio_until(&mut self, until_pts_s: f64) -> Result<(), PipelineError> {
         let mut added_bytes = 0usize;
-        let mut first_pts_s: Option<f64> = None;
         for (source, pending) in self.audio_sources.iter_mut().zip(&mut self.pending_audio) {
             let packets = source.poll_packets(until_pts_s)?;
             added_bytes = packets.iter().fold(added_bytes, |total, packet| {
                 total.saturating_add(packet.data.len())
             });
-            for packet in &packets {
-                if packet.pts_s.is_finite() {
-                    first_pts_s =
-                        Some(first_pts_s.map_or(packet.pts_s, |pts| pts.min(packet.pts_s)));
-                }
-            }
             pending.extend(packets);
         }
         self.pending_audio_bytes = self.pending_audio_bytes.saturating_add(added_bytes);
-        if let Some(pts_s) = first_pts_s {
-            self.note_pending_start(pts_s);
-        }
         Ok(())
     }
 
     fn finish_audio_until(&mut self, until_pts_s: f64) -> Result<(), PipelineError> {
         let mut added_bytes = 0usize;
-        let mut first_pts_s: Option<f64> = None;
         for (source, pending) in self.audio_sources.iter_mut().zip(&mut self.pending_audio) {
             let packets = source.finish_packets(until_pts_s)?;
             added_bytes = packets.iter().fold(added_bytes, |total, packet| {
                 total.saturating_add(packet.data.len())
             });
-            for packet in &packets {
-                if packet.pts_s.is_finite() {
-                    first_pts_s =
-                        Some(first_pts_s.map_or(packet.pts_s, |pts| pts.min(packet.pts_s)));
-                }
-            }
             pending.extend(packets);
         }
         self.pending_audio_bytes = self.pending_audio_bytes.saturating_add(added_bytes);
-        if let Some(pts_s) = first_pts_s {
-            self.note_pending_start(pts_s);
-        }
         Ok(())
     }
 
-    fn note_pending_start(&mut self, pts_s: f64) {
-        if !pts_s.is_finite() {
-            return;
+    fn note_pending_video_frame(&mut self, packet: &EncodedPacket) {
+        self.pending_video_frames = self.pending_video_frames.saturating_add(1);
+        if self.nominal_video_duration_s.is_none()
+            && packet.duration_s.is_finite()
+            && packet.duration_s > 0.0
+        {
+            self.nominal_video_duration_s = Some(packet.duration_s);
         }
-        self.pending_started_pts_s = Some(
-            self.pending_started_pts_s
-                .map_or(pts_s, |current| current.min(pts_s)),
-        );
     }
 
     fn recount_pending_audio_bytes(&mut self) {
@@ -684,7 +663,7 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
             });
     }
 
-    fn validate_pending_limits(&self, now_pts_s: f64) -> Result<(), PipelineError> {
+    fn validate_pending_limits(&self) -> Result<(), PipelineError> {
         let pending_payload_bytes = self.pending_payload_bytes();
         if pending_payload_bytes > self.pending_byte_budget {
             return Err(EncodeError::Backend(format!(
@@ -693,11 +672,11 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
             ))
             .into());
         }
-        if let Some(start_pts_s) = self.pending_started_pts_s {
-            let duration_s = now_pts_s - start_pts_s;
+        if let Some(frame_duration_s) = self.nominal_video_duration_s {
+            let duration_s = self.pending_video_frames as f64 * frame_duration_s;
             if duration_s.is_finite() && duration_s > MAX_PENDING_GOP_DURATION_S {
                 return Err(EncodeError::Backend(format!(
-                    "encoder did not produce a keyframe before pending GOP duration exceeded {:.1} seconds ({duration_s:.3} seconds)",
+                    "encoder did not produce a keyframe before pending GOP duration exceeded {:.1} seconds of encoded frame time ({duration_s:.3} seconds)",
                     MAX_PENDING_GOP_DURATION_S
                 ))
                 .into());
@@ -1450,7 +1429,7 @@ fn relative_pts_ticks(pts_s: f64, origin_s: f64, timescale: u32) -> io::Result<u
 mod tests {
     use super::*;
     use crate::mock::{MockCapture, MockEncoder};
-    use crate::traits::{EncodedPacket, Frame};
+    use crate::traits::{CaptureEngine, CaptureError, EncodedPacket, Frame, FrameData};
     use clipline_mp4::{AudioTrackConfig, VideoTrackConfig};
     use clipline_test_utils::TestDir;
 
@@ -1463,8 +1442,60 @@ mod tests {
         ticks: &'static [f64],
     }
 
+    struct TimestampCapture {
+        pts: std::collections::VecDeque<f64>,
+    }
+
+    struct VariableDurationEncoder {
+        inner: MockEncoder,
+        fps: u32,
+        previous_pts_s: Option<f64>,
+    }
+
     const CLOSELY_SPACED_TICKS: &[f64] = &[0.0, 900.0, 907.0, 2_700.0, 3_600.0];
     const REPEATED_SUB_TICK_TICKS: &[f64] = &[0.0, 900.0, 900.009, 900.018, 3_600.0];
+
+    impl TimestampCapture {
+        fn new(pts: impl IntoIterator<Item = f64>) -> Self {
+            Self {
+                pts: pts.into_iter().collect(),
+            }
+        }
+    }
+
+    impl CaptureEngine for TimestampCapture {
+        fn next_frame(&mut self) -> Result<Option<Frame>, CaptureError> {
+            Ok(self.pts.pop_front().map(|pts_s| Frame {
+                pts_s,
+                data: FrameData::Cpu(vec![0; 16]),
+            }))
+        }
+    }
+
+    impl VariableDurationEncoder {
+        fn new(gop_len: u64, fps: u32) -> Self {
+            Self {
+                inner: MockEncoder::new(gop_len, fps),
+                fps,
+                previous_pts_s: None,
+            }
+        }
+    }
+
+    impl Encoder for VariableDurationEncoder {
+        fn encode(&mut self, frame: &Frame) -> Result<Vec<EncodedPacket>, EncodeError> {
+            let mut packets = self.inner.encode(frame)?;
+            packets[0].duration_s = self
+                .previous_pts_s
+                .map_or(1.0 / f64::from(self.fps), |previous| frame.pts_s - previous);
+            self.previous_pts_s = Some(frame.pts_s);
+            Ok(packets)
+        }
+
+        fn track_config(&self) -> VideoTrackConfig {
+            self.inner.track_config()
+        }
+    }
 
     impl Encoder for PtsRemapEncoder {
         fn encode(&mut self, frame: &Frame) -> Result<Vec<EncodedPacket>, EncodeError> {
@@ -1657,6 +1688,19 @@ mod tests {
             error.to_string().contains("GOP duration") && error.to_string().contains("keyframe"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn sparse_capture_timestamps_do_not_look_like_missing_keyframes() {
+        let capture = TimestampCapture::new([0.0, 10.5, 10.5 + 1.0 / 60.0]);
+        let encoder = VariableDurationEncoder::new(30, 60);
+        let mut recorder = Recorder::new(capture, encoder, usize::MAX);
+
+        recorder
+            .run_to_end()
+            .expect("a static-screen gap is not encoder keyframe failure");
+
+        assert_eq!(recorder.ring_len(), 1);
     }
 
     #[test]
