@@ -1,13 +1,16 @@
 use std::sync::{mpsc, Arc, Barrier};
 use std::time::Duration;
 
-use clipline_settings::cloud::{cloud_credential_target, CloudUploadRecord};
+use clipline_settings::cloud::{
+    cloud_credential_target, cloud_credential_target_for_operation, CloudUploadRecord,
+};
 use clipline_settings::osu::osu_credential_target;
 use clipline_settings::{
-    AccountGeneration, CloudAccountIdentity, CloudAccountPublicationOwner, CloudProfileCas,
-    CloudRecordCas, CloudRecordCasKind, CloudRecordSlot, OsuAccountGeneration, OsuApiSettings,
-    OsuProfileCas, OsuProfileCasKind, SettingsChange, SettingsPreferences, SettingsProfile,
-    SettingsStore, SettingsTransaction, SettingsTransactionError,
+    AccountGeneration, CloudAccountCas, CloudAccountCasKind, CloudAccountIdentity,
+    CloudAccountProfile, CloudAccountPublicationOwner, CloudProfileCas, CloudRecordCas,
+    CloudRecordCasKind, CloudRecordSlot, OsuAccountGeneration, OsuApiSettings, OsuProfileCas,
+    OsuProfileCasKind, SettingsChange, SettingsPreferences, SettingsProfile, SettingsStore,
+    SettingsTransaction, SettingsTransactionError,
 };
 use clipline_test_utils::TestDir;
 
@@ -671,34 +674,178 @@ fn cloud_profile_cas_rejects_unbounded_or_empty_profile_text_without_mutation() 
             23
         );
     }
+}
 
-    // A hand-edited/current account can itself carry an oversized user id.
-    // Once exact owner and user fencing succeeds, the CAS-side bound must
-    // still reject it before profile mutation.
-    let mut oversized_account = connected.document.cloud.clone();
-    oversized_account.connected_user_id = Some(oversized.clone());
-    oversized_account.credential_target = Some("oversized-user-credential".into());
-    let oversized_owner = store
+#[test]
+fn cloud_account_cas_preserves_unrelated_writes_and_advances_exact_ownership() {
+    let dir = TestDir::new("clipline-settings", "cloud-account-cas-unrelated");
+    let profile = SettingsProfile::isolated(dir.path());
+    let account_store = SettingsStore::open(profile.clone());
+    let unrelated_store = SettingsStore::open(profile);
+    let initial = account_store.current_cloud_account().unwrap();
+    let expected = CloudAccountProfile::from_settings(&initial.document.cloud);
+    let candidate = cloud_credential_target_for_operation("candidate-one").unwrap();
+    let mut reserved = expected.clone();
+    reserved.credential_cleanup_targets.push(candidate.clone());
+    reserved.normalize();
+    let reserved_snapshot = account_store
+        .compare_exchange_cloud_account(CloudAccountCas {
+            kind: CloudAccountCasKind::ReserveCredential,
+            expected_account: initial.account,
+            expected_account_generation: initial.account_generation,
+            expected,
+            replacement: reserved.clone(),
+            default_visibility: None,
+        })
+        .unwrap();
+
+    let unrelated_media = dir.path().join("unrelated-media").display().to_string();
+    let unrelated_before = unrelated_store.current_cloud_account().unwrap();
+    unrelated_store
         .transact(transaction(
-            &connected,
-            SettingsChange::ReplaceCloudSettings(oversized_account),
+            &unrelated_before,
+            SettingsChange::SetMediaRoot(unrelated_media.clone()),
         ))
         .unwrap();
+
+    let mut connected = reserved.clone();
+    connected.host_url = "https://clips.example".into();
+    connected.public_url = Some("https://public.example".into());
+    connected.connected_user_id = Some("user-1".into());
+    connected.connected_username = Some("Dain".into());
+    connected.credential_target = Some(candidate.clone());
+    connected
+        .credential_cleanup_targets
+        .retain(|target| target != &candidate);
+    connected.normalize();
+    let committed = account_store
+        .compare_exchange_cloud_account(CloudAccountCas {
+            kind: CloudAccountCasKind::Connect,
+            expected_account: reserved_snapshot.account,
+            expected_account_generation: reserved_snapshot.account_generation,
+            expected: reserved,
+            replacement: connected.clone(),
+            default_visibility: Some("unlisted".into()),
+        })
+        .unwrap();
+
+    assert_eq!(committed.document.media_dir, unrelated_media);
+    assert_eq!(
+        CloudAccountProfile::from_settings(&committed.document.cloud),
+        connected
+    );
+    assert_eq!(committed.document.cloud.default_visibility, "unlisted");
+    assert_eq!(
+        committed.account_generation.get(),
+        reserved_snapshot.account_generation.get() + 1
+    );
+}
+
+#[test]
+fn cloud_disconnect_clears_owner_before_cleanup_and_reconcile_keeps_generation() {
+    let dir = TestDir::new("clipline-settings", "cloud-account-disconnect");
+    let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));
+    let initial = store.current_cloud_account().unwrap();
+    let candidate = cloud_credential_target_for_operation("candidate-two").unwrap();
+    let mut connected = CloudAccountProfile {
+        host_url: "https://clips.example".into(),
+        public_url: Some("https://public.example".into()),
+        connected_user_id: Some("user-1".into()),
+        connected_username: Some("Dain".into()),
+        connected_display_name: None,
+        credential_target: Some(candidate.clone()),
+        credential_cleanup_targets: Vec::new(),
+    };
+    connected.normalize();
+    let seeded = store
+        .transact(transaction(
+            &initial,
+            SettingsChange::ReplaceCloudProfile({
+                let mut cloud = initial.document.cloud.clone();
+                connected.apply_to(&mut cloud);
+                cloud
+            }),
+        ))
+        .unwrap();
+    let current = store.current_cloud_account().unwrap();
+    assert_eq!(current.account_generation, seeded.account_generation);
+    let expected = CloudAccountProfile::from_settings(&current.document.cloud);
+    let mut disconnected = expected.clone();
+    disconnected.connected_user_id = None;
+    disconnected.connected_username = None;
+    disconnected.connected_display_name = None;
+    disconnected.credential_target = None;
+    disconnected
+        .credential_cleanup_targets
+        .push(candidate.clone());
+    disconnected.normalize();
+    let cleared = store
+        .compare_exchange_cloud_account(CloudAccountCas {
+            kind: CloudAccountCasKind::Disconnect,
+            expected_account: current.account,
+            expected_account_generation: current.account_generation,
+            expected,
+            replacement: disconnected.clone(),
+            default_visibility: None,
+        })
+        .unwrap();
+    assert!(!cleared.document.cloud.connected());
+    assert!(cleared.document.cloud.credential_target.is_none());
+    assert_eq!(
+        cleared.document.cloud.credential_cleanup_targets,
+        vec![candidate]
+    );
+
+    let mut reconciled = disconnected;
+    reconciled.credential_cleanup_targets.clear();
+    let after = store
+        .compare_exchange_cloud_account(CloudAccountCas {
+            kind: CloudAccountCasKind::ReconcileCleanup,
+            expected_account: cleared.account,
+            expected_account_generation: cleared.account_generation,
+            expected: CloudAccountProfile::from_settings(&cleared.document.cloud),
+            replacement: reconciled,
+            default_visibility: None,
+        })
+        .unwrap();
+    assert_eq!(after.account_generation, cleared.account_generation);
+}
+
+#[test]
+fn cloud_account_cas_rejects_stale_aba_owner_without_mutation() {
+    let dir = TestDir::new("clipline-settings", "cloud-account-cas-aba");
+    let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));
+    let initial = store.current_cloud_account().unwrap();
+    let stale = CloudAccountProfile::from_settings(&initial.document.cloud);
+    let candidate = cloud_credential_target_for_operation("candidate-aba").unwrap();
+    let mut reserved = stale.clone();
+    reserved.credential_cleanup_targets.push(candidate);
+    reserved.normalize();
+    let current = store
+        .compare_exchange_cloud_account(CloudAccountCas {
+            kind: CloudAccountCasKind::ReserveCredential,
+            expected_account: initial.account.clone(),
+            expected_account_generation: initial.account_generation,
+            expected: stale.clone(),
+            replacement: reserved,
+            default_visibility: None,
+        })
+        .unwrap();
+    let primary = file_bytes(store.profile().settings_path());
+
     let error = store
-        .compare_exchange_cloud_profile(CloudProfileCas {
-            account: oversized_owner.account.clone(),
-            account_generation: oversized_owner.account_generation,
-            expected_connected_user_id: oversized,
-            username: "valid".into(),
-            display_name: None,
+        .compare_exchange_cloud_account(CloudAccountCas {
+            kind: CloudAccountCasKind::ReconcileCleanup,
+            expected_account: initial.account,
+            expected_account_generation: initial.account_generation,
+            expected: stale.clone(),
+            replacement: stale,
+            default_visibility: None,
         })
         .unwrap_err();
-    assert!(matches!(error, SettingsTransactionError::Validation(_)));
-    assert_eq!(store.snapshot().unwrap(), oversized_owner);
-    assert_eq!(
-        oversized_owner.document.cloud.upload_generation_sequence,
-        23
-    );
+    assert_eq!(error, SettingsTransactionError::StaleCloudProfile);
+    assert_eq!(store.current_cloud_account().unwrap(), current);
+    assert_eq!(file_bytes(store.profile().settings_path()), primary);
 }
 
 #[test]

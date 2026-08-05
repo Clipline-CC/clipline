@@ -34,8 +34,11 @@ pub use capture_region::{
     RegionGeometryError, MAX_DISPLAY_ID_BYTES,
 };
 pub use cloud::{
-    normalize_cloud_visibility, CloudSettings, CloudUploadRecord, MAX_CLOUD_UPLOAD_ERROR_BYTES,
-    MAX_CLOUD_UPLOAD_ID_BYTES, MAX_CLOUD_UPLOAD_PATH_BYTES, MAX_CLOUD_UPLOAD_URL_BYTES,
+    normalize_cloud_visibility, CloudAccountProfile, CloudSettings, CloudUploadRecord,
+    MAX_CLOUD_ACCOUNT_FIELD_BYTES, MAX_CLOUD_ACCOUNT_PROFILE_BYTES,
+    MAX_CLOUD_CREDENTIAL_CLEANUP_TARGETS, MAX_CLOUD_CREDENTIAL_TARGET_BYTES,
+    MAX_CLOUD_UPLOAD_ERROR_BYTES, MAX_CLOUD_UPLOAD_ID_BYTES, MAX_CLOUD_UPLOAD_PATH_BYTES,
+    MAX_CLOUD_UPLOAD_URL_BYTES,
 };
 pub use coordinator::{
     SettingsApplyCoordinator, SettingsApplyError, SettingsApplyPorts, SettingsApplyQuiescence,
@@ -62,10 +65,10 @@ pub use osu::{
 pub use persistence::{
     audio_preview_cache_dir, cloud_paths_equivalent, icon_cache_dir, normalize_media_dir,
     normalize_replay_cache_dir, quota_bytes_from_gb, replay_cache_quota_bytes_from_gb,
-    settings_path, share_export_cache_dir, AccountGeneration, CloudAccountIdentity,
-    CloudAccountPublicationOwner, CloudAccountStore, CloudProfileCas, CloudRecordCas,
-    CloudRecordCasKind, CloudRecordSlot, LibraryConfig, OsuProfileCas, OsuProfileCasKind,
-    SettingsChange, SettingsLoadSource, SettingsPathResolver, SettingsProfile,
+    settings_path, share_export_cache_dir, AccountGeneration, CloudAccountCas, CloudAccountCasKind,
+    CloudAccountIdentity, CloudAccountPublicationOwner, CloudAccountStore, CloudProfileCas,
+    CloudRecordCas, CloudRecordCasKind, CloudRecordSlot, LibraryConfig, OsuProfileCas,
+    OsuProfileCasKind, SettingsChange, SettingsLoadSource, SettingsPathResolver, SettingsProfile,
     SettingsProfileError, SettingsRevision, SettingsSnapshot, SettingsStore, SettingsTransaction,
     SettingsTransactionError, MAX_CLOUD_RECORD_CAS_SLOTS,
 };

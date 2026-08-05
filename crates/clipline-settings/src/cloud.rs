@@ -8,6 +8,10 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 pub const CLOUD_CREDENTIAL_PREFIX: &str = "Clipline Cloud";
+pub const MAX_CLOUD_ACCOUNT_FIELD_BYTES: usize = 16 * 1024;
+pub const MAX_CLOUD_CREDENTIAL_TARGET_BYTES: usize = 16 * 1024;
+pub const MAX_CLOUD_CREDENTIAL_CLEANUP_TARGETS: usize = 16;
+pub const MAX_CLOUD_ACCOUNT_PROFILE_BYTES: usize = 128 * 1024;
 /// Upload identities share the neutral Library contract's 16 KiB identity bound.
 pub const MAX_CLOUD_UPLOAD_ID_BYTES: usize = 16 * 1024;
 /// Paths are user-controlled and may include a long Windows verbatim prefix.
@@ -23,6 +27,100 @@ pub fn cloud_credential_target(host_url: &str, user_id: &str) -> String {
         host_url.trim().trim_end_matches('/'),
         user_id.trim()
     )
+}
+
+/// Credential target owned by one exact Cloud account operation.
+///
+/// New account mutations never overwrite the deterministic legacy target.
+/// The operation id is generated independently by every caller, so a failed
+/// candidate can be cleaned without touching the active credential of a
+/// concurrent or later login.
+pub fn cloud_credential_target_for_operation(operation_id: &str) -> Result<String, String> {
+    if operation_id.is_empty()
+        || operation_id.len() > 64
+        || !operation_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return Err("Cloud credential operation id is invalid".into());
+    }
+    Ok(format!(
+        "{CLOUD_CREDENTIAL_PREFIX}:operation:{operation_id}"
+    ))
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CloudAccountProfile {
+    pub host_url: String,
+    pub public_url: Option<String>,
+    pub connected_user_id: Option<String>,
+    pub connected_username: Option<String>,
+    pub connected_display_name: Option<String>,
+    pub credential_target: Option<String>,
+    pub credential_cleanup_targets: Vec<String>,
+}
+
+impl CloudAccountProfile {
+    #[must_use]
+    pub fn from_settings(settings: &CloudSettings) -> Self {
+        Self {
+            host_url: settings.host_url.clone(),
+            public_url: settings.public_url.clone(),
+            connected_user_id: settings.connected_user_id.clone(),
+            connected_username: settings.connected_username.clone(),
+            connected_display_name: settings.connected_display_name.clone(),
+            credential_target: settings.credential_target.clone(),
+            credential_cleanup_targets: settings.credential_cleanup_targets.clone(),
+        }
+    }
+
+    pub fn apply_to(&self, settings: &mut CloudSettings) {
+        settings.host_url.clone_from(&self.host_url);
+        settings.public_url.clone_from(&self.public_url);
+        settings
+            .connected_user_id
+            .clone_from(&self.connected_user_id);
+        settings
+            .connected_username
+            .clone_from(&self.connected_username);
+        settings
+            .connected_display_name
+            .clone_from(&self.connected_display_name);
+        settings
+            .credential_target
+            .clone_from(&self.credential_target);
+        settings
+            .credential_cleanup_targets
+            .clone_from(&self.credential_cleanup_targets);
+    }
+
+    pub fn normalize(&mut self) {
+        let mut settings = CloudSettings {
+            host_url: self.host_url.clone(),
+            public_url: self.public_url.clone(),
+            connected_user_id: self.connected_user_id.clone(),
+            connected_username: self.connected_username.clone(),
+            connected_display_name: self.connected_display_name.clone(),
+            credential_target: self.credential_target.clone(),
+            credential_cleanup_targets: self.credential_cleanup_targets.clone(),
+            ..CloudSettings::default()
+        };
+        settings.normalize();
+        *self = Self::from_settings(&settings);
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        let mut settings = CloudSettings::default();
+        self.apply_to(&mut settings);
+        settings.validate_account_profile()
+    }
+
+    #[must_use]
+    pub fn connected(&self) -> bool {
+        !self.host_url.is_empty()
+            && self.connected_user_id.is_some()
+            && self.credential_target.is_some()
+    }
 }
 
 fn default_cloud_visibility() -> String {
@@ -201,6 +299,7 @@ impl CloudSettings {
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        self.validate_account_profile()?;
         validate_cloud_visibility(&self.default_visibility)?;
         for (key, record) in &self.uploads {
             validate_bounded_required("cloud upload key", key, MAX_CLOUD_UPLOAD_ID_BYTES)?;
@@ -248,6 +347,97 @@ impl CloudSettings {
         }
         Ok(())
     }
+
+    fn validate_account_profile(&self) -> Result<(), String> {
+        let mut aggregate = 0usize;
+        account_text(
+            &mut aggregate,
+            "cloud host URL",
+            Some(&self.host_url),
+            MAX_CLOUD_ACCOUNT_FIELD_BYTES,
+        )?;
+        account_text(
+            &mut aggregate,
+            "cloud public URL",
+            self.public_url.as_deref(),
+            MAX_CLOUD_ACCOUNT_FIELD_BYTES,
+        )?;
+        account_text(
+            &mut aggregate,
+            "cloud user id",
+            self.connected_user_id.as_deref(),
+            MAX_CLOUD_ACCOUNT_FIELD_BYTES,
+        )?;
+        account_text(
+            &mut aggregate,
+            "cloud username",
+            self.connected_username.as_deref(),
+            MAX_CLOUD_ACCOUNT_FIELD_BYTES,
+        )?;
+        account_text(
+            &mut aggregate,
+            "cloud display name",
+            self.connected_display_name.as_deref(),
+            MAX_CLOUD_ACCOUNT_FIELD_BYTES,
+        )?;
+        account_text(
+            &mut aggregate,
+            "cloud credential target",
+            self.credential_target.as_deref(),
+            MAX_CLOUD_CREDENTIAL_TARGET_BYTES,
+        )?;
+        if self.credential_cleanup_targets.len() > MAX_CLOUD_CREDENTIAL_CLEANUP_TARGETS {
+            return Err(format!(
+                "cloud credential cleanup targets must contain at most {MAX_CLOUD_CREDENTIAL_CLEANUP_TARGETS} entries"
+            ));
+        }
+        for target in &self.credential_cleanup_targets {
+            account_text(
+                &mut aggregate,
+                "cloud credential cleanup target",
+                Some(target),
+                MAX_CLOUD_CREDENTIAL_TARGET_BYTES,
+            )?;
+        }
+        if let Some(target) = self.credential_target.as_deref() {
+            if self
+                .credential_cleanup_targets
+                .iter()
+                .any(|cleanup| cleanup == target)
+            {
+                return Err(
+                    "cloud active credential target cannot be scheduled for cleanup".into(),
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+fn account_text(
+    aggregate: &mut usize,
+    label: &str,
+    value: Option<&str>,
+    maximum: usize,
+) -> Result<(), String> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    if value.len() > maximum {
+        return Err(format!(
+            "{label} is {} bytes; maximum is {maximum}",
+            value.len()
+        ));
+    }
+    *aggregate = aggregate
+        .checked_add(value.len())
+        .ok_or_else(|| "cloud account profile byte count overflowed".to_string())?;
+    if *aggregate > MAX_CLOUD_ACCOUNT_PROFILE_BYTES {
+        return Err(format!(
+            "cloud account profile is {aggregate} bytes; maximum is {MAX_CLOUD_ACCOUNT_PROFILE_BYTES}"
+        ));
+    }
+    Ok(())
 }
 
 fn validate_bounded_required(name: &str, value: &str, maximum: usize) -> Result<(), String> {

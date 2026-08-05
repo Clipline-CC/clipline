@@ -20,7 +20,8 @@ use super::validation::{
 };
 use super::{AppSettings, SettingsPreferences};
 use super::{
-    CloudSettings, CloudUploadRecord, OsuAccountGenerationError, OsuApiSettings, VideoEncoder,
+    CloudAccountProfile, CloudSettings, CloudUploadRecord, OsuAccountGenerationError,
+    OsuApiSettings, VideoEncoder,
 };
 
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -779,6 +780,29 @@ pub struct CloudProfileCas {
     pub display_name: Option<String>,
 }
 
+/// Durable Cloud account operation fenced by the exact prior account profile
+/// and the process-wide persisted-owner generation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloudAccountCasKind {
+    ReserveCredential,
+    Connect,
+    Disconnect,
+    ReconcileCleanup,
+}
+
+/// Whole-account compare-and-swap which intentionally excludes unrelated UI
+/// preferences and upload-record revisions from its comparison authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CloudAccountCas {
+    pub kind: CloudAccountCasKind,
+    pub expected_account: CloudAccountIdentity,
+    pub expected_account_generation: AccountGeneration,
+    pub expected: CloudAccountProfile,
+    pub replacement: CloudAccountProfile,
+    /// Connect alone may update the legacy compatibility preference.
+    pub default_visibility: Option<String>,
+}
+
 /// Durable osu! operation whose ownership is fenced by the exact prior
 /// profile and its persisted account generation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -859,6 +883,8 @@ pub enum SettingsTransactionError {
     AccountChanged,
     #[error("cloud upload record changed while the settings operation was in flight")]
     StaleCloudRecord,
+    #[error("cloud account profile changed while the settings operation was in flight")]
+    StaleCloudProfile,
     #[error("osu! profile changed while the settings operation was in flight")]
     StaleOsuProfile,
     #[error("settings preferences changed while the draft was open")]
@@ -1126,6 +1152,118 @@ impl SettingsStore {
             change: SettingsChange::CompareExchangeCloudProfile(change),
         };
         self.commit_locked(&mut commit_guard, &mut state, transaction)
+    }
+
+    /// Apply one exact Cloud account mutation against the latest durable
+    /// document while preserving unrelated preferences and record writes.
+    pub fn compare_exchange_cloud_account(
+        &self,
+        change: CloudAccountCas,
+    ) -> Result<SettingsSnapshot, SettingsTransactionError> {
+        let mut shared = self
+            .inner
+            .commit_lock
+            .lock()
+            .map_err(|_| SettingsTransactionError::LockPoisoned)?;
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| SettingsTransactionError::LockPoisoned)?;
+        let current_primary = read_primary_state(self.inner.profile.settings_path());
+        if current_primary != shared.primary {
+            return Err(SettingsTransactionError::ExternalModification);
+        }
+        let mut current = load_current_document(&current_primary, &state, shared.revision)?;
+        let current_owner = shared
+            .owner
+            .as_ref()
+            .expect("opened settings profile must register its Cloud owner")
+            .clone();
+        let current_account = CloudAccountIdentity::from_settings(&current.cloud);
+        if current_account != current_owner.account
+            || cloud_publication_stable_account(&current.cloud) != current_owner.stable_account
+        {
+            return Err(SettingsTransactionError::AccountChanged);
+        }
+        if change.expected_account != current_owner.account {
+            return Err(SettingsTransactionError::AccountChanged);
+        }
+        if change.expected_account_generation != current_owner.account_generation {
+            return Err(SettingsTransactionError::StaleAccountGeneration {
+                expected: change.expected_account_generation,
+                current: current_owner.account_generation,
+            });
+        }
+        apply_cloud_account_cas(&mut current.cloud, change)?;
+        let (next, json) = current
+            .normalized_json_bytes()
+            .map_err(SettingsTransactionError::Validation)?;
+        let next_account = CloudAccountIdentity::from_settings(&next.cloud);
+        let next_stable_account = cloud_publication_stable_account(&next.cloud);
+        let next_account_generation = if next_account == current_owner.account
+            && next_stable_account == current_owner.stable_account
+        {
+            current_owner.account_generation
+        } else {
+            current_owner.account_generation.checked_next()?
+        };
+        let next_revision = shared.revision.checked_next()?;
+        let primary =
+            persist_store_transaction(self.inner.profile.settings_path(), json, &current_primary)
+                .map_err(SettingsTransactionError::Persistence)?;
+        shared.primary = primary.clone();
+        shared.revision = next_revision;
+        shared.owner = Some(CloudAccountPublicationOwner::from_cloud(
+            next_account.clone(),
+            next_account_generation,
+            &next.cloud,
+        ));
+        state.primary = primary;
+        state.snapshot = SettingsSnapshot {
+            document: next,
+            revision: next_revision,
+            account_generation: next_account_generation,
+            account: next_account,
+        };
+        Ok(state.snapshot.clone())
+    }
+
+    /// Refresh this store's cached snapshot from the profile-wide Cloud owner.
+    pub fn current_cloud_account(&self) -> Result<SettingsSnapshot, SettingsTransactionError> {
+        let shared = self
+            .inner
+            .commit_lock
+            .lock()
+            .map_err(|_| SettingsTransactionError::LockPoisoned)?;
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| SettingsTransactionError::LockPoisoned)?;
+        let current_primary = read_primary_state(self.inner.profile.settings_path());
+        if current_primary != shared.primary {
+            return Err(SettingsTransactionError::ExternalModification);
+        }
+        let current = load_current_document(&current_primary, &state, shared.revision)?;
+        let owner = shared
+            .owner
+            .as_ref()
+            .expect("opened settings profile must register its Cloud owner");
+        let account = CloudAccountIdentity::from_settings(&current.cloud);
+        if account != owner.account
+            || cloud_publication_stable_account(&current.cloud) != owner.stable_account
+        {
+            return Err(SettingsTransactionError::AccountChanged);
+        }
+        state.primary = current_primary;
+        state.snapshot = SettingsSnapshot {
+            document: current,
+            revision: shared.revision,
+            account_generation: owner.account_generation,
+            account,
+        };
+        Ok(state.snapshot.clone())
     }
 
     /// Apply one exact osu! profile mutation while preserving unrelated
@@ -1789,6 +1927,168 @@ fn apply_osu_profile_cas(
     }
 
     *current = change.replacement;
+    Ok(())
+}
+
+fn load_current_document(
+    primary: &PrimaryState,
+    state: &StoreState,
+    shared_revision: SettingsRevision,
+) -> Result<AppSettings, SettingsTransactionError> {
+    match primary {
+        PrimaryState::Missing
+            if state.primary == PrimaryState::Missing
+                && state.snapshot.revision == shared_revision =>
+        {
+            Ok(state.snapshot.document.clone())
+        }
+        PrimaryState::File { bytes, .. } => {
+            AppSettings::load_from_json_bytes(bytes).map_err(|error| {
+                SettingsTransactionError::Validation(format!(
+                    "current durable settings are invalid: {}",
+                    error.describe()
+                ))
+            })
+        }
+        PrimaryState::Missing | PrimaryState::Unreadable(_) => {
+            Err(SettingsTransactionError::ExternalModification)
+        }
+    }
+}
+
+fn apply_cloud_account_cas(
+    current: &mut CloudSettings,
+    change: CloudAccountCas,
+) -> Result<(), SettingsTransactionError> {
+    validate_normalized_cloud_account_profile("expected", &change.expected)?;
+    if CloudAccountProfile::from_settings(current) != change.expected {
+        return Err(SettingsTransactionError::StaleCloudProfile);
+    }
+    validate_normalized_cloud_account_profile("replacement", &change.replacement)?;
+    validate_cloud_account_transition(&change)?;
+
+    let identity_changed = change.expected.host_url != change.replacement.host_url
+        || change.expected.connected_user_id != change.replacement.connected_user_id;
+    change.replacement.apply_to(current);
+    if let Some(visibility) = change.default_visibility {
+        current.default_visibility = visibility;
+    }
+    if matches!(change.kind, CloudAccountCasKind::Connect) && identity_changed {
+        current.uploads.clear();
+    }
+    Ok(())
+}
+
+fn validate_normalized_cloud_account_profile(
+    label: &str,
+    profile: &CloudAccountProfile,
+) -> Result<(), SettingsTransactionError> {
+    profile.validate().map_err(|error| {
+        SettingsTransactionError::Validation(format!(
+            "invalid {label} Cloud account profile: {error}"
+        ))
+    })?;
+    let mut normalized = profile.clone();
+    normalized.normalize();
+    if &normalized != profile {
+        return Err(SettingsTransactionError::Validation(format!(
+            "invalid {label} Cloud account profile: profile must already be normalized"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_cloud_account_transition(
+    change: &CloudAccountCas,
+) -> Result<(), SettingsTransactionError> {
+    let invalid = |message: &str| {
+        SettingsTransactionError::Validation(format!("invalid Cloud account CAS: {message}"))
+    };
+    let same_owner_fields = change.expected.host_url == change.replacement.host_url
+        && change.expected.public_url == change.replacement.public_url
+        && change.expected.connected_user_id == change.replacement.connected_user_id
+        && change.expected.connected_username == change.replacement.connected_username
+        && change.expected.connected_display_name == change.replacement.connected_display_name
+        && change.expected.credential_target == change.replacement.credential_target;
+    let retained_cleanup = change
+        .expected
+        .credential_cleanup_targets
+        .iter()
+        .all(|target| {
+            change
+                .replacement
+                .credential_cleanup_targets
+                .contains(target)
+        });
+    let retained_or_activated_cleanup =
+        change
+            .expected
+            .credential_cleanup_targets
+            .iter()
+            .all(|target| {
+                change
+                    .replacement
+                    .credential_cleanup_targets
+                    .contains(target)
+                    || change.replacement.credential_target.as_ref() == Some(target)
+            });
+    match change.kind {
+        CloudAccountCasKind::ReserveCredential => {
+            if !same_owner_fields || !retained_cleanup || change.default_visibility.is_some() {
+                return Err(invalid(
+                    "credential reservation may only append cleanup ownership",
+                ));
+            }
+        }
+        CloudAccountCasKind::Connect => {
+            if !change.replacement.connected()
+                || !retained_or_activated_cleanup
+                || change.replacement.credential_target == change.expected.credential_target
+            {
+                return Err(invalid(
+                    "connect requires a new connected owner and retained cleanup work",
+                ));
+            }
+            if let Some(previous) = change.expected.credential_target.as_ref() {
+                if !change
+                    .replacement
+                    .credential_cleanup_targets
+                    .contains(previous)
+                {
+                    return Err(invalid(
+                        "connect did not schedule the prior active credential",
+                    ));
+                }
+            }
+        }
+        CloudAccountCasKind::Disconnect => {
+            if change.replacement.connected()
+                || change.replacement.credential_target.is_some()
+                || !retained_cleanup
+                || change.default_visibility.is_some()
+            {
+                return Err(invalid(
+                    "disconnect must clear the owner and retain cleanup work",
+                ));
+            }
+            if let Some(previous) = change.expected.credential_target.as_ref() {
+                if !change
+                    .replacement
+                    .credential_cleanup_targets
+                    .contains(previous)
+                {
+                    return Err(invalid("disconnect did not schedule the active credential"));
+                }
+            }
+        }
+        CloudAccountCasKind::ReconcileCleanup => {
+            if !same_owner_fields || change.default_visibility.is_some() {
+                return Err(invalid(
+                    "cleanup reconciliation may not change account ownership",
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
