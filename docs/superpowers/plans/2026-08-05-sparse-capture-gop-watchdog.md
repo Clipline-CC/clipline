@@ -9,7 +9,7 @@
 
 ## Minimal fix
 
-- [ ] Measure pending GOP progress from encoded frame count and the stream's shortest valid sample duration instead of capture PTS span.
+- [ ] Measure pending GOP progress from encoded frame count and the stream's initial nominal sample duration instead of capture PTS span.
 - [ ] Reset pending frame progress at the initial keyframe and every sealed GOP while retaining the combined video/audio byte guard.
 - [ ] Keep the error explicit about a missing keyframe and encoded-frame duration.
 
