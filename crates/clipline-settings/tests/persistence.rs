@@ -5,9 +5,9 @@ use clipline_settings::cloud::{cloud_credential_target, CloudUploadRecord};
 use clipline_settings::osu::osu_credential_target;
 use clipline_settings::{
     AccountGeneration, CloudAccountIdentity, CloudAccountPublicationOwner, CloudProfileCas,
-    CloudRecordCas, CloudRecordCasKind, CloudRecordSlot, OsuApiSettings, SettingsChange,
-    SettingsPreferences, SettingsProfile, SettingsStore, SettingsTransaction,
-    SettingsTransactionError,
+    CloudRecordCas, CloudRecordCasKind, CloudRecordSlot, OsuAccountGeneration, OsuApiSettings,
+    OsuProfileCas, OsuProfileCasKind, SettingsChange, SettingsPreferences, SettingsProfile,
+    SettingsStore, SettingsTransaction, SettingsTransactionError,
 };
 use clipline_test_utils::TestDir;
 
@@ -24,6 +24,24 @@ fn transaction(
 
 fn file_bytes(path: &std::path::Path) -> Option<Vec<u8>> {
     std::fs::read(path).ok()
+}
+
+fn configured_osu_profile(
+    generation: OsuAccountGeneration,
+    client_id: &str,
+    user: &str,
+) -> OsuApiSettings {
+    OsuApiSettings {
+        account_generation: generation,
+        client_id: Some(client_id.into()),
+        user: Some(user.into()),
+        credential_target: Some(
+            clipline_settings::osu::osu_credential_target_for_operation(generation, "test")
+                .unwrap(),
+        ),
+        credential_cleanup_targets: Vec::new(),
+        last_connected_username: None,
+    }
 }
 
 fn ui_preferences(snapshot: &clipline_settings::SettingsSnapshot) -> SettingsPreferences {
@@ -108,7 +126,7 @@ fn preference_cas_preserves_cloud_account_aba_upload_progress_and_osu_bytes() {
         client_id: Some("12345".into()),
         user: Some("dain".into()),
         credential_target: Some(osu_credential_target("12345", "dain")),
-        credential_cleanup_targets: vec!["old-osu-target".into()],
+        credential_cleanup_targets: vec![osu_credential_target("1", "old")],
         last_connected_username: Some("Dain".into()),
     };
     let raced = store
@@ -681,6 +699,245 @@ fn cloud_profile_cas_rejects_unbounded_or_empty_profile_text_without_mutation() 
         oversized_owner.document.cloud.upload_generation_sequence,
         23
     );
+}
+
+#[test]
+fn osu_profile_cas_preserves_unrelated_writes_and_advances_the_exact_owner() {
+    let dir = TestDir::new("clipline-settings", "osu-profile-cas-unrelated");
+    let profile = SettingsProfile::isolated(dir.path());
+    let store = SettingsStore::open(profile.clone());
+    let unrelated_store = SettingsStore::open(profile);
+    let initial = store.snapshot().unwrap();
+    let expected = initial.document.osu.clone();
+    let replacement = configured_osu_profile(
+        expected.account_generation.checked_next().unwrap(),
+        "12345",
+        "Dain",
+    );
+
+    let media_root = dir.path().join("unrelated-media").display().to_string();
+    let unrelated = unrelated_store
+        .transact(transaction(
+            &unrelated_store.snapshot().unwrap(),
+            SettingsChange::SetMediaRoot(media_root.clone()),
+        ))
+        .unwrap();
+    let committed = store
+        .compare_exchange_osu_profile(OsuProfileCas {
+            kind: OsuProfileCasKind::Save,
+            expected,
+            replacement: replacement.clone(),
+        })
+        .unwrap();
+
+    assert_eq!(committed.document.media_dir, media_root);
+    assert_eq!(committed.document.osu, replacement);
+    assert_eq!(
+        committed.account_generation, unrelated.account_generation,
+        "osu! ownership must not perturb the unrelated Cloud owner"
+    );
+}
+
+#[test]
+fn osu_profile_cas_rejects_stale_and_aba_owners_byte_identically() {
+    let dir = TestDir::new("clipline-settings", "osu-profile-cas-aba");
+    let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));
+    let initial = store.snapshot().unwrap();
+    let generation_2 = initial
+        .document
+        .osu
+        .account_generation
+        .checked_next()
+        .unwrap();
+    let account_a = configured_osu_profile(generation_2, "12345", "Dain");
+    let saved_a = store
+        .compare_exchange_osu_profile(OsuProfileCas {
+            kind: OsuProfileCasKind::Save,
+            expected: initial.document.osu.clone(),
+            replacement: account_a.clone(),
+        })
+        .unwrap();
+    let generation_3 = generation_2.checked_next().unwrap();
+    let disconnected = OsuApiSettings {
+        account_generation: generation_3,
+        credential_cleanup_targets: vec![account_a
+            .credential_target
+            .clone()
+            .expect("configured target")],
+        ..OsuApiSettings::default()
+    };
+    let disconnected = store
+        .compare_exchange_osu_profile(OsuProfileCas {
+            kind: OsuProfileCasKind::Disconnect,
+            expected: account_a.clone(),
+            replacement: disconnected,
+        })
+        .unwrap();
+    let mut account_a_again =
+        configured_osu_profile(generation_3.checked_next().unwrap(), "12345", "Dain");
+    account_a_again.credential_cleanup_targets =
+        disconnected.document.osu.credential_cleanup_targets.clone();
+    let current = store
+        .compare_exchange_osu_profile(OsuProfileCas {
+            kind: OsuProfileCasKind::Save,
+            expected: disconnected.document.osu,
+            replacement: account_a_again,
+        })
+        .unwrap();
+    let primary = file_bytes(store.profile().settings_path());
+    let backup = file_bytes(&dir.path().join("settings.json.bak"));
+
+    let error = store
+        .compare_exchange_osu_profile(OsuProfileCas {
+            kind: OsuProfileCasKind::Test,
+            expected: saved_a.document.osu,
+            replacement: configured_osu_profile(generation_3, "12345", "3426414"),
+        })
+        .unwrap_err();
+
+    assert_eq!(error, SettingsTransactionError::StaleOsuProfile);
+    assert_eq!(store.snapshot().unwrap(), current);
+    assert_eq!(file_bytes(store.profile().settings_path()), primary);
+    assert_eq!(file_bytes(&dir.path().join("settings.json.bak")), backup);
+}
+
+#[test]
+fn osu_profile_cas_enforces_operation_generation_transitions() {
+    let kinds = [
+        OsuProfileCasKind::Save,
+        OsuProfileCasKind::Test,
+        OsuProfileCasKind::Disconnect,
+    ];
+    for (index, kind) in kinds.into_iter().enumerate() {
+        let dir = TestDir::new(
+            "clipline-settings",
+            &format!("osu-profile-generation-{index}"),
+        );
+        let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));
+        let initial = store.snapshot().unwrap();
+        let error = store
+            .compare_exchange_osu_profile(OsuProfileCas {
+                kind,
+                expected: initial.document.osu.clone(),
+                replacement: initial.document.osu.clone(),
+            })
+            .unwrap_err();
+        assert!(matches!(error, SettingsTransactionError::Validation(_)));
+        assert_eq!(store.snapshot().unwrap(), initial);
+    }
+
+    let dir = TestDir::new("clipline-settings", "osu-profile-reconcile-generation");
+    let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));
+    let initial = store.snapshot().unwrap();
+    let mut reconciled = initial.document.osu.clone();
+    reconciled.credential_cleanup_targets = vec![osu_credential_target("1", "old")];
+    let committed = store
+        .compare_exchange_osu_profile(OsuProfileCas {
+            kind: OsuProfileCasKind::Reconcile,
+            expected: initial.document.osu,
+            replacement: reconciled.clone(),
+        })
+        .unwrap();
+    assert_eq!(committed.document.osu, reconciled);
+
+    let mut wrong_generation = committed.document.osu.clone();
+    wrong_generation.account_generation =
+        wrong_generation.account_generation.checked_next().unwrap();
+    let error = store
+        .compare_exchange_osu_profile(OsuProfileCas {
+            kind: OsuProfileCasKind::Reconcile,
+            expected: committed.document.osu,
+            replacement: wrong_generation,
+        })
+        .unwrap_err();
+    assert!(matches!(error, SettingsTransactionError::Validation(_)));
+}
+
+#[test]
+fn osu_profile_cas_fails_closed_when_the_generation_is_exhausted() {
+    let dir = TestDir::new("clipline-settings", "osu-profile-generation-exhausted");
+    let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));
+    let initial = store.snapshot().unwrap();
+    let mut exhausted = initial.document.osu.clone();
+    exhausted.account_generation = OsuAccountGeneration::new(u64::MAX).unwrap();
+    let seeded = store
+        .transact(transaction(
+            &initial,
+            SettingsChange::ReplaceOsuProfile(exhausted.clone()),
+        ))
+        .unwrap();
+
+    let error = store
+        .compare_exchange_osu_profile(OsuProfileCas {
+            kind: OsuProfileCasKind::Save,
+            expected: exhausted.clone(),
+            replacement: exhausted,
+        })
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        SettingsTransactionError::OsuAccountGenerationExhausted
+    );
+    assert_eq!(store.snapshot().unwrap(), seeded);
+}
+
+#[test]
+fn osu_profile_cas_never_drops_cleanup_or_schedules_the_active_target() {
+    let dir = TestDir::new("clipline-settings", "osu-profile-cleanup-invariants");
+    let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));
+    let initial = store.snapshot().unwrap();
+    let mut expected =
+        configured_osu_profile(initial.document.osu.account_generation, "12345", "Dain");
+    expected.credential_target = Some(osu_credential_target("12345", "Dain"));
+    let older_target = osu_credential_target("1", "older");
+    expected.credential_cleanup_targets = vec![older_target.clone()];
+    let seeded = store
+        .transact(transaction(
+            &initial,
+            SettingsChange::ReplaceOsuProfile(expected.clone()),
+        ))
+        .unwrap();
+    let next_generation = expected.account_generation.checked_next().unwrap();
+    let mut replacement = configured_osu_profile(next_generation, "12345", "Dain");
+
+    let error = store
+        .compare_exchange_osu_profile(OsuProfileCas {
+            kind: OsuProfileCasKind::Save,
+            expected: expected.clone(),
+            replacement: replacement.clone(),
+        })
+        .unwrap_err();
+    assert!(matches!(error, SettingsTransactionError::Validation(_)));
+    assert_eq!(store.snapshot().unwrap(), seeded);
+
+    replacement.credential_cleanup_targets = vec![older_target];
+    let error = store
+        .compare_exchange_osu_profile(OsuProfileCas {
+            kind: OsuProfileCasKind::Save,
+            expected: expected.clone(),
+            replacement: replacement.clone(),
+        })
+        .unwrap_err();
+    assert!(matches!(error, SettingsTransactionError::Validation(_)));
+    assert_eq!(store.snapshot().unwrap(), seeded);
+
+    replacement
+        .credential_cleanup_targets
+        .push(expected.credential_target.clone().unwrap());
+    replacement
+        .credential_cleanup_targets
+        .push(replacement.credential_target.clone().unwrap());
+    replacement.normalize();
+    let error = store
+        .compare_exchange_osu_profile(OsuProfileCas {
+            kind: OsuProfileCasKind::Save,
+            expected,
+            replacement,
+        })
+        .unwrap_err();
+    assert!(matches!(error, SettingsTransactionError::Validation(_)));
+    assert_eq!(store.snapshot().unwrap(), seeded);
 }
 
 #[test]

@@ -11,6 +11,9 @@ use windows::Win32::Security::Credentials::{
     CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE,
     CRED_TYPE_GENERIC,
 };
+use zeroize::{Zeroize, Zeroizing};
+
+use crate::secret::SecretString;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum WindowsCredentialError {
@@ -54,7 +57,7 @@ impl CredentialStore {
             nul_terminated(OsStr::new(target)).ok_or(WindowsCredentialError::TargetContainsNul)?;
         let mut username_w = nul_terminated(OsStr::new(username))
             .ok_or(WindowsCredentialError::UsernameContainsNul)?;
-        let mut blob = value.as_bytes().to_vec();
+        let mut blob = Zeroizing::new(value.as_bytes().to_vec());
         let blob_len =
             u32::try_from(blob.len()).map_err(|_| WindowsCredentialError::ValueTooLarge {
                 value_label: self.value_label,
@@ -77,6 +80,12 @@ impl CredentialStore {
     }
 
     pub fn read(self, target: &str) -> Result<String, WindowsCredentialError> {
+        self.read_secret(target)
+            .map(|secret| secret.expose_secret().to_owned())
+    }
+
+    /// Read a credential into move-only zeroizing UTF-8 ownership.
+    pub fn read_secret(self, target: &str) -> Result<SecretString, WindowsCredentialError> {
         let target_w =
             nul_terminated(OsStr::new(target)).ok_or(WindowsCredentialError::TargetContainsNul)?;
         let mut raw: *mut CREDENTIALW = ptr::null_mut();
@@ -95,6 +104,22 @@ impl CredentialStore {
                 credential.CredentialBlobSize,
                 self.value_label,
             )
+        }
+    }
+
+    /// Read an optional credential without turning absence into an error.
+    pub fn read_secret_if_present(
+        self,
+        target: &str,
+    ) -> Result<Option<SecretString>, WindowsCredentialError> {
+        match self.read_secret(target) {
+            Ok(secret) => Ok(Some(secret)),
+            Err(WindowsCredentialError::Native { code, .. })
+                if code == ERROR_NOT_FOUND.to_hresult().0 =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
         }
     }
 
@@ -136,6 +161,14 @@ impl Drop for OwnedCredential {
     fn drop(&mut self) {
         if !self.0.is_null() {
             unsafe {
+                let credential = &mut *self.0;
+                if !credential.CredentialBlob.is_null() && credential.CredentialBlobSize != 0 {
+                    std::slice::from_raw_parts_mut(
+                        credential.CredentialBlob,
+                        credential.CredentialBlobSize as usize,
+                    )
+                    .zeroize();
+                }
                 CredFree(self.0.cast());
             }
         }
@@ -146,16 +179,22 @@ unsafe fn decode_credential_blob(
     blob: *const u8,
     blob_len: u32,
     value_label: &'static str,
-) -> Result<String, WindowsCredentialError> {
-    let bytes = if blob_len == 0 {
-        Vec::new()
+) -> Result<SecretString, WindowsCredentialError> {
+    let mut bytes = if blob_len == 0 {
+        Zeroizing::new(Vec::new())
     } else {
         if blob.is_null() {
             return Err(WindowsCredentialError::NullBlob { value_label });
         }
-        unsafe { std::slice::from_raw_parts(blob, blob_len as usize) }.to_vec()
+        Zeroizing::new(unsafe { std::slice::from_raw_parts(blob, blob_len as usize) }.to_vec())
     };
-    String::from_utf8(bytes).map_err(|_| WindowsCredentialError::InvalidUtf8 { value_label })
+    match String::from_utf8(std::mem::take(&mut *bytes)) {
+        Ok(value) => Ok(SecretString::from_zeroizing(Zeroizing::new(value))),
+        Err(error) => {
+            let _invalid = Zeroizing::new(error.into_bytes());
+            Err(WindowsCredentialError::InvalidUtf8 { value_label })
+        }
+    }
 }
 
 #[cfg(test)]
@@ -165,13 +204,16 @@ mod tests {
     #[test]
     fn credential_blob_decoder_accepts_empty_and_valid_utf8() {
         assert_eq!(
-            unsafe { decode_credential_blob(ptr::null(), 0, "test secret") }.unwrap(),
+            unsafe { decode_credential_blob(ptr::null(), 0, "test secret") }
+                .unwrap()
+                .expose_secret(),
             ""
         );
         let value = b"secret";
         assert_eq!(
             unsafe { decode_credential_blob(value.as_ptr(), value.len() as u32, "test secret") }
-                .unwrap(),
+                .unwrap()
+                .expose_secret(),
             "secret"
         );
     }
@@ -221,8 +263,9 @@ mod tests {
         store.delete_if_present(&target).unwrap();
         let secret = "secret bytes: snowman \u{2603}";
         store.write(&target, "Clipline test", secret).unwrap();
-        assert_eq!(store.read(&target).unwrap(), secret);
+        assert_eq!(store.read_secret(&target).unwrap().expose_secret(), secret);
         store.delete_if_present(&target).unwrap();
+        assert!(store.read_secret_if_present(&target).unwrap().is_none());
         let error = store.read(&target).unwrap_err().to_string();
         assert!(error.contains("read Clipline disposable test secret"));
         assert!(!error.contains(secret));

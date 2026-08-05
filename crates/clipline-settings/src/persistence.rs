@@ -19,7 +19,9 @@ use super::validation::{
     MAX_REPLAY_WINDOW_S, MIN_BITRATE_MBPS, MIN_REPLAY_WINDOW_S,
 };
 use super::{AppSettings, SettingsPreferences};
-use super::{CloudSettings, CloudUploadRecord, OsuApiSettings, VideoEncoder};
+use super::{
+    CloudSettings, CloudUploadRecord, OsuAccountGenerationError, OsuApiSettings, VideoEncoder,
+};
 
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 static QUARANTINE_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -777,6 +779,32 @@ pub struct CloudProfileCas {
     pub display_name: Option<String>,
 }
 
+/// Durable osu! operation whose ownership is fenced by the exact prior
+/// profile and its persisted account generation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OsuProfileCasKind {
+    /// Store or replace the configured client/user credential reference.
+    Save,
+    /// Commit a successfully resolved/tested account identity.
+    Test,
+    /// Remove the configured account while retaining exact cleanup work.
+    Disconnect,
+    /// Reconcile only cleanup targets without changing account ownership.
+    Reconcile,
+}
+
+/// Whole-profile compare-and-swap for backend-owned osu! state.
+///
+/// The store refreshes the outer settings revision under its commit gate, so
+/// unrelated preference, Cloud, and upload writes are preserved. The exact
+/// expected profile remains the mutation authority and prevents account ABA.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OsuProfileCas {
+    pub kind: OsuProfileCasKind,
+    pub expected: OsuApiSettings,
+    pub replacement: OsuApiSettings,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct SettingsSnapshot {
     pub document: AppSettings,
@@ -831,12 +859,16 @@ pub enum SettingsTransactionError {
     AccountChanged,
     #[error("cloud upload record changed while the settings operation was in flight")]
     StaleCloudRecord,
+    #[error("osu! profile changed while the settings operation was in flight")]
+    StaleOsuProfile,
     #[error("settings preferences changed while the draft was open")]
     StalePreferences,
     #[error("settings revision is exhausted")]
     RevisionExhausted,
     #[error("cloud account generation is exhausted")]
     AccountGenerationExhausted,
+    #[error("osu! account generation is exhausted")]
+    OsuAccountGenerationExhausted,
     #[error("settings file changed outside this process")]
     ExternalModification,
     #[error("invalid settings transaction: {0}")]
@@ -1094,6 +1126,141 @@ impl SettingsStore {
             change: SettingsChange::CompareExchangeCloudProfile(change),
         };
         self.commit_locked(&mut commit_guard, &mut state, transaction)
+    }
+
+    /// Apply one exact osu! profile mutation while preserving unrelated
+    /// settings changes committed after the caller captured its profile.
+    pub fn compare_exchange_osu_profile(
+        &self,
+        change: OsuProfileCas,
+    ) -> Result<SettingsSnapshot, SettingsTransactionError> {
+        let mut shared = self
+            .inner
+            .commit_lock
+            .lock()
+            .map_err(|_| SettingsTransactionError::LockPoisoned)?;
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| SettingsTransactionError::LockPoisoned)?;
+
+        let current_primary = read_primary_state(self.inner.profile.settings_path());
+        if current_primary != shared.primary {
+            return Err(SettingsTransactionError::ExternalModification);
+        }
+        let mut current = match &current_primary {
+            PrimaryState::Missing
+                if state.primary == PrimaryState::Missing
+                    && state.snapshot.revision == shared.revision =>
+            {
+                state.snapshot.document.clone()
+            }
+            PrimaryState::File { bytes, .. } => {
+                AppSettings::load_from_json_bytes(bytes).map_err(|error| {
+                    SettingsTransactionError::Validation(format!(
+                        "current durable settings are invalid: {}",
+                        error.describe()
+                    ))
+                })?
+            }
+            PrimaryState::Missing | PrimaryState::Unreadable(_) => {
+                return Err(SettingsTransactionError::ExternalModification)
+            }
+        };
+        let current_owner = shared
+            .owner
+            .as_ref()
+            .expect("opened settings profile must register its Cloud owner")
+            .clone();
+        let current_account = CloudAccountIdentity::from_settings(&current.cloud);
+        if current_account != current_owner.account
+            || cloud_publication_stable_account(&current.cloud) != current_owner.stable_account
+        {
+            return Err(SettingsTransactionError::AccountChanged);
+        }
+
+        apply_osu_profile_cas(&mut current.osu, change)?;
+        let (next, json) = current
+            .normalized_json_bytes()
+            .map_err(SettingsTransactionError::Validation)?;
+        let next_account = CloudAccountIdentity::from_settings(&next.cloud);
+        if next_account != current_owner.account
+            || cloud_publication_stable_account(&next.cloud) != current_owner.stable_account
+        {
+            return Err(SettingsTransactionError::AccountChanged);
+        }
+        let next_revision = shared.revision.checked_next()?;
+        let primary =
+            persist_store_transaction(self.inner.profile.settings_path(), json, &current_primary)
+                .map_err(SettingsTransactionError::Persistence)?;
+        shared.primary = primary.clone();
+        shared.revision = next_revision;
+        state.primary = primary;
+        state.snapshot = SettingsSnapshot {
+            document: next,
+            revision: next_revision,
+            account_generation: current_owner.account_generation,
+            account: next_account,
+        };
+        Ok(state.snapshot.clone())
+    }
+
+    /// Reload the current durable osu! profile under the shared profile gate
+    /// and refresh this independently opened store's cached snapshot.
+    pub fn current_osu_profile(&self) -> Result<OsuApiSettings, SettingsTransactionError> {
+        let shared = self
+            .inner
+            .commit_lock
+            .lock()
+            .map_err(|_| SettingsTransactionError::LockPoisoned)?;
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| SettingsTransactionError::LockPoisoned)?;
+        let current_primary = read_primary_state(self.inner.profile.settings_path());
+        if current_primary != shared.primary {
+            return Err(SettingsTransactionError::ExternalModification);
+        }
+        let current = match &current_primary {
+            PrimaryState::Missing
+                if state.primary == PrimaryState::Missing
+                    && state.snapshot.revision == shared.revision =>
+            {
+                state.snapshot.document.clone()
+            }
+            PrimaryState::File { bytes, .. } => {
+                AppSettings::load_from_json_bytes(bytes).map_err(|error| {
+                    SettingsTransactionError::Validation(format!(
+                        "current durable settings are invalid: {}",
+                        error.describe()
+                    ))
+                })?
+            }
+            PrimaryState::Missing | PrimaryState::Unreadable(_) => {
+                return Err(SettingsTransactionError::ExternalModification)
+            }
+        };
+        let owner = shared
+            .owner
+            .as_ref()
+            .expect("opened settings profile must register its Cloud owner");
+        let account = CloudAccountIdentity::from_settings(&current.cloud);
+        if account != owner.account
+            || cloud_publication_stable_account(&current.cloud) != owner.stable_account
+        {
+            return Err(SettingsTransactionError::AccountChanged);
+        }
+        let osu = current.osu.clone();
+        state.primary = current_primary;
+        state.snapshot = SettingsSnapshot {
+            document: current,
+            revision: shared.revision,
+            account_generation: owner.account_generation,
+            account,
+        };
+        Ok(osu)
     }
 
     /// Compare and replace only the settings fields owned by the UI.
@@ -1441,6 +1608,157 @@ fn apply_change(
         SettingsChange::ReplaceOsuProfile(osu) => document.osu = osu,
     }
     Ok(())
+}
+
+fn apply_osu_profile_cas(
+    current: &mut OsuApiSettings,
+    change: OsuProfileCas,
+) -> Result<(), SettingsTransactionError> {
+    validate_normalized_osu_profile("expected", &change.expected)?;
+    if *current != change.expected {
+        return Err(SettingsTransactionError::StaleOsuProfile);
+    }
+    validate_normalized_osu_profile("replacement", &change.replacement)?;
+
+    if !matches!(change.kind, OsuProfileCasKind::Reconcile)
+        && change
+            .expected
+            .credential_cleanup_targets
+            .iter()
+            .any(|target| {
+                !change
+                    .replacement
+                    .credential_cleanup_targets
+                    .contains(target)
+                    && change.replacement.credential_target.as_ref() != Some(target)
+            })
+    {
+        return invalid_osu_profile_cas("replacement dropped a pending credential cleanup target");
+    }
+    if change.expected.credential_target != change.replacement.credential_target {
+        if let Some(prior) = change.expected.credential_target.as_ref() {
+            if !change
+                .replacement
+                .credential_cleanup_targets
+                .contains(prior)
+            {
+                return invalid_osu_profile_cas(
+                    "replacement did not schedule the prior active credential target",
+                );
+            }
+        }
+    }
+
+    match change.kind {
+        OsuProfileCasKind::Save | OsuProfileCasKind::Test | OsuProfileCasKind::Disconnect => {
+            let required = change
+                .expected
+                .account_generation
+                .checked_next()
+                .map_err(|error| match error {
+                    OsuAccountGenerationError::Exhausted => {
+                        SettingsTransactionError::OsuAccountGenerationExhausted
+                    }
+                    OsuAccountGenerationError::Zero => SettingsTransactionError::Validation(
+                        "osu! expected account generation is zero".into(),
+                    ),
+                })?;
+            if change.replacement.account_generation != required {
+                return invalid_osu_profile_cas(
+                    "save, test, and disconnect must advance the account generation exactly once",
+                );
+            }
+        }
+        OsuProfileCasKind::Reconcile => {
+            if change.replacement.account_generation != change.expected.account_generation {
+                return invalid_osu_profile_cas(
+                    "cleanup reconciliation must retain the account generation",
+                );
+            }
+            let mut expected_with_replacement_cleanup = change.expected.clone();
+            expected_with_replacement_cleanup.credential_cleanup_targets =
+                change.replacement.credential_cleanup_targets.clone();
+            if expected_with_replacement_cleanup != change.replacement {
+                return invalid_osu_profile_cas(
+                    "cleanup reconciliation may change only cleanup targets",
+                );
+            }
+        }
+    }
+
+    match change.kind {
+        OsuProfileCasKind::Save | OsuProfileCasKind::Test => {
+            let Some(_client_id) = change.replacement.client_id.as_deref() else {
+                return invalid_osu_profile_cas("configured profile is missing the client id");
+            };
+            let Some(_user) = change.replacement.user.as_deref() else {
+                return invalid_osu_profile_cas("configured profile is missing the user");
+            };
+            if !change
+                .replacement
+                .credential_target
+                .as_deref()
+                .is_some_and(|target| {
+                    super::osu::is_osu_credential_target_for_generation(
+                        target,
+                        change.replacement.account_generation,
+                    )
+                })
+            {
+                return invalid_osu_profile_cas(
+                    "configured profile credential target does not belong to its generation",
+                );
+            }
+        }
+        OsuProfileCasKind::Disconnect => {
+            if change.replacement.client_id.is_some()
+                || change.replacement.user.is_some()
+                || change.replacement.credential_target.is_some()
+                || change.replacement.last_connected_username.is_some()
+            {
+                return invalid_osu_profile_cas(
+                    "disconnect replacement must not retain configured account fields",
+                );
+            }
+            if let Some(target) = change.expected.credential_target.as_ref() {
+                if !change
+                    .replacement
+                    .credential_cleanup_targets
+                    .contains(target)
+                {
+                    return invalid_osu_profile_cas(
+                        "disconnect replacement must schedule the prior credential target",
+                    );
+                }
+            }
+        }
+        OsuProfileCasKind::Reconcile => {}
+    }
+
+    *current = change.replacement;
+    Ok(())
+}
+
+fn validate_normalized_osu_profile(
+    label: &str,
+    profile: &OsuApiSettings,
+) -> Result<(), SettingsTransactionError> {
+    profile.validate().map_err(|error| {
+        SettingsTransactionError::Validation(format!("osu! {label} profile: {error}"))
+    })?;
+    let mut normalized = profile.clone();
+    normalized.normalize();
+    if &normalized != profile {
+        return invalid_osu_profile_cas(format!("{label} profile must already be normalized"));
+    }
+    Ok(())
+}
+
+fn invalid_osu_profile_cas(message: impl Into<String>) -> Result<(), SettingsTransactionError> {
+    Err(SettingsTransactionError::Validation(format!(
+        "invalid osu! profile CAS: {}",
+        message.into()
+    )))
 }
 
 fn validate_cloud_profile_cas(change: &CloudProfileCas) -> Result<(), SettingsTransactionError> {

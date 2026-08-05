@@ -34,6 +34,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 httpmock = "0.7"
 semver = { version = "1", features = ["serde"] }
 url = { version = "2", features = ["serde"] }
+zeroize = "1"
 
 [patch.crates-io]
 # wayland-scanner 0.31.10's published quick-xml 0.39 dependency is affected by

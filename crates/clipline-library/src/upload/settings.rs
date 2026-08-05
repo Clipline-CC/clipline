@@ -563,6 +563,8 @@ fn classify_settings_error(error: SettingsTransactionError) -> UploadRecordError
         SettingsTransactionError::StaleRevision { .. }
         | SettingsTransactionError::StalePreferences => UploadRecordErrorKind::Contended,
         SettingsTransactionError::RevisionExhausted
+        | SettingsTransactionError::OsuAccountGenerationExhausted
+        | SettingsTransactionError::StaleOsuProfile
         | SettingsTransactionError::ExternalModification
         | SettingsTransactionError::LockPoisoned => UploadRecordErrorKind::Persistence,
         SettingsTransactionError::Validation(_) | SettingsTransactionError::Persistence(_) => {

@@ -982,13 +982,17 @@ dependencies = [
  "clipline-capture",
  "clipline-events",
  "clipline-settings",
+ "clipline-shell",
  "clipline-test-utils",
  "png 0.17.16",
  "serde",
  "serde_json",
  "sha2",
+ "static_assertions",
  "tracing",
+ "uuid",
  "windows-sys 0.61.2",
+ "zeroize",
 ]
 
 [[package]]
@@ -1093,6 +1097,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "windows 0.62.2",
+ "zeroize",
 ]
 
 [[package]]

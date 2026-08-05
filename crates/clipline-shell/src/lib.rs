@@ -5,6 +5,7 @@ mod channel;
 mod contract;
 pub mod diagnostics;
 pub mod hotkey;
+pub mod secret;
 mod shutdown;
 
 #[cfg(windows)]

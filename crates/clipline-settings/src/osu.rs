@@ -22,6 +22,48 @@ pub fn osu_credential_target(client_id: &str, user: &str) -> String {
     )
 }
 
+/// Credential target owned by one exact osu! account operation.
+///
+/// The operation id is generated independently for every write, including by
+/// separately constructed frontend adapters. The target grammar deliberately
+/// excludes user-controlled client/user text, so a legacy target cannot be
+/// crafted to collide with a new candidate.
+pub fn osu_credential_target_for_operation(
+    generation: OsuAccountGeneration,
+    operation_id: &str,
+) -> Result<String, String> {
+    if operation_id.is_empty()
+        || operation_id.len() > 64
+        || !operation_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return Err("osu! credential operation id is invalid".into());
+    }
+    Ok(format!(
+        "{OSU_CREDENTIAL_PREFIX}:generation:{}:operation:{operation_id}",
+        generation.get()
+    ))
+}
+
+pub fn is_osu_credential_target_for_generation(
+    target: &str,
+    generation: OsuAccountGeneration,
+) -> bool {
+    let prefix = format!(
+        "{OSU_CREDENTIAL_PREFIX}:generation:{}:operation:",
+        generation.get()
+    );
+    let Some(operation_id) = target.strip_prefix(&prefix) else {
+        return false;
+    };
+    !operation_id.is_empty()
+        && operation_id.len() <= 64
+        && operation_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct OsuAccountGeneration(u64);
@@ -123,6 +165,19 @@ impl OsuApiSettings {
                 return Err("osu! client id must be a number".into());
             }
         }
+        if let Some(target) = self.credential_target.as_deref() {
+            validate_owned_credential_target("osu! credential target", target)?;
+        }
+        for target in &self.credential_cleanup_targets {
+            validate_owned_credential_target("osu! credential cleanup target", target)?;
+        }
+        if self.credential_target.as_ref().is_some_and(|active| {
+            self.credential_cleanup_targets
+                .iter()
+                .any(|target| target == active)
+        }) {
+            return Err("osu! active credential target cannot be scheduled for cleanup".into());
+        }
         Ok(())
     }
 
@@ -167,6 +222,17 @@ impl OsuApiSettings {
         }
         Ok(())
     }
+}
+
+fn validate_owned_credential_target(label: &str, target: &str) -> Result<(), String> {
+    if !target.starts_with(OSU_CREDENTIAL_PREFIX)
+        || target.as_bytes().get(OSU_CREDENTIAL_PREFIX.len()) != Some(&b':')
+    {
+        return Err(format!(
+            "{label} is outside Clipline's osu! credential namespace"
+        ));
+    }
+    Ok(())
 }
 
 fn account_optional_text(

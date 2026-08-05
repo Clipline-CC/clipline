@@ -64,10 +64,10 @@ pub use persistence::{
     normalize_replay_cache_dir, quota_bytes_from_gb, replay_cache_quota_bytes_from_gb,
     settings_path, share_export_cache_dir, AccountGeneration, CloudAccountIdentity,
     CloudAccountPublicationOwner, CloudAccountStore, CloudProfileCas, CloudRecordCas,
-    CloudRecordCasKind, CloudRecordSlot, LibraryConfig, SettingsChange, SettingsLoadSource,
-    SettingsPathResolver, SettingsProfile, SettingsProfileError, SettingsRevision,
-    SettingsSnapshot, SettingsStore, SettingsTransaction, SettingsTransactionError,
-    MAX_CLOUD_RECORD_CAS_SLOTS,
+    CloudRecordCasKind, CloudRecordSlot, LibraryConfig, OsuProfileCas, OsuProfileCasKind,
+    SettingsChange, SettingsLoadSource, SettingsPathResolver, SettingsProfile,
+    SettingsProfileError, SettingsRevision, SettingsSnapshot, SettingsStore, SettingsTransaction,
+    SettingsTransactionError, MAX_CLOUD_RECORD_CAS_SLOTS,
 };
 pub use preferences::{
     CloudUploadPreferences, GamePluginPreference, GamePreferences, SettingsPreferences,

@@ -101,14 +101,21 @@ display text into the reducer. Each callback carries its exact field, every draf
 atomically resets capture, and successful capture/clear returns both compacted labels so clearing
 Primary can safely promote Secondary without publishing a blank required primary.
 
-osu! settings now persist a checked nonzero account generation, migrate legacy profiles to generation
-1, retain shipping `u64` client-id semantics, and enforce per-field, cleanup-list, and 64 KiB aggregate
-bounds before normalization can hide hostile input. The generation is not yet an authoritative ABA
-fence: the later osu service/CAS slice must enforce exact transitions under the settings commit lock
-before asynchronous work trusts it. The explicit 100/125/150/200% DPI and negative-half-tie matrix is
-green.
+osu! account ownership is now neutral and transaction-safe. Move-only zeroizing secret wrappers keep
+client secrets and access tokens out of Clone, Serde, Debug, errors, status DTOs, and settings;
+Credential Manager reads and writes also zero temporary Rust buffers and the OS-owned credential
+blob before release. Save reserves a UUID operation target durably in the cleanup set before the
+possibly ambiguous external write, then an exact whole-profile CAS advances the checked account
+generation and atomically transfers that target to active ownership. Failed writes, failed final
+CAS, disconnect, and delete failures therefore either remove the candidate or leave its exact target
+durably scheduled. Independently opened `SettingsStore` adapters reload the current durable profile
+under the shared commit gate, so unrelated Settings and Cloud writes survive and stale or ABA profile
+mutations fail closed. One process-global service gate serializes status/save/disconnect across
+independently constructed services; cross-process exclusion relies on Clipline's existing
+authenticated single-instance boundary. The legacy plaintext credential read and whole-profile
+replacement routes remain only for the thin Tauri compatibility cutover.
 
-Next: implement the Task 8 osu! secret/CAS/HTTP/enrichment slices and the remaining thin Tauri
+Next: implement the Task 8 bounded osu! HTTP/enrichment slice, then complete the thin Tauri
 compatibility cutover.
 `artifacts/`, `paseo.json`, and unrelated poster formatting remain local and excluded.
 

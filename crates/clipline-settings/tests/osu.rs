@@ -9,7 +9,7 @@ fn repeated_ascii(byte: u8, len: usize) -> String {
 }
 
 fn cleanup_target(index: usize, len: usize) -> String {
-    let prefix = format!("{index:02}:");
+    let prefix = format!("Clipline osu!:{index:02}:");
     format!("{prefix}{}", repeated_ascii(b'x', len - prefix.len()))
 }
 
@@ -19,7 +19,7 @@ fn exact_osu_profile_boundaries_validate() {
         account_generation: OsuAccountGeneration::INITIAL,
         client_id: Some(u64::MAX.to_string()),
         user: Some(repeated_ascii(b'u', MAX_OSU_USER_BYTES)),
-        credential_target: Some(repeated_ascii(b't', MAX_OSU_CREDENTIAL_TARGET_BYTES)),
+        credential_target: Some(cleanup_target(99, MAX_OSU_CREDENTIAL_TARGET_BYTES)),
         credential_cleanup_targets: (0..MAX_OSU_CREDENTIAL_CLEANUP_TARGETS)
             .map(|index| {
                 cleanup_target(
@@ -114,7 +114,7 @@ fn each_osu_profile_field_rejects_one_byte_or_digit_over_the_limit() {
 fn cleanup_count_is_checked_before_normalization_can_dedupe_or_drop_entries() {
     let mut duplicates = OsuApiSettings {
         credential_cleanup_targets: vec![
-            "duplicate".into();
+            "Clipline osu!:duplicate".into();
             MAX_OSU_CREDENTIAL_CLEANUP_TARGETS + 1
         ],
         ..OsuApiSettings::default()
@@ -154,9 +154,9 @@ fn aggregate_overflow_remains_rejected_after_normalization() {
 fn bounded_cleanup_targets_still_normalize_and_dedupe() {
     let mut settings = OsuApiSettings {
         credential_cleanup_targets: vec![
-            " target-b ".into(),
-            "target-a".into(),
-            "target-b".into(),
+            " Clipline osu!:target-b ".into(),
+            "Clipline osu!:target-a".into(),
+            "Clipline osu!:target-b".into(),
             "  ".into(),
         ],
         ..OsuApiSettings::default()
@@ -166,9 +166,69 @@ fn bounded_cleanup_targets_still_normalize_and_dedupe() {
 
     assert_eq!(
         settings.credential_cleanup_targets,
-        ["target-a", "target-b"]
+        ["Clipline osu!:target-a", "Clipline osu!:target-b"]
     );
     settings.validate().unwrap();
+}
+
+#[test]
+fn active_credential_target_cannot_also_be_scheduled_for_cleanup() {
+    let target = clipline_settings::osu::osu_credential_target("12345", "Dain");
+    let settings = OsuApiSettings {
+        client_id: Some("12345".into()),
+        user: Some("Dain".into()),
+        credential_target: Some(target.clone()),
+        credential_cleanup_targets: vec![target],
+        ..OsuApiSettings::default()
+    };
+
+    let error = settings.validate().unwrap_err();
+    assert!(error.contains("active credential target"), "{error}");
+}
+
+#[test]
+fn foreign_credential_targets_never_gain_cleanup_authority() {
+    for settings in [
+        OsuApiSettings {
+            credential_target: Some("unrelated credential".into()),
+            ..OsuApiSettings::default()
+        },
+        OsuApiSettings {
+            credential_cleanup_targets: vec!["Clipline Cloud:account".into()],
+            ..OsuApiSettings::default()
+        },
+    ] {
+        let error = settings.validate().unwrap_err();
+        assert!(error.contains("outside Clipline's osu! credential namespace"));
+    }
+}
+
+#[test]
+fn operation_targets_are_generation_owned_and_disjoint_from_legacy_user_text() {
+    let generation = OsuAccountGeneration::new(9).unwrap();
+    let operation = clipline_settings::osu::osu_credential_target_for_operation(
+        generation,
+        "01234567-89ab-cdef",
+    )
+    .unwrap();
+    let crafted_legacy = clipline_settings::osu::osu_credential_target(
+        "12345",
+        "generation:9:operation:01234567-89ab-cdef",
+    );
+
+    assert_ne!(operation, crafted_legacy);
+    assert!(
+        clipline_settings::osu::is_osu_credential_target_for_generation(&operation, generation)
+    );
+    assert!(
+        !clipline_settings::osu::is_osu_credential_target_for_generation(
+            &operation,
+            OsuAccountGeneration::new(8).unwrap()
+        )
+    );
+    assert!(
+        clipline_settings::osu::osu_credential_target_for_operation(generation, "bad:id").is_err()
+    );
 }
 
 #[test]

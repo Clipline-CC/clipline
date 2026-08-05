@@ -7,12 +7,15 @@ publish = false
 
 [dependencies]
 clipline-settings = { path = "../clipline-settings" }
+clipline-shell = { path = "../clipline-shell" }
 base64 = "0.22"
 png = "0.17"
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"
 tracing = "0.1"
+zeroize = { workspace = true }
+uuid = { version = "1", features = ["v4"] }
 
 [target.'cfg(windows)'.dependencies]
 clipline-capture = { path = "../clipline-capture" }
@@ -28,3 +31,4 @@ windows-sys = { version = "0.61", features = [
 [dev-dependencies]
 clipline-test-utils = { path = "../clipline-test-utils" }
 clipline-events = { path = "../clipline-events" }
+static_assertions = "1"
