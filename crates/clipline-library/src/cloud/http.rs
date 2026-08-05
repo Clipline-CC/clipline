@@ -14,6 +14,10 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use super::account::{
+    CloudAccountCancellation, CloudAccountFuture, CloudAccountTransport, CloudAuthenticatedAccount,
+    CloudAuthenticationRequest,
+};
 use super::cache::{
     CancellationProbe, CloudAssetRequest, CloudCacheError, DownloadPort, DownloadReceipt,
     DownloadSink, DownloadStatus,
@@ -23,8 +27,7 @@ use super::ports::{
     CloudTransportFuture, PortError,
 };
 use super::protocol::{
-    validate_discovery, ClipDetailResponse, CloudApiBase, CloudProtocolError,
-    CreateDeviceTokenRequest, CreateDeviceTokenResponse, DiscoveryResponse,
+    validate_discovery, ClipDetailResponse, CloudApiBase, CloudProtocolError, DiscoveryResponse,
     MeResponse as ProtocolMeResponse, UpdateVisibilityRequest,
 };
 use super::{
@@ -374,6 +377,73 @@ pub struct ReqwestCloudProtocol {
     media_probe_timeout: Duration,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ReqwestCloudAccountTransport;
+
+impl ReqwestCloudAccountTransport {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+impl CloudAccountTransport for ReqwestCloudAccountTransport {
+    fn authenticate<'a>(
+        &'a self,
+        request: CloudAuthenticationRequest,
+        cancellation: &'a dyn CloudAccountCancellation,
+    ) -> CloudAccountFuture<'a> {
+        Box::pin(async move {
+            let protocol = ReqwestCloudProtocol::new(request.base.clone())?;
+            let discovery = cancel_account_request(cancellation, protocol.discovery()).await?;
+            let credential = cancel_account_request(
+                cancellation,
+                protocol.create_device_token(
+                    &request.username,
+                    &request.password,
+                    &request.device_name,
+                ),
+            )
+            .await?;
+            let profile =
+                cancel_account_request(cancellation, protocol.me(credential.expose())).await?;
+            if profile.user.is_disabled {
+                return Err(CloudProtocolError::InvalidDiscovery);
+            }
+            Ok(CloudAuthenticatedAccount {
+                host_url: request.base.as_str().trim_end_matches('/').to_string(),
+                public_url: discovery
+                    .public_url
+                    .trim()
+                    .trim_end_matches('/')
+                    .to_string(),
+                user_id: profile.user.id,
+                username: profile.user.username,
+                display_name: profile
+                    .user
+                    .display_name
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty()),
+                credential,
+            })
+        })
+    }
+}
+
+async fn cancel_account_request<T>(
+    cancellation: &dyn CloudAccountCancellation,
+    request: impl std::future::Future<Output = Result<T, CloudProtocolError>>,
+) -> Result<T, CloudProtocolError> {
+    if cancellation.is_canceled() {
+        return Err(CloudProtocolError::Canceled);
+    }
+    tokio::pin!(request);
+    tokio::select! {
+        () = cancellation.cancelled() => Err(CloudProtocolError::Canceled),
+        result = &mut request => result,
+    }
+}
+
 impl ReqwestCloudProtocol {
     pub fn new(base: CloudApiBase) -> Result<Self, CloudProtocolError> {
         Ok(Self {
@@ -420,15 +490,41 @@ impl ReqwestCloudProtocol {
 
     pub async fn create_device_token(
         &self,
-        request: &CreateDeviceTokenRequest,
-    ) -> Result<CreateDeviceTokenResponse, CloudProtocolError> {
-        self.send_json(
-            self.control
-                .post(self.base.api_url("api/v1/auth/device-token")?)
-                .json(request),
-            "create Clipline Cloud device token",
-        )
-        .await
+        username: &str,
+        password: &super::account::CloudPassword,
+        name: &str,
+    ) -> Result<CloudCredential, CloudProtocolError> {
+        #[derive(Serialize)]
+        struct DeviceTokenRequest<'a> {
+            username: &'a str,
+            password: &'a str,
+            name: &'a str,
+        }
+        #[derive(Deserialize)]
+        struct DeviceTokenResponse {
+            token: String,
+        }
+        let response: DeviceTokenResponse = self
+            .send_json(
+                self.control
+                    .post(self.base.api_url("api/v1/auth/device-token")?)
+                    .json(&DeviceTokenRequest {
+                        username,
+                        password: password.expose(),
+                        name,
+                    }),
+                "create Clipline Cloud device token",
+            )
+            .await?;
+        let credential = CloudCredential::new(response.token);
+        if credential.expose().is_empty()
+            || credential.expose().len() > MAX_CLOUD_CONTROL_JSON_BYTES
+        {
+            return Err(CloudProtocolError::Http(
+                "Clipline Cloud returned an invalid device token".into(),
+            ));
+        }
+        Ok(credential)
     }
 
     pub async fn me(&self, bearer_token: &str) -> Result<ProtocolMeResponse, CloudProtocolError> {

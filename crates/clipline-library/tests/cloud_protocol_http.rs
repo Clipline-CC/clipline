@@ -1,7 +1,6 @@
 use clipline_library::http::{CloudMediaProbe, ReqwestCloudProtocol};
-use clipline_library::protocol::{
-    CloudApiBase, CloudProtocolError, CreateDeviceTokenRequest, UpdateVisibilityRequest,
-};
+use clipline_library::protocol::{CloudApiBase, CloudProtocolError, UpdateVisibilityRequest};
+use clipline_library::CloudPassword;
 use httpmock::prelude::*;
 use std::time::{Duration, Instant};
 
@@ -116,15 +115,12 @@ async fn connection_calls_preserve_the_base_prefix_and_auth_boundary() {
 
     let discovered = client.discovery().await.unwrap();
     assert_eq!(discovered.api_version, "v1");
+    let password = CloudPassword::new("secret".into()).unwrap();
     let created = client
-        .create_device_token(&CreateDeviceTokenRequest {
-            username: "dain".into(),
-            password: "secret".into(),
-            name: "Clipline Desktop".into(),
-        })
+        .create_device_token("dain", &password, "Clipline Desktop")
         .await
         .unwrap();
-    let me = client.me(&created.token).await.unwrap();
+    let me = client.me(created.expose()).await.unwrap();
     assert_eq!(me.user.id, "user-1");
     discovery.assert_hits(1);
     token.assert_hits(1);

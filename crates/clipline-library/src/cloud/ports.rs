@@ -1,6 +1,8 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use clipline_shell::secret::SecretString;
+
 use crate::{CloudAccountGeneration, CloudAccountKey, CloudWorkToken};
 
 use super::{
@@ -63,17 +65,28 @@ impl PortError {
 }
 
 /// Bearer credential kept outside serializable/debuggable service values.
-pub struct CloudCredential(String);
+pub struct CloudCredential(SecretString);
 
 impl CloudCredential {
     #[must_use]
     pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
+        Self(SecretString::new(value.into()))
+    }
+
+    #[must_use]
+    pub fn from_secret(value: SecretString) -> Self {
+        Self(value)
     }
 
     #[must_use]
     pub fn expose(&self) -> &str {
-        &self.0
+        self.0.expose_secret()
+    }
+}
+
+impl std::fmt::Debug for CloudCredential {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("CloudCredential([REDACTED])")
     }
 }
 

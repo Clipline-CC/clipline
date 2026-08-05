@@ -1342,6 +1342,38 @@ fn osu_http_enrichment_and_secret_algorithms_have_one_shared_owner() {
 }
 
 #[test]
+fn cloud_account_mutation_and_secret_algorithms_have_one_shared_owner() {
+    let root = workspace_root();
+    let shared = fs::read_to_string(root.join("crates/clipline-library/src/cloud/account.rs"))
+        .expect("read shared Cloud account service");
+    let adapter = fs::read_to_string(root.join("apps/clipline-app/src/cloud.rs"))
+        .expect("read Cloud adapter");
+
+    assert!(shared.contains("pub struct CloudAccountService"));
+    assert!(shared.contains("pub struct CloudPassword"));
+    assert!(adapter.contains("CloudAccountService"));
+    assert!(adapter.contains("SettingsCloudAccountPort"));
+    for duplicate in [
+        "CreateDeviceTokenRequest",
+        "reconcile_cloud_credential_cleanup",
+        "write_then_persist",
+        "fn write_credential(",
+        "fn delete_credential_if_present(",
+    ] {
+        assert!(
+            !adapter.contains(duplicate),
+            "Tauri Cloud adapter duplicates shared algorithm {duplicate}"
+        );
+    }
+    assert!(
+        !root
+            .join("apps/clipline-app/src/credential_transaction.rs")
+            .exists(),
+        "the application-local credential transaction helper must stay removed"
+    );
+}
+
+#[test]
 fn large_application_surfaces_delegate_to_named_domain_owners() {
     let root = workspace_root();
     let app =
@@ -1379,7 +1411,8 @@ fn large_application_surfaces_delegate_to_named_domain_owners() {
     assert!(library.contains("mod naming;") && !library.contains("fn normalized_clip_file_name("));
     assert!(
         cloud.contains("CloudApiBase")
-            && cloud.contains("ReqwestCloudProtocol")
+            && cloud.contains("ReqwestCloudAccountTransport")
+            && cloud.contains("CloudAccountService")
             && !cloud.contains("fn validate_cloud_cache_component")
     );
 

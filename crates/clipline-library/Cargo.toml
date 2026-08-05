@@ -21,6 +21,7 @@ sha2 = "0.10"
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["fs", "io-util", "sync"] }
 tokio-util = { version = "0.7", features = ["io"] }
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 boa_engine = "0.21.1"

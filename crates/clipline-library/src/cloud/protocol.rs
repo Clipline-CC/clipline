@@ -258,29 +258,6 @@ pub struct DiscoveryFeatures {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateDeviceTokenRequest {
-    pub username: String,
-    pub password: String,
-    pub name: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateDeviceTokenResponse {
-    pub token: String,
-    pub device_token: DeviceTokenResponse,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DeviceTokenResponse {
-    pub id: String,
-    pub name: String,
-    pub created_at: DateTime<Utc>,
-    pub last_used_at: Option<DateTime<Utc>>,
-    pub expires_at: Option<DateTime<Utc>>,
-    pub revoked_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MeResponse {
     pub user: UserResponse,
     pub auth_kind: String,

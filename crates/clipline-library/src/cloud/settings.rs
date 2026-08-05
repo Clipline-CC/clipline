@@ -4,8 +4,9 @@ use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 
 use clipline_settings::{
-    CloudAccountPublicationOwner, CloudProfileCas, SettingsSnapshot, SettingsStore,
-    SettingsTransactionError,
+    CloudAccountCas, CloudAccountCasKind, CloudAccountProfile, CloudAccountPublicationOwner,
+    CloudProfileCas, SettingsSnapshot, SettingsStore, SettingsTransactionError,
+    MAX_CLOUD_CREDENTIAL_CLEANUP_TARGETS,
 };
 
 use crate::{
@@ -13,6 +14,7 @@ use crate::{
     MAX_CATALOG_STRING_BYTES, MAX_CLOUD_INDEX_ROWS,
 };
 
+use super::account::{CloudAccountMutationPort, CloudAccountState, CloudConnectedProfile};
 use super::ports::{CloudAccountPort, CloudProfilePatch, PortError};
 use super::CloudServiceAccount;
 use super::{
@@ -223,14 +225,192 @@ impl SettingsCloudAccountPort {
         Self { store }
     }
 
-    fn settings_snapshot(&self) -> Result<SettingsSnapshot, PortError> {
-        run_settings_io(|| self.store.snapshot().map_err(settings_error))
+    fn current_account_snapshot(&self) -> Result<SettingsSnapshot, PortError> {
+        run_settings_io(|| self.store.current_cloud_account().map_err(settings_error))
+    }
+
+    fn state_from_snapshot(snapshot: &SettingsSnapshot) -> Result<CloudAccountState, PortError> {
+        Ok(CloudAccountState {
+            account: cloud_service_account_from_snapshot(snapshot)?,
+            profile: CloudAccountProfile::from_settings(&snapshot.document.cloud),
+        })
+    }
+
+    fn exact_before(&self, expected: &CloudAccountState) -> Result<SettingsSnapshot, PortError> {
+        let before = self.current_account_snapshot()?;
+        let current = Self::state_from_snapshot(&before)?;
+        if current.account.snapshot.account_key != expected.account.snapshot.account_key
+            || current.account.snapshot.generation != expected.account.snapshot.generation
+            || current.profile != expected.profile
+        {
+            return Err(PortError::account_changed());
+        }
+        Ok(before)
+    }
+
+    fn commit_account(
+        &self,
+        before: &SettingsSnapshot,
+        kind: CloudAccountCasKind,
+        expected: CloudAccountProfile,
+        replacement: CloudAccountProfile,
+        default_visibility: Option<String>,
+    ) -> Result<CloudAccountState, PortError> {
+        let change = CloudAccountCas {
+            kind,
+            expected_account: before.account.clone(),
+            expected_account_generation: before.account_generation,
+            expected,
+            replacement,
+            default_visibility,
+        };
+        let after = run_settings_io(|| {
+            self.store
+                .compare_exchange_cloud_account(change)
+                .map_err(settings_error)
+        })?;
+        Self::state_from_snapshot(&after)
+    }
+}
+
+impl CloudAccountMutationPort for SettingsCloudAccountPort {
+    fn load(&self) -> Result<CloudAccountState, PortError> {
+        let snapshot = self.current_account_snapshot()?;
+        Self::state_from_snapshot(&snapshot)
+    }
+
+    fn reserve_credential(
+        &self,
+        expected: &CloudAccountState,
+        target: String,
+    ) -> Result<CloudAccountState, PortError> {
+        let before = self.exact_before(expected)?;
+        let mut replacement = expected.profile.clone();
+        if replacement.credential_cleanup_targets.contains(&target)
+            || replacement.credential_target.as_ref() == Some(&target)
+        {
+            return Err(PortError::new("cloud credential target collision"));
+        }
+        if replacement.credential_cleanup_targets.len() >= MAX_CLOUD_CREDENTIAL_CLEANUP_TARGETS {
+            return Err(PortError::new("cloud credential cleanup queue is full"));
+        }
+        replacement.credential_cleanup_targets.push(target);
+        replacement.normalize();
+        self.commit_account(
+            &before,
+            CloudAccountCasKind::ReserveCredential,
+            expected.profile.clone(),
+            replacement,
+            None,
+        )
+    }
+
+    fn commit_connect(
+        &self,
+        expected: &CloudAccountState,
+        connected: CloudConnectedProfile,
+        default_visibility: Option<String>,
+    ) -> Result<CloudAccountState, PortError> {
+        let before = self.exact_before(expected)?;
+        if !expected
+            .profile
+            .credential_cleanup_targets
+            .contains(&connected.credential_target)
+        {
+            return Err(PortError::new(
+                "cloud candidate credential was not durably reserved",
+            ));
+        }
+        let mut replacement = expected.profile.clone();
+        replacement.host_url = connected.host_url;
+        replacement.public_url = Some(connected.public_url);
+        replacement.connected_user_id = Some(connected.user_id);
+        replacement.connected_username = Some(connected.username);
+        replacement.connected_display_name = connected.display_name;
+        replacement.credential_target = Some(connected.credential_target.clone());
+        replacement
+            .credential_cleanup_targets
+            .retain(|target| target != &connected.credential_target);
+        if let Some(previous) = expected
+            .profile
+            .credential_target
+            .as_ref()
+            .filter(|previous| *previous != &connected.credential_target)
+        {
+            if !replacement.credential_cleanup_targets.contains(previous) {
+                if replacement.credential_cleanup_targets.len()
+                    >= MAX_CLOUD_CREDENTIAL_CLEANUP_TARGETS
+                {
+                    return Err(PortError::new("cloud credential cleanup queue is full"));
+                }
+                replacement
+                    .credential_cleanup_targets
+                    .push(previous.clone());
+            }
+        }
+        replacement.normalize();
+        self.commit_account(
+            &before,
+            CloudAccountCasKind::Connect,
+            expected.profile.clone(),
+            replacement,
+            default_visibility,
+        )
+    }
+
+    fn commit_disconnect(
+        &self,
+        expected: &CloudAccountState,
+    ) -> Result<CloudAccountState, PortError> {
+        let before = self.exact_before(expected)?;
+        let mut replacement = expected.profile.clone();
+        if let Some(previous) = replacement.credential_target.take() {
+            if !replacement.credential_cleanup_targets.contains(&previous) {
+                if replacement.credential_cleanup_targets.len()
+                    >= MAX_CLOUD_CREDENTIAL_CLEANUP_TARGETS
+                {
+                    return Err(PortError::new("cloud credential cleanup queue is full"));
+                }
+                replacement.credential_cleanup_targets.push(previous);
+            }
+        }
+        replacement.connected_user_id = None;
+        replacement.connected_username = None;
+        replacement.connected_display_name = None;
+        replacement.normalize();
+        self.commit_account(
+            &before,
+            CloudAccountCasKind::Disconnect,
+            expected.profile.clone(),
+            replacement,
+            None,
+        )
+    }
+
+    fn reconcile_cleanup(
+        &self,
+        expected: &CloudAccountState,
+        deleted_targets: &[String],
+    ) -> Result<CloudAccountState, PortError> {
+        let before = self.exact_before(expected)?;
+        let mut replacement = expected.profile.clone();
+        replacement
+            .credential_cleanup_targets
+            .retain(|target| !deleted_targets.contains(target));
+        replacement.normalize();
+        self.commit_account(
+            &before,
+            CloudAccountCasKind::ReconcileCleanup,
+            expected.profile.clone(),
+            replacement,
+            None,
+        )
     }
 }
 
 impl CloudAccountPort for SettingsCloudAccountPort {
     fn snapshot(&self) -> Result<CloudServiceAccount, PortError> {
-        cloud_service_account_from_snapshot(&self.settings_snapshot()?)
+        cloud_service_account_from_snapshot(&self.current_account_snapshot()?)
     }
 
     fn apply_profile(
@@ -239,7 +419,7 @@ impl CloudAccountPort for SettingsCloudAccountPort {
         expected_generation: CloudAccountGeneration,
         patch: CloudProfilePatch,
     ) -> Result<CloudServiceAccount, PortError> {
-        let before = self.settings_snapshot()?;
+        let before = self.current_account_snapshot()?;
         let current = cloud_service_account_from_snapshot(&before)?;
         if &current.snapshot.account_key != expected_key
             || current.snapshot.generation != expected_generation
@@ -293,6 +473,7 @@ fn validate_optional_catalog_text(field: &str, value: Option<&str>) -> Result<()
 fn settings_error(error: SettingsTransactionError) -> PortError {
     match error {
         SettingsTransactionError::AccountChanged
+        | SettingsTransactionError::StaleCloudProfile
         | SettingsTransactionError::StaleAccountGeneration { .. }
         | SettingsTransactionError::AccountGenerationExhausted => PortError::account_changed(),
         other => PortError::new(other.to_string()),

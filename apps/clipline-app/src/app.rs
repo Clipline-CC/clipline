@@ -50,10 +50,11 @@ use crate::games::{DetectedGame, GameWindowInfo};
 use crate::service::{self, Cmd, Event, ServiceOptions};
 use crate::settings::{
     cloud_paths_equivalent, quota_bytes_from_gb, AppSettings, AppSettingsServiceExt, CaptureMode,
-    CloudRecordCas, CloudRecordCasKind, CloudRecordSlot, CustomGameSettings, GameRecordingMode,
-    SettingsApplyCoordinator, SettingsApplyPorts, SettingsApplyQuiescence, SettingsChange,
-    SettingsPreferences, SettingsProfile, SettingsSnapshot, SettingsStore, SettingsTransaction,
-    SettingsTransactionError, MAX_CLOUD_RECORD_CAS_SLOTS,
+    CloudAccountPublicationOwner, CloudRecordCas, CloudRecordCasKind, CloudRecordSlot,
+    CustomGameSettings, GameRecordingMode, SettingsApplyCoordinator, SettingsApplyPorts,
+    SettingsApplyQuiescence, SettingsChange, SettingsPreferences, SettingsProfile,
+    SettingsSnapshot, SettingsStore, SettingsTransaction, SettingsTransactionError,
+    MAX_CLOUD_RECORD_CAS_SLOTS,
 };
 use crate::updates::{channel_enabled, UpdateChannel};
 use crate::util::unix_now_i64;
@@ -1733,6 +1734,42 @@ impl RuntimeState {
             .ok_or_else(|| "osu! account operations require a durable settings store".to_string())
     }
 
+    pub(crate) fn cloud_settings_store(&self) -> Result<SettingsStore, String> {
+        self.2
+            .clone()
+            .ok_or_else(|| "Cloud account operations require a durable settings store".to_string())
+    }
+
+    pub(crate) fn refresh_cloud_profile(&self) -> Result<crate::settings::CloudSettings, String> {
+        let _refresh = self
+            .4
+            .lock()
+            .map_err(|_| "Cloud settings refresh lock poisoned")?;
+        let store = self.cloud_settings_store()?;
+        for _ in 0..3 {
+            let snapshot = store
+                .current_cloud_account()
+                .map_err(|error| error.to_string())?;
+            let owner = CloudAccountPublicationOwner::from_snapshot(&snapshot);
+            let cloud = snapshot.document.cloud.clone();
+            let published = store.publish_if_cloud_account_current(&owner, || {
+                let mut inner = self
+                    .0
+                    .lock()
+                    .map_err(|_| "runtime state lock poisoned".to_string())?;
+                inner.settings.cloud = cloud.clone();
+                Ok::<_, String>(cloud.clone())
+            });
+            match published {
+                Ok(result) => return result,
+                Err(SettingsTransactionError::AccountChanged)
+                | Err(SettingsTransactionError::StaleAccountGeneration { .. }) => continue,
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+        Err("Cloud account changed while refreshing runtime settings".to_string())
+    }
+
     pub(crate) fn refresh_osu_profile(&self) -> Result<crate::settings::OsuApiSettings, String> {
         let _refresh = self
             .4
@@ -1798,35 +1835,7 @@ impl RuntimeState {
         operation(&cloud, 1)
     }
 
-    pub(crate) fn replace_cloud_profile_if_generation(
-        &self,
-        expected_generation: u64,
-        mut cloud: crate::settings::CloudSettings,
-    ) -> Result<AppSettings, String> {
-        cloud.normalize();
-        let Some(store) = self.2.as_ref() else {
-            if expected_generation != 1 {
-                return Err("cloud account changed while profile work was in flight".into());
-            }
-            return self.update_cloud_with(|current| *current = cloud, AppSettings::save);
-        };
-        let _save_guard = Self::lock_cloud_settings_save()?;
-        let before = store.snapshot().map_err(|error| error.to_string())?;
-        if before.account_generation.get() != expected_generation {
-            return Err("cloud account changed while profile work was in flight".into());
-        }
-        let after = store
-            .transact(SettingsTransaction {
-                expected_revision: before.revision,
-                expected_account_generation: before.account_generation,
-                change: SettingsChange::ReplaceCloudProfile(cloud),
-            })
-            .map_err(|error| error.to_string())?;
-        let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-        inner.settings.cloud = after.document.cloud;
-        Ok(inner.settings.clone())
-    }
-
+    #[cfg(test)]
     pub(crate) fn update_cloud<F>(&self, update: F) -> Result<AppSettings, String>
     where
         F: FnOnce(&mut crate::settings::CloudSettings),
@@ -1949,6 +1958,7 @@ impl RuntimeState {
         Ok(true)
     }
 
+    #[cfg(test)]
     fn update_cloud_with<F>(
         &self,
         update: F,

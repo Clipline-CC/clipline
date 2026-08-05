@@ -4,6 +4,43 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-04): Slint replacement Milestone 8, Task 9 Cloud account ownership
+
+Milestone 8 Task 9 is complete. `clipline-library::CloudAccountService` now owns the exact neutral
+status/connect/disconnect algorithm over injected transport, Settings, credential, cancellation,
+and invalidation ports. Passwords and bearer tokens are move-only, redacted, non-Serde, and
+zeroizing. The redirect-free rustls transport keeps discovery, login, and profile lookup within the
+reviewed Cloud origin and existing bounded body/deadline rules. A process-wide operation gate
+serializes independently constructed account services, with a post-lock cancellation checkpoint so
+canceled queued work cannot reserve, write, or publish.
+
+Credential replacement reserves a UUID operation target in durable bounded cleanup state before
+the external write, then transfers ownership with an exact latest-document Cloud-account CAS.
+Account replacement preserves unrelated preferences and concurrent upload-record writes, advances
+the checked account generation, and clears only prior-owner uploads. Disconnect durably clears the
+owner before invalidation and exact cleanup. Delete failures stay bounded and retryable; a failed
+credential write or uncommitted connect cleans only a target that durable state proves is inactive.
+
+Cloud account CAS publication now resolves the platform's moved-but-error ambiguity under the
+profile-wide commit gate. It re-reads the primary and accepts a reported failure only when the
+normalized replacement bytes match exactly, then refreshes shared identity/revision/account owner
+state. This prevents both false failure and deletion of a token referenced by committed settings.
+Service-level commit-then-fail regressions cover connect and disconnect; arbitrary indeterminate
+ports preserve the credential plus its durable cleanup reservation instead of guessing.
+
+The shipping Tauri `cloud_status`, `cloud_connect`, and `cloud_disconnect` commands are thin
+adapters over the shared service with their exact names, request keys, snake-case status JSON,
+blank-device fallback, and omitted-visibility reset to `private` preserved. Successful mutation
+releases accepted Cloud media leases, updates upload ownership and the runtime mirror, and publishes
+desktop account invalidation best effort after the durable commit. The duplicate app credential
+transaction and public serializable password/token DTOs are gone; repository-security tests pin the
+single shared algorithm owner.
+
+Focused Settings/account tests, app all-target checking, workspace tests, strict workspace Clippy,
+and the final independent audit are green. Next: Task 10, move Support into a bounded neutral
+`clipline-support` service. `artifacts/`, `paseo.json`, and unrelated poster/local-mutation changes
+remain local and excluded.
+
 ## Checkpoint (2026-08-04): Slint replacement Milestone 8, Task 8 Games foundations
 
 Task 8 is in progress through its bounded identity, settings, presentation, icon-decode, and

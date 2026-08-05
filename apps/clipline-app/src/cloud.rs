@@ -18,19 +18,22 @@ use clipline_library::cache::{
 use clipline_library::cache_identity::{
     CloudAccountFence, CloudAssetKey, CloudAssetKind, CloudCacheNamespace,
 };
-use clipline_library::http::{ReqwestAssetDownload, ReqwestCloudProtocol, ReqwestCloudTransport};
+use clipline_library::http::{
+    ReqwestAssetDownload, ReqwestCloudAccountTransport, ReqwestCloudTransport,
+};
 use clipline_library::ports::{
-    CloudAccountPort, CloudCredential, CloudCredentialPort, CloudProfilePatch, CloudRequestFence,
-    PortError,
+    CloudAccountPort, CloudCredential, CloudCredentialPort, CloudRequestFence, PortError,
 };
-use clipline_library::protocol::{
-    ClipDetailResponse, CloudApiBase, CloudProtocolError, CreateDeviceTokenRequest,
-};
+use clipline_library::protocol::{ClipDetailResponse, CloudApiBase, CloudProtocolError};
+use clipline_library::settings::SettingsCloudAccountPort;
 use clipline_library::{
     account_key as shared_account_key, CloudAccountFields,
-    CloudAccountGeneration as LibraryAccountGeneration, CloudAccountSnapshot, CloudBrowserEffect,
-    CloudService, CloudServiceAccount, CloudUserProfile as SharedCloudUserProfile, CloudWorkToken,
-    ForegroundGeneration, RequestGeneration, UploadCancellation, UploadEndpoint,
+    CloudAccountGeneration as LibraryAccountGeneration, CloudAccountInvalidationPort,
+    CloudAccountService, CloudAccountSnapshot, CloudBrowserEffect,
+    CloudConnectRequest as SharedCloudConnectRequest, CloudConnectionStatus,
+    CloudCredentialMutationPort, CloudPassword, CloudService, CloudServiceAccount,
+    CloudUserProfile as SharedCloudUserProfile, CloudWorkToken, ForegroundGeneration,
+    NeverCancelCloudAccount, RequestGeneration, UploadCancellation, UploadEndpoint,
     UploadStatusSyncOutcome, WindowAttachmentGeneration, WindowWorkToken,
 };
 use clipline_shell::windows::credential::CredentialStore;
@@ -42,66 +45,124 @@ use crate::library::{validate_upload_source, StorageSettings};
 use crate::settings::{normalize_cloud_visibility, CloudSettings, CloudUploadRecord};
 use crate::util::unix_now;
 
-const DEFAULT_DEVICE_NAME: &str = "Clipline Desktop";
 const CLOUD_CREDENTIALS: CredentialStore = CredentialStore::new("cloud token");
 static CLOUD_COMPAT_REQUEST_GENERATION: AtomicU64 = AtomicU64::new(0);
 static CLOUD_MEDIA_LEASE_GENERATION: AtomicU64 = AtomicU64::new(0);
 static SHARED_CLOUD_SERVICE: OnceLock<CloudService> = OnceLock::new();
 static SHARED_CLOUD_MEDIA_LEASES: OnceLock<Mutex<HashMap<u64, CloudMediaLease>>> = OnceLock::new();
 
+#[derive(Clone, Copy)]
+struct WindowsCloudCredentialPort;
+
+impl CloudCredentialPort for WindowsCloudCredentialPort {
+    fn read(&self, target: &str) -> Result<CloudCredential, PortError> {
+        CLOUD_CREDENTIALS
+            .read_secret(target)
+            .map(CloudCredential::from_secret)
+            .map_err(|error| PortError::new(error.to_string()))
+    }
+}
+
+impl CloudCredentialMutationPort for WindowsCloudCredentialPort {
+    fn read(&self, target: &str) -> Result<Option<CloudCredential>, PortError> {
+        CLOUD_CREDENTIALS
+            .read_secret_if_present(target)
+            .map(|secret| secret.map(CloudCredential::from_secret))
+            .map_err(|error| PortError::new(error.to_string()))
+    }
+
+    fn write(
+        &self,
+        target: &str,
+        username: &str,
+        credential: &CloudCredential,
+    ) -> Result<(), PortError> {
+        CLOUD_CREDENTIALS
+            .write(target, username, credential.expose())
+            .map_err(|error| PortError::new(error.to_string()))
+    }
+
+    fn delete_if_present(&self, target: &str) -> Result<(), PortError> {
+        CLOUD_CREDENTIALS
+            .delete_if_present(target)
+            .map_err(|error| PortError::new(error.to_string()))
+    }
+}
+
 #[derive(Clone)]
-struct RuntimeCloudAccountPort {
+struct TauriCloudInvalidation {
     app: AppHandle<Wry>,
 }
 
-impl RuntimeCloudAccountPort {
-    fn current(&self) -> Result<CloudServiceAccount, PortError> {
-        let state = self.app.state::<RuntimeState>();
-        state
-            .with_cloud_settings_exclusive(|cloud, generation| {
-                service_account_from_settings(cloud, generation).map_err(|error| error.to_string())
-            })
-            .map_err(PortError::new)
-    }
-}
-
-impl CloudAccountPort for RuntimeCloudAccountPort {
-    fn snapshot(&self) -> Result<CloudServiceAccount, PortError> {
-        self.current()
-    }
-
-    fn apply_profile(
+impl CloudAccountInvalidationPort for TauriCloudInvalidation {
+    fn account_changed(
         &self,
-        expected_key: &clipline_library::CloudAccountKey,
-        expected_generation: LibraryAccountGeneration,
-        patch: CloudProfilePatch,
-    ) -> Result<CloudServiceAccount, PortError> {
+        _previous: Option<&CloudServiceAccount>,
+        current: Option<&CloudServiceAccount>,
+    ) {
+        release_all_cloud_media_leases();
+        let upload_owner = current.map(|account| {
+            clipline_library::UploadAccountOwner::new(
+                account.snapshot.account_key.clone(),
+                account.snapshot.generation,
+            )
+        });
+        self.app
+            .state::<crate::cloud_upload::TauriUploadState>()
+            .service()
+            .account_changed(upload_owner.as_ref());
         let state = self.app.state::<RuntimeState>();
-        let current = self.current()?;
-        if &current.snapshot.account_key != expected_key
-            || current.snapshot.generation != expected_generation
-            || current.snapshot.user_id.as_deref() != Some(patch.user_id.as_str())
-        {
-            return Err(PortError::account_changed());
+        let refreshed = match state.refresh_cloud_profile() {
+            Ok(cloud) => cloud,
+            Err(error) => {
+                tracing::warn!(event = "cloud_runtime_mirror_refresh_failed", error = %error);
+                return;
+            }
+        };
+        let Ok((cloud, generation)) = state.cloud_settings_generation() else {
+            return;
+        };
+        if cloud != refreshed {
+            tracing::warn!(event = "cloud_runtime_mirror_changed_before_account_event");
+            return;
         }
-        let mut cloud = state.cloud_settings_generation().map_err(PortError::new)?.0;
-        cloud.connected_username = Some(patch.username);
-        cloud.connected_display_name = patch.display_name;
-        let settings = state
-            .replace_cloud_profile_if_generation(expected_generation.get(), cloud)
-            .map_err(|_| PortError::account_changed())?;
-        service_account_from_settings(&settings.cloud, expected_generation.get())
+        let owner = match current {
+            Some(expected) => {
+                let Ok(actual) = service_account_from_settings(&cloud, generation) else {
+                    return;
+                };
+                if actual.snapshot.account_key != expected.snapshot.account_key
+                    || actual.snapshot.generation != expected.snapshot.generation
+                {
+                    tracing::warn!(event = "cloud_account_event_owner_changed");
+                    return;
+                }
+                desktop_cloud_account_owner(&cloud, generation).ok()
+            }
+            None if !cloud.connected() => None,
+            None => return,
+        };
+        if let Err(error) = publish_desktop_cloud_account(&self.app, generation, owner) {
+            tracing::warn!(event = "cloud_account_event_publish_failed", error = %error);
+        }
     }
 }
 
-struct RuntimeCloudCredentialPort;
+type TauriCloudAccountService = CloudAccountService<
+    SettingsCloudAccountPort,
+    WindowsCloudCredentialPort,
+    ReqwestCloudAccountTransport,
+    TauriCloudInvalidation,
+>;
 
-impl CloudCredentialPort for RuntimeCloudCredentialPort {
-    fn read(&self, target: &str) -> Result<CloudCredential, PortError> {
-        read_credential(target)
-            .map(CloudCredential::new)
-            .map_err(PortError::new)
-    }
+fn cloud_account_service(app: &AppHandle<Wry>) -> Result<TauriCloudAccountService, String> {
+    let store = app.state::<RuntimeState>().cloud_settings_store()?;
+    Ok(CloudAccountService::new(
+        SettingsCloudAccountPort::new(store),
+        WindowsCloudCredentialPort,
+        ReqwestCloudAccountTransport::new(),
+        TauriCloudInvalidation { app: app.clone() },
+    ))
 }
 
 #[derive(Clone)]
@@ -126,9 +187,10 @@ fn shared_cloud_service(app: &AppHandle<Wry>) -> Result<&'static CloudService, S
         return Ok(service);
     }
     let transport = ReqwestCloudTransport::new().map_err(|error| error.to_string())?;
+    let store = app.state::<RuntimeState>().cloud_settings_store()?;
     let service = CloudService::new(
-        Arc::new(RuntimeCloudAccountPort { app: app.clone() }),
-        Arc::new(RuntimeCloudCredentialPort),
+        Arc::new(SettingsCloudAccountPort::new(store)),
+        Arc::new(WindowsCloudCredentialPort),
         Arc::new(transport),
     );
     let _ = SHARED_CLOUD_SERVICE.set(service);
@@ -203,9 +265,10 @@ fn current_cloud_work(app: &AppHandle<Wry>) -> Result<(CloudWorkToken, ExactClou
     if lifecycle.mode != WindowLifecycleMode::Foreground {
         return Err("cloud foreground work requires the main window".into());
     }
-    let account = RuntimeCloudAccountPort { app: app.clone() }
-        .snapshot()
-        .map_err(|error| error.to_string())?;
+    let account =
+        SettingsCloudAccountPort::new(app.state::<RuntimeState>().cloud_settings_store()?)
+            .snapshot()
+            .map_err(|error| error.to_string())?;
     let request = CLOUD_COMPAT_REQUEST_GENERATION
         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
             current.checked_add(1)
@@ -230,17 +293,40 @@ fn current_cloud_work(app: &AppHandle<Wry>) -> Result<(CloudWorkToken, ExactClou
     ))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct CloudConnectRequest {
     pub host_url: String,
     pub username: String,
-    pub password: String,
+    #[serde(deserialize_with = "deserialize_cloud_password")]
+    pub password: CloudPassword,
     #[serde(default)]
     pub device_name: Option<String>,
     #[serde(default)]
     pub plain_http_confirmed: bool,
     #[serde(default)]
     pub default_visibility: Option<String>,
+}
+
+impl std::fmt::Debug for CloudConnectRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CloudConnectRequest")
+            .field("host_url", &self.host_url)
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .field("device_name", &self.device_name)
+            .field("plain_http_confirmed", &self.plain_http_confirmed)
+            .field("default_visibility", &self.default_visibility)
+            .finish()
+    }
+}
+
+fn deserialize_cloud_password<'de, D>(deserializer: D) -> Result<CloudPassword, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    CloudPassword::new(value).map_err(serde::de::Error::custom)
 }
 
 #[derive(Debug, Deserialize)]
@@ -259,20 +345,6 @@ pub struct UploadClipCommandRequest {
 #[derive(Debug, Deserialize)]
 pub struct SyncCloudClipStatusRequest {
     pub path: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct CloudConnectionStatus {
-    pub connected: bool,
-    pub token_present: bool,
-    pub host_url: String,
-    pub public_url: Option<String>,
-    pub username: Option<String>,
-    pub display_name: Option<String>,
-    pub user_id: Option<String>,
-    pub default_visibility: String,
-    pub delete_local_after_upload: bool,
-    pub auto_upload_rules: bool,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -354,12 +426,21 @@ pub struct CachedCloudClip {
 }
 
 #[tauri::command]
-pub fn cloud_status(state: tauri::State<RuntimeState>) -> CloudConnectionStatus {
-    if let Err(error) = reconcile_cloud_credential_cleanup(&state) {
-        tracing::warn!(event = "cloud_pending_credential_reconcile_failed", error = %error);
+pub fn cloud_status(
+    app: AppHandle<Wry>,
+    state: tauri::State<RuntimeState>,
+) -> CloudConnectionStatus {
+    match cloud_account_service(&app).and_then(|service| {
+        let status = service.status().map_err(|error| error.to_string())?;
+        state.refresh_cloud_profile()?;
+        Ok(status)
+    }) {
+        Ok(status) => status,
+        Err(error) => {
+            tracing::warn!(event = "cloud_status_refresh_failed", error = %error);
+            connection_status(&state.settings().cloud)
+        }
     }
-    let settings = state.settings();
-    connection_status(&settings.cloud)
 }
 
 #[tauri::command]
@@ -890,155 +971,31 @@ pub async fn sync_cloud_clip_status(
 #[tauri::command]
 pub async fn cloud_connect(
     app: AppHandle<Wry>,
-    state: tauri::State<'_, RuntimeState>,
     request: CloudConnectRequest,
 ) -> Result<CloudConnectionStatus, String> {
-    let visibility = request
-        .default_visibility
-        .as_deref()
-        .map(normalize_cloud_visibility)
-        .unwrap_or_else(|| "private".to_string());
-    let device_name = request
-        .device_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(DEFAULT_DEVICE_NAME)
-        .to_string();
-
-    let base_url = CloudApiBase::parse(request.host_url.trim(), request.plain_http_confirmed)
-        .map_err(cloud_protocol_error)?;
-    let protocol = ReqwestCloudProtocol::new(base_url.clone()).map_err(cloud_protocol_error)?;
-    let discovery = protocol.discovery().await.map_err(cloud_protocol_error)?;
-    let device_token = protocol
-        .create_device_token(&CreateDeviceTokenRequest {
-            username: request.username.trim().to_string(),
-            password: request.password,
-            name: device_name,
-        })
+    let service = cloud_account_service(&app)?;
+    let status = service
+        .connect(
+            SharedCloudConnectRequest {
+                host_url: request.host_url,
+                username: request.username,
+                password: request.password,
+                device_name: request.device_name,
+                plain_http_confirmed: request.plain_http_confirmed,
+                default_visibility: request.default_visibility,
+            },
+            &NeverCancelCloudAccount,
+        )
         .await
-        .map_err(cloud_protocol_error)?;
-    let me = protocol
-        .me(&device_token.token)
-        .await
-        .map_err(cloud_protocol_error)?;
-
-    let host_url = base_url.as_str().trim_end_matches('/').to_string();
-    let public_url = discovery
-        .public_url
-        .trim()
-        .trim_end_matches('/')
-        .to_string();
-    let target = credential_target(&host_url, &me.user.id);
-    let old_target = state.settings().cloud.credential_target;
-    let previous_target_secret = read_credential(&target).ok();
-    let settings = crate::credential_transaction::write_then_persist(
-        &target,
-        &me.user.username,
-        &device_token.token,
-        previous_target_secret.as_deref(),
-        write_credential,
-        delete_credential_if_present,
-        || {
-            state.update_cloud(|cloud| {
-                let identity_changed = cloud.host_url != host_url
-                    || cloud.connected_user_id.as_deref() != Some(me.user.id.as_str());
-                cloud.host_url = host_url.clone();
-                cloud.public_url = Some(public_url.clone());
-                cloud.connected_user_id = Some(me.user.id.clone());
-                cloud.connected_username = Some(me.user.username.clone());
-                cloud.connected_display_name = me
-                    .user
-                    .display_name
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_string);
-                cloud.credential_target = Some(target.clone());
-                cloud.default_visibility = visibility.clone();
-                if let Some(old) = old_target.as_deref().filter(|old| *old != target) {
-                    cloud.credential_cleanup_targets.push(old.to_string());
-                }
-                if identity_changed {
-                    cloud.uploads.clear();
-                }
-            })
-        },
-    )?;
-    if let Err(error) = reconcile_cloud_credential_cleanup(&state) {
-        tracing::warn!(event = "cloud_old_credential_reconcile_failed", error = %error);
-    }
-    let (committed_cloud, generation) = state.cloud_settings_generation()?;
-    let upload_account = service_account_from_settings(&committed_cloud, generation)
         .map_err(|error| error.to_string())?;
-    app.state::<crate::cloud_upload::TauriUploadState>()
-        .service()
-        .account_changed(Some(&clipline_library::UploadAccountOwner::new(
-            upload_account.snapshot.account_key,
-            upload_account.snapshot.generation,
-        )));
-    publish_desktop_cloud_account(
-        &app,
-        generation,
-        Some(desktop_cloud_account_owner(&committed_cloud, generation)?),
-    )?;
-
-    Ok(connection_status(&settings.cloud))
+    Ok(status)
 }
 
 #[tauri::command]
-pub fn cloud_disconnect(
-    app: AppHandle<Wry>,
-    state: tauri::State<RuntimeState>,
-) -> Result<CloudConnectionStatus, String> {
-    let old_target = state.settings().cloud.credential_target;
-    let settings = state.update_cloud(|cloud| {
-        cloud.connected_user_id = None;
-        cloud.connected_username = None;
-        cloud.connected_display_name = None;
-        if let Some(target) = old_target.clone() {
-            cloud.credential_cleanup_targets.push(target);
-        }
-    })?;
-    if let Err(error) = reconcile_cloud_credential_cleanup(&state) {
-        tracing::warn!(event = "cloud_disconnected_credential_reconcile_failed", error = %error);
-    }
-    let (_, generation) = state.cloud_settings_generation()?;
-    app.state::<crate::cloud_upload::TauriUploadState>()
-        .service()
-        .account_changed(None);
-    publish_desktop_cloud_account(&app, generation, None)?;
-    Ok(connection_status(&settings.cloud))
-}
-
-fn reconcile_cloud_credential_cleanup(state: &RuntimeState) -> Result<(), String> {
-    let targets = state.settings().cloud.credential_cleanup_targets;
-    if targets.is_empty() {
-        return Ok(());
-    }
-    let report =
-        crate::credential_transaction::cleanup_targets(targets, delete_credential_if_present);
-    let deleted = report.deleted;
-    if !deleted.is_empty() {
-        state.update_cloud(|cloud| {
-            cloud
-                .credential_cleanup_targets
-                .retain(|target| !deleted.contains(target));
-            if cloud.connected_user_id.is_none()
-                && cloud
-                    .credential_target
-                    .as_ref()
-                    .is_some_and(|target| deleted.contains(target))
-            {
-                cloud.credential_target = None;
-            }
-        })?;
-    }
-    if report.failures.is_empty() {
-        Ok(())
-    } else {
-        Err(report.failures.join(", "))
-    }
+pub fn cloud_disconnect(app: AppHandle<Wry>) -> Result<CloudConnectionStatus, String> {
+    let service = cloud_account_service(&app)?;
+    let status = service.disconnect().map_err(|error| error.to_string())?;
+    Ok(status)
 }
 
 #[tauri::command]
@@ -1192,25 +1149,9 @@ fn cloud_record_for_path(cloud: &CloudSettings, path: &str) -> Option<CloudUploa
         .max_by_key(|record| record.updated_at_unix)
         .cloned()
 }
-fn credential_target(host_url: &str, user_id: &str) -> String {
-    clipline_settings::cloud::cloud_credential_target(host_url, user_id)
-}
-
-fn write_credential(target: &str, username: &str, token: &str) -> Result<(), String> {
-    CLOUD_CREDENTIALS
-        .write(target, username, token)
-        .map_err(|error| error.to_string())
-}
-
 fn read_credential(target: &str) -> Result<String, String> {
     CLOUD_CREDENTIALS
         .read(target)
-        .map_err(|error| error.to_string())
-}
-
-fn delete_credential_if_present(target: &str) -> Result<(), String> {
-    CLOUD_CREDENTIALS
-        .delete_if_present(target)
         .map_err(|error| error.to_string())
 }
 
@@ -1224,9 +1165,64 @@ mod tests {
     use clipline_test_utils::TestDir;
 
     #[test]
+    fn cloud_connect_request_redacts_password_and_keeps_exact_legacy_keys() {
+        let request: CloudConnectRequest = serde_json::from_value(serde_json::json!({
+            "host_url": "https://clips.example",
+            "username": "dain",
+            "password": "password-sentinel",
+            "device_name": "Clipline Desktop",
+            "plain_http_confirmed": false,
+            "default_visibility": "unlisted"
+        }))
+        .unwrap();
+        assert_eq!(request.password.expose(), "password-sentinel");
+        let debug = format!("{request:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("password-sentinel"));
+
+        let status = CloudConnectionStatus {
+            connected: true,
+            token_present: true,
+            host_url: "https://clips.example".into(),
+            public_url: Some("https://public.example".into()),
+            username: Some("dain".into()),
+            display_name: Some("Dain".into()),
+            user_id: Some("user-1".into()),
+            default_visibility: "unlisted".into(),
+            delete_local_after_upload: true,
+            auto_upload_rules: false,
+        };
+        let value = serde_json::to_value(status).unwrap();
+        let keys = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            keys,
+            [
+                "auto_upload_rules",
+                "connected",
+                "default_visibility",
+                "delete_local_after_upload",
+                "display_name",
+                "host_url",
+                "public_url",
+                "token_present",
+                "user_id",
+                "username",
+            ]
+        );
+    }
+
+    #[test]
     fn credential_target_includes_server_and_user() {
         assert_eq!(
-            credential_target("https://clips.example.com", "user_1"),
+            clipline_settings::cloud::cloud_credential_target(
+                "https://clips.example.com",
+                "user_1"
+            ),
             "Clipline Cloud:https://clips.example.com:user_1"
         );
     }

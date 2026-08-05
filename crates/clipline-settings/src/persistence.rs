@@ -1160,6 +1160,14 @@ impl SettingsStore {
         &self,
         change: CloudAccountCas,
     ) -> Result<SettingsSnapshot, SettingsTransactionError> {
+        self.compare_exchange_cloud_account_with(change, persist_store_transaction)
+    }
+
+    fn compare_exchange_cloud_account_with(
+        &self,
+        change: CloudAccountCas,
+        persist: impl FnOnce(&Path, Vec<u8>, &PrimaryState) -> Result<PrimaryState, String>,
+    ) -> Result<SettingsSnapshot, SettingsTransactionError> {
         let mut shared = self
             .inner
             .commit_lock
@@ -1209,9 +1217,26 @@ impl SettingsStore {
             current_owner.account_generation.checked_next()?
         };
         let next_revision = shared.revision.checked_next()?;
-        let primary =
-            persist_store_transaction(self.inner.profile.settings_path(), json, &current_primary)
-                .map_err(SettingsTransactionError::Persistence)?;
+        let primary = match persist(
+            self.inner.profile.settings_path(),
+            json.clone(),
+            &current_primary,
+        ) {
+            Ok(primary) => primary,
+            Err(error) => {
+                // Exact replacement can report an ambiguous OS error after
+                // the destination has already moved. Resolve that ambiguity
+                // while the profile-wide gate is still held. Byte equality is
+                // sufficient here: whether our move or an equivalent external
+                // writer published the normalized replacement, the requested
+                // durable account state is now authoritative.
+                let observed = read_primary_state(self.inner.profile.settings_path());
+                match &observed {
+                    PrimaryState::File { bytes, .. } if bytes == &json => observed,
+                    _ => return Err(SettingsTransactionError::Persistence(error)),
+                }
+            }
+        };
         shared.primary = primary.clone();
         shared.revision = next_revision;
         shared.owner = Some(CloudAccountPublicationOwner::from_cloud(
@@ -2788,6 +2813,47 @@ mod transaction_tests {
         assert!(
             leftovers.is_empty(),
             "temporary files remain: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn cloud_account_cas_recovers_an_ambiguous_successful_publication() {
+        let dir = TestDir::new("clipline-settings", "cloud-account-ambiguous-publication");
+        let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));
+        let initial = store.current_cloud_account().unwrap();
+        let expected = CloudAccountProfile::from_settings(&initial.document.cloud);
+        let mut replacement = expected.clone();
+        let candidate = "Clipline Cloud:operation:ambiguous-publication".to_string();
+        replacement
+            .credential_cleanup_targets
+            .push(candidate.clone());
+        replacement.normalize();
+
+        let committed = store
+            .compare_exchange_cloud_account_with(
+                CloudAccountCas {
+                    kind: CloudAccountCasKind::ReserveCredential,
+                    expected_account: initial.account,
+                    expected_account_generation: initial.account_generation,
+                    expected,
+                    replacement: replacement.clone(),
+                    default_visibility: None,
+                },
+                |path, json, current| {
+                    let _published = write_file_atomically_if_primary(path, json, current)?;
+                    Err("injected lost acknowledgement after exact move".into())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            CloudAccountProfile::from_settings(&committed.document.cloud),
+            replacement
+        );
+        assert_eq!(store.current_cloud_account().unwrap(), committed);
+        assert_eq!(
+            committed.document.cloud.credential_cleanup_targets,
+            vec![candidate]
         );
     }
 

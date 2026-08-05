@@ -555,6 +555,7 @@ fn classify_settings_error(error: SettingsTransactionError) -> UploadRecordError
     let message = error.to_string();
     let kind = match &error {
         SettingsTransactionError::AccountChanged
+        | SettingsTransactionError::StaleCloudProfile
         | SettingsTransactionError::StaleAccountGeneration { .. }
         | SettingsTransactionError::AccountGenerationExhausted => {
             UploadRecordErrorKind::AccountChanged
