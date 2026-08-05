@@ -309,8 +309,8 @@
       register it when present; regular installs rely on on-demand managed runtime / locate).
 - [x] Update UI contracts: regular config must not list `ffmpeg/`; standalone must; no
       `avcodec-*.dll` expectation on the regular NSIS payload.
-- [ ] Hard gate when a regular setup is built: setup size ≤ **25 MB**, and the payload contains
-      no `avcodec-*.dll`. Record actual size (requires NSIS build; config/contracts land first).
+- [x] Hard gate when a regular setup is built: setup size ≤ **25 MB**, and the payload contains
+      no `avcodec-*.dll`. Recorded **9,808,604 bytes (9.35 MiB)** for `Clipline_0.1.45_x64-setup.exe` (local measure build with updater artifacts disabled); binary scan found no `avcodec` substring; `target/release` has no `avcodec*` files.
 - [x] Commit as `build(app): stop bundling FFmpeg in the regular installer`.
 
 ---

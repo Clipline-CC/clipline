@@ -15,7 +15,7 @@ Plan: `docs/superpowers/plans/2026-08-04-slim-core-webview-ffmpeg.md`.
 ### Budgets / measurements
 - Idle hard: **zero** Clipline WebView2 children; tree **PWS ≤120 MiB** (≤90 stretch). Harness CSV: destroy/autostart **70.9–92 MiB** PWS; recorder-stopped control **~14–15 MiB** PWS.
 - Same-process destroy rebound ≤ first destroy +15 MiB (cycle + final). Absolute commit / cross-process cold deltas = telemetry only.
-- Regular installer target ≤**25 MB** setup with **no** `avcodec-*.dll` (NSIS size still needs a release build measurement).
+- Regular installer measured **9.35 MiB** (`9,808,604 bytes`) `Clipline_0.1.45_x64-setup.exe` after dropping `ffmpeg/` — under ≤**25 MB** hard gate; no `avcodec-*.dll` / no `avcodec` substring in setup. (Measure build used `createUpdaterArtifacts: false` locally; signed release build should stay in the same ballpark.)
 
 ### Core vs Optional
 - **Core:** WGC/WASAPI, Hybrid MP4, MFT H.264, LoL markers, library/trim, Cloud, tray/hotkeys, on-demand FFmpeg *installer* UX.
