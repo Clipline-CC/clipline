@@ -4,6 +4,27 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-05): sparse-capture GOP watchdog
+
+Plan: `docs/superpowers/plans/2026-08-05-sparse-capture-gop-watchdog.md` (`0d5ec35`).
+
+A live Automatic/AMD AMF H.264 session stopped with `encoder did not produce a keyframe before
+pending GOP duration exceeded 10.0 seconds`. The encoder was healthy: WGC can deliver no frames
+while the captured display is static, but the recorder's missing-keyframe watchdog measured the
+capture PTS span. AMD's GOP setting counts encoded frames, and its variable-rate MFT samples can
+legitimately span the preceding static interval, so sparse input looked like a stalled encoder.
+
+`Recorder` now measures unsealed GOP progress using encoded frame count and the first sample's
+configured nominal duration. Later variable-rate sample durations and wall-clock PTS gaps no
+longer advance the failure clock. The combined video/audio 64 MiB byte guard remains unchanged,
+and a continuously emitting encoder that stops producing keyframes still fails after ten seconds
+of encoded frame time.
+
+The exact sparse-timestamp red/green regression, all 46 pipeline tests, full workspace tests,
+fresh-cache capture Clippy, and warning-denied workspace Clippy are green. Manual retest: start
+recording, leave the captured display static for at least 15 seconds, resume activity, and confirm
+the recorder remains active and can save a replay.
+
 ## Checkpoint (2026-08-04): Nightly 0.1.45
 
 Plan: `docs/superpowers/plans/2026-08-04-nightly-0.1.45.md` (`59a358b`).
