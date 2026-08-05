@@ -271,6 +271,33 @@ fn marker_replacement_preserves_non_review_events_and_other_fields() {
 }
 
 #[test]
+fn discovery_quarantines_only_malformed_regular_pending_sidecars() {
+    let dir = TestDir::new("clipline-osu", "pending-quarantine");
+    let clip = write_session(&dir.path().join("session"));
+    let pending = pending_record(&clip);
+    std::fs::write(
+        pending_path(&clip),
+        serde_json::to_vec_pretty(&pending).unwrap(),
+    )
+    .unwrap();
+    let bad = dir.path().join("bad.osu-enrichment.json");
+    std::fs::write(&bad, b"{ truncated").unwrap();
+
+    let jobs = discover_pending(dir.path()).unwrap();
+
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].clip_path(), clip.canonicalize().unwrap());
+    assert!(!bad.exists());
+    assert!(std::fs::read_dir(dir.path()).unwrap().any(|entry| {
+        entry
+            .ok()
+            .and_then(|entry| entry.file_name().to_str().map(str::to_owned))
+            .is_some_and(|name| name.starts_with("bad.osu-enrichment.json.invalid."))
+    }));
+    assert_eq!(discover_pending(dir.path()).unwrap().len(), 1);
+}
+
+#[test]
 fn foreign_pending_and_clip_replacements_are_preserved() {
     let dir = TestDir::new("clipline-osu", "foreign-races");
     let clip = write_session(&dir.path().join("session"));

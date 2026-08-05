@@ -20,7 +20,7 @@ use clipline_games::detector::{
     GameDetectorCheckpoint, GameDetectorService, GameDetectorSinkError, GameDetectorToken,
     PreparedDetectorReconfiguration, RejectedGameDetectionEvent,
 };
-use clipline_library::{ActiveFileRegistry, UploadService};
+use clipline_library::{ActiveFileRegistry, OsuTitleEvent, UploadService};
 use clipline_shell::hotkey::{HotkeyReplacementReceipt, HotkeySet};
 use clipline_shell::windows::activation::WindowsInstanceGuard;
 use clipline_shell::windows::autostart::{AutostartChange, WindowsAutostartRegistration};
@@ -47,14 +47,13 @@ use tauri::{AppHandle, Manager, Runtime, WebviewWindow, WebviewWindowBuilder, Wi
 use crate::game_discovery::DetectedGameCandidate;
 use crate::game_plugins::GamePluginInfo;
 use crate::games::{DetectedGame, GameWindowInfo};
-use crate::osu_enrichment::OsuTitleEvent;
 use crate::service::{self, Cmd, Event, ServiceOptions};
 use crate::settings::{
     cloud_paths_equivalent, quota_bytes_from_gb, AppSettings, AppSettingsServiceExt, CaptureMode,
     CloudRecordCas, CloudRecordCasKind, CloudRecordSlot, CustomGameSettings, GameRecordingMode,
     SettingsApplyCoordinator, SettingsApplyPorts, SettingsApplyQuiescence, SettingsChange,
     SettingsPreferences, SettingsProfile, SettingsSnapshot, SettingsStore, SettingsTransaction,
-    MAX_CLOUD_RECORD_CAS_SLOTS,
+    SettingsTransactionError, MAX_CLOUD_RECORD_CAS_SLOTS,
 };
 use crate::updates::{channel_enabled, UpdateChannel};
 use crate::util::unix_now_i64;
@@ -783,6 +782,7 @@ pub(crate) struct RuntimeState(
     RecorderStopAcknowledgement,
     Option<SettingsStore>,
     Mutex<Option<RecorderEventPump>>,
+    Mutex<()>,
 );
 
 struct RecorderEventPump {
@@ -987,7 +987,11 @@ impl RuntimeState {
     }
 
     #[cfg(test)]
-    fn with_store(settings: AppSettings, lol_url: Option<String>, store: SettingsStore) -> Self {
+    pub(crate) fn with_store(
+        settings: AppSettings,
+        lol_url: Option<String>,
+        store: SettingsStore,
+    ) -> Self {
         Self::from_parts(None, settings, lol_url, Some(store))
     }
 
@@ -1047,6 +1051,7 @@ impl RuntimeState {
             RecorderStopAcknowledgement::default(),
             store,
             Mutex::new(None),
+            Mutex::new(()),
         )
     }
 
@@ -1722,6 +1727,41 @@ impl RuntimeState {
             .unwrap_or_default()
     }
 
+    pub(crate) fn osu_settings_store(&self) -> Result<SettingsStore, String> {
+        self.2
+            .clone()
+            .ok_or_else(|| "osu! account operations require a durable settings store".to_string())
+    }
+
+    pub(crate) fn refresh_osu_profile(&self) -> Result<crate::settings::OsuApiSettings, String> {
+        let _refresh = self
+            .4
+            .lock()
+            .map_err(|_| "osu! settings refresh lock poisoned")?;
+        let store = self.2.as_ref().ok_or_else(|| {
+            "osu! account operations require a durable settings store".to_string()
+        })?;
+        for _ in 0..3 {
+            let profile = store
+                .current_osu_profile()
+                .map_err(|error| error.to_string())?;
+            let published = store.publish_if_osu_profile_current(&profile, || {
+                let mut inner = self
+                    .0
+                    .lock()
+                    .map_err(|_| "runtime state lock poisoned".to_string())?;
+                inner.settings.osu = profile.clone();
+                Ok::<_, String>(profile.clone())
+            });
+            match published {
+                Ok(result) => return result,
+                Err(SettingsTransactionError::StaleOsuProfile) => continue,
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+        Err("osu! account changed while refreshing runtime settings".to_string())
+    }
+
     pub(crate) fn cloud_settings_generation(
         &self,
     ) -> Result<(crate::settings::CloudSettings, u64), String> {
@@ -1933,55 +1973,6 @@ impl RuntimeState {
         save(&next)?;
         let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
         inner.settings.cloud = next.cloud;
-        Ok(inner.settings.clone())
-    }
-
-    pub(crate) fn update_osu<F>(&self, update: F) -> Result<AppSettings, String>
-    where
-        F: FnOnce(&mut crate::settings::OsuApiSettings),
-    {
-        let Some(store) = self.2.as_ref() else {
-            return self.update_osu_with(update, AppSettings::save);
-        };
-        let _save_guard = Self::lock_cloud_settings_save()?;
-        let before = store.snapshot().map_err(|error| error.to_string())?;
-        let mut osu = before.document.osu.clone();
-        update(&mut osu);
-        osu.normalize();
-        let after = store
-            .transact(SettingsTransaction {
-                expected_revision: before.revision,
-                expected_account_generation: before.account_generation,
-                change: SettingsChange::ReplaceOsuProfile(osu),
-            })
-            .map_err(|error| error.to_string())?;
-        let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-        inner.settings.osu = after.document.osu;
-        Ok(inner.settings.clone())
-    }
-
-    fn update_osu_with<F>(
-        &self,
-        update: F,
-        save: impl FnOnce(&AppSettings) -> Result<(), String>,
-    ) -> Result<AppSettings, String>
-    where
-        F: FnOnce(&mut crate::settings::OsuApiSettings),
-    {
-        let _save_guard = CLOUD_SETTINGS_SAVE_LOCK
-            .lock()
-            .map_err(|_| "settings save lock poisoned")?;
-        let mut next = self
-            .0
-            .lock()
-            .map_err(|_| "runtime state lock poisoned")?
-            .settings
-            .clone();
-        update(&mut next.osu);
-        next.osu.normalize();
-        save(&next)?;
-        let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-        inner.settings.osu = next.osu;
         Ok(inner.settings.clone())
     }
 
@@ -2771,6 +2762,11 @@ fn shutdown_app<R: Runtime>(
             command: ShellCommand::Quit,
             message,
         })?;
+    let mut osu_quiesced =
+        OsuQuiescence::begin(app).map_err(|message| TauriShellError::Action {
+            command: ShellCommand::Quit,
+            message,
+        })?;
     let started = Instant::now();
     let mut shutdown = ShutdownCoordinator::new();
     let mut effect = shutdown.begin(
@@ -2842,6 +2838,7 @@ fn shutdown_app<R: Runtime>(
                 })?;
                 detector_quiesced.commit_shutdown();
                 uploads_quiesced.commit_shutdown();
+                osu_quiesced.commit_shutdown();
                 shutdown_owner.commit_exit();
                 updates_quiesced.commit_exit();
                 app.exit(0);
@@ -2881,6 +2878,11 @@ where
 
 struct UploadQuiescence {
     service: Option<UploadService>,
+}
+
+struct OsuQuiescence<R: Runtime> {
+    app: AppHandle<R>,
+    active: bool,
 }
 
 struct DetectorQuiescence<R: Runtime> {
@@ -2971,6 +2973,43 @@ impl Drop for UploadQuiescence {
     fn drop(&mut self) {
         if let Some(service) = self.service.take() {
             let _ = service.resume();
+        }
+    }
+}
+
+impl<R: Runtime> OsuQuiescence<R> {
+    fn begin(app: &AppHandle<R>) -> Result<Self, String> {
+        let guard = Self {
+            app: app.clone(),
+            active: true,
+        };
+        app.state::<crate::osu_api::TauriOsuRuntime>()
+            .quiesce_and_wait(SHELL_SHUTDOWN_TIMEOUT)?;
+        Ok(guard)
+    }
+
+    fn commit_shutdown(&mut self) {
+        if !self.active {
+            return;
+        }
+        if let Err(error) = self
+            .app
+            .state::<crate::osu_api::TauriOsuRuntime>()
+            .commit_shutdown()
+        {
+            log_diagnostic(format!("osu! runtime shutdown failed: {error}"));
+        }
+        self.active = false;
+    }
+}
+
+impl<R: Runtime> Drop for OsuQuiescence<R> {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        if let Err(error) = self.app.state::<crate::osu_api::TauriOsuRuntime>().resume() {
+            log_diagnostic(format!("osu! runtime resume failed: {error}"));
         }
     }
 }
@@ -3214,6 +3253,7 @@ struct TauriUpdateShutdown<'a, R: Runtime> {
     state: &'a RuntimeState,
     detector: Option<DetectorQuiescence<R>>,
     uploads: Option<UploadQuiescence>,
+    osu: Option<OsuQuiescence<R>>,
 }
 
 impl<R: Runtime> UpdateShutdown for TauriUpdateShutdown<'_, R> {
@@ -3226,6 +3266,9 @@ impl<R: Runtime> UpdateShutdown for TauriUpdateShutdown<'_, R> {
         }
         if self.uploads.is_none() {
             self.uploads = Some(UploadQuiescence::begin(self.app).map_err(AppUpdateShutdownError)?);
+        }
+        if self.osu.is_none() {
+            self.osu = Some(OsuQuiescence::begin(self.app).map_err(AppUpdateShutdownError)?);
         }
         self.state
             .publish_durable_settings()
@@ -3257,6 +3300,9 @@ impl<R: Runtime> UpdateShutdown for TauriUpdateShutdown<'_, R> {
         }
         if let Some(uploads) = self.uploads.as_mut() {
             uploads.commit_shutdown();
+        }
+        if let Some(osu) = self.osu.as_mut() {
+            osu.commit_shutdown();
         }
         self.app.exit(0);
         Ok(())
@@ -3340,6 +3386,7 @@ async fn install_update_inner<R: Runtime>(
         state,
         detector: None,
         uploads: None,
+        osu: None,
     };
     let receipt = install_verified(&mut launcher, &mut shutdown, verified)
         .map_err(|error| error.to_string())?;
@@ -4054,10 +4101,16 @@ pub fn run(
         settings_store,
         active_files.clone(),
     );
+    let osu_runtime = crate::osu_api::TauriOsuRuntime::start();
+    if let Some(warning) = osu_runtime.startup_warning() {
+        log_diagnostic(warning);
+        tracing::warn!(event = "osu_runtime_startup_failed", message = %warning);
+    }
 
     tauri::Builder::default()
         .manage(runtime_state)
         .manage(active_files)
+        .manage(osu_runtime)
         .manage(desktop_state)
         .manage(crate::desktop::ProducerGenerations::default())
         .manage(ui_event_sink)
@@ -4423,6 +4476,11 @@ pub fn run(
                 {
                     uploads.shutdown();
                 }
+                if let Some(osu) = app.try_state::<crate::osu_api::TauriOsuRuntime>() {
+                    if let Err(error) = osu.shutdown() {
+                        log_diagnostic(format!("osu! enrichment shutdown failed: {error}"));
+                    }
+                }
                 if let Err(error) = app
                     .state::<clipline_recorder::microphone::MicrophoneMonitorService>()
                     .shutdown()
@@ -4646,7 +4704,7 @@ fn pump_events<R: Runtime>(
                 let title_events = handle
                     .state::<RuntimeState>()
                     .osu_title_events_for_window(*recording_start_unix, *recording_end_unix);
-                let saved = crate::osu_enrichment::OsuSavedClip {
+                let saved = clipline_games::osu_enrichment::OsuSavedClip {
                     path: std::path::PathBuf::from(path),
                     seconds: *seconds,
                     full_session: true,
@@ -4654,7 +4712,10 @@ fn pump_events<R: Runtime>(
                     recording_end_unix: *recording_end_unix,
                     title_events,
                 };
-                match crate::osu_enrichment::write_pending_for_saved_clip(&saved) {
+                match clipline_games::osu_enrichment::write_pending_for_saved_clip(
+                    &saved,
+                    handle.state::<ActiveFileRegistry>().inner(),
+                ) {
                     Ok(Some(_)) => {
                         let app = handle.clone();
                         let media_root = handle
@@ -4845,21 +4906,25 @@ mod tests {
     }
 
     #[test]
-    fn failed_osu_settings_save_leaves_live_state_unchanged() {
-        let state = RuntimeState::new(AppSettings::default(), None);
+    fn refresh_osu_profile_reads_the_durable_profile_into_the_runtime_mirror() {
+        let dir = TestDir::new("clipline-app", "settings-store-osu-refresh");
+        let store = SettingsStore::open(SettingsProfile::isolated(dir.path()));
+        let initial = store.snapshot().unwrap();
+        let state = RuntimeState::with_store(initial.document.clone(), None, store.clone());
+        let mut osu = initial.document.osu;
+        osu.client_id = Some("1234".into());
+        let persisted = store
+            .transact(SettingsTransaction {
+                expected_revision: initial.revision,
+                expected_account_generation: initial.account_generation,
+                change: SettingsChange::ReplaceOsuProfile(osu),
+            })
+            .unwrap();
 
-        let error = state
-            .update_osu_with(
-                |osu| osu.client_id = Some("1234".into()),
-                |candidate| {
-                    assert_eq!(candidate.osu.client_id.as_deref(), Some("1234"));
-                    Err("settings denied".into())
-                },
-            )
-            .unwrap_err();
+        let refreshed = state.refresh_osu_profile().unwrap();
 
-        assert_eq!(error, "settings denied");
-        assert!(state.settings().osu.client_id.is_none());
+        assert_eq!(refreshed, persisted.document.osu);
+        assert_eq!(state.settings().osu, persisted.document.osu);
     }
 
     #[test]

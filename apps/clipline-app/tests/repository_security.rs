@@ -484,18 +484,31 @@ fn unsafe_application_platform_helpers_live_under_the_windows_module() {
     let source_root = workspace_root().join("apps/clipline-app/src");
     let windows_root = source_root.join("windows");
     let sources = rust_sources_below(&source_root);
-    for symbol in ["GetDiskFreeSpaceExW", "MoveFileExW"] {
-        let owners: Vec<_> = sources
+    let disk_space_owners: Vec<_> = sources
+        .iter()
+        .filter(|path| {
+            fs::read_to_string(path)
+                .unwrap()
+                .contains("GetDiskFreeSpaceExW")
+        })
+        .collect();
+    assert!(
+        !disk_space_owners.is_empty(),
+        "expected a Windows owner for GetDiskFreeSpaceExW"
+    );
+    assert!(
+        disk_space_owners
             .iter()
-            .filter(|path| fs::read_to_string(path).unwrap().contains(symbol))
-            .collect();
-        assert!(!owners.is_empty(), "expected a Windows owner for {symbol}");
-        assert!(
-            owners.iter().all(|path| path.starts_with(&windows_root)),
-            "{symbol} must be confined below {} but appears in {owners:?}",
-            windows_root.display()
-        );
-    }
+            .all(|path| path.starts_with(&windows_root)),
+        "GetDiskFreeSpaceExW must be confined below {} but appears in {disk_space_owners:?}",
+        windows_root.display()
+    );
+    assert!(
+        sources
+            .iter()
+            .all(|path| !fs::read_to_string(path).unwrap().contains("MoveFileExW")),
+        "identity-fenced file replacement belongs to clipline-shell, not the app"
+    );
 
     let duplicate_clocks: Vec<_> = sources
         .iter()
@@ -1287,6 +1300,45 @@ fn shared_recorder_runtime_has_one_owner_and_no_framework_dependency() {
     let util = fs::read_to_string(root.join("apps/clipline-app/src/util.rs"))
         .expect("read application utility adapter");
     assert!(!util.contains("fn unix_now("));
+}
+
+#[test]
+fn osu_http_enrichment_and_secret_algorithms_have_one_shared_owner() {
+    let root = workspace_root();
+    let shared_http =
+        fs::read_to_string(root.join("crates/clipline-games/src/osu_http.rs")).unwrap();
+    let shared_enrichment =
+        fs::read_to_string(root.join("crates/clipline-games/src/osu_enrichment.rs")).unwrap();
+    let shared_account = fs::read_to_string(root.join("crates/clipline-games/src/osu.rs")).unwrap();
+    let adapter = fs::read_to_string(root.join("apps/clipline-app/src/osu_api.rs")).unwrap();
+
+    assert!(shared_http.contains("struct RawOsuScore"));
+    assert!(shared_enrichment.contains("fn map_proxy_scores_to_clip_plays("));
+    assert!(shared_account.contains("pub struct OsuAccountService"));
+    assert!(adapter.contains("OsuAccountService"));
+    assert!(adapter.contains("JoinedOsuEnrichmentService"));
+    assert!(adapter.contains("ConfiguredOsuScoreFetcher"));
+    for duplicate in [
+        "struct RawOsuScore",
+        "fn request_app_token(",
+        "fn request_recent_page(",
+        "fn normalize_score(",
+        "ENRICHMENT_PASSES",
+        "fn map_proxy_scores_to_clip_plays(",
+        "struct OwnedSidecarTemp",
+        "CredentialStore::new(",
+    ] {
+        assert!(
+            !adapter.contains(duplicate),
+            "Tauri osu! adapter duplicates shared algorithm {duplicate}"
+        );
+    }
+    assert!(
+        !root
+            .join("apps/clipline-app/src/osu_enrichment.rs")
+            .exists(),
+        "the duplicate application-owned osu! enrichment module must stay removed"
+    );
 }
 
 #[test]

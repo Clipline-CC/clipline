@@ -459,6 +459,28 @@ fn failed_cleanup_remains_exactly_scheduled_without_leaking_its_target() {
 }
 
 #[test]
+fn status_stays_available_when_obsolete_credential_cleanup_fails() {
+    let (fixture, _) = configured_profile("12345", "Dain", "secret");
+    fixture
+        .profile
+        .lock()
+        .unwrap()
+        .credential_cleanup_targets
+        .push("obsolete-target".into());
+    *fixture.fail_delete.lock().unwrap() = true;
+    let service = OsuAccountService::new(fixture.clone(), fixture.clone());
+
+    let status = service.status().unwrap();
+
+    assert!(status.configured);
+    assert_eq!(status.user.as_deref(), Some("Dain"));
+    assert_eq!(
+        fixture.profile.lock().unwrap().credential_cleanup_targets,
+        ["obsolete-target"]
+    );
+}
+
+#[test]
 fn generation_exhaustion_is_rejected_before_any_credential_side_effect() {
     let fixture = Fixture::default();
     fixture.profile.lock().unwrap().account_generation =

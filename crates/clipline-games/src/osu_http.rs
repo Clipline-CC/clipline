@@ -309,6 +309,7 @@ pub struct OsuRecentFetch {
     pub username: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct OsuHttpClient {
     client: reqwest::Client,
     token_url: Url,

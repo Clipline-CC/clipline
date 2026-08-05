@@ -20,7 +20,8 @@ use clipline_library::{
     MAX_PENDING_OSU_BYTES,
 };
 use clipline_shell::{
-    open_regular_file_nofollow, opened_file_identity, DirectoryAuthority, FileIdentity,
+    metadata_is_link_or_reparse_point, open_regular_file_nofollow, opened_file_identity,
+    DirectoryAuthority, FileIdentity,
 };
 
 use crate::identity::OSU_ID;
@@ -79,6 +80,53 @@ pub struct DiscoveredPendingEnrichment {
     parent_authority: DirectoryAuthority,
     clip_name: OsString,
     sidecar_name: OsString,
+}
+
+#[derive(Debug)]
+struct InvalidPendingEnrichment {
+    parent_authority: DirectoryAuthority,
+    sidecar_name: OsString,
+    sidecar_identity: FileIdentity,
+}
+
+impl InvalidPendingEnrichment {
+    fn quarantine(self) -> Result<PathBuf, OsuEnrichmentError> {
+        for _ in 0..64 {
+            let counter = OSU_SIDECAR_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let mut quarantine_name = self.sidecar_name.clone();
+            quarantine_name.push(format!(".invalid.{}.{counter}", std::process::id()));
+            match self.parent_authority.rename_file_noreplace_if_identity(
+                &self.sidecar_name,
+                &quarantine_name,
+                self.sidecar_identity,
+            ) {
+                Ok(()) => {
+                    return Ok(self.parent_authority.display_path().join(quarantine_name));
+                }
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::AlreadyExists
+                        && !error.may_have_moved() =>
+                {
+                    continue;
+                }
+                Err(_) => {
+                    return Err(OsuEnrichmentError::new(
+                        OsuEnrichmentErrorKind::StaleFile,
+                        "quarantine exact invalid osu! enrichment sidecar",
+                    ));
+                }
+            }
+        }
+        Err(OsuEnrichmentError::new(
+            OsuEnrichmentErrorKind::TooLarge,
+            "allocate invalid osu! enrichment quarantine name",
+        ))
+    }
+}
+
+struct PendingDiscovery {
+    jobs: Vec<DiscoveredPendingEnrichment>,
+    invalid: Vec<InvalidPendingEnrichment>,
 }
 
 impl DiscoveredPendingEnrichment {
@@ -382,15 +430,41 @@ where
             ));
         };
         checkpoint(fence, owner)?;
-        let pending = discover_pending(media_root)?;
+        let PendingDiscovery { jobs, invalid } = discover_pending_exact(media_root)?;
+        for invalid in invalid {
+            checkpoint(fence, owner)?;
+            let mut invalid = Some(invalid);
+            let mut quarantine = || {
+                invalid
+                    .take()
+                    .expect("quarantine publication closure runs at most once")
+                    .quarantine()
+                    .map(|_| ())
+            };
+            match fence.publish_if_current(owner, &mut quarantine) {
+                Ok(()) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        OsuEnrichmentErrorKind::AccountChanged | OsuEnrichmentErrorKind::Canceled
+                    ) =>
+                {
+                    return Err(error);
+                }
+                Err(error) => tracing::warn!(
+                    event = "invalid_osu_enrichment_quarantine_failed",
+                    kind = ?error.kind()
+                ),
+            }
+        }
         let mut due = Vec::new();
-        due.try_reserve_exact(pending.len()).map_err(|_| {
+        due.try_reserve_exact(jobs.len()).map_err(|_| {
             OsuEnrichmentError::new(
                 OsuEnrichmentErrorKind::Allocation,
                 "reserve due osu! enrichment jobs",
             )
         })?;
-        due.extend(pending.into_iter().filter(|job| job.retry_due(now_unix)));
+        due.extend(jobs.into_iter().filter(|job| job.retry_due(now_unix)));
         let mut summary = OsuEnrichmentSummary {
             owner,
             discovered: due.len(),
@@ -543,6 +617,10 @@ pub struct JoinedOsuEnrichmentHandle {
 }
 
 impl JoinedOsuEnrichmentHandle {
+    pub fn recv(self) -> Result<JoinedOsuEnrichmentOutcome, mpsc::RecvError> {
+        self.receiver.recv()
+    }
+
     pub fn recv_timeout(
         &self,
         timeout: Duration,
@@ -998,6 +1076,23 @@ pub fn write_pending_for_saved_clip(
 pub fn discover_pending(
     media_root: &Path,
 ) -> Result<Vec<DiscoveredPendingEnrichment>, OsuEnrichmentError> {
+    let PendingDiscovery { jobs, invalid } = discover_pending_exact(media_root)?;
+    for invalid in invalid {
+        match invalid.quarantine() {
+            Ok(path) => tracing::warn!(
+                event = "invalid_osu_enrichment_quarantined",
+                path = %path.display()
+            ),
+            Err(error) => tracing::warn!(
+                event = "invalid_osu_enrichment_quarantine_failed",
+                kind = ?error.kind()
+            ),
+        }
+    }
+    Ok(jobs)
+}
+
+fn discover_pending_exact(media_root: &Path) -> Result<PendingDiscovery, OsuEnrichmentError> {
     let root_authority = DirectoryAuthority::open(media_root).map_err(|_| {
         OsuEnrichmentError::new(
             OsuEnrichmentErrorKind::UnsafePath,
@@ -1027,8 +1122,23 @@ pub fn discover_pending(
             "reserve pending osu! enrichment jobs",
         )
     })?;
+    let mut invalid = Vec::new();
+    invalid
+        .try_reserve_exact(MAX_OSU_PENDING_JOBS)
+        .map_err(|_| {
+            OsuEnrichmentError::new(
+                OsuEnrichmentErrorKind::Allocation,
+                "reserve invalid pending osu! enrichment jobs",
+            )
+        })?;
     let mut scanned = 0usize;
-    discover_pending_in_dir(&media_root, &media_root, &mut out, &mut scanned)?;
+    discover_pending_in_dir(
+        &media_root,
+        &media_root,
+        &mut out,
+        &mut invalid,
+        &mut scanned,
+    )?;
     let entries = std::fs::read_dir(&media_root).map_err(|_| {
         OsuEnrichmentError::new(
             OsuEnrichmentErrorKind::Io,
@@ -1050,8 +1160,8 @@ pub fn discover_pending(
                 "inspect osu! enrichment root entry",
             )
         })?;
-        if metadata.is_dir() && !metadata_is_link_or_reparse(&metadata) {
-            discover_pending_in_dir(&media_root, &path, &mut out, &mut scanned)?;
+        if metadata.is_dir() && !metadata_is_link_or_reparse_point(&metadata) {
+            discover_pending_in_dir(&media_root, &path, &mut out, &mut invalid, &mut scanned)?;
         }
     }
     out.sort_by(|a, b| {
@@ -1060,7 +1170,7 @@ pub fn discover_pending(
             .cmp(&b.record.recording_start_unix)
             .then_with(|| a.clip_path.cmp(&b.clip_path))
     });
-    Ok(out)
+    Ok(PendingDiscovery { jobs: out, invalid })
 }
 
 pub fn apply_scores_to_pending(
@@ -1449,6 +1559,7 @@ fn discover_pending_in_dir(
     media_root: &Path,
     dir: &Path,
     out: &mut Vec<DiscoveredPendingEnrichment>,
+    invalid: &mut Vec<InvalidPendingEnrichment>,
     scanned: &mut usize,
 ) -> Result<(), OsuEnrichmentError> {
     let entries = match std::fs::read_dir(dir) {
@@ -1478,20 +1589,70 @@ fn discover_pending_in_dir(
         else {
             continue;
         };
-        if out.len() >= MAX_OSU_PENDING_JOBS {
+        if out.len().saturating_add(invalid.len()) >= MAX_OSU_PENDING_JOBS {
             return Err(OsuEnrichmentError::new(
                 OsuEnrichmentErrorKind::TooLarge,
                 "retain pending osu! enrichment jobs",
             ));
         }
+        // Capture the candidate identity before parsing. If the directory
+        // entry changes anywhere during validation, quarantine can only move
+        // this exact pre-parse file and therefore preserves the replacement.
+        let invalid_candidate = discover_invalid_pending(&path);
         match discover_pending_file(media_root, &path, stem) {
             Ok(job) => out.push(job),
-            Err(error) => {
-                tracing::warn!(event = "invalid_osu_enrichment_skipped", kind = ?error.kind())
-            }
+            Err(error) => match invalid_candidate {
+                Ok(candidate) => invalid.push(candidate),
+                Err(quarantine_error) => tracing::warn!(
+                    event = "invalid_osu_enrichment_skipped",
+                    kind = ?error.kind(),
+                    quarantine_kind = ?quarantine_error.kind()
+                ),
+            },
         }
     }
     Ok(())
+}
+
+fn discover_invalid_pending(path: &Path) -> Result<InvalidPendingEnrichment, OsuEnrichmentError> {
+    let parent = path.parent().ok_or_else(|| {
+        OsuEnrichmentError::new(
+            OsuEnrichmentErrorKind::UnsafePath,
+            "validate invalid osu! sidecar parent",
+        )
+    })?;
+    let sidecar_name = path.file_name().ok_or_else(|| {
+        OsuEnrichmentError::new(
+            OsuEnrichmentErrorKind::UnsafePath,
+            "validate invalid osu! sidecar name",
+        )
+    })?;
+    let parent_authority = DirectoryAuthority::open(parent).map_err(|_| {
+        OsuEnrichmentError::new(
+            OsuEnrichmentErrorKind::UnsafePath,
+            "retain invalid osu! sidecar parent",
+        )
+    })?;
+    let sidecar = parent_authority
+        .open_regular_file(sidecar_name)
+        .map_err(|_| {
+            OsuEnrichmentError::new(
+                OsuEnrichmentErrorKind::UnsafePath,
+                "open invalid osu! enrichment sidecar",
+            )
+        })?;
+    let sidecar_identity = opened_file_identity(&sidecar).map_err(|_| {
+        OsuEnrichmentError::new(
+            OsuEnrichmentErrorKind::UnsafePath,
+            "identify invalid osu! enrichment sidecar",
+        )
+    })?;
+    drop(sidecar);
+    Ok(InvalidPendingEnrichment {
+        parent_authority,
+        sidecar_name: sidecar_name.to_os_string(),
+        sidecar_identity,
+    })
 }
 
 fn discover_pending_file(
@@ -2209,18 +2370,29 @@ fn unix_now_i64() -> i64 {
         })
 }
 
-fn metadata_is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
-    if metadata.file_type().is_symlink() {
-        return true;
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-    }
-    #[cfg(not(windows))]
-    {
-        false
+#[cfg(test)]
+mod quarantine_tests {
+    use super::*;
+    use clipline_test_utils::TestDir;
+
+    #[test]
+    fn invalid_pending_quarantine_preserves_a_foreign_replacement() {
+        let dir = TestDir::new("clipline-osu", "quarantine-foreign-replacement");
+        let path = dir.path().join("clip.osu-enrichment.json");
+        std::fs::write(&path, b"{ invalid").unwrap();
+        let candidate = discover_invalid_pending(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, b"foreign").unwrap();
+
+        let error = candidate.quarantine().unwrap_err();
+
+        assert_eq!(error.kind(), OsuEnrichmentErrorKind::StaleFile);
+        assert_eq!(std::fs::read(&path).unwrap(), b"foreign");
+        assert!(!std::fs::read_dir(dir.path()).unwrap().any(|entry| {
+            entry
+                .ok()
+                .and_then(|entry| entry.file_name().to_str().map(str::to_owned))
+                .is_some_and(|name| name.contains(".invalid."))
+        }));
     }
 }

@@ -7,9 +7,7 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 
 pub(crate) use webview_memory::{set_memory_target, MemoryTarget};
-use windows_sys::Win32::Storage::FileSystem::{
-    GetDiskFreeSpaceExW, MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-};
+use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 
 pub fn current_process_is_elevated() -> Result<bool, String> {
     clipline_shell::windows::process::current_process_is_elevated()
@@ -59,23 +57,6 @@ pub(crate) fn available_space_bytes(path: &Path, context: &str) -> Result<u64, S
         return Err(last_os_error(context));
     }
     Ok(available)
-}
-
-pub(crate) fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
-    let from = wide_null(from.as_os_str());
-    let to = wide_null(to.as_os_str());
-    let result = unsafe {
-        MoveFileExW(
-            from.as_ptr(),
-            to.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if result == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
 }
 
 #[cfg(test)]

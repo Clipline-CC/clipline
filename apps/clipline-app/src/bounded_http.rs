@@ -5,30 +5,14 @@ use std::time::Duration;
 
 use serde::de::DeserializeOwned;
 
-pub(crate) const CONTROL_JSON_MAX_BYTES: usize = 4 * 1024 * 1024;
 pub(crate) const ERROR_BODY_MAX_BYTES: usize = 64 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const CONTROL_READ_TIMEOUT: Duration = Duration::from_secs(15);
-const CONTROL_TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
 const STREAM_READ_TIMEOUT: Duration = Duration::from_secs(30);
 const MIN_UPLOAD_THROUGHPUT_BYTES_PER_SECOND: u64 = 256 * 1024;
 const MIN_UPLOAD_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_UPLOAD_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 
-static CONTROL_CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
 static AUTHENTICATED_STREAM_CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
-
-pub(crate) fn control_client() -> Result<&'static reqwest::Client, String> {
-    cached_client(&CONTROL_CLIENT, || {
-        reqwest::Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .read_timeout(CONTROL_READ_TIMEOUT)
-            .timeout(CONTROL_TOTAL_TIMEOUT)
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|error| format!("build bounded HTTP control client: {error}"))
-    })
-}
 
 pub(crate) fn authenticated_stream_client() -> Result<&'static reqwest::Client, String> {
     cached_client(&AUTHENTICATED_STREAM_CLIENT, || {
@@ -163,7 +147,7 @@ mod tests {
             when.method(GET).path("/oversized");
             then.status(200).body("12345");
         });
-        let response = control_client()
+        let response = authenticated_stream_client()
             .unwrap()
             .get(format!("{}/oversized", server.base_url()))
             .send()

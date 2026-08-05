@@ -341,7 +341,9 @@ where
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let loaded = self.load_profile()?;
-        let profile = self.reconcile_cleanup(&loaded)?;
+        // Cleanup remains durably scheduled, but a transient credential-store
+        // delete failure must not hide an otherwise usable account status.
+        let profile = self.reconcile_cleanup(&loaded).unwrap_or(loaded);
         self.status_for(&profile)
     }
 

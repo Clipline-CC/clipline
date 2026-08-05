@@ -144,8 +144,34 @@ and only the latest pending request behind each active root. Displaced callers r
 still runs. Focused Games/Settings/Library suites, workspace no-run compilation, changed-crate
 all-target Clippy, and identity/account/mutation/coalescing regressions are green.
 
-Next: complete the Task 8 thin Tauri compatibility cutover and duplicate-algorithm rejection tests.
-`artifacts/`, `paseo.json`, and unrelated poster formatting remain local and excluded.
+The Task 8 Tauri cutover is complete. The shipping shell preserves the same four command names,
+snake-case JSON fields, null/blank-secret reuse behavior, and trusted setup-guide flow through a
+thin adapter over `OsuAccountService`, `OsuHttpClient`, and `JoinedOsuEnrichmentService`. One
+process-owned runtime tracks at most 64 account/enrichment operations, reuses and cancels the exact
+account fence, and owns the sole joined coordinator. Quit and updater preparation close admission,
+cancel current work, and wait through a reversible RAII guard; a failed exit resumes admission,
+while the actual exit boundary seals the runtime and `RunEvent::Exit` remains an idempotent
+shutdown backstop. Coordinator/HTTP startup failure is best-effort and does not prevent Clipline
+from opening.
+
+Shared account status keeps obsolete-credential cleanup best-effort. Compatibility status retries
+until its durable account generation/client/user and Tauri-only credential-target projection are
+coherent, and publishes the runtime settings mirror only inside the same exact profile gate as
+account CAS, preventing an older command from regressing live settings. Malformed pending sidecars
+are quarantined with retained parent authority and exact file identity; service-driven quarantine
+also runs inside the current account publication fence, and a foreign replacement is preserved.
+The duplicate 1,544-line application enrichment module and its app-local `MoveFileExW` helper are
+gone, with repository-security tests pinning shared ownership and Windows confinement.
+
+The generic shipping Tauri `DesktopSnapshot<AppSettings>` remains a legacy compatibility envelope
+and therefore still contains persistence-only credential target metadata. The native Settings/Games
+surface must consume the shared sanitized account projection in Tasks 11-12 and must not instantiate
+that generic snapshot with `AppSettings`; no new credential target or cleanup target was added to a
+Slint model in Task 8.
+
+Next: Task 9, extract exact Cloud connect/disconnect account mutation over the existing shared
+Cloud runtime and account fences. `artifacts/`, `paseo.json`, and unrelated poster formatting remain
+local and excluded.
 
 ## Checkpoint (2026-08-04): Slint replacement Milestone 8, Task 7 joined microphone monitor
 
