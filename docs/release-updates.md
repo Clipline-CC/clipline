@@ -43,11 +43,17 @@ For now, publish Nightly manually from a Windows checkout:
 
 $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content .local-secrets\clipline-updater.key -Raw
 
-# Download and stage the exact reviewed LGPL FFmpeg archive used for gallery
-# posters and the optional FFmpeg encoder tier. The script hashes the archive
-# before opening it, extracts only the manifest allowlist, validates the
-# executable/version/configuration and per-file hashes, and emits
-# PROVENANCE.json beside the staged runtime.
+# 1. Regular build (from apps/clipline-app so config discovery works).
+#    Do NOT stage FFmpeg first — the regular SKU embeds no ffmpeg/ resources.
+Set-Location apps/clipline-app
+cargo tauri build
+# stage target/release/bundle/nsis/Clipline_<ver>_x64-setup.exe + .sig
+
+# 2. Standalone build (overlay merges over tauri.conf.json).
+#    Stage/verify the pinned LGPL FFmpeg archive first; standalone still bundles ffmpeg/.
+#    Both builds write the SAME bundle path, so stage step 1's exe and .sig
+#    before starting this one or the regular installer is overwritten.
+Set-Location ../..
 $ffmpegManifest = Get-Content apps\clipline-app\ffmpeg-runtime.json -Raw | ConvertFrom-Json
 $ffmpegInputs = Join-Path $env:LOCALAPPDATA "Clipline\release-inputs"
 New-Item -ItemType Directory -Path $ffmpegInputs -Force | Out-Null
@@ -55,15 +61,7 @@ $ffmpegArchive = Join-Path $ffmpegInputs $ffmpegManifest.archive_name
 Invoke-WebRequest -Uri $ffmpegManifest.archive_url -OutFile $ffmpegArchive
 .\scripts\stage-ffmpeg-resource.ps1 -ArchivePath $ffmpegArchive
 .\scripts\verify-ffmpeg-resource.ps1
-
-# 1. Regular build (from apps/clipline-app so config discovery works)
 Set-Location apps/clipline-app
-cargo tauri build
-# stage target/release/bundle/nsis/Clipline_<ver>_x64-setup.exe + .sig
-
-# 2. Standalone build (overlay merges over tauri.conf.json)
-#    Both builds write the SAME bundle path, so stage step 1's exe and .sig
-#    before starting this one or the regular installer is overwritten.
 cargo tauri build --config tauri.standalone.conf.json
 # stage and rename to Clipline_<ver>_x64-standalone-setup.exe, then RE-SIGN it
 # under the new name — do not rename the .sig. A minisign trusted comment
@@ -94,12 +92,17 @@ its license and configuration, then rotate every version, URL, archive/file
 size, and hash in `apps/clipline-app/ffmpeg-runtime.json` together. Run the
 staging script against the exact archive and review the logged provenance.
 Never use BtbN's floating `latest` asset. `apps/clipline-app/ffmpeg/` is a
-build staging directory and its binaries are intentionally git-ignored; its
-allowlisted `PROVENANCE.json` and license are bundled into both installers.
-Tauri runs `scripts/verify-ffmpeg-resource.ps1` again through
-`build.beforeBundleCommand` immediately before either installer is bundled.
-This offline preflight rejects a README-only, incomplete, modified, or
-misconfigured runtime; do not bypass it or replace it with a network fetch.
+build staging directory and its binaries are intentionally git-ignored.
+
+**Regular installer** no longer embeds `ffmpeg/` (slim-core on-demand runtime).
+Do **not** stage FFmpeg before a regular `cargo tauri build` if you are measuring
+the lightweight SKU. Measured regular setup after the drop: **9.35 MiB**.
+
+**Standalone / offline SKU** still lists `ffmpeg/` in `tauri.standalone.conf.json`.
+For that build only: stage with `scripts/stage-ffmpeg-resource.ps1`, then run
+`cargo tauri build --config tauri.standalone.conf.json`; its standalone-only
+`beforeBundleCommand` runs `scripts/verify-ffmpeg-resource.ps1` automatically.
+The regular `tauri.conf.json` no longer runs `beforeBundleCommand` verify-ffmpeg.
 A GitHub Actions workflow can automate this later, but pushing workflow files
 requires a token with GitHub's `workflow` scope.
 

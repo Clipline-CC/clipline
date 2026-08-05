@@ -24,9 +24,8 @@
       <div id="notice"></div>
       <div id="error"></div>
       <div id="poster-runtime-warning" class="poster-runtime-warning" role="alert" hidden>
-        <span>Thumbnails need Clipline's FFmpeg component, but it is missing or blocked. Update or
-          reinstall Clipline, check antivirus quarantine, then retry.</span>
-        <button id="poster-runtime-retry" type="button">Retry thumbnails</button>
+        <span>Thumbnails need Clipline's optional FFmpeg component.</span>
+        <button id="poster-runtime-install" type="button">Install FFmpeg</button>
       </div>
     </div>
     <aside class="sidebar">
@@ -584,6 +583,20 @@
               <div class="recording-control">
                 <select id="set-encoder"></select>
                 <span id="encoder-summary" class="setting-summary"></span>
+              </div>
+            </div>
+            <div class="setting-row">
+              <div class="setting-info">
+                <strong>Optional FFmpeg component</strong>
+                <span>Adds thumbnails, multi-track audio previews, shareable Copy Clip, and FFmpeg encoders.</span>
+              </div>
+              <div class="recording-control ffmpeg-runtime-control">
+                <span id="ffmpeg-runtime-status" class="setting-summary" role="status">Checking...</span>
+                <progress id="ffmpeg-runtime-progress" max="100" value="0" hidden></progress>
+                <div class="ffmpeg-runtime-actions">
+                  <button id="ffmpeg-runtime-install" type="button">Install</button>
+                  <button id="ffmpeg-runtime-cancel" type="button" hidden>Cancel</button>
+                </div>
               </div>
             </div>
             <div class="setting-row" data-settings-key="replay_window_s buffer_seconds">

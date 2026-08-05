@@ -6,6 +6,7 @@
   "archive_name": "ffmpeg-n8.1.2-21-gce3c09c101-win64-lgpl-shared-8.1.zip",
   "archive_url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-06-30-13-34/ffmpeg-n8.1.2-21-gce3c09c101-win64-lgpl-shared-8.1.zip",
   "archive_sha256": "27bcaf58b5140171dfe838a0b365d12c60607d71fc168424456410bad6a834da",
+  "archive_size": 70103338,
   "archive_root": "ffmpeg-n8.1.2-21-gce3c09c101-win64-lgpl-shared-8.1",
   "version_line": "ffmpeg version n8.1.2-21-gce3c09c101-20260630 Copyright (c) 2000-2026 the FFmpeg developers",
   "required_configuration": [

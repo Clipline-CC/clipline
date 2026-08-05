@@ -2,7 +2,7 @@
 //! wiring around the recorder service thread.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -42,16 +42,23 @@ const MAIN_WINDOW_LABEL: &str = "main";
 const WEBVIEW_READY_TIMEOUT: Duration = Duration::from_secs(5);
 const GAME_DETECTOR_INTERVAL: Duration = Duration::from_millis(500);
 const WINDOW_LIFECYCLE_EVENT: &str = "window-lifecycle";
-static FRONTEND_READY: AtomicBool = AtomicBool::new(false);
-static WEBVIEW_READY_WATCHDOG_ARMED: AtomicBool = AtomicBool::new(false);
+// Frontend readiness is tracked per window generation via
+// FrontendReadinessState. The repair dialog remains process-global.
 static WEBVIEW_REPAIR_NOTICE_SHOWN: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 enum WindowLifecycleMode {
     Foreground,
+    /// Legacy soft-hide tray mode. Close-to-tray now uses Destroying/Destroyed;
+    /// kept for reconcile coverage and any residual hide paths.
+    #[allow(dead_code)]
     Tray,
     Taskbar,
+    /// Close-to-tray has requested destroy; the label may still be registered.
+    Destroying,
+    /// No live app UI. Opens may build a fresh main window.
+    Destroyed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -66,6 +73,8 @@ impl WindowLifecycleSnapshot {
         Self {
             revision,
             mode,
+            // Destroying/Destroyed are backgrounded: the UI is gone or going away,
+            // so async frontend work must not recreate gallery/media.
             backgrounded: mode != WindowLifecycleMode::Foreground,
         }
     }
@@ -75,11 +84,12 @@ struct WindowLifecycleState(Mutex<WindowLifecycleSnapshot>);
 
 impl Default for WindowLifecycleState {
     fn default() -> Self {
-        // The configured native window starts hidden. A normal launch moves to
-        // Foreground after reveal; autostart deliberately remains in Tray.
+        // With `"create": false`, cold start (including --autostart) has no
+        // WebView until open_main_window builds one. Normal launches move to
+        // Foreground after reveal; autostart stays Destroyed.
         Self(Mutex::new(WindowLifecycleSnapshot::new(
             0,
-            WindowLifecycleMode::Tray,
+            WindowLifecycleMode::Destroyed,
         )))
     }
 }
@@ -103,6 +113,143 @@ impl WindowLifecycleState {
         }
         *snapshot
     }
+}
+
+/// Remembers an Open requested while the main window is mid-destroy.
+struct MainWindowOpenQueue(AtomicBool);
+
+impl Default for MainWindowOpenQueue {
+    fn default() -> Self {
+        Self(AtomicBool::new(false))
+    }
+}
+
+impl MainWindowOpenQueue {
+    fn pending(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+
+    fn set_pending(&self, pending: bool) {
+        self.0.store(pending, Ordering::Release);
+    }
+}
+
+/// Per-window UI readiness. Generation 0 means no live main window.
+struct FrontendReadinessState {
+    /// Monotonic allocator; never resets across destroy/recreate.
+    next_generation: AtomicU64,
+    /// Currently live UI generation; 0 means no live main window.
+    generation: AtomicU64,
+    ready_generation: AtomicU64,
+    watchdog_armed_generation: AtomicU64,
+    destroy_started: Mutex<Option<Instant>>,
+}
+
+#[derive(Clone, Copy)]
+struct FrontendReadinessCheckpoint {
+    generation: u64,
+    ready_generation: u64,
+}
+
+impl Default for FrontendReadinessState {
+    fn default() -> Self {
+        Self {
+            next_generation: AtomicU64::new(0),
+            generation: AtomicU64::new(0),
+            ready_generation: AtomicU64::new(0),
+            watchdog_armed_generation: AtomicU64::new(0),
+            destroy_started: Mutex::new(None),
+        }
+    }
+}
+
+impl FrontendReadinessState {
+    fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    fn ready_generation(&self) -> u64 {
+        self.ready_generation.load(Ordering::Acquire)
+    }
+
+    fn begin_generation(&self) -> u64 {
+        let next = self.next_generation.fetch_add(1, Ordering::AcqRel) + 1;
+        self.generation.store(next, Ordering::Release);
+        if let Ok(mut started) = self.destroy_started.lock() {
+            if let Some(started_at) = started.take() {
+                let elapsed_ms = started_at.elapsed().as_millis();
+                log_diagnostic(format!(
+                    "main window recreate generation={next} destroy_to_build_ms={elapsed_ms}"
+                ));
+            }
+        }
+        log_diagnostic(format!("main window generation begun generation={next}"));
+        next
+    }
+
+    fn clear_for_destroy(&self) -> FrontendReadinessCheckpoint {
+        let previous = self.generation.swap(0, Ordering::AcqRel);
+        let checkpoint = FrontendReadinessCheckpoint {
+            generation: previous,
+            ready_generation: self.ready_generation(),
+        };
+        // next_generation stays monotonic so recreate never reuses a ready/watchdog id.
+        if let Ok(mut started) = self.destroy_started.lock() {
+            *started = Some(Instant::now());
+        }
+        log_diagnostic(format!(
+            "main window generation cleared for destroy previous={previous}"
+        ));
+        checkpoint
+    }
+
+    fn restore_after_failed_destroy(&self, checkpoint: FrontendReadinessCheckpoint) {
+        self.generation
+            .store(checkpoint.generation, Ordering::Release);
+        self.ready_generation
+            .store(checkpoint.ready_generation, Ordering::Release);
+        if let Ok(mut started) = self.destroy_started.lock() {
+            *started = None;
+        }
+        log_diagnostic(format!(
+            "main window generation restored after failed destroy generation={}",
+            checkpoint.generation
+        ));
+    }
+
+    fn mark_ready(&self) -> Option<u64> {
+        let generation = self.generation();
+        if generation == 0 {
+            return None;
+        }
+        self.ready_generation.store(generation, Ordering::Release);
+        Some(generation)
+    }
+
+    fn is_ready(&self, generation: u64) -> bool {
+        generation != 0 && self.generation() == generation && self.ready_generation() == generation
+    }
+
+    /// Returns true when this call newly arms the watchdog for the generation.
+    fn try_arm_watchdog(&self, generation: u64) -> bool {
+        if generation == 0 || self.is_ready(generation) {
+            return false;
+        }
+        let previous = self
+            .watchdog_armed_generation
+            .swap(generation, Ordering::AcqRel);
+        previous != generation
+    }
+}
+
+fn watchdog_should_fire(
+    armed_generation: u64,
+    current_generation: u64,
+    ready_generation: u64,
+) -> bool {
+    armed_generation != 0
+        && armed_generation == current_generation
+        && ready_generation != armed_generation
 }
 
 fn ensure_foreground_microphone_test(state: &WindowLifecycleState) -> Result<(), String> {
@@ -279,17 +426,120 @@ fn is_app_window_label(label: &str) -> bool {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // exercised by unit tests; open path uses MainWindowOpenAction
 enum MainWindowOpenTarget {
     ExistingMain,
     NewMain,
 }
 
+#[allow(dead_code)] // exercised by unit tests; open path uses MainWindowOpenAction
 fn main_window_open_target(main_window_present: bool) -> MainWindowOpenTarget {
     if main_window_present {
         MainWindowOpenTarget::ExistingMain
     } else {
         MainWindowOpenTarget::NewMain
     }
+}
+
+/// Destroy-aware open decision for the tray shell. Distinct from
+/// [`MainWindowOpenTarget`] so queued opens during `Destroying` are expressible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MainWindowOpenAction {
+    RevealExisting,
+    QueueOpen,
+    BuildNew,
+    Noop,
+}
+
+/// Pure tray-shell state used to pin the destroy -> open race without a live
+/// Tauri runtime. Production close-to-tray/open paths drive these helpers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MainWindowShellState {
+    mode: WindowLifecycleMode,
+    main_window_present: bool,
+    pending_open: bool,
+}
+
+impl MainWindowShellState {
+    #[allow(dead_code)] // unit-test constructor; production uses main_window_shell_state
+    fn new(mode: WindowLifecycleMode, main_window_present: bool) -> Self {
+        Self {
+            mode,
+            main_window_present,
+            pending_open: false,
+        }
+    }
+}
+
+/// Enter `Destroying` while the dying label may still be registered.
+fn begin_close_to_tray_destroy(state: &mut MainWindowShellState) {
+    state.mode = WindowLifecycleMode::Destroying;
+}
+
+/// Queue while `Destroying`; build only when destroyed/absent; never reveal a
+/// dying label.
+fn request_main_window_open(state: &mut MainWindowShellState) -> MainWindowOpenAction {
+    match state.mode {
+        WindowLifecycleMode::Destroying => {
+            state.pending_open = true;
+            MainWindowOpenAction::QueueOpen
+        }
+        WindowLifecycleMode::Destroyed => {
+            state.pending_open = false;
+            MainWindowOpenAction::BuildNew
+        }
+        _ if state.main_window_present => MainWindowOpenAction::RevealExisting,
+        _ => MainWindowOpenAction::BuildNew,
+    }
+}
+
+/// Mark `Destroyed`, clear the label, and build once when an open was queued
+/// mid-destroy.
+fn observe_main_window_destroyed(state: &mut MainWindowShellState) -> MainWindowOpenAction {
+    state.mode = WindowLifecycleMode::Destroyed;
+    state.main_window_present = false;
+    if state.pending_open {
+        state.pending_open = false;
+        MainWindowOpenAction::BuildNew
+    } else {
+        MainWindowOpenAction::Noop
+    }
+}
+
+/// `Destroying`/`Destroyed` never resolve to `ExistingMain`, even when a stale
+/// label is still registered.
+#[allow(dead_code)] // unit-test helper; production branches on MainWindowOpenAction
+fn main_window_open_target_for(
+    mode: WindowLifecycleMode,
+    main_window_present: bool,
+) -> MainWindowOpenTarget {
+    match mode {
+        WindowLifecycleMode::Destroying | WindowLifecycleMode::Destroyed => {
+            MainWindowOpenTarget::NewMain
+        }
+        _ => main_window_open_target(main_window_present),
+    }
+}
+
+fn main_window_shell_state<R: Runtime>(app: &AppHandle<R>) -> MainWindowShellState {
+    MainWindowShellState {
+        mode: app.state::<WindowLifecycleState>().snapshot().mode,
+        main_window_present: app.get_webview_window(MAIN_WINDOW_LABEL).is_some(),
+        pending_open: app.state::<MainWindowOpenQueue>().pending(),
+    }
+}
+
+fn persist_main_window_shell_pending<R: Runtime>(app: &AppHandle<R>, state: &MainWindowShellState) {
+    app.state::<MainWindowOpenQueue>()
+        .set_pending(state.pending_open);
+}
+
+fn prepare_frontend_readiness_for_destroy<R: Runtime>(
+    app: &AppHandle<R>,
+) -> FrontendReadinessCheckpoint {
+    let checkpoint = app.state::<FrontendReadinessState>().clear_for_destroy();
+    WEBVIEW_REPAIR_NOTICE_SHOWN.store(false, Ordering::Release);
+    checkpoint
 }
 
 fn window_state_summary<R: Runtime>(window: &WebviewWindow<R>) -> String {
@@ -380,27 +630,36 @@ fn probe_webview_after_reveal<R: Runtime>(window: &WebviewWindow<R>, context: &s
     }
 }
 
-fn arm_frontend_ready_watchdog() {
-    if FRONTEND_READY.load(Ordering::Acquire) {
-        return;
-    }
-    if WEBVIEW_READY_WATCHDOG_ARMED
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
-        .is_err()
-    {
+fn arm_frontend_ready_watchdog<R: Runtime>(app: &AppHandle<R>, generation: u64) {
+    let readiness = app.state::<FrontendReadinessState>();
+    if !readiness.try_arm_watchdog(generation) {
         return;
     }
 
-    log_diagnostic("webview readiness watchdog armed");
+    log_diagnostic(format!(
+        "webview readiness watchdog armed generation={generation}"
+    ));
+    let app = app.clone();
     let _ = std::thread::Builder::new()
         .name("clipline-webview-readiness-watchdog".into())
-        .spawn(|| {
+        .spawn(move || {
             std::thread::sleep(WEBVIEW_READY_TIMEOUT);
-            if !FRONTEND_READY.load(Ordering::Acquire) {
-                log_diagnostic("webview readiness watchdog expired before frontend_ready");
+            let readiness = app.state::<FrontendReadinessState>();
+            if watchdog_should_fire(
+                generation,
+                readiness.generation(),
+                readiness.ready_generation(),
+            ) {
+                log_diagnostic(format!(
+                    "webview readiness watchdog expired before frontend_ready generation={generation}"
+                ));
                 show_webview_repair_notice_once(WebviewRepairNoticeReason::FrontendReadyTimeout);
             } else {
-                log_diagnostic("webview readiness watchdog observed frontend_ready");
+                log_diagnostic(format!(
+                    "webview readiness watchdog settled generation={generation} current={} ready={}",
+                    readiness.generation(),
+                    readiness.ready_generation()
+                ));
             }
         });
 }
@@ -470,16 +729,21 @@ fn frontend_ready<R: Runtime>(
     runtime: tauri::State<RuntimeState>,
     startup_warnings: tauri::State<StartupWarnings>,
     window_lifecycle: tauri::State<WindowLifecycleState>,
+    readiness: tauri::State<FrontendReadinessState>,
 ) -> FrontendReadyResponse {
-    let was_ready = FRONTEND_READY.swap(true, Ordering::AcqRel);
-    if !was_ready {
-        log_diagnostic("frontend_ready received");
-    }
-    if let Some(status) = runtime.current_waiting_status() {
+    let generation = readiness.mark_ready();
+    log_diagnostic(format!(
+        "frontend_ready received generation={} webviews={}",
+        generation
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "none".into()),
+        webview_labels(&app)
+    ));
+    if let Some(status) = runtime.durable_recorder_status_for_replay() {
         let _ = app.emit("status", status);
     }
     FrontendReadyResponse {
-        warnings: startup_warnings.take(),
+        warnings: startup_warnings.snapshot(),
         window_lifecycle: window_lifecycle.snapshot(),
     }
 }
@@ -492,9 +756,9 @@ impl StartupWarnings {
         Self(Mutex::new(warnings))
     }
 
-    fn take(&self) -> Vec<String> {
+    fn snapshot(&self) -> Vec<String> {
         match self.0.lock() {
-            Ok(mut warnings) => std::mem::take(&mut *warnings),
+            Ok(warnings) => warnings.clone(),
             Err(error) => vec![format!(
                 "startup diagnostics could not be read because their lock was poisoned: {error}"
             )],
@@ -873,6 +1137,27 @@ impl RuntimeState {
             && inner.tx.is_none()
             && !recorder_should_run(&inner.settings, inner.active_game.as_ref()))
         .then(waiting_for_game_status)
+    }
+
+    /// Prefer the live waiting-for-game state; otherwise replay the last durable
+    /// recorder status so a recreated UI can rehydrate without waiting for the
+    /// next service tick.
+    fn durable_recorder_status_for_replay(&self) -> Option<Event> {
+        if let Some(waiting) = self.current_waiting_status() {
+            return Some(waiting);
+        }
+        let inner = self.0.lock().ok()?;
+        let status = inner.last_recorder_status.as_ref()?;
+        Some(Event::Status {
+            recording: status.recording,
+            waiting_for_game: status.waiting_for_game,
+            segments: status.segments,
+            buffered_s: status.buffered_s,
+            buffered_mb: status.buffered_mb,
+            full_session: status.full_session,
+            encoder: status.encoder.clone(),
+            capture_backend: status.capture_backend.clone(),
+        })
     }
 
     fn waiting_generation_is_current(&self, generation: u64) -> bool {
@@ -1607,6 +1892,13 @@ fn send_main_window_to_tray<R: Runtime>(app: &AppHandle<R>) -> Result<(), String
         "send main window to tray webviews={}",
         webview_labels(app)
     ));
+
+    let mode = app.state::<WindowLifecycleState>().snapshot().mode;
+    if mode == WindowLifecycleMode::Destroying {
+        log_diagnostic("send-to-tray skipped: already Destroying");
+        return Ok(());
+    }
+
     let mut windows = app
         .webview_windows()
         .into_iter()
@@ -1614,28 +1906,77 @@ fn send_main_window_to_tray<R: Runtime>(app: &AppHandle<R>) -> Result<(), String
         .collect::<Vec<_>>();
     windows.sort_by(|a, b| a.0.cmp(&b.0));
 
-    if windows.is_empty() {
-        log_diagnostic("send-to-tray skipped: app window not found");
+    if mode == WindowLifecycleMode::Destroyed && windows.is_empty() {
+        log_diagnostic("send-to-tray skipped: already Destroyed");
+        return Ok(());
     }
+
+    // Strong RAM path: destroy the WebView tree. Taskbar minimize still uses
+    // hide/Low for restore latency.
+    let readiness_checkpoint = prepare_frontend_readiness_for_destroy(app);
+    let mut state = main_window_shell_state(app);
+    begin_close_to_tray_destroy(&mut state);
+    persist_main_window_shell_pending(app, &state);
+    publish_background_window(app, WindowLifecycleMode::Destroying);
+
+    if windows.is_empty() {
+        log_diagnostic("send-to-tray no live webview; completing Destroyed immediately");
+        return complete_main_window_destroyed(app);
+    }
+
     for (label, window) in windows {
-        log_window_state(&format!("send-to-tray before label={label}"), &window);
-        hide_main_window(
-            || window.hide(),
-            || publish_background_window(app, WindowLifecycleMode::Tray),
-            || {
-                let result = window.as_ref().hide();
-                log_diagnostic(format!(
-                    "send-to-tray webview hide label={label}: {}",
-                    result_debug(result.as_ref())
-                ));
-                result
-            },
-            || request_webview_memory_target(&window, &label, crate::windows::MemoryTarget::Low),
-        )?;
-        log_diagnostic(format!("send-to-tray hide ok label={label}"));
-        log_window_state(&format!("send-to-tray after hide label={label}"), &window);
+        log_window_state(
+            &format!("send-to-tray before destroy label={label}"),
+            &window,
+        );
+        let result = window.destroy();
+        log_diagnostic(format!(
+            "send-to-tray destroy requested label={label}: {}",
+            result_debug(result.as_ref())
+        ));
+        if let Err(error) = result {
+            app.state::<FrontendReadinessState>()
+                .restore_after_failed_destroy(readiness_checkpoint);
+            app.state::<MainWindowOpenQueue>().set_pending(false);
+            publish_window_lifecycle(app, mode);
+            return Err(format!("destroy main window {label}: {error}"));
+        }
+        // Do not assert the label is gone: Tauri queues destruction and
+        // WindowEvent::Destroyed completes the transition.
     }
     Ok(())
+}
+
+fn complete_main_window_destroyed<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    let remaining = app
+        .webview_windows()
+        .into_keys()
+        .filter(|label| is_app_window_label(label))
+        .count();
+    if remaining > 0 {
+        log_diagnostic(format!(
+            "main window Destroyed deferred; remaining app webviews={remaining}"
+        ));
+        return Ok(());
+    }
+
+    let mut state = main_window_shell_state(app);
+    // The dying label is gone by definition once Destroyed is observed.
+    state.main_window_present = false;
+    let action = observe_main_window_destroyed(&mut state);
+    persist_main_window_shell_pending(app, &state);
+    publish_background_window(app, WindowLifecycleMode::Destroyed);
+    log_diagnostic(format!(
+        "main window Destroyed pending_open={} action={action:?}",
+        app.state::<MainWindowOpenQueue>().pending()
+    ));
+
+    match action {
+        MainWindowOpenAction::BuildNew => open_main_window(app),
+        MainWindowOpenAction::RevealExisting
+        | MainWindowOpenAction::QueueOpen
+        | MainWindowOpenAction::Noop => Ok(()),
+    }
 }
 
 fn publish_window_lifecycle<R: Runtime>(
@@ -1684,25 +2025,6 @@ fn request_webview_memory_target<R: Runtime>(
         log_diagnostic(format!(
             "webview memory target dispatch failed label={label} target={target:?}: {error}"
         ));
-    }
-}
-
-/// A cold autostart never calls `open_main_window`, and while the native window
-/// is created hidden (`tauri.conf.json` `"visible": false`) wry initialises the
-/// WebView2 controller from its `visible` attribute — so the webview would
-/// render indefinitely in the background session that matters most. Hide it
-/// explicitly; the reveal path turns it back on.
-fn hide_autostart_webviews<R: Runtime>(app: &AppHandle<R>) {
-    for (label, window) in app.webview_windows() {
-        if !is_app_window_label(&label) {
-            continue;
-        }
-        let result = window.as_ref().hide();
-        log_diagnostic(format!(
-            "autostart webview hide label={label}: {}",
-            result_debug(result.as_ref())
-        ));
-        request_webview_memory_target(&window, &label, crate::windows::MemoryTarget::Low);
     }
 }
 
@@ -1829,7 +2151,12 @@ fn reconcile_native_window<R: Runtime>(
     window: &WebviewWindow<R>,
 ) -> Result<(), String> {
     let mode = app.state::<WindowLifecycleState>().snapshot().mode;
-    if mode == WindowLifecycleMode::Tray {
+    if matches!(
+        mode,
+        WindowLifecycleMode::Tray
+            | WindowLifecycleMode::Destroying
+            | WindowLifecycleMode::Destroyed
+    ) {
         return Ok(());
     }
 
@@ -2494,6 +2821,9 @@ pub fn run() {
         .manage(RuntimeState::new(settings.clone(), lol_url))
         .manage(StartupWarnings::new(startup_warnings))
         .manage(WindowLifecycleState::default())
+        .manage(MainWindowOpenQueue::default())
+        .manage(FrontendReadinessState::default())
+        .manage(crate::ffmpeg_install::FfmpegInstallController::default())
         .manage(MicTestState::default())
         .manage(support::SupportState::default())
         .manage(crate::memory::MemorySampler::default())
@@ -2546,6 +2876,9 @@ pub fn run() {
             extract_window_icon,
             memory_status,
             frontend_ready,
+            crate::ffmpeg_install::ffmpeg_runtime_status,
+            crate::ffmpeg_install::ensure_ffmpeg_runtime,
+            crate::ffmpeg_install::cancel_ffmpeg_runtime_install,
             start_microphone_test,
             stop_microphone_test,
             get_autostart_status,
@@ -2620,6 +2953,12 @@ pub fn run() {
             }
             if let Err(e) = crate::library::prune_audio_preview_cache_on_startup() {
                 tracing::warn!(event = "audio_preview_startup_prune_failed", error = %e);
+            }
+            if let Some(local) = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from) {
+                let staging = crate::ffmpeg_install::staging_root(&local);
+                if let Err(e) = crate::ffmpeg_install::sweep_abandoned_staging(&staging) {
+                    tracing::warn!(event = "ffmpeg_staging_startup_sweep_failed", error = %e);
+                }
             }
 
             // Keep release builds in sync with the user's setting. Debug builds
@@ -2721,8 +3060,8 @@ pub fn run() {
             }
             spawn_game_detector(app.handle().clone());
 
-            // The main window is created hidden by default so autostart launches
-            // don't flash it. Show it for normal launches.
+            // `"create": false` keeps cold --autostart WebView-free. Normal
+            // launches and tray Open build through open_main_window.
             if !launched_by_autostart {
                 log_diagnostic("normal launch opening main window");
                 if let Err(e) = open_main_window(app.handle()) {
@@ -2730,8 +3069,7 @@ pub fn run() {
                     tracing::error!(event = "startup_window_show_failed", error = %e);
                 }
             } else {
-                log_diagnostic("autostart launch hiding webview");
-                hide_autostart_webviews(app.handle());
+                log_diagnostic("autostart launch leaving Destroyed shell without webview");
             }
 
             Ok(())
@@ -2758,6 +3096,17 @@ pub fn run() {
                         log_diagnostic("close request action: quit");
                         quit_app(app);
                     }
+                }
+            }
+            tauri::RunEvent::WindowEvent {
+                label,
+                event: WindowEvent::Destroyed,
+                ..
+            } if is_app_window_label(&label) => {
+                log_diagnostic(format!("window event: app Destroyed label={label}"));
+                if let Err(e) = complete_main_window_destroyed(app) {
+                    log_diagnostic(format!("complete Destroyed failed: {e}"));
+                    tracing::error!(event = "main_window_destroyed_handler_failed", error = %e);
                 }
             }
             tauri::RunEvent::WindowEvent {
@@ -2827,26 +3176,42 @@ fn open_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
         "open_main_window start webviews={}",
         webview_labels(app)
     ));
-    let main_window = app.get_webview_window(MAIN_WINDOW_LABEL);
 
-    match main_window_open_target(main_window.is_some()) {
-        MainWindowOpenTarget::ExistingMain => {
-            let window = main_window.expect("target requires main window");
+    let mut state = main_window_shell_state(app);
+    let action = request_main_window_open(&mut state);
+    persist_main_window_shell_pending(app, &state);
+    log_diagnostic(format!(
+        "open_main_window action={action:?} mode={:?} present={} pending={}",
+        state.mode, state.main_window_present, state.pending_open
+    ));
+
+    match action {
+        MainWindowOpenAction::QueueOpen => {
+            log_diagnostic("open_main_window queued until WindowEvent::Destroyed");
+            Ok(())
+        }
+        MainWindowOpenAction::Noop => Ok(()),
+        MainWindowOpenAction::RevealExisting => {
+            let window = app
+                .get_webview_window(MAIN_WINDOW_LABEL)
+                .ok_or_else(|| "main window vanished before reveal".to_string())?;
+            // A stale registered label during Destroying/Destroyed must never
+            // reach here; request_main_window_open queues/builds instead.
             log_window_state("open existing before reveal", &window);
             let result = reveal_logged_window(&window, "open existing");
             log_window_state("open existing after reveal", &window);
             probe_webview_after_reveal(&window, "open existing after reveal");
-            arm_frontend_ready_watchdog();
+            arm_frontend_ready_watchdog(app, app.state::<FrontendReadinessState>().generation());
             result
         }
-        MainWindowOpenTarget::NewMain => {
-            log_diagnostic("open_main_window rebuilding missing main window");
+        MainWindowOpenAction::BuildNew => {
+            log_diagnostic("open_main_window building main window");
             let window = build_main_window(app, MAIN_WINDOW_LABEL)?;
             log_window_state("open rebuilt before reveal", &window);
             let result = reveal_logged_window(&window, "open rebuilt");
             log_window_state("open rebuilt after reveal", &window);
             probe_webview_after_reveal(&window, "open rebuilt after reveal");
-            arm_frontend_ready_watchdog();
+            arm_frontend_ready_watchdog(app, app.state::<FrontendReadinessState>().generation());
             result
         }
     }
@@ -2864,10 +3229,16 @@ fn build_main_window<R: Runtime>(
         .ok_or_else(|| "missing main window config".to_string())?
         .clone();
     config.label = label.to_string();
-    WebviewWindowBuilder::from_config(app, &config)
+    let window = WebviewWindowBuilder::from_config(app, &config)
         .map_err(|e| e.to_string())?
         .build()
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    let generation = app.state::<FrontendReadinessState>().begin_generation();
+    log_diagnostic(format!(
+        "build_main_window ready label={label} generation={generation} webviews={}",
+        webview_labels(app)
+    ));
+    Ok(window)
 }
 
 fn reveal_logged_window<R: Runtime>(
@@ -3111,11 +3482,114 @@ mod tests {
     }
 
     #[test]
-    fn startup_warnings_are_delivered_once_after_frontend_readiness() {
+    fn startup_warnings_remain_durable_across_frontend_ready_replays() {
         let warnings = StartupWarnings::new(vec!["settings recovered".into()]);
 
-        assert_eq!(warnings.take(), vec!["settings recovered"]);
-        assert!(warnings.take().is_empty());
+        assert_eq!(warnings.snapshot(), vec!["settings recovered"]);
+        assert_eq!(
+            warnings.snapshot(),
+            vec!["settings recovered"],
+            "recreated UIs must see the same durable startup warnings"
+        );
+    }
+
+    #[test]
+    fn frontend_readiness_generations_isolate_watchdogs_and_ready_markers() {
+        let readiness = FrontendReadinessState::default();
+        assert_eq!(readiness.generation(), 0);
+
+        let first = readiness.begin_generation();
+        assert_eq!(first, 1);
+        assert!(readiness.try_arm_watchdog(first));
+        assert!(!readiness.try_arm_watchdog(first));
+        assert_eq!(readiness.mark_ready(), Some(first));
+        assert!(readiness.is_ready(first));
+        assert!(!readiness.try_arm_watchdog(first));
+
+        readiness.clear_for_destroy();
+        assert_eq!(readiness.generation(), 0);
+        assert!(!readiness.is_ready(first));
+
+        let second = readiness.begin_generation();
+        assert_eq!(second, first + 1);
+        assert!(readiness.try_arm_watchdog(second));
+        assert!(watchdog_should_fire(
+            second,
+            readiness.generation(),
+            readiness.ready_generation()
+        ));
+        // An old timer must not fire against a newer window.
+        assert!(!watchdog_should_fire(
+            first,
+            readiness.generation(),
+            readiness.ready_generation()
+        ));
+        assert_eq!(readiness.mark_ready(), Some(second));
+        assert!(!watchdog_should_fire(
+            second,
+            readiness.generation(),
+            readiness.ready_generation()
+        ));
+    }
+
+    #[test]
+    fn failed_destroy_restores_the_live_frontend_generation() {
+        let readiness = FrontendReadinessState::default();
+        let generation = readiness.begin_generation();
+        assert_eq!(readiness.mark_ready(), Some(generation));
+
+        let checkpoint = readiness.clear_for_destroy();
+        assert_eq!(readiness.generation(), 0);
+        readiness.restore_after_failed_destroy(checkpoint);
+
+        assert_eq!(readiness.generation(), generation);
+        assert!(readiness.is_ready(generation));
+    }
+
+    #[test]
+    fn durable_recorder_status_prefers_waiting_then_last_status() {
+        let mut settings = AppSettings::default();
+        settings.games.pause_when_no_game = true;
+        let state = RuntimeState::new(settings, None);
+        {
+            let mut inner = state.0.lock().unwrap();
+            inner.recording_desired = true;
+            inner.last_recorder_status = Some(RecorderDiagnosticStatus {
+                recording: true,
+                waiting_for_game: false,
+                segments: 3,
+                buffered_s: 12.0,
+                buffered_mb: 4.0,
+                full_session: false,
+                encoder: "mft-h264".into(),
+                capture_backend: "wgc".into(),
+            });
+        }
+
+        assert!(matches!(
+            state.durable_recorder_status_for_replay(),
+            Some(Event::Status {
+                recording: false,
+                waiting_for_game: true,
+                ..
+            })
+        ));
+
+        {
+            let mut inner = state.0.lock().unwrap();
+            inner.recording_desired = false;
+        }
+
+        assert!(matches!(
+            state.durable_recorder_status_for_replay(),
+            Some(Event::Status {
+                recording: true,
+                waiting_for_game: false,
+                segments: 3,
+                encoder,
+                ..
+            }) if encoder == "mft-h264"
+        ));
     }
 
     #[test]
@@ -4623,6 +5097,134 @@ mod tests {
     }
 
     #[test]
+    fn close_to_tray_destroy_enters_destroying_until_destroyed_event() {
+        let mut state = MainWindowShellState::new(WindowLifecycleMode::Foreground, true);
+
+        begin_close_to_tray_destroy(&mut state);
+        assert_eq!(state.mode, WindowLifecycleMode::Destroying);
+        assert!(
+            state.main_window_present,
+            "the dying label may still be registered during Destroying"
+        );
+        assert!(!state.pending_open);
+
+        let action = observe_main_window_destroyed(&mut state);
+        assert_eq!(state.mode, WindowLifecycleMode::Destroyed);
+        assert!(
+            !state.main_window_present,
+            "Destroyed must clear the registered main label"
+        );
+        assert_eq!(action, MainWindowOpenAction::Noop);
+    }
+
+    #[test]
+    fn open_during_destroying_queues_instead_of_revealing_dying_label() {
+        let mut state = MainWindowShellState::new(WindowLifecycleMode::Destroying, true);
+
+        let action = request_main_window_open(&mut state);
+
+        assert_eq!(action, MainWindowOpenAction::QueueOpen);
+        assert!(state.pending_open);
+        assert_eq!(state.mode, WindowLifecycleMode::Destroying);
+        assert!(state.main_window_present);
+        assert_ne!(
+            main_window_open_target_for(WindowLifecycleMode::Destroying, true),
+            MainWindowOpenTarget::ExistingMain
+        );
+    }
+
+    #[test]
+    fn destroyed_with_pending_open_builds_exactly_one_window() {
+        let mut state = MainWindowShellState {
+            mode: WindowLifecycleMode::Destroying,
+            main_window_present: true,
+            pending_open: true,
+        };
+
+        let action = observe_main_window_destroyed(&mut state);
+
+        assert_eq!(state.mode, WindowLifecycleMode::Destroyed);
+        assert!(!state.main_window_present);
+        assert!(!state.pending_open);
+        assert_eq!(action, MainWindowOpenAction::BuildNew);
+
+        let second = observe_main_window_destroyed(&mut state);
+        assert_eq!(second, MainWindowOpenAction::Noop);
+        assert!(!state.pending_open);
+    }
+
+    #[test]
+    fn destroying_or_destroyed_label_is_never_existing_main() {
+        assert_ne!(
+            main_window_open_target_for(WindowLifecycleMode::Destroying, true),
+            MainWindowOpenTarget::ExistingMain
+        );
+        assert_ne!(
+            main_window_open_target_for(WindowLifecycleMode::Destroyed, true),
+            MainWindowOpenTarget::ExistingMain
+        );
+        assert_eq!(
+            main_window_open_target_for(WindowLifecycleMode::Destroyed, false),
+            MainWindowOpenTarget::NewMain
+        );
+        assert_eq!(
+            main_window_open_target_for(WindowLifecycleMode::Foreground, true),
+            MainWindowOpenTarget::ExistingMain
+        );
+    }
+
+    #[test]
+    fn immediate_close_then_open_race_builds_only_after_destroyed() {
+        let mut state = MainWindowShellState::new(WindowLifecycleMode::Foreground, true);
+        let mut builds = 0;
+        let mut reveals = 0;
+
+        begin_close_to_tray_destroy(&mut state);
+        assert_eq!(state.mode, WindowLifecycleMode::Destroying);
+
+        match request_main_window_open(&mut state) {
+            MainWindowOpenAction::QueueOpen => {}
+            MainWindowOpenAction::RevealExisting => reveals += 1,
+            MainWindowOpenAction::BuildNew => builds += 1,
+            MainWindowOpenAction::Noop => {}
+        }
+        assert!(
+            state.pending_open,
+            "open during Destroying must be remembered"
+        );
+        assert_eq!(reveals, 0, "must not reveal the dying label");
+        assert_eq!(builds, 0, "must not build while Destroying");
+
+        match observe_main_window_destroyed(&mut state) {
+            MainWindowOpenAction::BuildNew => builds += 1,
+            MainWindowOpenAction::RevealExisting => reveals += 1,
+            MainWindowOpenAction::QueueOpen | MainWindowOpenAction::Noop => {}
+        }
+
+        assert_eq!(state.mode, WindowLifecycleMode::Destroyed);
+        assert!(!state.main_window_present);
+        assert!(!state.pending_open);
+        assert_eq!(reveals, 0);
+        assert_eq!(builds, 1);
+    }
+
+    #[test]
+    fn destroying_and_destroyed_modes_are_backgrounded() {
+        assert!(WindowLifecycleSnapshot::new(1, WindowLifecycleMode::Destroying).backgrounded);
+        assert!(WindowLifecycleSnapshot::new(2, WindowLifecycleMode::Destroyed).backgrounded);
+        assert!(!WindowLifecycleSnapshot::new(3, WindowLifecycleMode::Foreground).backgrounded);
+    }
+
+    #[test]
+    fn microphone_test_rejects_destroying_and_destroyed_modes() {
+        let state = WindowLifecycleState::default();
+        state.transition(WindowLifecycleMode::Destroying);
+        assert!(ensure_foreground_microphone_test(&state).is_err());
+        state.transition(WindowLifecycleMode::Destroyed);
+        assert!(ensure_foreground_microphone_test(&state).is_err());
+    }
+
+    #[test]
     fn parses_webview2_runtime_version_from_reg_output() {
         let output = r#"
 HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}
@@ -4868,11 +5470,11 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
 
         assert_eq!(
             state.snapshot(),
-            WindowLifecycleSnapshot::new(0, WindowLifecycleMode::Tray)
+            WindowLifecycleSnapshot::new(0, WindowLifecycleMode::Destroyed)
         );
         assert_eq!(
-            state.transition(WindowLifecycleMode::Tray),
-            WindowLifecycleSnapshot::new(0, WindowLifecycleMode::Tray)
+            state.transition(WindowLifecycleMode::Destroyed),
+            WindowLifecycleSnapshot::new(0, WindowLifecycleMode::Destroyed)
         );
         assert_eq!(
             state.transition(WindowLifecycleMode::Foreground),
@@ -5006,6 +5608,14 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
         );
         assert_eq!(
             native_window_reconcile_action(WindowLifecycleMode::Tray, true),
+            NativeWindowReconcileAction::None
+        );
+        assert_eq!(
+            native_window_reconcile_action(WindowLifecycleMode::Destroying, true),
+            NativeWindowReconcileAction::None
+        );
+        assert_eq!(
+            native_window_reconcile_action(WindowLifecycleMode::Destroyed, false),
             NativeWindowReconcileAction::None
         );
     }

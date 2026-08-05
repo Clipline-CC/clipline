@@ -367,7 +367,8 @@ pub struct EncoderOption {
 pub fn available_encoder_options() -> Vec<EncoderOption> {
     let mut seen = std::collections::BTreeSet::new();
     let mut options = Vec::new();
-    for cap in encoder_capabilities() {
+    let capabilities = encoder_capabilities();
+    for cap in &capabilities {
         for &codec in &cap.codecs {
             let Some(encoder) = VideoEncoder::from_parts(cap.backend, codec) else {
                 continue;
@@ -1274,17 +1275,103 @@ fn warn_user(events: &Sender<Event>, message: String) {
     let _ = events.send(Event::Error { message });
 }
 
-/// Combined MFT + FFmpeg capabilities. Probing is hardware-stable per
-/// process, so it is computed once and reused across recorder restarts
-/// (the FFmpeg probe test-encodes, which is too slow to repeat per save).
-fn encoder_capabilities() -> &'static [EncoderCapability] {
+/// Process-static MFT capabilities (hardware probe is stable for the process).
+fn mft_capabilities_cached() -> &'static [EncoderCapability] {
     use std::sync::OnceLock;
-    static CAPS: OnceLock<Vec<EncoderCapability>> = OnceLock::new();
-    CAPS.get_or_init(|| {
-        let mut caps = mft_probe::enumerate().unwrap_or_default();
-        caps.extend(ffmpeg::probe());
-        caps
-    })
+    static MFT_CAPS: OnceLock<Vec<EncoderCapability>> = OnceLock::new();
+    MFT_CAPS.get_or_init(|| mft_probe::enumerate().unwrap_or_default())
+}
+
+#[derive(Debug, Clone)]
+struct FfmpegCapabilitySlot {
+    identity: String,
+    caps: Vec<EncoderCapability>,
+}
+
+fn ffmpeg_caps_slot() -> &'static std::sync::Mutex<Option<FfmpegCapabilitySlot>> {
+    use std::sync::{Mutex, OnceLock};
+    static FFMPEG_CAPS: OnceLock<Mutex<Option<FfmpegCapabilitySlot>>> = OnceLock::new();
+    FFMPEG_CAPS.get_or_init(|| Mutex::new(None))
+}
+
+fn ffmpeg_capability_slot(
+    existing: Option<&FfmpegCapabilitySlot>,
+    identity: &str,
+    probe: impl FnOnce() -> Vec<EncoderCapability>,
+) -> FfmpegCapabilitySlot {
+    if let Some(existing) = existing {
+        if existing.identity == identity {
+            return existing.clone();
+        }
+    }
+    FfmpegCapabilitySlot {
+        identity: identity.to_string(),
+        caps: probe(),
+    }
+}
+
+/// Identity for the replaceable FFmpeg half: managed provenance, external path, or missing.
+pub fn ffmpeg_capability_identity(
+    managed: Option<&crate::ffmpeg_runtime::ManagedRuntimeInfo>,
+    locate_path: Option<&std::path::Path>,
+) -> String {
+    if let Some(info) = managed {
+        return format!("managed:{}:{}", info.dir.display(), info.manifest_sha256);
+    }
+    if let Some(path) = locate_path {
+        return format!("external:{}", path.display());
+    }
+    "missing".to_string()
+}
+
+fn current_ffmpeg_capability_identity() -> String {
+    let local = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from);
+    let managed_dir = local
+        .as_ref()
+        .map(|path| crate::ffmpeg_install::managed_root(path));
+    let locate = ffmpeg::locate();
+    let status = crate::ffmpeg_install::runtime_status_for_dirs(
+        managed_dir.as_deref(),
+        locate.as_deref(),
+    )
+    .unwrap_or_else(|_| crate::ffmpeg_runtime::FfmpegRuntimeStatus {
+        kind: crate::ffmpeg_runtime::FfmpegDiscoveryKind::Missing,
+        managed: None,
+        locate_path: locate.clone(),
+    });
+    ffmpeg_capability_identity(status.managed.as_ref(), status.locate_path.as_deref())
+}
+
+fn ffmpeg_capabilities_cached() -> Vec<EncoderCapability> {
+    let identity = current_ffmpeg_capability_identity();
+    let slot_lock = ffmpeg_caps_slot();
+    let mut guard = match slot_lock.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let next = ffmpeg_capability_slot(guard.as_ref(), &identity, ffmpeg::probe);
+    *guard = Some(next.clone());
+    next.caps
+}
+
+/// Drop the FFmpeg capability slot and re-probe against the current runtime identity.
+pub fn refresh_ffmpeg_encoder_capabilities() -> Vec<EncoderOption> {
+    {
+        let slot_lock = ffmpeg_caps_slot();
+        let mut guard = match slot_lock.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *guard = None;
+    }
+    available_encoder_options()
+}
+
+/// Combined MFT (process-static) + FFmpeg (replaceable/versioned) capabilities.
+fn encoder_capabilities() -> Vec<EncoderCapability> {
+    let mut caps = mft_capabilities_cached().to_vec();
+    caps.extend(ffmpeg_capabilities_cached());
+    caps
 }
 
 #[cfg(test)]
@@ -1326,7 +1413,8 @@ fn build_encoder(
     events: &Sender<Event>,
 ) -> Result<(Box<dyn Encoder>, EncoderCandidate), String> {
     let preference = opts.video_encoder.preference();
-    let candidates = rank_encoders(encoder_capabilities(), &opts.decodable_codecs, preference);
+    let capabilities = encoder_capabilities();
+    let candidates = rank_encoders(&capabilities, &opts.decodable_codecs, preference);
     if candidates.is_empty() {
         return Err("init: no usable video encoder found on this system".into());
     }
@@ -2510,6 +2598,70 @@ fn is_within_temp(dir: &Path, temp_dir: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::{ffmpeg_capability_identity, ffmpeg_capability_slot};
+    use clipline_capture::{Codec, EncoderApi, EncoderBackend, EncoderCapability};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn ffmpeg_capability_slot_reuses_same_identity() {
+        let probes = AtomicUsize::new(0);
+        let first = ffmpeg_capability_slot(None, "managed:x:abc", || {
+            probes.fetch_add(1, Ordering::SeqCst);
+            vec![EncoderCapability {
+                api: EncoderApi::Ffmpeg,
+                backend: EncoderBackend::SvtAv1,
+                codecs: vec![Codec::Av1],
+            }]
+        });
+        let second = ffmpeg_capability_slot(Some(&first), "managed:x:abc", || {
+            probes.fetch_add(1, Ordering::SeqCst);
+            panic!("should not reprobe");
+        });
+        assert_eq!(first.identity, second.identity);
+        assert_eq!(first.caps.len(), second.caps.len());
+        assert_eq!(probes.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn ffmpeg_capability_slot_reprobes_when_identity_changes() {
+        let probes = AtomicUsize::new(0);
+        let first = ffmpeg_capability_slot(None, "missing", || {
+            probes.fetch_add(1, Ordering::SeqCst);
+            Vec::new()
+        });
+        let second = ffmpeg_capability_slot(Some(&first), "external:C:/ffmpeg.exe", || {
+            probes.fetch_add(1, Ordering::SeqCst);
+            vec![EncoderCapability {
+                api: EncoderApi::Ffmpeg,
+                backend: EncoderBackend::Nvenc,
+                codecs: vec![Codec::H264],
+            }]
+        });
+        assert_ne!(first.identity, second.identity);
+        assert_eq!(second.caps.len(), 1);
+        assert_eq!(probes.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn ffmpeg_capability_identity_prefers_managed_over_external() {
+        let managed = crate::ffmpeg_runtime::ManagedRuntimeInfo {
+            dir: std::path::PathBuf::from("C:/managed"),
+            ffmpeg_exe: std::path::PathBuf::from("C:/managed/ffmpeg.exe"),
+            release_tag: "tag".into(),
+            archive_sha256: "aa".into(),
+            manifest_sha256: "bb".into(),
+        };
+        assert_eq!(
+            ffmpeg_capability_identity(Some(&managed), Some(std::path::Path::new("C:/ext/ffmpeg.exe"))),
+            "managed:C:/managed:bb"
+        );
+        assert_eq!(
+            ffmpeg_capability_identity(None, Some(std::path::Path::new("C:/ext/ffmpeg.exe"))),
+            "external:C:/ext/ffmpeg.exe"
+        );
+        assert_eq!(ffmpeg_capability_identity(None, None), "missing");
+    }
+
     use super::*;
     use clipline_capture::{MockCapture, MockEncoder};
     use clipline_test_utils::TestDir;

@@ -1878,6 +1878,113 @@ function probeDecodableCodecs() {
   decodableCodecs = supported;
 }
 
+var ffmpegRuntimeSnapshot = null;
+var ffmpegRuntimeInstallPromise = null;
+var ffmpegRuntimeRetry = null;
+
+function ffmpegInstallPhase(snapshot = ffmpegRuntimeSnapshot) {
+  return String(snapshot?.state?.phase || "idle");
+}
+
+function ffmpegRuntimeUnavailable(error) {
+  return String(error || "").toLowerCase().includes("ffmpeg is not available");
+}
+
+function applyFfmpegInstallSnapshot(snapshot) {
+  if (!snapshot) return;
+  ffmpegRuntimeSnapshot = snapshot;
+  const phase = ffmpegInstallPhase(snapshot);
+  const state = snapshot.state || {};
+  const managed = snapshot.discovery === "managed_verified";
+  const active = ["checking", "downloading", "verifying", "publishing"].includes(phase);
+  const cancellable = ["checking", "downloading", "verifying"].includes(phase);
+  const total = Number(state.total) || 0;
+  const bytes = Number(state.bytes) || 0;
+  const percent = total > 0 ? Math.min(100, Math.round((bytes / total) * 100)) : 0;
+  const status = $("ffmpeg-runtime-status");
+  const progress = $("ffmpeg-runtime-progress");
+  const install = $("ffmpeg-runtime-install");
+  const cancel = $("ffmpeg-runtime-cancel");
+  const posterInstall = $("poster-runtime-install");
+
+  if (phase === "checking") status.textContent = "Checking...";
+  else if (phase === "downloading") status.textContent = `Downloading... ${percent}%`;
+  else if (phase === "verifying") status.textContent = "Verifying downloaded files...";
+  else if (phase === "publishing") status.textContent = "Finishing installation...";
+  else if (phase === "failed") status.textContent = `Install failed: ${state.message || "unknown error"}`;
+  else if (phase === "cancelled") status.textContent = "Install cancelled";
+  else if (managed) status.textContent = "Installed and verified";
+  else if (snapshot.discovery === "external_unmanaged") {
+    status.textContent = "External FFmpeg found; managed component not installed";
+  } else status.textContent = "Not installed";
+
+  progress.hidden = phase !== "downloading";
+  progress.value = percent;
+  install.hidden = active || managed;
+  install.textContent = phase === "failed" || phase === "cancelled"
+    ? "Retry Install / Repair"
+    : "Install / Repair";
+  cancel.hidden = !cancellable;
+  posterInstall.disabled = active;
+  posterInstall.textContent = active
+    ? phase === "downloading" ? `Installing... ${percent}%` : "Installing..."
+    : "Install FFmpeg";
+}
+
+async function queryFfmpegRuntimeStatus() {
+  const snapshot = await invoke("ffmpeg_runtime_status");
+  applyFfmpegInstallSnapshot(snapshot);
+  return snapshot;
+}
+
+async function ensureFfmpegRuntime(retry = null) {
+  if (typeof retry === "function") ffmpegRuntimeRetry = retry;
+  if (ffmpegRuntimeInstallPromise) return ffmpegRuntimeInstallPromise;
+
+  ffmpegRuntimeInstallPromise = invoke("ensure_ffmpeg_runtime")
+    .then((snapshot) => {
+      applyFfmpegInstallSnapshot(snapshot);
+      if (snapshot.discovery === "managed_verified") {
+        const pendingRetry = ffmpegRuntimeRetry;
+        ffmpegRuntimeRetry = null;
+        if (pendingRetry) return Promise.resolve(pendingRetry()).then(() => snapshot);
+      }
+      return snapshot;
+    })
+    .catch(async (error) => {
+      ffmpegRuntimeRetry = null;
+      try {
+        await queryFfmpegRuntimeStatus();
+      } catch (_) {
+        // Keep the original install error.
+      }
+      if (ffmpegInstallPhase() !== "cancelled") $("error").textContent = String(error);
+      throw error;
+    })
+    .finally(() => {
+      ffmpegRuntimeInstallPromise = null;
+    });
+  return ffmpegRuntimeInstallPromise;
+}
+
+async function cancelFfmpegRuntimeInstall() {
+  $("ffmpeg-runtime-cancel").disabled = true;
+  $("ffmpeg-runtime-status").textContent = "Cancelling...";
+  try {
+    const snapshot = await invoke("cancel_ffmpeg_runtime_install");
+    applyFfmpegInstallSnapshot(snapshot);
+    if (["checking", "downloading", "verifying"].includes(ffmpegInstallPhase(snapshot))) {
+      $("ffmpeg-runtime-status").textContent = "Cancelling...";
+    }
+  } finally {
+    $("ffmpeg-runtime-cancel").disabled = false;
+  }
+}
+
+function installFfmpegForPosters() {
+  return ensureFfmpegRuntime(retryUnavailablePosters);
+}
+
 async function loadVideoEncoders(lifecycleWork = captureForegroundWork()) {
   if (!lifecycleWork) return false;
   probeDecodableCodecs();

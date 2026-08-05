@@ -1284,6 +1284,13 @@ button.primary.settings-save-glow {
   min-width: 0;
 }
 
+.ffmpeg-runtime-control progress { width: 100%; }
+.ffmpeg-runtime-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .audio-control {
   display: grid;
   gap: 8px;

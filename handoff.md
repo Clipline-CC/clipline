@@ -25,6 +25,39 @@ fresh-cache capture Clippy, and warning-denied workspace Clippy are green. Manua
 recording, leave the captured display static for at least 15 seconds, resume activity, and confirm
 the recorder remains active and can save a replay.
 
+---
+
+## Checkpoint (2026-08-04): Slim-core destroyable WebView + on-demand FFmpeg
+
+Plan: `docs/superpowers/plans/2026-08-04-slim-core-webview-ffmpeg.md`.
+
+### What shipped in-tree
+- **Milestone A:** `"create": false` cold autostart; async tray/close `Destroying`→`Destroyed` with queued open; per-window frontend readiness generations + durable status/warning replay.
+- **Milestone B:** capability matrix; managed-runtime verifier separate from `locate()`; single-flight ensure/cancel/status with `archive_size`; replaceable FFmpeg encoder cache; **regular** `tauri.conf.json` no longer embeds `ffmpeg/` (standalone still may).
+
+### Budgets / measurements
+- Idle hard: **zero** Clipline WebView2 children; tree **PWS ≤120 MiB** (≤90 stretch). Harness CSV: destroy/autostart **70.9–92 MiB** PWS; recorder-stopped control **~14–15 MiB** PWS.
+- Same-process destroy rebound ≤ first destroy +15 MiB (cycle + final). Absolute commit / cross-process cold deltas = telemetry only.
+- Regular installer measured **9.35 MiB** (`9,808,604 bytes`) `Clipline_0.1.45_x64-setup.exe` after dropping `ffmpeg/` — under ≤**25 MB** hard gate; no `avcodec-*.dll` / no `avcodec` substring in setup. (Measure build used `createUpdaterArtifacts: false` locally; signed release build should stay in the same ballpark.)
+
+### Core vs Optional
+- **Core:** WGC/WASAPI, Hybrid MP4, MFT H.264, LoL markers, library/trim, Cloud, tray/hotkeys, on-demand FFmpeg *installer* UX.
+- **Optional / separate:** managed FFmpeg bytes, standalone Fixed Version WebView2, osu! enrichment, disk replay (opt-in), native HEVC/AV1 preview, FFmpeg-free share export (deferred).
+
+### Operator notes
+- Tray/close destroys the UI; Open recreates and rehydrates via `frontend_ready`.
+- `ensure_ffmpeg_runtime` is no-op only for `ManagedVerified` LOCALAPPDATA trees; PATH/override = `ExternalUnmanaged`.
+- Do **not** default disk replay on; Cloud stays Core.
+
+### PR #139 review fixes (2026-08-05)
+- Managed FFmpeg install/status/cancel is reachable from Settings and from blocked poster, audio-preview, and shareable Copy Clip actions; successful installs refresh encoder capabilities and retry the blocked action.
+- Cancellation remains worker-owned through extraction and crosses a locked, non-cancellable publish boundary; failed/cancelled workers clean staging before publishing terminal state.
+- Runtime hashing streams in 64 KiB chunks, extraction hashes while copying, status verification runs off the async/UI thread, and successful publication reuses staged verification instead of rereading the full runtime tree.
+- A failed WebView destroy restores the live frontend readiness generation and lifecycle mode instead of leaving the shell stuck in `Destroying`.
+- The standalone/offline Tauri overlay retains the FFmpeg verification preflight even though the regular slim config no longer runs or bundles it.
+
+---
+
 ## Checkpoint (2026-08-04): Nightly 0.1.45
 
 Plan: `docs/superpowers/plans/2026-08-04-nightly-0.1.45.md` (`59a358b`).

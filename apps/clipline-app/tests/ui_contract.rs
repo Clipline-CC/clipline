@@ -322,19 +322,44 @@ fn windows_installer_repairs_webview2_with_bootstrapper() {
 }
 
 #[test]
-fn installer_bundles_ffmpeg_for_thumbnail_generation() {
+fn configured_main_window_is_not_created_at_startup() {
+    let config: serde_json::Value =
+        serde_json::from_str(&tauri_config()).expect("tauri.conf.json should parse");
+    let create = config
+        .pointer("/app/windows/0/create")
+        .and_then(|value| value.as_bool());
+    assert_eq!(
+        create,
+        Some(false),
+        "main window config must remain a builder template; cold --autostart creates no WebView"
+    );
+    let app = app_rs();
+    assert!(
+        app.contains("autostart launch leaving Destroyed shell without webview"),
+        "autostart setup must not build or hide a startup webview"
+    );
+}
+
+#[test]
+fn regular_installer_omits_ffmpeg_resources_for_on_demand_runtime() {
     let config: serde_json::Value =
         serde_json::from_str(&tauri_config()).expect("tauri.conf.json should parse");
     let resources = config
         .pointer("/bundle/resources")
         .and_then(serde_json::Value::as_array)
-        .expect("bundle.resources should be listed");
+        .cloned()
+        .unwrap_or_default();
     assert!(
         resources
             .iter()
-            .any(|resource| resource.as_str() == Some("ffmpeg/")),
-        "fresh installs need the LGPL ffmpeg resource bundle so local gallery posters can be generated"
+            .all(|resource| resource.as_str() != Some("ffmpeg/")),
+        "regular installer must not embed ffmpeg/; managed runtime is on-demand"
     );
+    assert!(
+        config.pointer("/build/beforeBundleCommand").is_none(),
+        "regular SKU must not run verify-ffmpeg-resource beforeBundleCommand"
+    );
+
     let standalone: serde_json::Value = serde_json::from_str(&tauri_standalone_config())
         .expect("tauri.standalone.conf.json should parse");
     let standalone_resources = standalone
@@ -345,16 +370,15 @@ fn installer_bundles_ffmpeg_for_thumbnail_generation() {
         standalone_resources
             .iter()
             .any(|resource| resource.as_str() == Some("ffmpeg/")),
-        "standalone installs must keep the ffmpeg resource when overlaying WebView2 resources"
+        "standalone/offline SKU may still bundle ffmpeg beside Fixed Version WebView2"
     );
 
     let app = app_rs();
     assert!(
-        app.contains("BaseDirectory::Resource")
-            && app.contains("configure_bundled_ffmpeg")
+        app.contains("configure_bundled_ffmpeg")
             && app.contains("ffmpeg/ffmpeg.exe")
-            && app.contains("clipline_capture::ffmpeg::set_bundled_ffmpeg"),
-        "Tauri setup must register the bundled ffmpeg resource path before thumbnails or encoder probing run"
+            && app.contains("bundled ffmpeg resource missing"),
+        "setup must tolerate a missing bundled ffmpeg resource on the regular SKU"
     );
 }
 
@@ -416,9 +440,18 @@ fn frontend_reports_webview_readiness_to_native_shell() {
         app.contains("fn frontend_ready<R: Runtime>(")
             && app.contains("runtime: tauri::State<RuntimeState>")
             && app.contains("startup_warnings: tauri::State<StartupWarnings>")
-            && app.contains("runtime.current_waiting_status()")
+            && app.contains("readiness: tauri::State<FrontendReadinessState>")
+            && app.contains("startup_warnings.snapshot()")
+            && app.contains("runtime.durable_recorder_status_for_replay()")
             && app.contains("frontend_ready,"),
-        "Rust shell must expose frontend_ready with durable startup diagnostics and recorder status replay"
+        "Rust shell must expose frontend_ready with generation-scoped readiness and durable status/warning replay"
+    );
+    assert!(
+        app.contains("struct FrontendReadinessState")
+            && app.contains("fn arm_frontend_ready_watchdog<R: Runtime>(")
+            && app.contains("watchdog_should_fire(")
+            && app.contains("begin_generation("),
+        "native shell must track frontend readiness per window generation"
     );
     assert!(
         js.contains("invoke(\"frontend_ready\")")
@@ -1263,11 +1296,13 @@ fn review_player_owns_all_controls() {
             && !main_js().contains("is_timeline_marker"),
         "supported games must expose persisted League match detail controls in the settings dialog"
     );
+    let settings = read_ui_js("settings.js");
+    let render_games = js_function_body(&settings, "renderGamePlugins");
     assert!(
-        main_js().contains("empty.textContent = \"no supported games available\"")
-            && !main_js().contains("not installed")
-            && !main_js().contains("repair available")
-            && !main_js().contains("Package is current"),
+        render_games.contains("empty.textContent = \"no supported games available\"")
+            && !render_games.contains("not installed")
+            && !render_games.contains("repair available")
+            && !render_games.contains("Package is current"),
         "Settings > Games copy should describe built-in supported games, not installable packages"
     );
     assert!(
@@ -2553,9 +2588,14 @@ fn native_background_lifecycle_releases_heavy_frontend_state() {
     let suspend_helper = &js[suspend_start..close_review_start];
 
     assert!(
-        tray_helper.contains("publish_background_window(app, WindowLifecycleMode::Tray)")
+        tray_helper.contains("WindowLifecycleMode::Destroying")
+            && tray_helper.contains("window.destroy()")
             && tray_helper.contains("WINDOW_LIFECYCLE_EVENT"),
-        "native close-to-tray must publish durable lifecycle state after hiding"
+        "native close-to-tray must destroy the webview and publish Destroying"
+    );
+    assert!(
+        !app.contains("fn hide_autostart_webviews"),
+        "create:false makes hide_autostart_webviews obsolete"
     );
     assert!(
         js.contains("listen(\"window-lifecycle\"")
@@ -3503,8 +3543,8 @@ fn library_has_cloud_source_tab() {
     }
     for required in [
         "id=\"poster-runtime-warning\"",
-        "id=\"poster-runtime-retry\"",
-        "check antivirus quarantine",
+        "id=\"poster-runtime-install\"",
+        "optional FFmpeg component",
     ] {
         assert!(
             html.contains(required),
@@ -3512,10 +3552,9 @@ fn library_has_cloud_source_tab() {
         );
     }
     assert!(
-        js.contains(
-            "$(\"poster-runtime-retry\").addEventListener(\"click\", retryUnavailablePosters)"
-        ),
-        "the thumbnail runtime warning must expose an in-process retry"
+        js.contains("$(\"poster-runtime-install\").addEventListener(\"click\"")
+            && js.contains("installFfmpegForPosters()"),
+        "the thumbnail runtime warning must expose the managed FFmpeg installer"
     );
     assert!(
         css.contains(".poster-runtime-warning[hidden] { display: none; }")
@@ -3815,6 +3854,207 @@ fn deck_status_success_toasts_auto_clear() {
             "progress status should stay explicit via `{required}`"
         );
     }
+}
+
+#[test]
+fn ffmpeg_capability_cache_is_replaceable_after_managed_install() {
+    let service = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/service.rs"))
+        .expect("read service.rs");
+    let install =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ffmpeg_install.rs"))
+            .expect("read ffmpeg_install.rs");
+    assert!(
+        service.contains("fn mft_capabilities_cached(")
+            && service.contains("fn ffmpeg_capabilities_cached(")
+            && service.contains("fn refresh_ffmpeg_encoder_capabilities(")
+            && service.contains("fn ffmpeg_capability_identity("),
+        "service must split process-static MFT caps from replaceable FFmpeg caps"
+    );
+    assert!(
+        !service.contains("static CAPS: OnceLock<Vec<EncoderCapability>>"),
+        "combined OnceLock encoder cache must be gone"
+    );
+    assert!(
+        install.contains("refresh_ffmpeg_encoder_capabilities()")
+            && install.contains("encoders-changed"),
+        "managed ensure must refresh FFmpeg caps and notify the UI"
+    );
+}
+
+#[test]
+fn ffmpeg_install_commands_are_native_and_queryable() {
+    let install =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ffmpeg_install.rs"))
+            .expect("read ffmpeg_install.rs");
+    let app = app_rs();
+    let manifest =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("ffmpeg-runtime.json"))
+            .expect("read ffmpeg-runtime.json");
+
+    for required in [
+        "enum FfmpegInstallState",
+        "Downloading {",
+        "fn ffmpeg_runtime_status(",
+        "async fn ensure_ffmpeg_runtime(",
+        "fn cancel_ffmpeg_runtime_install(",
+        "fn sweep_abandoned_staging(",
+        "archive_size",
+        "FFMPEG_INSTALL_EVENT",
+    ] {
+        assert!(
+            install.contains(required),
+            "ffmpeg_install.rs must expose `{required}`"
+        );
+    }
+    assert!(
+        manifest.contains("\"archive_size\": 70103338"),
+        "committed manifest must pin exact archive_size bytes"
+    );
+    assert!(
+        app.contains("crate::ffmpeg_install::ffmpeg_runtime_status")
+            && app.contains("crate::ffmpeg_install::ensure_ffmpeg_runtime")
+            && app.contains("crate::ffmpeg_install::cancel_ffmpeg_runtime_install")
+            && app.contains("FfmpegInstallController::default()"),
+        "app must manage install controller and expose status/ensure/cancel commands"
+    );
+    assert!(
+        app.contains("ffmpeg_staging_startup_sweep_failed"),
+        "startup must sweep abandoned ffmpeg staging"
+    );
+}
+
+#[test]
+fn ffmpeg_install_is_reachable_from_settings_and_blocked_library_actions() {
+    let html = index_html();
+    let main = main_js();
+    let settings = read_ui_js("settings.js");
+    let library = read_ui_js("library.js");
+    let review = read_ui_js("review-player.js");
+
+    for required in [
+        "id=\"ffmpeg-runtime-status\"",
+        "id=\"ffmpeg-runtime-progress\"",
+        "id=\"ffmpeg-runtime-install\"",
+        "id=\"ffmpeg-runtime-cancel\"",
+        "id=\"poster-runtime-install\"",
+    ] {
+        assert!(
+            html.contains(required),
+            "managed FFmpeg UI must expose `{required}`"
+        );
+    }
+    for required in [
+        "invoke(\"ffmpeg_runtime_status\")",
+        "invoke(\"ensure_ffmpeg_runtime\")",
+        "invoke(\"cancel_ffmpeg_runtime_install\")",
+        "function applyFfmpegInstallSnapshot(",
+    ] {
+        assert!(
+            settings.contains(required),
+            "settings runtime controller must contain `{required}`"
+        );
+    }
+    assert!(
+        main.contains("listen(\"ffmpeg-install\"")
+            && main.contains("listen(\"encoders-changed\"")
+            && main.contains("installFfmpegForPosters"),
+        "frontend must subscribe to native progress/capability refresh and wire poster install"
+    );
+    assert!(
+        library.contains("showPosterRuntimeWarning")
+            && review.contains("ffmpegRuntimeUnavailable(error)")
+            && review.contains("ensureFfmpegRuntime("),
+        "poster, audio-preview, and Copy Clip failures must offer install-and-retry"
+    );
+}
+
+#[test]
+fn ffmpeg_managed_runtime_verifier_is_separate_from_locate() {
+    let runtime =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ffmpeg_runtime.rs"))
+            .expect("read ffmpeg_runtime.rs");
+    let capture = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/clipline-capture/src/ffmpeg.rs"),
+    )
+    .expect("read capture ffmpeg.rs");
+
+    for required in [
+        "fn verify_managed_ffmpeg_runtime(",
+        "fn ffmpeg_runtime_status(",
+        "struct ManagedRuntimeInfo",
+        "ManagedRuntimeVerifyError",
+        "fn managed_runtime_needs_repair(",
+        "PROVENANCE.json",
+        "manifest_sha256",
+    ] {
+        assert!(
+            runtime.contains(required),
+            "ffmpeg_runtime.rs must expose managed verifier surface `{required}`"
+        );
+    }
+    assert!(
+        capture.contains("pub fn locate()")
+            && capture.contains("CLIPLINE_FFMPEG")
+            && capture.contains("LOCALAPPDATA"),
+        "locate() remains discovery-only and must stay in clipline-capture"
+    );
+    assert!(
+        !capture.contains("verify_managed_ffmpeg_runtime"),
+        "managed verification must not live inside locate()"
+    );
+}
+
+#[test]
+fn ffmpeg_capability_matrix_contracts_managed_runtime_surfaces() {
+    let runtime =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ffmpeg_runtime.rs"))
+            .expect("read ffmpeg_runtime.rs");
+    let library = library_rs();
+    let js = main_js();
+    let gallery = read_ui_js("gallery-window-core.js");
+
+    for required in [
+        "enum FfmpegRequirementReason",
+        "ShareableClipboardExport",
+        "AudioSidecarExtract",
+        "Poster",
+        "SvtAv1",
+        "FfmpegBackendEncoder",
+        "enum FfmpegDiscoveryKind",
+        "ManagedVerified",
+        "ExternalUnmanaged",
+        "Missing",
+        "fn recording_without_ffmpeg_possible",
+        "fn ffmpeg_required_for",
+        "fn ensure_ffmpeg_runtime_is_noop",
+        "Install the FFmpeg runtime to copy a shareable clip.",
+        "Install the FFmpeg runtime to generate clip posters.",
+    ] {
+        assert!(
+            runtime.contains(required),
+            "ffmpeg_runtime.rs must expose capability-matrix surface `{required}`"
+        );
+    }
+
+    assert!(
+        library.contains("ffmpeg is not available for a shareable clipboard export")
+            && library.contains("ffmpeg is not available for poster extraction"),
+        "library paths must keep actionable missing-FFmpeg errors for share export and posters"
+    );
+    assert!(
+        gallery.contains("posterRuntimeUnavailable")
+            && gallery.contains("ffmpeg is not available for poster extraction"),
+        "gallery core must recognize the poster missing-runtime error"
+    );
+    assert!(
+        js.contains("copyClipToClipboard")
+            && js.contains("copy_clip_to_clipboard"),
+        "Copy Clip UI must remain the share-export entry point that will host the install affordance"
+    );
+    assert!(
+        runtime.contains("archive_size") && runtime.contains("fn free_space_required_bytes"),
+        "managed download manifest and free-space planner must carry archive_size"
+    );
 }
 
 #[test]

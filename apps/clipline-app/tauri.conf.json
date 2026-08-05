@@ -4,11 +4,7 @@
   "version": "0.1.45",
   "identifier": "io.clipline.app",
   "build": {
-    "frontendDist": "ui",
-    "beforeBundleCommand": {
-      "script": "%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\\verify-ffmpeg-resource.ps1",
-      "cwd": "../.."
-    }
+    "frontendDist": "ui"
   },
   "app": {
     "withGlobalTauri": true,
@@ -21,7 +17,8 @@
         "minHeight": 640,
         "resizable": true,
         "decorations": false,
-        "visible": false
+        "visible": false,
+        "create": false
       }
     ],
     "security": {
@@ -44,11 +41,10 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
-    "createUpdaterArtifacts": true,
-    "resources": [
-      "ffmpeg/"
+    "targets": [
+      "nsis"
     ],
+    "createUpdaterArtifacts": true,
     "publisher": "Clipline",
     "shortDescription": "Lightweight, ad-free game recorder with automatic event markers",
     "longDescription": "Clipline is a lightweight, ad-free, open-source game recorder for Windows — anti-cheat-safe capture, a ShadowPlay-style replay buffer, and automatic in-game event markers (League of Legends), with a built-in review/trim player.",
