@@ -75,6 +75,17 @@ var windowLifecycleListenerReady = listen("window-lifecycle", (event) => {
   applyWindowLifecycleSnapshot(event.payload);
 });
 
+listen("ffmpeg-install", (event) => {
+  applyFfmpegInstallSnapshot(event.payload);
+});
+
+listen("encoders-changed", (event) => {
+  videoEncoders = Array.isArray(event.payload) ? event.payload : [];
+  videoEncodersLoaded = true;
+  renderVideoEncoderSelect();
+  if (currentSettings) syncRecordingFields();
+});
+
 listen("game-detection", (e) => {
   activeDetectedGame = e.payload || null;
   if (activeDetectedGame?.active) {
@@ -131,7 +142,17 @@ $("gallery-select-toggle").addEventListener("click", () => {
 $("bulk-select-all").addEventListener("click", selectAllVisible);
 $("bulk-clear").addEventListener("click", clearSelection);
 $("bulk-delete").addEventListener("click", bulkDeleteSelected);
-$("poster-runtime-retry").addEventListener("click", retryUnavailablePosters);
+$("poster-runtime-install").addEventListener("click", () => {
+  void installFfmpegForPosters().catch(() => {});
+});
+$("ffmpeg-runtime-install").addEventListener("click", () => {
+  void ensureFfmpegRuntime().catch(() => {});
+});
+$("ffmpeg-runtime-cancel").addEventListener("click", () => {
+  void cancelFfmpegRuntimeInstall().catch((error) => {
+    $("error").textContent = String(error);
+  });
+});
 $("gallery-sort").addEventListener("change", (ev) => { gallerySort = ev.target.value; renderClips(); });
 $("gallery-group").addEventListener("change", (ev) => { galleryGroup = ev.target.value; renderClips(); });
 $("gallery-filter").addEventListener("click", (ev) => {
@@ -800,6 +821,9 @@ async function loadInitialSettings(lifecycleWork = captureForegroundWork()) {
   return true;
 }
 reportFrontendReady();
+queryFfmpegRuntimeStatus().catch((error) => {
+  console.warn("ffmpeg runtime status failed:", error);
+});
 setInterval(() => {
   if (!document.hidden && captureForegroundWork()) refreshMemoryUsage();
 }, 2000);

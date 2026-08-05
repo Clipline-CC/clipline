@@ -26,6 +26,13 @@ Plan: `docs/superpowers/plans/2026-08-04-slim-core-webview-ffmpeg.md`.
 - `ensure_ffmpeg_runtime` is no-op only for `ManagedVerified` LOCALAPPDATA trees; PATH/override = `ExternalUnmanaged`.
 - Do **not** default disk replay on; Cloud stays Core.
 
+### PR #139 review fixes (2026-08-05)
+- Managed FFmpeg install/status/cancel is reachable from Settings and from blocked poster, audio-preview, and shareable Copy Clip actions; successful installs refresh encoder capabilities and retry the blocked action.
+- Cancellation remains worker-owned through extraction and crosses a locked, non-cancellable publish boundary; failed/cancelled workers clean staging before publishing terminal state.
+- Runtime hashing streams in 64 KiB chunks, extraction hashes while copying, status verification runs off the async/UI thread, and successful publication reuses staged verification instead of rereading the full runtime tree.
+- A failed WebView destroy restores the live frontend readiness generation and lifecycle mode instead of leaving the shell stuck in `Destroying`.
+- The standalone/offline Tauri overlay retains the FFmpeg verification preflight even though the regular slim config no longer runs or bundles it.
+
 ---
 
 ## Checkpoint (2026-08-04): Nightly 0.1.45

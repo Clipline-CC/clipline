@@ -554,6 +554,20 @@ fn ffmpeg_release_staging_is_pinned_allowlisted_and_attributed() {
         standalone_text.contains("\"ffmpeg/\""),
         "standalone/offline SKU may still bundle the verified ffmpeg resource"
     );
+    let standalone: serde_json::Value =
+        serde_json::from_str(&standalone_text).expect("valid standalone Tauri config");
+    assert_eq!(
+        standalone.pointer("/build/beforeBundleCommand/script").and_then(|value| value.as_str()),
+        Some("%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\\verify-ffmpeg-resource.ps1"),
+        "standalone/offline SKU must verify its bundled FFmpeg payload before bundling"
+    );
+    assert_eq!(
+        standalone
+            .pointer("/build/beforeBundleCommand/cwd")
+            .and_then(|value| value.as_str()),
+        Some("../.."),
+        "standalone FFmpeg preflight must run from the workspace root"
+    );
     let release = fs::read_to_string(root.join("docs/release.workflow.yml"))
         .expect("read release workflow template");
     let stage_position = release

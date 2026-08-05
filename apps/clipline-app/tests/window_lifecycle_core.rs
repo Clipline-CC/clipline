@@ -227,4 +227,3 @@ fn destroying_or_destroyed_shaped_snapshots_invalidate_foreground_work() {
         r#"{"enteredBackground":true,"oldWorkDuringDestroying":false,"oldWorkDuringDestroyed":false,"captureWhileDestroyed":null,"destroyedState":{"known":true,"backgrounded":true,"nativeRevision":3,"generation":3,"dirty":true}}"#
     );
 }
-

@@ -4,8 +4,8 @@
 //! `clipline_capture::ffmpeg::locate` remains discovery of a runnable binary —
 //! it does **not** mean ManagedVerified. Download/ensure state machine is B3.
 
-use std::fs;
-use std::io;
+use std::fs::{self, File};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use clipline_capture::{Codec, EncoderApi, EncoderBackend, EncoderCapability};
@@ -159,23 +159,51 @@ pub struct ManagedRuntimeInfo {
 /// Why a managed tree failed verification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ManagedRuntimeVerifyError {
-    NotDirectory { path: PathBuf },
-    MissingFile { name: String },
-    UnexpectedFile { name: String },
-    SizeMismatch { name: String, expected: u64, actual: u64 },
-    HashMismatch { name: String, expected: String, actual: String },
+    NotDirectory {
+        path: PathBuf,
+    },
+    MissingFile {
+        name: String,
+    },
+    UnexpectedFile {
+        name: String,
+    },
+    SizeMismatch {
+        name: String,
+        expected: u64,
+        actual: u64,
+    },
+    HashMismatch {
+        name: String,
+        expected: String,
+        actual: String,
+    },
     MissingProvenance,
-    InvalidProvenance { message: String },
-    ProvenanceMismatch { field: String, expected: String, actual: String },
-    InvalidManifest { message: String },
-    Io { message: String },
+    InvalidProvenance {
+        message: String,
+    },
+    ProvenanceMismatch {
+        field: String,
+        expected: String,
+        actual: String,
+    },
+    InvalidManifest {
+        message: String,
+    },
+    Io {
+        message: String,
+    },
 }
 
 impl std::fmt::Display for ManagedRuntimeVerifyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotDirectory { path } => {
-                write!(f, "managed FFmpeg path is not a directory: {}", path.display())
+                write!(
+                    f,
+                    "managed FFmpeg path is not a directory: {}",
+                    path.display()
+                )
             }
             Self::MissingFile { name } => write!(f, "managed FFmpeg missing required file: {name}"),
             Self::UnexpectedFile { name } => {
@@ -241,25 +269,34 @@ fn hex_sha256(bytes: &[u8]) -> String {
 }
 
 fn hex_sha256_file(path: &Path) -> Result<String, ManagedRuntimeVerifyError> {
-    let bytes = fs::read(path)?;
-    Ok(hex_sha256(&bytes))
+    let mut file = File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
 }
 
 /// Parse the committed `ffmpeg-runtime.json` allowlist/manifest.
 pub fn parse_ffmpeg_runtime_manifest(
     json: &str,
 ) -> Result<FfmpegRuntimeManifest, ManagedRuntimeVerifyError> {
-    let manifest: FfmpegRuntimeManifest = serde_json::from_str(json).map_err(|error| {
-        ManagedRuntimeVerifyError::InvalidManifest {
+    let manifest: FfmpegRuntimeManifest =
+        serde_json::from_str(json).map_err(|error| ManagedRuntimeVerifyError::InvalidManifest {
             message: error.to_string(),
-        }
-    })?;
+        })?;
     if manifest.schema_version != 1 {
         return Err(ManagedRuntimeVerifyError::InvalidManifest {
-            message: format!(
-                "schema_version must be 1, got {}",
-                manifest.schema_version
-            ),
+            message: format!("schema_version must be 1, got {}", manifest.schema_version),
         });
     }
     if manifest.allowed_files.is_empty() {
@@ -327,13 +364,10 @@ fn verify_regular_file(
     expected_size: u64,
     expected_sha256: &str,
 ) -> Result<String, ManagedRuntimeVerifyError> {
-    let meta = fs::metadata(path).map_err(|_| ManagedRuntimeVerifyError::MissingFile {
-        name: name.into(),
-    })?;
+    let meta = fs::metadata(path)
+        .map_err(|_| ManagedRuntimeVerifyError::MissingFile { name: name.into() })?;
     if !meta.is_file() {
-        return Err(ManagedRuntimeVerifyError::MissingFile {
-            name: name.into(),
-        });
+        return Err(ManagedRuntimeVerifyError::MissingFile { name: name.into() });
     }
     let actual_size = meta.len();
     if actual_size != expected_size {
@@ -396,12 +430,7 @@ pub fn verify_managed_ffmpeg_runtime(
                 name: file.staged_name.clone(),
             });
         }
-        verify_regular_file(
-            &path,
-            &file.staged_name,
-            file.size,
-            &file.sha256,
-        )?;
+        verify_regular_file(&path, &file.staged_name, file.size, &file.sha256)?;
     }
 
     let provenance_path = dir.join("PROVENANCE.json");
@@ -409,12 +438,11 @@ pub fn verify_managed_ffmpeg_runtime(
         return Err(ManagedRuntimeVerifyError::MissingProvenance);
     }
     let provenance_json = fs::read_to_string(&provenance_path)?;
-    let provenance: FfmpegProvenance =
-        serde_json::from_str(&provenance_json).map_err(|error| {
-            ManagedRuntimeVerifyError::InvalidProvenance {
-                message: error.to_string(),
-            }
-        })?;
+    let provenance: FfmpegProvenance = serde_json::from_str(&provenance_json).map_err(|error| {
+        ManagedRuntimeVerifyError::InvalidProvenance {
+            message: error.to_string(),
+        }
+    })?;
     if provenance.schema_version != 1 {
         return Err(ManagedRuntimeVerifyError::InvalidProvenance {
             message: format!(
@@ -425,7 +453,11 @@ pub fn verify_managed_ffmpeg_runtime(
     }
 
     assert_exact("provider", &manifest.provider, &provenance.provider)?;
-    assert_exact("release_tag", &manifest.release_tag, &provenance.release_tag)?;
+    assert_exact(
+        "release_tag",
+        &manifest.release_tag,
+        &provenance.release_tag,
+    )?;
     assert_exact(
         "published_at",
         &manifest.published_at,
@@ -436,7 +468,11 @@ pub fn verify_managed_ffmpeg_runtime(
         &manifest.archive_name,
         &provenance.archive_name,
     )?;
-    assert_exact("archive_url", &manifest.archive_url, &provenance.archive_url)?;
+    assert_exact(
+        "archive_url",
+        &manifest.archive_url,
+        &provenance.archive_url,
+    )?;
     assert_exact(
         "archive_sha256",
         &manifest.archive_sha256.to_ascii_lowercase(),
@@ -530,9 +566,8 @@ pub fn ffmpeg_runtime_status(
     manifest_sha256: &str,
     locate_path: Option<&Path>,
 ) -> FfmpegRuntimeStatus {
-    let managed = managed_dir.and_then(|dir| {
-        verify_managed_ffmpeg_runtime(dir, manifest, manifest_sha256).ok()
-    });
+    let managed = managed_dir
+        .and_then(|dir| verify_managed_ffmpeg_runtime(dir, manifest, manifest_sha256).ok());
     if let Some(info) = managed {
         return FfmpegRuntimeStatus {
             kind: FfmpegDiscoveryKind::ManagedVerified,
@@ -557,18 +592,14 @@ pub fn ffmpeg_runtime_status(
 /// Short UI copy for an install affordance tied to a requirement reason.
 pub fn install_affordance_copy(reason: FfmpegRequirementReason) -> &'static str {
     match reason {
-        FfmpegRequirementReason::Poster => {
-            "Install the FFmpeg runtime to generate clip posters."
-        }
+        FfmpegRequirementReason::Poster => "Install the FFmpeg runtime to generate clip posters.",
         FfmpegRequirementReason::AudioSidecarExtract => {
             "Install the FFmpeg runtime to extract audio tracks."
         }
         FfmpegRequirementReason::ShareableClipboardExport => {
             "Install the FFmpeg runtime to copy a shareable clip."
         }
-        FfmpegRequirementReason::SvtAv1 => {
-            "Install the FFmpeg runtime to use SVT-AV1 encoding."
-        }
+        FfmpegRequirementReason::SvtAv1 => "Install the FFmpeg runtime to use SVT-AV1 encoding.",
         FfmpegRequirementReason::FfmpegBackendEncoder => {
             "Install the FFmpeg runtime to use FFmpeg encoder backends."
         }
@@ -606,7 +637,10 @@ mod tests {
     #[test]
     fn mft_capability_allows_recording_without_ffmpeg() {
         assert!(recording_without_ffmpeg_possible(&[mft_h264()]));
-        assert!(!recording_without_ffmpeg_possible(&[ffmpeg_nvenc(), svt_av1()]));
+        assert!(!recording_without_ffmpeg_possible(&[
+            ffmpeg_nvenc(),
+            svt_av1()
+        ]));
         assert!(!recording_without_ffmpeg_possible(&[]));
         assert!(!recording_without_ffmpeg_possible(&[EncoderCapability {
             api: EncoderApi::Mft,
@@ -795,16 +829,8 @@ mod tests {
             &manifest,
             "bb".repeat(32).as_str(),
             &[
-                (
-                    "ffmpeg.exe".into(),
-                    12,
-                    hex_sha256(b"ffmpeg-bytes"),
-                ),
-                (
-                    "avcodec-62.dll".into(),
-                    13,
-                    hex_sha256(b"avcodec-bytes"),
-                ),
+                ("ffmpeg.exe".into(), 12, hex_sha256(b"ffmpeg-bytes")),
+                ("avcodec-62.dll".into(), 13, hex_sha256(b"avcodec-bytes")),
             ],
         );
         let err = verify_managed_ffmpeg_runtime(dir.path(), &manifest, &"aa".repeat(32))

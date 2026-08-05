@@ -304,7 +304,8 @@
 - [x] Remove the regular-SKU `beforeBundleCommand` that runs
       `scripts/verify-ffmpeg-resource.ps1` (it must not stage FFmpeg into the slim installer).
 - [x] Keep `ffmpeg/` in `tauri.standalone.conf.json` so the offline/Fixed-Version SKU remains
-      self-contained; document that standalone is not the lightweight installer.
+      self-contained, and keep the FFmpeg verifier as a standalone-only `beforeBundleCommand`;
+      document that standalone is not the lightweight installer.
 - [x] Keep `configure_bundled_ffmpeg` tolerant of a missing resource path (standalone/dev still
       register it when present; regular installs rely on on-demand managed runtime / locate).
 - [x] Update UI contracts: regular config must not list `ffmpeg/`; standalone must; no

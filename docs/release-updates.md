@@ -99,8 +99,9 @@ Do **not** stage FFmpeg before a regular `cargo tauri build` if you are measurin
 the lightweight SKU. Measured regular setup after the drop: **9.35 MiB**.
 
 **Standalone / offline SKU** still lists `ffmpeg/` in `tauri.standalone.conf.json`.
-For that build only: stage with `scripts/stage-ffmpeg-resource.ps1`, verify with
-`scripts/verify-ffmpeg-resource.ps1`, then `cargo tauri build --config tauri.standalone.conf.json`.
+For that build only: stage with `scripts/stage-ffmpeg-resource.ps1`, then run
+`cargo tauri build --config tauri.standalone.conf.json`; its standalone-only
+`beforeBundleCommand` runs `scripts/verify-ffmpeg-resource.ps1` automatically.
 The regular `tauri.conf.json` no longer runs `beforeBundleCommand` verify-ffmpeg.
 A GitHub Actions workflow can automate this later, but pushing workflow files
 requires a token with GitHub's `workflow` scope.

@@ -1296,11 +1296,13 @@ fn review_player_owns_all_controls() {
             && !main_js().contains("is_timeline_marker"),
         "supported games must expose persisted League match detail controls in the settings dialog"
     );
+    let settings = read_ui_js("settings.js");
+    let render_games = js_function_body(&settings, "renderGamePlugins");
     assert!(
-        main_js().contains("empty.textContent = \"no supported games available\"")
-            && !main_js().contains("not installed")
-            && !main_js().contains("repair available")
-            && !main_js().contains("Package is current"),
+        render_games.contains("empty.textContent = \"no supported games available\"")
+            && !render_games.contains("not installed")
+            && !render_games.contains("repair available")
+            && !render_games.contains("Package is current"),
         "Settings > Games copy should describe built-in supported games, not installable packages"
     );
     assert!(
@@ -3541,8 +3543,8 @@ fn library_has_cloud_source_tab() {
     }
     for required in [
         "id=\"poster-runtime-warning\"",
-        "id=\"poster-runtime-retry\"",
-        "check antivirus quarantine",
+        "id=\"poster-runtime-install\"",
+        "optional FFmpeg component",
     ] {
         assert!(
             html.contains(required),
@@ -3550,10 +3552,9 @@ fn library_has_cloud_source_tab() {
         );
     }
     assert!(
-        js.contains(
-            "$(\"poster-runtime-retry\").addEventListener(\"click\", retryUnavailablePosters)"
-        ),
-        "the thumbnail runtime warning must expose an in-process retry"
+        js.contains("$(\"poster-runtime-install\").addEventListener(\"click\"")
+            && js.contains("installFfmpegForPosters()"),
+        "the thumbnail runtime warning must expose the managed FFmpeg installer"
     );
     assert!(
         css.contains(".poster-runtime-warning[hidden] { display: none; }")
@@ -3857,14 +3858,11 @@ fn deck_status_success_toasts_auto_clear() {
 
 #[test]
 fn ffmpeg_capability_cache_is_replaceable_after_managed_install() {
-    let service = fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/service.rs"),
-    )
-    .expect("read service.rs");
-    let install = fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ffmpeg_install.rs"),
-    )
-    .expect("read ffmpeg_install.rs");
+    let service = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/service.rs"))
+        .expect("read service.rs");
+    let install =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ffmpeg_install.rs"))
+            .expect("read ffmpeg_install.rs");
     assert!(
         service.contains("fn mft_capabilities_cached(")
             && service.contains("fn ffmpeg_capabilities_cached(")
@@ -3885,15 +3883,13 @@ fn ffmpeg_capability_cache_is_replaceable_after_managed_install() {
 
 #[test]
 fn ffmpeg_install_commands_are_native_and_queryable() {
-    let install = fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ffmpeg_install.rs"),
-    )
-    .expect("read ffmpeg_install.rs");
+    let install =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ffmpeg_install.rs"))
+            .expect("read ffmpeg_install.rs");
     let app = app_rs();
-    let manifest = fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("ffmpeg-runtime.json"),
-    )
-    .expect("read ffmpeg-runtime.json");
+    let manifest =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("ffmpeg-runtime.json"))
+            .expect("read ffmpeg-runtime.json");
 
     for required in [
         "enum FfmpegInstallState",
@@ -3928,14 +3924,57 @@ fn ffmpeg_install_commands_are_native_and_queryable() {
 }
 
 #[test]
+fn ffmpeg_install_is_reachable_from_settings_and_blocked_library_actions() {
+    let html = index_html();
+    let main = main_js();
+    let settings = read_ui_js("settings.js");
+    let library = read_ui_js("library.js");
+    let review = read_ui_js("review-player.js");
+
+    for required in [
+        "id=\"ffmpeg-runtime-status\"",
+        "id=\"ffmpeg-runtime-progress\"",
+        "id=\"ffmpeg-runtime-install\"",
+        "id=\"ffmpeg-runtime-cancel\"",
+        "id=\"poster-runtime-install\"",
+    ] {
+        assert!(
+            html.contains(required),
+            "managed FFmpeg UI must expose `{required}`"
+        );
+    }
+    for required in [
+        "invoke(\"ffmpeg_runtime_status\")",
+        "invoke(\"ensure_ffmpeg_runtime\")",
+        "invoke(\"cancel_ffmpeg_runtime_install\")",
+        "function applyFfmpegInstallSnapshot(",
+    ] {
+        assert!(
+            settings.contains(required),
+            "settings runtime controller must contain `{required}`"
+        );
+    }
+    assert!(
+        main.contains("listen(\"ffmpeg-install\"")
+            && main.contains("listen(\"encoders-changed\"")
+            && main.contains("installFfmpegForPosters"),
+        "frontend must subscribe to native progress/capability refresh and wire poster install"
+    );
+    assert!(
+        library.contains("showPosterRuntimeWarning")
+            && review.contains("ffmpegRuntimeUnavailable(error)")
+            && review.contains("ensureFfmpegRuntime("),
+        "poster, audio-preview, and Copy Clip failures must offer install-and-retry"
+    );
+}
+
+#[test]
 fn ffmpeg_managed_runtime_verifier_is_separate_from_locate() {
-    let runtime = fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ffmpeg_runtime.rs"),
-    )
-    .expect("read ffmpeg_runtime.rs");
+    let runtime =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ffmpeg_runtime.rs"))
+            .expect("read ffmpeg_runtime.rs");
     let capture = fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../crates/clipline-capture/src/ffmpeg.rs"),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/clipline-capture/src/ffmpeg.rs"),
     )
     .expect("read capture ffmpeg.rs");
 
@@ -3967,10 +4006,9 @@ fn ffmpeg_managed_runtime_verifier_is_separate_from_locate() {
 
 #[test]
 fn ffmpeg_capability_matrix_contracts_managed_runtime_surfaces() {
-    let runtime = fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ffmpeg_runtime.rs"),
-    )
-    .expect("read ffmpeg_runtime.rs");
+    let runtime =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ffmpeg_runtime.rs"))
+            .expect("read ffmpeg_runtime.rs");
     let library = library_rs();
     let js = main_js();
     let gallery = read_ui_js("gallery-window-core.js");
@@ -4014,8 +4052,7 @@ fn ffmpeg_capability_matrix_contracts_managed_runtime_surfaces() {
         "Copy Clip UI must remain the share-export entry point that will host the install affordance"
     );
     assert!(
-        runtime.contains("archive_size")
-            && runtime.contains("fn free_space_required_bytes"),
+        runtime.contains("archive_size") && runtime.contains("fn free_space_required_bytes"),
         "managed download manifest and free-space planner must carry archive_size"
     );
 }

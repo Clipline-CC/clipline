@@ -145,6 +145,12 @@ struct FrontendReadinessState {
     destroy_started: Mutex<Option<Instant>>,
 }
 
+#[derive(Clone, Copy)]
+struct FrontendReadinessCheckpoint {
+    generation: u64,
+    ready_generation: u64,
+}
+
 impl Default for FrontendReadinessState {
     fn default() -> Self {
         Self {
@@ -181,14 +187,33 @@ impl FrontendReadinessState {
         next
     }
 
-    fn clear_for_destroy(&self) {
+    fn clear_for_destroy(&self) -> FrontendReadinessCheckpoint {
         let previous = self.generation.swap(0, Ordering::AcqRel);
+        let checkpoint = FrontendReadinessCheckpoint {
+            generation: previous,
+            ready_generation: self.ready_generation(),
+        };
         // next_generation stays monotonic so recreate never reuses a ready/watchdog id.
         if let Ok(mut started) = self.destroy_started.lock() {
             *started = Some(Instant::now());
         }
         log_diagnostic(format!(
             "main window generation cleared for destroy previous={previous}"
+        ));
+        checkpoint
+    }
+
+    fn restore_after_failed_destroy(&self, checkpoint: FrontendReadinessCheckpoint) {
+        self.generation
+            .store(checkpoint.generation, Ordering::Release);
+        self.ready_generation
+            .store(checkpoint.ready_generation, Ordering::Release);
+        if let Ok(mut started) = self.destroy_started.lock() {
+            *started = None;
+        }
+        log_diagnostic(format!(
+            "main window generation restored after failed destroy generation={}",
+            checkpoint.generation
         ));
     }
 
@@ -202,9 +227,7 @@ impl FrontendReadinessState {
     }
 
     fn is_ready(&self, generation: u64) -> bool {
-        generation != 0
-            && self.generation() == generation
-            && self.ready_generation() == generation
+        generation != 0 && self.generation() == generation && self.ready_generation() == generation
     }
 
     /// Returns true when this call newly arms the watchdog for the generation.
@@ -212,7 +235,9 @@ impl FrontendReadinessState {
         if generation == 0 || self.is_ready(generation) {
             return false;
         }
-        let previous = self.watchdog_armed_generation.swap(generation, Ordering::AcqRel);
+        let previous = self
+            .watchdog_armed_generation
+            .swap(generation, Ordering::AcqRel);
         previous != generation
     }
 }
@@ -489,7 +514,9 @@ fn main_window_open_target_for(
     main_window_present: bool,
 ) -> MainWindowOpenTarget {
     match mode {
-        WindowLifecycleMode::Destroying | WindowLifecycleMode::Destroyed => MainWindowOpenTarget::NewMain,
+        WindowLifecycleMode::Destroying | WindowLifecycleMode::Destroyed => {
+            MainWindowOpenTarget::NewMain
+        }
         _ => main_window_open_target(main_window_present),
     }
 }
@@ -503,12 +530,16 @@ fn main_window_shell_state<R: Runtime>(app: &AppHandle<R>) -> MainWindowShellSta
 }
 
 fn persist_main_window_shell_pending<R: Runtime>(app: &AppHandle<R>, state: &MainWindowShellState) {
-    app.state::<MainWindowOpenQueue>().set_pending(state.pending_open);
+    app.state::<MainWindowOpenQueue>()
+        .set_pending(state.pending_open);
 }
 
-fn prepare_frontend_readiness_for_destroy<R: Runtime>(app: &AppHandle<R>) {
-    app.state::<FrontendReadinessState>().clear_for_destroy();
+fn prepare_frontend_readiness_for_destroy<R: Runtime>(
+    app: &AppHandle<R>,
+) -> FrontendReadinessCheckpoint {
+    let checkpoint = app.state::<FrontendReadinessState>().clear_for_destroy();
     WEBVIEW_REPAIR_NOTICE_SHOWN.store(false, Ordering::Release);
+    checkpoint
 }
 
 fn window_state_summary<R: Runtime>(window: &WebviewWindow<R>) -> String {
@@ -703,7 +734,9 @@ fn frontend_ready<R: Runtime>(
     let generation = readiness.mark_ready();
     log_diagnostic(format!(
         "frontend_ready received generation={} webviews={}",
-        generation.map(|value| value.to_string()).unwrap_or_else(|| "none".into()),
+        generation
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "none".into()),
         webview_labels(&app)
     ));
     if let Some(status) = runtime.durable_recorder_status_for_replay() {
@@ -731,7 +764,6 @@ impl StartupWarnings {
             )],
         }
     }
-
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -1881,7 +1913,7 @@ fn send_main_window_to_tray<R: Runtime>(app: &AppHandle<R>) -> Result<(), String
 
     // Strong RAM path: destroy the WebView tree. Taskbar minimize still uses
     // hide/Low for restore latency.
-    prepare_frontend_readiness_for_destroy(app);
+    let readiness_checkpoint = prepare_frontend_readiness_for_destroy(app);
     let mut state = main_window_shell_state(app);
     begin_close_to_tray_destroy(&mut state);
     persist_main_window_shell_pending(app, &state);
@@ -1893,12 +1925,22 @@ fn send_main_window_to_tray<R: Runtime>(app: &AppHandle<R>) -> Result<(), String
     }
 
     for (label, window) in windows {
-        log_window_state(&format!("send-to-tray before destroy label={label}"), &window);
+        log_window_state(
+            &format!("send-to-tray before destroy label={label}"),
+            &window,
+        );
         let result = window.destroy();
         log_diagnostic(format!(
             "send-to-tray destroy requested label={label}: {}",
             result_debug(result.as_ref())
         ));
+        if let Err(error) = result {
+            app.state::<FrontendReadinessState>()
+                .restore_after_failed_destroy(readiness_checkpoint);
+            app.state::<MainWindowOpenQueue>().set_pending(false);
+            publish_window_lifecycle(app, mode);
+            return Err(format!("destroy main window {label}: {error}"));
+        }
         // Do not assert the label is gone: Tauri queues destruction and
         // WindowEvent::Destroyed completes the transition.
     }
@@ -1909,7 +1951,7 @@ fn complete_main_window_destroyed<R: Runtime>(app: &AppHandle<R>) -> Result<(), 
     let remaining = app
         .webview_windows()
         .into_keys()
-        .filter(|label| is_app_window_label(&label))
+        .filter(|label| is_app_window_label(label))
         .count();
     if remaining > 0 {
         log_diagnostic(format!(
@@ -3477,13 +3519,31 @@ mod tests {
             readiness.ready_generation()
         ));
         // An old timer must not fire against a newer window.
-        assert!(!watchdog_should_fire(first, readiness.generation(), readiness.ready_generation()));
+        assert!(!watchdog_should_fire(
+            first,
+            readiness.generation(),
+            readiness.ready_generation()
+        ));
         assert_eq!(readiness.mark_ready(), Some(second));
         assert!(!watchdog_should_fire(
             second,
             readiness.generation(),
             readiness.ready_generation()
         ));
+    }
+
+    #[test]
+    fn failed_destroy_restores_the_live_frontend_generation() {
+        let readiness = FrontendReadinessState::default();
+        let generation = readiness.begin_generation();
+        assert_eq!(readiness.mark_ready(), Some(generation));
+
+        let checkpoint = readiness.clear_for_destroy();
+        assert_eq!(readiness.generation(), 0);
+        readiness.restore_after_failed_destroy(checkpoint);
+
+        assert_eq!(readiness.generation(), generation);
+        assert!(readiness.is_ready(generation));
     }
 
     #[test]

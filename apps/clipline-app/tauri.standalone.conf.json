@@ -1,5 +1,11 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
+  "build": {
+    "beforeBundleCommand": {
+      "script": "%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\\verify-ffmpeg-resource.ps1",
+      "cwd": "../.."
+    }
+  },
   "bundle": {
     "resources": [
       "ffmpeg/",

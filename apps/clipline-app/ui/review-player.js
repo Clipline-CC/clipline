@@ -432,7 +432,21 @@ async function runAudioPreviewRequest(request) {
     prepared = null;
   }
   if (error && !transition.start && previewRequestStillCurrent(request)) {
-    restoreAudibleAudioSelection(`audio preview failed: ${error}`);
+    if (ffmpegRuntimeUnavailable(error)) {
+      selectedAudioTrackIds = new Set(currentReviewAudioTrackIds);
+      renderAudioTrackPanel();
+      setDeckStatus("FFmpeg is needed to preview this audio selection.");
+      setDeckStatusAction("Install FFmpeg", () => {
+        void ensureFfmpegRuntime(() => {
+          if (!currentClip || currentClip.path !== request.clipPath) return;
+          selectedAudioTrackIds = new Set(request.trackIds);
+          renderAudioTrackPanel();
+          requestSelectedAudioPreview();
+        }).catch(() => {});
+      });
+    } else {
+      restoreAudibleAudioSelection(`audio preview failed: ${error}`);
+    }
   }
 
   if (transition.start) void runAudioPreviewRequest(transition.start);
@@ -832,6 +846,7 @@ function resumeForegroundSettingsWork() {
     ensureDisplaysLoaded(lifecycleWork),
     ensureAudioDevicesLoaded(lifecycleWork),
     ensureVideoEncodersLoaded(lifecycleWork),
+    queryFfmpegRuntimeStatus(),
   ])
     .then(() => {
       if (isForegroundWorkCurrent(lifecycleWork)) renderVisibleSettingsSection();
@@ -1889,8 +1904,16 @@ async function copyClipToClipboard(event) {
     });
     setDeckStatus(original ? "original clip copied" : "shareable clip copied", { transient: true });
   } catch (e) {
-    setDeckStatus("");
-    $("error").textContent = e;
+    const error = String(e);
+    if (!original && ffmpegRuntimeUnavailable(error)) {
+      setDeckStatus("FFmpeg is needed to prepare a shareable clip.");
+      setDeckStatusAction("Install FFmpeg", () => {
+        void ensureFfmpegRuntime(() => copyClipToClipboard({ shiftKey: false })).catch(() => {});
+      });
+    } else {
+      setDeckStatus("");
+      $("error").textContent = error;
+    }
   } finally {
     $("copy-clip").disabled = false;
   }
