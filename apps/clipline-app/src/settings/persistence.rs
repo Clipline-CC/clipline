@@ -48,6 +48,7 @@ impl SettingsLoadError {
 pub(crate) struct SettingsStartupLoad {
     pub(crate) settings: AppSettings,
     pub(crate) warnings: Vec<String>,
+    pub(crate) first_run: bool,
 }
 
 impl AppSettings {
@@ -73,6 +74,7 @@ impl AppSettings {
             Ok((settings, _)) => SettingsStartupLoad {
                 settings,
                 warnings: Vec::new(),
+                first_run: false,
             },
             Err(SettingsLoadError::Missing) => match load_classified(&backup) {
                 Ok((settings, _)) => SettingsStartupLoad {
@@ -82,10 +84,12 @@ impl AppSettings {
                         backup.display(),
                         path.display()
                     )],
+                    first_run: false,
                 },
                 Err(SettingsLoadError::Missing) => SettingsStartupLoad {
                     settings: Self::default(),
                     warnings: Vec::new(),
+                    first_run: true,
                 },
                 Err(backup_error) => startup_defaults_after_failure(
                     path,
@@ -107,6 +111,7 @@ impl AppSettings {
                     SettingsStartupLoad {
                         settings,
                         warnings: vec![warning],
+                        first_run: false,
                     }
                 }
                 Err(backup_error) => {
@@ -341,6 +346,7 @@ fn startup_defaults_after_failure(
     SettingsStartupLoad {
         settings: AppSettings::default(),
         warnings: vec![warning],
+        first_run: false,
     }
 }
 

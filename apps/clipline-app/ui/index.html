@@ -894,6 +894,193 @@
     </main>
   </div>
 
+  <section id="first-run-setup" class="first-run-setup" role="dialog" aria-modal="true" aria-labelledby="first-run-title" hidden>
+    <aside class="first-run-sidebar">
+      <div>
+        <img class="first-run-logo" src="assets/clipline-icon.svg" alt="" aria-hidden="true" />
+        <span class="first-run-kicker">First-time setup</span>
+      </div>
+      <ol class="first-run-steps" aria-label="Setup progress">
+        <li data-first-run-step="0"><span>1</span>Basics</li>
+        <li data-first-run-step="1"><span>2</span>Capture + recording</li>
+        <li data-first-run-step="2"><span>3</span>Games</li>
+        <li data-first-run-step="3"><span>4</span>Review</li>
+      </ol>
+      <p class="first-run-privacy"><strong>Private by default.</strong><br />Your recordings stay on this PC unless you choose to upload one.</p>
+    </aside>
+
+    <div class="first-run-main">
+      <div id="first-run-content" class="first-run-content">
+        <section id="first-run-basics" class="first-run-page" data-first-run-page="0">
+          <span class="first-run-kicker">Basic setup</span>
+          <h1 id="first-run-title">Set up the essentials.</h1>
+          <p class="first-run-lede">Choose where clips go, how much space they can use, and how you want to open Clipline.</p>
+          <div class="first-run-card">
+            <div class="first-run-row">
+              <label for="first-run-hotkey"><strong>Replay button hotkey</strong><span>Saves the most recent replay.</span></label>
+              <input id="first-run-hotkey" value="Alt+F10" autocomplete="off" spellcheck="false" />
+            </div>
+            <div class="first-run-row">
+              <label for="first-run-media-dir"><strong>Media folder</strong><span>Where clips and recordings are saved.</span></label>
+              <div class="first-run-folder-control">
+                <input id="first-run-media-dir" autocomplete="off" spellcheck="false" />
+                <button id="first-run-browse" type="button">Browse</button>
+              </div>
+            </div>
+            <div class="first-run-row">
+              <label for="first-run-quota"><strong>Disk quota</strong><span>Oldest clips are removed when this limit is reached.</span></label>
+              <div class="first-run-number-control">
+                <input id="first-run-quota" type="number" min="1" max="1000" value="10" />
+                <span>GB</span>
+              </div>
+            </div>
+            <div class="first-run-row">
+              <div><strong>Launch on startup</strong><span>Start Clipline when you sign in to Windows.</span></div>
+              <label class="first-run-check"><input id="first-run-startup" type="checkbox" checked />Open Clipline automatically</label>
+            </div>
+          </div>
+        </section>
+
+        <section id="first-run-capture" class="first-run-page" data-first-run-page="1" hidden>
+          <span class="first-run-kicker">Capture + recording</span>
+          <h1>Choose what Clipline records.</h1>
+          <p class="first-run-lede">Set the capture source, audio devices, and default replay quality.</p>
+          <div class="first-run-card">
+            <h2>Audio</h2>
+            <div class="first-run-row first-run-row-expanded">
+              <div><strong>Audio output</strong><span>Sound from the selected Windows playback device.</span></div>
+              <div class="first-run-control-stack">
+                <label class="first-run-check"><input id="first-run-output-enabled" type="checkbox" checked />Record output audio</label>
+                <label class="first-run-check"><input id="first-run-split-output" type="checkbox" />Experimental app audio tracks</label>
+                <select id="first-run-output-device" aria-label="Audio output device"><option value="">Default output device</option></select>
+                <div class="first-run-range-line">
+                  <input id="first-run-output-volume" aria-label="Audio output volume" type="range" min="0" max="2" step="0.05" value="1" />
+                  <output id="first-run-output-volume-label">100%</output>
+                </div>
+              </div>
+            </div>
+            <div class="first-run-row first-run-row-expanded">
+              <div><strong>Audio input</strong><span>Voice input mixed into saved clip audio.</span></div>
+              <div class="first-run-control-stack">
+                <label class="first-run-check"><input id="first-run-mic-enabled" type="checkbox" />Record microphone</label>
+                <select id="first-run-mic-device" aria-label="Audio input device"><option value="">Default microphone</option></select>
+                <div class="first-run-range-line">
+                  <input id="first-run-mic-volume" aria-label="Audio input volume" type="range" min="0" max="2" step="0.05" value="1" />
+                  <output id="first-run-mic-volume-label">100%</output>
+                </div>
+                <label class="first-run-check"><input id="first-run-mic-mono" type="checkbox" checked />Mono</label>
+                <div class="first-run-mic-test">
+                  <button id="first-run-test-mic" type="button">Test mic</button>
+                  <div class="first-run-mic-meter" aria-hidden="true"><span id="first-run-mic-meter-fill"></span></div>
+                  <span id="first-run-mic-test-status">Not testing</span>
+                </div>
+              </div>
+            </div>
+
+            <h2>Capture</h2>
+            <div class="first-run-row">
+              <label for="first-run-capture-target"><strong>Capture target</strong><span>What the recorder captures when no custom game is active.</span></label>
+              <select id="first-run-capture-target"><option value="primary_monitor">Primary display</option></select>
+            </div>
+            <div class="first-run-row">
+              <div><strong>Pause recorder when no game is open</strong><span>Reduce background load until an enabled game is detected.</span></div>
+              <label class="first-run-check"><input id="first-run-pause-no-game" type="checkbox" checked />Pause automatically</label>
+            </div>
+
+            <h2>Recording</h2>
+            <div class="first-run-row first-run-row-expanded">
+              <div><strong>Save length</strong><span>How much recent footage each replay saves.</span></div>
+              <div class="first-run-control-stack">
+                <input id="first-run-replay" type="range" min="5" max="120" step="5" value="30" aria-label="Save length" />
+                <div class="first-run-scale"><span>5 sec</span><span>1 min</span><span>2 min</span></div>
+                <output id="first-run-replay-label">Save Replay writes the last 30 sec.</output>
+              </div>
+            </div>
+            <div class="first-run-row">
+              <label for="first-run-resolution"><strong>Output size</strong><span>Caps saved video resolution while preserving aspect ratio.</span></label>
+              <div class="first-run-control-stack">
+                <select id="first-run-resolution">
+                  <option value="source">Source</option>
+                  <option value="1440p">1440p</option>
+                  <option value="1080p" selected>1080p</option>
+                  <option value="720p">720p</option>
+                  <option value="480p">480p</option>
+                </select>
+                <output id="first-run-resolution-label">1080p output, up to 1920 × 1080.</output>
+              </div>
+            </div>
+            <div class="first-run-row first-run-row-expanded">
+              <div><strong>Video quality</strong><span>Higher quality keeps more detail and uses more disk space.</span></div>
+              <div class="first-run-control-stack">
+                <input id="first-run-quality" type="range" min="0" max="3" step="1" value="1" aria-label="Video quality" />
+                <div class="first-run-scale"><span>Compact</span><span>Balanced</span><span>Sharp</span><span>Maximum</span></div>
+                <output id="first-run-quality-label">Balanced quality — good default.</output>
+              </div>
+            </div>
+            <div class="first-run-row first-run-row-expanded">
+              <div><strong>FPS</strong><span>Higher FPS feels smoother and costs more performance.</span></div>
+              <div class="first-run-control-stack">
+                <input id="first-run-fps" type="range" min="0" max="3" step="1" value="1" aria-label="FPS" />
+                <div class="first-run-scale"><span>30 FPS</span><span>60 FPS</span><span>90 FPS</span><span>120 FPS</span></div>
+                <output id="first-run-fps-label">60 FPS — good default for most games.</output>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="first-run-games" class="first-run-page" data-first-run-page="2" hidden>
+          <span class="first-run-kicker">Games</span>
+          <h1>Find the games you play.</h1>
+          <p class="first-run-lede">Use Clipline's built-in game integrations, then detect any other games installed on this PC.</p>
+          <div class="first-run-section-head"><strong>Supported games</strong><span>Built-in integrations with game-specific features.</span></div>
+          <div id="first-run-supported-games" class="first-run-supported-games"></div>
+          <div class="first-run-section-head"><strong>Other games</strong><span>Add basic replay capture for games Clipline finds.</span></div>
+          <div class="first-run-discovery">
+            <div class="first-run-discovery-head">
+              <div><strong>Detect games on this PC</strong><span>Only local app information is checked. Nothing is uploaded.</span></div>
+              <button id="first-run-detect-games" type="button">Detect Games</button>
+            </div>
+            <div id="first-run-game-scan-status" class="first-run-empty-state"><strong>No scan yet</strong><span>Run detection to find installed and currently running games.</span></div>
+            <div id="first-run-detected-games" class="first-run-detected-games" hidden></div>
+            <div id="first-run-detected-actions" class="first-run-detected-actions" hidden>
+              <span id="first-run-detected-count">No games selected</span>
+              <button id="first-run-add-games" type="button" disabled>Add selected games</button>
+            </div>
+            <div id="first-run-added-games" class="first-run-added-games" role="status" hidden></div>
+          </div>
+        </section>
+
+        <section id="first-run-review" class="first-run-page" data-first-run-page="3" hidden>
+          <span class="first-run-kicker">Ready to go</span>
+          <h1>Here's how Clipline will work.</h1>
+          <p class="first-run-lede">Review your choices before Clipline starts recording.</p>
+          <div class="first-run-summary">
+            <div><span>Replay hotkey</span><strong id="first-run-summary-hotkey"></strong></div>
+            <div><span>Media folder</span><strong id="first-run-summary-folder"></strong></div>
+            <div><span>Disk quota</span><strong id="first-run-summary-quota"></strong></div>
+            <div><span>Launch on startup</span><strong id="first-run-summary-startup"></strong></div>
+            <div><span>Audio output</span><strong id="first-run-summary-output"></strong></div>
+            <div><span>Audio input</span><strong id="first-run-summary-input"></strong></div>
+            <div><span>Capture target</span><strong id="first-run-summary-capture"></strong></div>
+            <div><span>Pause without a game</span><strong id="first-run-summary-pause"></strong></div>
+            <div><span>Save length</span><strong id="first-run-summary-replay"></strong></div>
+            <div><span>Output size</span><strong id="first-run-summary-resolution"></strong></div>
+            <div><span>Video quality</span><strong id="first-run-summary-quality"></strong></div>
+            <div><span>FPS</span><strong id="first-run-summary-fps"></strong></div>
+            <div><span>Supported games</span><strong id="first-run-summary-supported"></strong></div>
+            <div><span>Other games</span><strong id="first-run-summary-other"></strong></div>
+          </div>
+        </section>
+      </div>
+      <footer class="first-run-actions">
+        <span id="first-run-error" role="alert"></span>
+        <button id="first-run-back" type="button" hidden>Back</button>
+        <button id="first-run-next" class="primary" type="button">Continue</button>
+        <button id="first-run-finish" class="primary" type="button" hidden>Start Clipline</button>
+      </footer>
+    </div>
+  </section>
+
   <dialog id="confirm-dialog">
     <div class="confirm-body">
       <strong id="confirm-title">Delete this clip?</strong>
@@ -1100,6 +1287,7 @@
   <script src="cloud.js"></script>
   <script src="review-player.js"></script>
   <script src="support.js"></script>
+  <script src="first-run.js"></script>
   <script type="module" src="bootstrap.mjs"></script>
 </body>
 </html>

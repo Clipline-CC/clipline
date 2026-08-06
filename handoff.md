@@ -4,6 +4,40 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-06): first-run setup wizard
+
+Plan: `docs/superpowers/plans/2026-08-06-first-run-setup-wizard.md` (`b681e28`).
+
+Clipline now distinguishes a genuinely new install (neither `settings.json` nor its recovery copy
+exists) from a recovered or damaged existing install. New installs keep the recorder stopped and
+open a four-page, non-skippable setup flow inside the native shell. Existing installs retain their
+previous startup behavior, and any successful settings save clears the in-process first-run flag so
+a recreated WebView cannot reopen onboarding.
+
+The wizard implements the approved Basics, Capture + recording, Games, and Review screens. Its
+intentional first-run defaults are Alt+F10, the normal media directory, 10 GB, launch on startup,
+output audio on/default/100%, microphone off/default/100%/mono, primary display, pause without a
+game, 30-second replay, 1080p, Balanced quality, and 60 FPS. Supported game profiles come from the
+real plugin catalog and start enabled according to their profile defaults. Other Games runs the
+existing installed-game detector inline and converts selected results through the same custom-game
+normalization used by Settings. Device enumeration, display enumeration, mic testing, folder
+selection, hotkey parsing, and range presets are also shared with the existing UI.
+
+Finishing copies the wizard choices into the existing Settings model, calls the existing
+`save_settings` transaction, and only then starts recording. Save failures remain visible without
+dismissing the wizard. First-run background controls are inert, the titlebar remains available, and
+keyboard Tab can leave the hotkey recorder.
+
+Persistence/startup classification and UI contracts cover the new behavior. Full workspace tests,
+fresh-cache warning-denied workspace Clippy, JavaScript syntax checks, formatting, and diff checks
+are green. A development build launched against isolated `%APPDATA%`; Basics, device-backed Capture
++ recording, supported Games, and a real installed-game scan were visually checked at the normal
+1200×760 inner window size. Manual retest: walk all four pages, optionally test the microphone and
+game detector, finish setup, confirm recording starts, then restart and confirm the wizard does not
+return.
+
+---
+
 ## Checkpoint (2026-08-05): sparse-capture GOP watchdog
 
 Plan: `docs/superpowers/plans/2026-08-05-sparse-capture-gop-watchdog.md` (`0d5ec35`).

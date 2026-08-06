@@ -1482,20 +1482,25 @@ function syncAudioFields() {
   $("set-output-device").disabled = !outputEnabled;
   $("set-output-volume").disabled = !outputEnabled;
   $("set-audio-split-output").disabled = !outputEnabled;
-  $("set-mic-device").disabled = micTestRunning;
-  $("set-mic-volume").disabled = micTestRunning;
-  $("set-mic-mono").disabled = micTestRunning;
+  const testingHere = micTestRunning && micTestSurface === "settings";
+  $("set-mic-device").disabled = testingHere;
+  $("set-mic-volume").disabled = testingHere;
+  $("set-mic-mono").disabled = testingHere;
   $("test-mic").disabled = false;
-  $("test-mic").textContent = micTestRunning ? "Stop testing" : "Test mic";
+  $("test-mic").textContent = testingHere ? "Stop testing" : "Test mic";
   syncRangeProgress($("set-output-volume"));
   syncRangeProgress($("set-mic-volume"));
   $("output-volume-summary").textContent = volumeLabel($("set-output-volume").value);
   $("mic-volume-summary").textContent = volumeLabel($("set-mic-volume").value);
+  if (typeof syncFirstRunAudioFields === "function") syncFirstRunAudioFields();
 }
 
 function setMicTestStatus(message, level = 0) {
-  $("mic-test-status").textContent = message;
-  $("mic-meter-fill").style.width = `${Math.round(Math.max(0, Math.min(1, level)) * 100)}%`;
+  const firstRun = micTestSurface === "first-run";
+  const status = $(firstRun ? "first-run-mic-test-status" : "mic-test-status");
+  const meter = $(firstRun ? "first-run-mic-meter-fill" : "mic-meter-fill");
+  if (status) status.textContent = message;
+  if (meter) meter.style.width = `${Math.round(Math.max(0, Math.min(1, level)) * 100)}%`;
 }
 
 function micMeterLevel(result) {
@@ -1574,13 +1579,15 @@ function stopMicTestUi(message = "stopped") {
   setMicTestStatus(message, 0);
 }
 
-async function testMic() {
-  $("error").textContent = "";
+async function testMic(surface = "settings") {
+  surface = surface === "first-run" ? "first-run" : "settings";
+  const error = $(surface === "first-run" ? "first-run-error" : "error");
+  error.textContent = "";
   if (micTestRunning) {
     try {
       await invoke("stop_microphone_test");
     } catch (e) {
-      $("error").textContent = e;
+      error.textContent = e;
     }
     stopMicTestUi("stopped");
     return;
@@ -1588,6 +1595,7 @@ async function testMic() {
 
   const lifecycleWork = captureForegroundWork();
   if (!lifecycleWork) return;
+  micTestSurface = surface;
   micTestRunning = true;
   syncAudioFields();
   setMicTestStatus("listening", 0);
@@ -1598,9 +1606,9 @@ async function testMic() {
       return;
     }
     await invoke("start_microphone_test", {
-      deviceId: selectedDeviceId("set-mic-device"),
-      volume: Number($("set-mic-volume").value),
-      mono: $("set-mic-mono").checked,
+      deviceId: selectedDeviceId(surface === "first-run" ? "first-run-mic-device" : "set-mic-device"),
+      volume: Number($(surface === "first-run" ? "first-run-mic-volume" : "set-mic-volume").value),
+      mono: $(surface === "first-run" ? "first-run-mic-mono" : "set-mic-mono").checked,
     });
     if (!isForegroundWorkCurrent(lifecycleWork)) {
       await invoke("stop_microphone_test").catch(() => {});
@@ -1612,7 +1620,7 @@ async function testMic() {
       return;
     }
     stopMicTestUi("error");
-    $("error").textContent = e;
+    error.textContent = e;
   }
 }
 

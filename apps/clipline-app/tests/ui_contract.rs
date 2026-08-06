@@ -22,6 +22,7 @@ const APP_UI_JS: &[&str] = &[
     "cloud.js",
     "review-player.js",
     "support.js",
+    "first-run.js",
     "main.js",
 ];
 
@@ -4165,6 +4166,7 @@ fn ui_is_split_into_markup_styles_and_logic() {
         "src=\"library.js\"",
         "src=\"cloud.js\"",
         "src=\"review-player.js\"",
+        "src=\"first-run.js\"",
         "type=\"module\" src=\"bootstrap.mjs\"",
     ] {
         assert!(html.contains(asset), "index.html must reference {asset}");
@@ -4218,6 +4220,78 @@ fn ui_is_split_into_markup_styles_and_logic() {
             "script tag #{i} must not have an inline body"
         );
     }
+}
+
+#[test]
+fn first_run_setup_covers_approved_defaults_and_save_flow() {
+    let html = index_html();
+    let css = styles_css();
+    let wizard = read_ui_js("first-run.js");
+    let main = read_ui_js("main.js");
+
+    for required in [
+        "id=\"first-run-setup\"",
+        "id=\"first-run-basics\"",
+        "id=\"first-run-capture\"",
+        "id=\"first-run-games\"",
+        "id=\"first-run-review\"",
+        "id=\"first-run-hotkey\" value=\"Alt+F10\"",
+        "id=\"first-run-media-dir\"",
+        "id=\"first-run-quota\" type=\"number\" min=\"1\" max=\"1000\" value=\"10\"",
+        "id=\"first-run-startup\" type=\"checkbox\" checked",
+        "id=\"first-run-output-enabled\" type=\"checkbox\" checked",
+        "id=\"first-run-output-device\"",
+        "id=\"first-run-output-volume\"",
+        "id=\"first-run-split-output\"",
+        "id=\"first-run-mic-enabled\"",
+        "id=\"first-run-mic-device\"",
+        "id=\"first-run-mic-volume\"",
+        "id=\"first-run-mic-mono\" type=\"checkbox\" checked",
+        "id=\"first-run-test-mic\"",
+        "id=\"first-run-capture-target\"",
+        "id=\"first-run-pause-no-game\" type=\"checkbox\" checked",
+        "id=\"first-run-replay\" type=\"range\" min=\"5\" max=\"120\" step=\"5\" value=\"30\"",
+        "id=\"first-run-resolution\"",
+        "<option value=\"1080p\" selected>1080p</option>",
+        "id=\"first-run-quality\" type=\"range\" min=\"0\" max=\"3\" step=\"1\" value=\"1\"",
+        "id=\"first-run-fps\" type=\"range\" min=\"0\" max=\"3\" step=\"1\" value=\"1\"",
+        "id=\"first-run-supported-games\"",
+        "id=\"first-run-detect-games\"",
+        "id=\"first-run-detected-games\"",
+        "id=\"first-run-finish\"",
+        "id=\"first-run-error\"",
+    ] {
+        assert!(
+            html.contains(required),
+            "first-run setup must include `{required}`"
+        );
+    }
+
+    assert!(
+        css.contains(".first-run-setup[hidden]")
+            && css.contains(".first-run-empty-state[hidden]")
+            && css.contains("display: none"),
+        "first-run overlay and dynamic states need explicit hidden rules"
+    );
+    for required in [
+        "invoke(\"detect_installed_games\"",
+        "invoke(\"save_settings\"",
+        "invoke(\"set_recording\", { recording: true })",
+        "customGameFromDetectedCandidate",
+        "gamePluginSetting",
+        "if (event.key === \"Tab\") return",
+        "$(\"first-run-next\").focus()",
+    ] {
+        assert!(
+            wizard.contains(required),
+            "first-run controller must include `{required}`"
+        );
+    }
+    assert!(
+        main.contains("invoke(\"needs_first_run_setup\")")
+            && main.contains("openFirstRunSetup(settings)"),
+        "startup must ask the backend whether to open the setup wizard"
+    );
 }
 
 #[test]
