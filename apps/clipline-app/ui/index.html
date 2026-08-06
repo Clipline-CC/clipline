@@ -894,6 +894,78 @@
     </main>
   </div>
 
+  <dialog id="first-run-dialog" class="first-run-dialog" aria-labelledby="first-run-title">
+    <div class="first-run-shell">
+      <header class="first-run-head">
+        <span class="first-run-kicker">FIRST-TIME SETUP</span>
+        <h2 id="first-run-title">Welcome to Clipline</h2>
+        <span id="first-run-progress" class="hint" aria-live="polite">Step 1 of 3</span>
+      </header>
+
+      <div class="first-run-body">
+        <section id="first-run-step-1" class="first-run-step" data-first-run-step="0">
+          <h3>Your clips stay yours</h3>
+          <p>Clipline keeps a rolling replay locally on this PC. Nothing is uploaded unless you explicitly connect Clipline Cloud and choose to upload it.</p>
+          <div class="first-run-note">
+            <strong>Capture is paused during setup.</strong>
+            <span>Recording begins only after you finish or choose the defaults.</span>
+          </div>
+          <ul class="first-run-facts">
+            <li>Clips save to your Videos\Clipline folder.</li>
+            <li>Old clips are cleaned up at the configured storage limit.</li>
+            <li>You can change every choice later in Settings.</li>
+          </ul>
+        </section>
+
+        <section id="first-run-step-2" class="first-run-step" data-first-run-step="1" hidden>
+          <h3>Choose when Clipline records</h3>
+          <fieldset class="first-run-choices">
+            <legend>Capture behavior</legend>
+            <label class="first-run-choice">
+              <input type="radio" name="first-run-capture" value="games_only" checked />
+              <span><strong>Supported games only</strong><small>Recommended · waits quietly until an enabled game is open.</small></span>
+            </label>
+            <label class="first-run-choice">
+              <input type="radio" name="first-run-capture" value="desktop" />
+              <span><strong>Keep a desktop replay ready</strong><small>Captures the primary display whenever no supported game is open.</small></span>
+            </label>
+          </fieldset>
+          <label class="first-run-toggle">
+            <input id="first-run-full-sessions" type="checkbox" checked />
+            <span><strong>Save supported-game sessions automatically</strong><small>Save Replay still works during a full-session recording.</small></span>
+          </label>
+        </section>
+
+        <section id="first-run-step-3" class="first-run-step" data-first-run-step="2" hidden>
+          <h3>Choose your audio</h3>
+          <div class="first-run-choices">
+            <label class="first-run-toggle">
+              <input id="first-run-desktop-audio" type="checkbox" checked />
+              <span><strong>Record desktop audio</strong><small>Uses the default Windows playback device.</small></span>
+            </label>
+            <label class="first-run-toggle">
+              <input id="first-run-microphone" type="checkbox" />
+              <span><strong>Record my microphone</strong><small>Off by default. Uses the default Windows microphone.</small></span>
+            </label>
+          </div>
+          <div class="first-run-hotkey">
+            <span>Save the last minute at any time</span>
+            <kbd>Alt</kbd><span>+</span><kbd>F10</kbd>
+          </div>
+          <div id="first-run-summary" class="first-run-note" aria-live="polite"></div>
+        </section>
+      </div>
+
+      <footer class="first-run-actions">
+        <button id="first-run-defaults" type="button">Use defaults</button>
+        <span id="first-run-status" class="hint" role="status"></span>
+        <button id="first-run-back" type="button" hidden>Back</button>
+        <button id="first-run-next" type="button" class="primary">Continue</button>
+        <button id="first-run-finish" type="button" class="primary" hidden>Finish setup</button>
+      </footer>
+    </div>
+  </dialog>
+
   <dialog id="confirm-dialog">
     <div class="confirm-body">
       <strong id="confirm-title">Delete this clip?</strong>

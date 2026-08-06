@@ -1378,6 +1378,33 @@ fn startup_defaults_quietly_only_when_primary_and_backup_are_missing() {
 
     assert_eq!(loaded.settings, AppSettings::default());
     assert!(loaded.warnings.is_empty());
+    assert!(loaded.fresh_install);
+}
+
+#[test]
+fn startup_with_existing_primary_is_not_a_fresh_install() {
+    let dir = TestDir::new("clipline-settings", "startup-existing-primary");
+    let path = dir.path().join("settings.json");
+    AppSettings::default().save_to(&path).unwrap();
+
+    let loaded = AppSettings::load_for_startup_from(&path);
+
+    assert_eq!(loaded.settings, AppSettings::default());
+    assert!(!loaded.fresh_install);
+}
+
+#[test]
+fn startup_recovered_from_backup_is_not_a_fresh_install() {
+    let dir = TestDir::new("clipline-settings", "startup-existing-backup");
+    let path = dir.path().join("settings.json");
+    let backup = dir.path().join("settings.json.bak");
+    AppSettings::default().save_to(&backup).unwrap();
+
+    let loaded = AppSettings::load_for_startup_from(&path);
+
+    assert_eq!(loaded.settings, AppSettings::default());
+    assert!(!loaded.fresh_install);
+    assert_eq!(loaded.warnings.len(), 1);
 }
 
 #[test]
@@ -1421,6 +1448,7 @@ fn startup_quarantines_invalid_primary_and_recovers_last_known_good_backup() {
     let loaded = AppSettings::load_for_startup_from(&path);
 
     assert_eq!(loaded.settings, recovered);
+    assert!(!loaded.fresh_install);
     assert_eq!(loaded.warnings.len(), 1);
     assert!(loaded.warnings[0].contains("recovered"));
     assert!(!path.exists());
@@ -1442,6 +1470,7 @@ fn startup_quarantines_invalid_primary_before_using_visible_safe_defaults() {
     let loaded = AppSettings::load_for_startup_from(&path);
 
     assert_eq!(loaded.settings, AppSettings::default());
+    assert!(!loaded.fresh_install);
     assert_eq!(loaded.warnings.len(), 1);
     assert!(loaded.warnings[0].contains("safe defaults"));
     assert!(loaded.warnings[0].contains("preserved"));

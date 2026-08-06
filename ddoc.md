@@ -184,7 +184,19 @@ Riot's Vanguard FAQ confirms in-game/LCU APIs "should continue to function" and 
 - **Audio-cue detection:** spikes/keywords (Powder added shouting/laughter detection) — lowest priority.
 
 ### 6. Replay Buffer Architecture
-- **Games-only recording is opt-in.** Desktop/fallback capture remains the default. When Settings > Games > `Pause recorder when no game is open` is enabled alongside automatic game detection, the recorder stays armed but owns no capture/encode service while no enabled game is detected. The rail shows `Waiting`, Save Replay is disabled, opening an enabled game starts a fresh buffer, and leaving the game finalizes/stops that run without immediately reopening the fallback desktop source.
+- **Fresh installs pause before capturing.** When neither `settings.json` nor its backup exists,
+  Clipline opens a required three-step walkthrough before starting the recorder. It explains local
+  storage/privacy, asks for games-only versus desktop fallback capture, full-session behavior, and
+  desktop/microphone audio, then repeats the Alt+F10 save hotkey. `Finish setup` saves those choices
+  before starting capture; `Use defaults` saves the unchanged defaults before starting it. Existing,
+  recovered, and migrated settings never trigger onboarding.
+- **Games-only recording is opt-in.** Desktop/fallback capture remains the settings default, while
+  the first-start walkthrough preselects games-only as its recommended explicit choice. When
+  Settings > Games > `Pause recorder when no game is open` is enabled alongside automatic game
+  detection, the recorder stays armed but owns no capture/encode service while no enabled game is
+  detected. The rail shows `Waiting`, Save Replay is disabled, opening an enabled game starts a
+  fresh buffer, and leaving the game finalizes/stops that run without immediately reopening the
+  fallback desktop source.
 - Continuously encode video+audio; push **encoded** GOP-aligned segments into a ring buffer sized by `max_replay_time × bitrate`. CBR mode (like gpu-screen-recorder's `-bm cbr`) gives predictable RAM/disk usage in high-motion scenes; CQP/VBR is the default for quality.
 - **Retention is bounded by span *and* bytes, planned together.** Duration retention is exactly `replay_window_s`: across the existing ring plus the incoming segment, eviction keeps the latest keyframe at-or-before `incoming.end - replay_window_s`, so the surviving front is decodable and still covers the requested cutoff without a fixed time margin. The byte budget carries a 2× encoder-overshoot allowance as a hard cap rather than a duration target. When genuine bitrate overshoot requires more eviction than the duration bound, byte pressure may advance to the next keyframe (including the incoming keyframe) and **bytes win**: coverage can fall below the requested window because the alternative is unbounded growth. With no duration or byte pressure, a push does not realign or discard footage gratuitously.
 - **RAM by default** (avoiding constant disk writes — a commonly cited community rationale; OBS's buffer is RAM-only by design, though OBS forum staff consider SSD wear a non-issue on modern drives), with **disk-spill** for long buffers (gpu-screen-recorder's `-replay-storage disk`). OBS estimates RAM and warns when it would overflow; we expose the same estimator.
