@@ -309,7 +309,41 @@
       background: var(--good);
       transition: width .2s ease;
     }
-    .games-page .lede { margin-bottom: 22px; }
+    .games-page .lede { margin-bottom: 18px; }
+    .games-section-head {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 20px;
+      margin: 0 0 9px;
+    }
+    .games-section-head strong { font-size: 13px; }
+    .games-section-head span { color: var(--muted); font-size: 11.5px; }
+    .games-section-head.other-games { margin-top: 20px; }
+    .supported-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 9px;
+    }
+    .supported-game {
+      display: grid;
+      grid-template-columns: 42px minmax(0, 1fr) auto;
+      gap: 11px;
+      align-items: center;
+      padding: 11px 12px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: rgba(30, 24, 18, .7);
+      cursor: pointer;
+    }
+    .supported-game:hover,
+    .supported-game:has(input:checked) { border-color: #604a29; }
+    .supported-game input { accent-color: var(--accent); }
+    .supported-meta { min-width: 0; }
+    .supported-meta strong,
+    .supported-meta span { display: block; }
+    .supported-meta strong { margin-bottom: 4px; font-size: 13px; }
+    .supported-meta span { color: var(--muted); font-size: 11px; line-height: 1.35; }
     .discovery-card {
       overflow: hidden;
       border: 1px solid var(--line);
@@ -685,7 +719,27 @@
         <section class="screen games-page" data-screen="2" hidden>
           <div class="eyebrow">Games</div>
           <h2>Find the games you play.</h2>
-          <p class="lede">Clipline can scan Steam and running game windows, then add the games you want it to recognize.</p>
+          <p class="lede">Use Clipline’s built-in game integrations, then detect any other games installed on this PC.</p>
+          <div class="games-section-head">
+            <strong>Supported games</strong>
+            <span>Built-in integrations with game-specific features.</span>
+          </div>
+          <div class="supported-grid">
+            <label class="supported-game">
+              <span class="game-icon" aria-hidden="true">LoL</span>
+              <span class="supported-meta"><strong>League of Legends</strong><span>Full matches + automatic event markers</span></span>
+              <input type="checkbox" name="supported-game" value="League of Legends" aria-label="Enable League of Legends" checked>
+            </label>
+            <label class="supported-game">
+              <span class="game-icon red" aria-hidden="true">osu</span>
+              <span class="supported-meta"><strong>osu!</strong><span>Full sessions + enriched play details</span></span>
+              <input type="checkbox" name="supported-game" value="osu!" aria-label="Enable osu!" checked>
+            </label>
+          </div>
+          <div class="games-section-head other-games">
+            <strong>Other games</strong>
+            <span>Add basic replay capture for games Clipline finds.</span>
+          </div>
           <div class="discovery-card">
             <div class="discovery-intro">
               <div class="discovery-mark" aria-hidden="true">⌕</div>
@@ -754,7 +808,8 @@
             <div class="summary-row"><span>Output size</span><strong id="summary-size"></strong></div>
             <div class="summary-row"><span>Video quality</span><strong id="summary-quality"></strong></div>
             <div class="summary-row"><span>FPS</span><strong id="summary-fps"></strong></div>
-            <div class="summary-row"><span>Games</span><strong id="summary-games"></strong></div>
+            <div class="summary-row"><span>Supported games</span><strong id="summary-supported-games"></strong></div>
+            <div class="summary-row"><span>Other games</span><strong id="summary-games"></strong></div>
           </div>
           <div class="ready-note">Nothing has been recorded or changed in this HTML prototype.</div>
         </section>
@@ -864,6 +919,11 @@
         .map((checkbox) => checkbox.value);
     }
 
+    function enabledSupportedGames() {
+      return [...document.querySelectorAll('input[name="supported-game"]:checked')]
+        .map((checkbox) => checkbox.value);
+    }
+
     function syncGameControls() {
       const selected = selectedGames();
       document.querySelector("#games-selection-count").textContent = selected.length
@@ -921,6 +981,10 @@
         const quality = qualitySelection();
         document.querySelector("#summary-quality").textContent = `${quality.label} · ${quality.bitrate} Mbps`;
         document.querySelector("#summary-fps").textContent = `${fpsSelection().value} FPS`;
+        const supportedGames = enabledSupportedGames();
+        document.querySelector("#summary-supported-games").textContent = supportedGames.length
+          ? supportedGames.join(", ")
+          : "None enabled";
         document.querySelector("#summary-games").textContent = addedGames.length
           ? addedGames.join(", ")
           : "None added";
@@ -954,6 +1018,9 @@
       document.querySelector("#record-output-size").value = "1080p";
       document.querySelector("#record-quality").value = "1";
       document.querySelector("#record-fps").value = "1";
+      document.querySelectorAll('input[name="supported-game"]').forEach((checkbox) => {
+        checkbox.checked = true;
+      });
       resetGames();
       toast.hidden = true;
       step = 0;
