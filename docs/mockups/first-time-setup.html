@@ -167,30 +167,64 @@
       line-height: 1.6;
     }
 
-    .welcome-card {
-      display: grid;
-      grid-template-columns: 1fr auto;
-      gap: 24px;
-      align-items: center;
-      margin-top: 36px;
-      padding: 24px;
+    .settings-card {
+      overflow: hidden;
       border: 1px solid var(--line);
       border-radius: 14px;
-      background: linear-gradient(135deg, var(--panel-2), #18120d);
+      background: rgba(30, 24, 18, .7);
     }
-    .welcome-card strong { display: block; margin-bottom: 6px; font-size: 15px; }
-    .welcome-card p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
-    .hotkey { display: flex; gap: 7px; align-items: center; }
-    kbd {
-      min-width: 46px;
-      padding: 12px 13px;
-      border: 1px solid #57452d;
-      border-bottom-width: 3px;
-      border-radius: 8px;
-      background: #100d0a;
+    .setting-row {
+      display: grid;
+      grid-template-columns: minmax(180px, .8fr) minmax(260px, 1.2fr);
+      gap: 28px;
+      align-items: center;
+      min-height: 82px;
+      padding: 16px 18px;
+      border-bottom: 1px solid var(--line);
+    }
+    .setting-row:last-child { border-bottom: 0; }
+    .setting-label strong { display: block; margin-bottom: 4px; font-size: 14px; }
+    .setting-label small { display: block; color: var(--muted); font-size: 12.5px; line-height: 1.4; }
+    .field,
+    .browse {
+      min-width: 0;
+      height: 39px;
+      border: 1px solid #493b2b;
+      border-radius: 7px;
+      background: #120f0c;
+      color: var(--text);
+    }
+    .field {
+      width: 100%;
+      padding: 0 11px;
+      outline: none;
+    }
+    .field:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(255, 178, 36, .12); }
+    .hotkey-field {
+      width: 150px;
       color: #ffdc99;
-      font: 700 13px "Cascadia Mono", monospace;
+      font-family: "Cascadia Mono", monospace;
       text-align: center;
+    }
+    .folder-field { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+    .browse { padding: 0 13px; background: #211a14; cursor: pointer; }
+    .browse:hover { background: #2a2118; }
+    .quota-field { display: flex; align-items: center; gap: 9px; }
+    .quota-field .field { width: 105px; }
+    .unit { color: var(--muted); font-size: 13px; }
+    .startup-control {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      cursor: pointer;
+    }
+    .startup-control > span:first-child { color: var(--muted); font-size: 13px; }
+    .startup-control input { position: absolute; opacity: 0; pointer-events: none; }
+    .startup-control:has(input:checked) .switch { background: var(--accent); }
+    .startup-control:has(input:checked) .switch::after {
+      background: #20170b;
+      transform: translateX(18px);
     }
 
     .choices { display: grid; gap: 12px; }
@@ -334,7 +368,7 @@
       <div class="brand"><span class="mark">CL</span> Clipline</div>
       <div class="eyebrow">First-time setup</div>
       <ol class="steps" aria-label="Setup progress">
-        <li data-progress="0"><span>1</span>Welcome</li>
+        <li data-progress="0"><span>1</span>Basics</li>
         <li data-progress="1"><span>2</span>Recording style</li>
         <li data-progress="2"><span>3</span>Capture behavior</li>
         <li data-progress="3"><span>4</span>Audio</li>
@@ -348,15 +382,36 @@
 
       <div class="content">
         <section class="screen" data-screen="0">
-          <div class="eyebrow">Welcome to Clipline</div>
-          <h1>Never miss the moment before the moment.</h1>
-          <p class="lede">Let’s choose how Clipline should run on this PC. This takes about a minute, and every choice can be changed later.</p>
-          <div class="welcome-card">
-            <div>
-              <strong>Your replay button</strong>
-              <p>Press it after something happens. Clipline saves the last minute.</p>
+          <div class="eyebrow">Basic setup</div>
+          <h2>Set up the essentials.</h2>
+          <p class="lede">Choose where clips go, how much space they can use, and how you want to open Clipline.</p>
+          <div class="settings-card">
+            <div class="setting-row">
+              <label class="setting-label" for="setup-hotkey"><strong>Replay button hotkey</strong><small>Saves the most recent replay.</small></label>
+              <input class="field hotkey-field" id="setup-hotkey" value="Alt + F10" spellcheck="false">
             </div>
-            <div class="hotkey"><kbd>Alt</kbd><span>+</span><kbd>F10</kbd></div>
+            <div class="setting-row">
+              <label class="setting-label" for="setup-folder"><strong>Media folder</strong><small>Where clips and recordings are saved.</small></label>
+              <div class="folder-field">
+                <input class="field" id="setup-folder" value="C:\Users\You\Videos\Clipline" spellcheck="false">
+                <button class="browse" id="browse-folder" type="button">Browse</button>
+              </div>
+            </div>
+            <div class="setting-row">
+              <label class="setting-label" for="setup-quota"><strong>Disk quota</strong><small>Oldest clips are removed when this limit is reached.</small></label>
+              <div class="quota-field">
+                <input class="field" id="setup-quota" type="number" min="1" max="1000" step="1" value="10">
+                <span class="unit">GB</span>
+              </div>
+            </div>
+            <div class="setting-row">
+              <div class="setting-label"><strong>Launch on startup</strong><small>Start Clipline when you sign in to Windows.</small></div>
+              <label class="startup-control">
+                <span>Open Clipline automatically</span>
+                <input id="setup-startup" type="checkbox">
+                <span class="switch" aria-hidden="true"></span>
+              </label>
+            </div>
           </div>
         </section>
 
@@ -367,7 +422,7 @@
           <div class="choices">
             <label class="choice">
               <input type="radio" name="style" value="Replays only" checked>
-              <span><strong>Just the moments I choose</strong><small>Keep a rolling replay ready and save only when I press Alt + F10.</small></span>
+              <span><strong>Just the moments I choose</strong><small>Keep a rolling replay ready and save only when I press <span id="style-hotkey-copy">Alt + F10</span>.</small></span>
               <span class="tag">Simple</span>
             </label>
             <label class="choice">
@@ -421,7 +476,10 @@
             <div class="summary-row"><span>Clipline runs</span><strong id="summary-capture"></strong></div>
             <div class="summary-row"><span>Desktop audio</span><strong id="summary-audio"></strong></div>
             <div class="summary-row"><span>Microphone</span><strong id="summary-mic"></strong></div>
-            <div class="summary-row"><span>Save replay</span><strong>Alt + F10 · last 60 seconds</strong></div>
+            <div class="summary-row"><span>Replay hotkey</span><strong id="summary-hotkey"></strong></div>
+            <div class="summary-row"><span>Media folder</span><strong id="summary-folder"></strong></div>
+            <div class="summary-row"><span>Disk quota</span><strong id="summary-quota"></strong></div>
+            <div class="summary-row"><span>Launch on startup</span><strong id="summary-startup"></strong></div>
           </div>
           <div class="ready-note">Nothing has been recorded or changed in this HTML prototype.</div>
         </section>
@@ -455,12 +513,17 @@
         item.querySelector("span").textContent = index < step ? "✓" : index + 1;
       });
       back.hidden = step === 0;
-      next.textContent = step === 0 ? "Set up Clipline" : step === 4 ? "Start Clipline" : "Continue";
+      next.textContent = step === 4 ? "Start Clipline" : "Continue";
+      document.querySelector("#style-hotkey-copy").textContent = document.querySelector("#setup-hotkey").value;
       if (step === 4) {
         document.querySelector("#summary-style").textContent = selected("style").value;
         document.querySelector("#summary-capture").textContent = selected("capture").value;
         document.querySelector("#summary-audio").textContent = document.querySelector("[name=desktopAudio]").checked ? "On" : "Off";
         document.querySelector("#summary-mic").textContent = document.querySelector("[name=microphone]").checked ? "On" : "Off";
+        document.querySelector("#summary-hotkey").textContent = document.querySelector("#setup-hotkey").value;
+        document.querySelector("#summary-folder").textContent = document.querySelector("#setup-folder").value;
+        document.querySelector("#summary-quota").textContent = `${document.querySelector("#setup-quota").value} GB`;
+        document.querySelector("#summary-startup").textContent = document.querySelector("#setup-startup").checked ? "On" : "Off";
       }
     }
 
@@ -471,6 +534,10 @@
       window.setTimeout(() => { toast.hidden = true; }, 2600);
     });
     document.querySelector("#reset").addEventListener("click", () => {
+      document.querySelector("#setup-hotkey").value = "Alt + F10";
+      document.querySelector("#setup-folder").value = "C:\\Users\\You\\Videos\\Clipline";
+      document.querySelector("#setup-quota").value = "10";
+      document.querySelector("#setup-startup").checked = false;
       document.querySelector("[name=style]").checked = true;
       document.querySelector("[name=capture]").checked = true;
       document.querySelector("[name=desktopAudio]").checked = true;
@@ -478,6 +545,12 @@
       toast.hidden = true;
       step = 0;
       render();
+    });
+    document.querySelector("#browse-folder").addEventListener("click", () => {
+      document.querySelector("#setup-folder").select();
+      toast.textContent = "The native folder picker would open here.";
+      toast.hidden = false;
+      window.setTimeout(() => { toast.hidden = true; }, 2200);
     });
     render();
   </script>
