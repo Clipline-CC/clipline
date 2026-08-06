@@ -1,0 +1,485 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Clipline — First-time setup mock</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      --bg: #110e0b;
+      --panel: #19140f;
+      --panel-2: #211a13;
+      --line: #382d21;
+      --muted: #a99a86;
+      --text: #f3eadc;
+      --accent: #ffb224;
+      --accent-soft: #2d220f;
+      --good: #75d4a7;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      min-width: 860px;
+      min-height: 620px;
+      margin: 0;
+      background:
+        radial-gradient(circle at 74% 12%, rgba(255, 178, 36, .07), transparent 30%),
+        var(--bg);
+      color: var(--text);
+    }
+    button, input { font: inherit; }
+    button { color: inherit; }
+
+    .prototype {
+      display: grid;
+      grid-template-columns: 286px minmax(0, 1fr);
+      min-height: 100vh;
+    }
+    .sidebar {
+      display: flex;
+      flex-direction: column;
+      padding: 34px 30px;
+      border-right: 1px solid var(--line);
+      background: rgba(19, 15, 11, .84);
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 11px;
+      margin-bottom: 70px;
+      font-size: 18px;
+      font-weight: 750;
+      letter-spacing: .02em;
+    }
+    .mark {
+      display: grid;
+      width: 34px;
+      height: 34px;
+      place-items: center;
+      border: 1px solid #9a6b19;
+      border-radius: 9px;
+      color: var(--accent);
+      font: 700 12px "Cascadia Mono", monospace;
+    }
+    .eyebrow {
+      color: var(--accent);
+      font-size: 11px;
+      font-weight: 750;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+    }
+    .steps {
+      display: grid;
+      gap: 22px;
+      margin: 22px 0 0;
+      padding: 0;
+      list-style: none;
+    }
+    .steps li {
+      display: grid;
+      grid-template-columns: 26px 1fr;
+      gap: 12px;
+      align-items: center;
+      color: #746858;
+      font-size: 13px;
+      transition: color .18s ease;
+    }
+    .steps span {
+      display: grid;
+      width: 26px;
+      height: 26px;
+      place-items: center;
+      border: 1px solid #3a3025;
+      border-radius: 50%;
+      font-size: 11px;
+    }
+    .steps li.active { color: var(--text); }
+    .steps li.active span {
+      border-color: var(--accent);
+      background: var(--accent);
+      color: #1a1309;
+      font-weight: 750;
+    }
+    .steps li.done { color: var(--muted); }
+    .steps li.done span {
+      border-color: #6c582f;
+      color: var(--accent);
+    }
+    .privacy {
+      margin-top: auto;
+      color: #776b5c;
+      font-size: 12px;
+      line-height: 1.55;
+    }
+    .privacy strong { color: var(--muted); }
+
+    main {
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      min-width: 0;
+      padding: 27px 44px 32px;
+    }
+    .prototype-bar {
+      display: flex;
+      justify-content: flex-end;
+      align-items: center;
+      gap: 12px;
+      min-height: 28px;
+      color: #756a5b;
+      font-size: 10px;
+      font-weight: 750;
+      letter-spacing: .13em;
+    }
+    .reset {
+      padding: 5px 9px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      letter-spacing: 0;
+    }
+    .content {
+      width: min(720px, 100%);
+      margin: auto;
+      padding: 28px 0 22px;
+    }
+    .screen[hidden] { display: none; }
+    .screen h1 {
+      max-width: 680px;
+      margin: 12px 0 13px;
+      font-size: clamp(34px, 4vw, 52px);
+      line-height: 1.06;
+      letter-spacing: -.035em;
+    }
+    .screen h2 {
+      margin: 11px 0 10px;
+      font-size: 34px;
+      letter-spacing: -.025em;
+    }
+    .lede {
+      max-width: 630px;
+      margin: 0 0 30px;
+      color: var(--muted);
+      font-size: 16px;
+      line-height: 1.6;
+    }
+
+    .welcome-card {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 24px;
+      align-items: center;
+      margin-top: 36px;
+      padding: 24px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: linear-gradient(135deg, var(--panel-2), #18120d);
+    }
+    .welcome-card strong { display: block; margin-bottom: 6px; font-size: 15px; }
+    .welcome-card p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
+    .hotkey { display: flex; gap: 7px; align-items: center; }
+    kbd {
+      min-width: 46px;
+      padding: 12px 13px;
+      border: 1px solid #57452d;
+      border-bottom-width: 3px;
+      border-radius: 8px;
+      background: #100d0a;
+      color: #ffdc99;
+      font: 700 13px "Cascadia Mono", monospace;
+      text-align: center;
+    }
+
+    .choices { display: grid; gap: 12px; }
+    .choice {
+      position: relative;
+      display: grid;
+      grid-template-columns: 24px minmax(0, 1fr) auto;
+      gap: 14px;
+      align-items: center;
+      min-height: 84px;
+      padding: 17px 18px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: rgba(30, 24, 18, .7);
+      cursor: pointer;
+    }
+    .choice:hover { border-color: #59462d; background: var(--panel-2); }
+    .choice:has(input:checked) {
+      border-color: #a87518;
+      background: var(--accent-soft);
+      box-shadow: inset 3px 0 var(--accent);
+    }
+    .choice input { width: 17px; height: 17px; accent-color: var(--accent); }
+    .choice strong { display: block; margin-bottom: 4px; font-size: 15px; }
+    .choice small { display: block; color: var(--muted); font-size: 13px; line-height: 1.45; }
+    .tag {
+      padding: 4px 8px;
+      border-radius: 99px;
+      background: rgba(255, 178, 36, .12);
+      color: #ffc65a;
+      font-size: 10px;
+      font-weight: 750;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+
+    .toggles { display: grid; gap: 12px; }
+    .toggle {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 18px;
+      align-items: center;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: rgba(30, 24, 18, .7);
+      cursor: pointer;
+    }
+    .toggle strong { display: block; margin-bottom: 4px; font-size: 15px; }
+    .toggle small { color: var(--muted); font-size: 13px; }
+    .switch {
+      position: relative;
+      width: 42px;
+      height: 24px;
+      border-radius: 20px;
+      background: #4a4034;
+    }
+    .switch::after {
+      content: "";
+      position: absolute;
+      top: 3px;
+      left: 3px;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: #d2c7b8;
+      transition: transform .16s ease;
+    }
+    .toggle input { position: absolute; opacity: 0; pointer-events: none; }
+    .toggle:has(input:checked) .switch { background: var(--accent); }
+    .toggle:has(input:checked) .switch::after {
+      background: #20170b;
+      transform: translateX(18px);
+    }
+
+    .summary {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--panel);
+    }
+    .summary-row {
+      display: grid;
+      grid-template-columns: 150px 1fr;
+      gap: 22px;
+      padding: 17px 20px;
+      border-bottom: 1px solid var(--line);
+    }
+    .summary-row:last-child { border-bottom: 0; }
+    .summary-row span { color: var(--muted); font-size: 13px; }
+    .summary-row strong { font-size: 14px; }
+    .ready-note {
+      margin-top: 18px;
+      color: var(--good);
+      font-size: 13px;
+    }
+
+    footer {
+      display: flex;
+      width: min(720px, 100%);
+      margin: 0 auto;
+      padding-top: 22px;
+      border-top: 1px solid var(--line);
+    }
+    .button {
+      min-width: 108px;
+      padding: 11px 17px;
+      border: 1px solid #493b2b;
+      border-radius: 8px;
+      background: #201a14;
+      cursor: pointer;
+      font-weight: 650;
+    }
+    .button:hover { background: #2a2118; }
+    .button.primary {
+      margin-left: auto;
+      border-color: var(--accent);
+      background: var(--accent);
+      color: #1b1308;
+    }
+    .button.primary:hover { background: #ffc34d; }
+    #back[hidden] { visibility: hidden; display: block; }
+    .toast {
+      position: fixed;
+      right: 28px;
+      bottom: 28px;
+      padding: 13px 16px;
+      border: 1px solid #526c55;
+      border-radius: 8px;
+      background: #17241a;
+      color: #a9e9bb;
+      font-size: 13px;
+      box-shadow: 0 12px 40px rgba(0, 0, 0, .4);
+    }
+    .toast[hidden] { display: none; }
+  </style>
+</head>
+<body>
+  <div class="prototype">
+    <aside class="sidebar">
+      <div class="brand"><span class="mark">CL</span> Clipline</div>
+      <div class="eyebrow">First-time setup</div>
+      <ol class="steps" aria-label="Setup progress">
+        <li data-progress="0"><span>1</span>Welcome</li>
+        <li data-progress="1"><span>2</span>Recording style</li>
+        <li data-progress="2"><span>3</span>Capture behavior</li>
+        <li data-progress="3"><span>4</span>Audio</li>
+        <li data-progress="4"><span>5</span>Review</li>
+      </ol>
+      <p class="privacy"><strong>Private by default.</strong><br>Your recordings stay on this PC unless you choose to upload one.</p>
+    </aside>
+
+    <main>
+      <div class="prototype-bar">HTML PROTOTYPE <button class="reset" id="reset" type="button">Reset</button></div>
+
+      <div class="content">
+        <section class="screen" data-screen="0">
+          <div class="eyebrow">Welcome to Clipline</div>
+          <h1>Never miss the moment before the moment.</h1>
+          <p class="lede">Let’s choose how Clipline should run on this PC. This takes about a minute, and every choice can be changed later.</p>
+          <div class="welcome-card">
+            <div>
+              <strong>Your replay button</strong>
+              <p>Press it after something happens. Clipline saves the last minute.</p>
+            </div>
+            <div class="hotkey"><kbd>Alt</kbd><span>+</span><kbd>F10</kbd></div>
+          </div>
+        </section>
+
+        <section class="screen" data-screen="1" hidden>
+          <div class="eyebrow">Recording style</div>
+          <h2>What do you want to save?</h2>
+          <p class="lede">Choose the basic behavior. You can still save a replay in either mode.</p>
+          <div class="choices">
+            <label class="choice">
+              <input type="radio" name="style" value="Replays only" checked>
+              <span><strong>Just the moments I choose</strong><small>Keep a rolling replay ready and save only when I press Alt + F10.</small></span>
+              <span class="tag">Simple</span>
+            </label>
+            <label class="choice">
+              <input type="radio" name="style" value="Replays + full game sessions">
+              <span><strong>Moments and complete game sessions</strong><small>Automatically keep the whole session for supported games, plus manual replays.</small></span>
+            </label>
+          </div>
+        </section>
+
+        <section class="screen" data-screen="2" hidden>
+          <div class="eyebrow">Capture behavior</div>
+          <h2>When should Clipline be ready?</h2>
+          <p class="lede">This is the biggest privacy and performance choice in setup.</p>
+          <div class="choices">
+            <label class="choice">
+              <input type="radio" name="capture" value="Only while a supported game is open" checked>
+              <span><strong>Only while I’m playing</strong><small>Wait quietly until Clipline recognizes a supported game.</small></span>
+              <span class="tag">Recommended</span>
+            </label>
+            <label class="choice">
+              <input type="radio" name="capture" value="Always ready on the primary display">
+              <span><strong>Always keep replay ready</strong><small>Capture the primary display when no supported game is open.</small></span>
+            </label>
+          </div>
+        </section>
+
+        <section class="screen" data-screen="3" hidden>
+          <div class="eyebrow">Audio</div>
+          <h2>What should clips sound like?</h2>
+          <p class="lede">Clipline can record what you hear and your microphone on separate tracks.</p>
+          <div class="toggles">
+            <label class="toggle">
+              <span><strong>Desktop and game audio</strong><small>Include the audio playing through Windows.</small></span>
+              <input name="desktopAudio" type="checkbox" checked>
+              <span class="switch" aria-hidden="true"></span>
+            </label>
+            <label class="toggle">
+              <span><strong>Microphone</strong><small>Include your default microphone on a separate track.</small></span>
+              <input name="microphone" type="checkbox">
+              <span class="switch" aria-hidden="true"></span>
+            </label>
+          </div>
+        </section>
+
+        <section class="screen" data-screen="4" hidden>
+          <div class="eyebrow">Ready to go</div>
+          <h2>Here’s how Clipline will work.</h2>
+          <p class="lede">A plain-language summary before anything starts recording.</p>
+          <div class="summary">
+            <div class="summary-row"><span>Saving</span><strong id="summary-style"></strong></div>
+            <div class="summary-row"><span>Clipline runs</span><strong id="summary-capture"></strong></div>
+            <div class="summary-row"><span>Desktop audio</span><strong id="summary-audio"></strong></div>
+            <div class="summary-row"><span>Microphone</span><strong id="summary-mic"></strong></div>
+            <div class="summary-row"><span>Save replay</span><strong>Alt + F10 · last 60 seconds</strong></div>
+          </div>
+          <div class="ready-note">Nothing has been recorded or changed in this HTML prototype.</div>
+        </section>
+      </div>
+
+      <footer>
+        <button class="button" id="back" type="button" hidden>Back</button>
+        <button class="button primary" id="next" type="button">Set up Clipline</button>
+      </footer>
+    </main>
+  </div>
+
+  <div class="toast" id="toast" role="status" hidden>Prototype complete — no settings were changed.</div>
+
+  <script>
+    const screens = [...document.querySelectorAll("[data-screen]")];
+    const progress = [...document.querySelectorAll("[data-progress]")];
+    const back = document.querySelector("#back");
+    const next = document.querySelector("#next");
+    const toast = document.querySelector("#toast");
+    let step = 0;
+
+    function selected(name) {
+      return document.querySelector(`[name="${name}"]:checked`);
+    }
+
+    function render() {
+      screens.forEach((screen, index) => { screen.hidden = index !== step; });
+      progress.forEach((item, index) => {
+        item.className = index === step ? "active" : index < step ? "done" : "";
+        item.querySelector("span").textContent = index < step ? "✓" : index + 1;
+      });
+      back.hidden = step === 0;
+      next.textContent = step === 0 ? "Set up Clipline" : step === 4 ? "Start Clipline" : "Continue";
+      if (step === 4) {
+        document.querySelector("#summary-style").textContent = selected("style").value;
+        document.querySelector("#summary-capture").textContent = selected("capture").value;
+        document.querySelector("#summary-audio").textContent = document.querySelector("[name=desktopAudio]").checked ? "On" : "Off";
+        document.querySelector("#summary-mic").textContent = document.querySelector("[name=microphone]").checked ? "On" : "Off";
+      }
+    }
+
+    back.addEventListener("click", () => { step = Math.max(0, step - 1); render(); });
+    next.addEventListener("click", () => {
+      if (step < screens.length - 1) { step += 1; render(); return; }
+      toast.hidden = false;
+      window.setTimeout(() => { toast.hidden = true; }, 2600);
+    });
+    document.querySelector("#reset").addEventListener("click", () => {
+      document.querySelector("[name=style]").checked = true;
+      document.querySelector("[name=capture]").checked = true;
+      document.querySelector("[name=desktopAudio]").checked = true;
+      document.querySelector("[name=microphone]").checked = false;
+      toast.hidden = true;
+      step = 0;
+      render();
+    });
+    render();
+  </script>
+</body>
+</html>
