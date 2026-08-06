@@ -10,12 +10,10 @@
       font-family: "Segoe UI", system-ui, sans-serif;
       --bg: #110e0b;
       --panel: #19140f;
-      --panel-2: #211a13;
       --line: #382d21;
       --muted: #a99a86;
       --text: #f3eadc;
       --accent: #ffb224;
-      --accent-soft: #2d220f;
       --good: #75d4a7;
     }
 
@@ -226,55 +224,18 @@
       background: #20170b;
       transform: translateX(18px);
     }
-
-    .choices { display: grid; gap: 12px; }
-    .choice {
-      position: relative;
-      display: grid;
-      grid-template-columns: 24px minmax(0, 1fr) auto;
-      gap: 14px;
-      align-items: center;
-      min-height: 84px;
-      padding: 17px 18px;
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      background: rgba(30, 24, 18, .7);
-      cursor: pointer;
-    }
-    .choice:hover { border-color: #59462d; background: var(--panel-2); }
-    .choice:has(input:checked) {
-      border-color: #a87518;
-      background: var(--accent-soft);
-      box-shadow: inset 3px 0 var(--accent);
-    }
-    .choice input { width: 17px; height: 17px; accent-color: var(--accent); }
-    .choice strong { display: block; margin-bottom: 4px; font-size: 15px; }
-    .choice small { display: block; color: var(--muted); font-size: 13px; line-height: 1.45; }
-    .tag {
-      padding: 4px 8px;
-      border-radius: 99px;
-      background: rgba(255, 178, 36, .12);
-      color: #ffc65a;
+    .capture-settings .lede { margin-bottom: 18px; }
+    .capture-settings .setting-row { min-height: 68px; padding-top: 12px; padding-bottom: 12px; }
+    .settings-section-title {
+      padding: 9px 18px;
+      border-bottom: 1px solid var(--line);
+      background: #15110e;
+      color: #c7b89f;
       font-size: 10px;
       font-weight: 750;
-      letter-spacing: .06em;
+      letter-spacing: .12em;
       text-transform: uppercase;
     }
-
-    .toggles { display: grid; gap: 12px; }
-    .toggle {
-      display: grid;
-      grid-template-columns: 1fr auto;
-      gap: 18px;
-      align-items: center;
-      padding: 18px;
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      background: rgba(30, 24, 18, .7);
-      cursor: pointer;
-    }
-    .toggle strong { display: block; margin-bottom: 4px; font-size: 15px; }
-    .toggle small { color: var(--muted); font-size: 13px; }
     .switch {
       position: relative;
       width: 42px;
@@ -293,13 +254,6 @@
       background: #d2c7b8;
       transition: transform .16s ease;
     }
-    .toggle input { position: absolute; opacity: 0; pointer-events: none; }
-    .toggle:has(input:checked) .switch { background: var(--accent); }
-    .toggle:has(input:checked) .switch::after {
-      background: #20170b;
-      transform: translateX(18px);
-    }
-
     .summary {
       overflow: hidden;
       border: 1px solid var(--line);
@@ -369,10 +323,8 @@
       <div class="eyebrow">First-time setup</div>
       <ol class="steps" aria-label="Setup progress">
         <li data-progress="0"><span>1</span>Basics</li>
-        <li data-progress="1"><span>2</span>Recording style</li>
-        <li data-progress="2"><span>3</span>Capture behavior</li>
-        <li data-progress="3"><span>4</span>Audio</li>
-        <li data-progress="4"><span>5</span>Review</li>
+        <li data-progress="1"><span>2</span>Capture + recording</li>
+        <li data-progress="2"><span>3</span>Review</li>
       </ol>
       <p class="privacy"><strong>Private by default.</strong><br>Your recordings stay on this PC unless you choose to upload one.</p>
     </aside>
@@ -408,78 +360,112 @@
               <div class="setting-label"><strong>Launch on startup</strong><small>Start Clipline when you sign in to Windows.</small></div>
               <label class="startup-control">
                 <span>Open Clipline automatically</span>
-                <input id="setup-startup" type="checkbox">
+                <input id="setup-startup" type="checkbox" checked>
                 <span class="switch" aria-hidden="true"></span>
               </label>
             </div>
           </div>
         </section>
 
-        <section class="screen" data-screen="1" hidden>
-          <div class="eyebrow">Recording style</div>
-          <h2>What do you want to save?</h2>
-          <p class="lede">Choose the basic behavior. You can still save a replay in either mode.</p>
-          <div class="choices">
-            <label class="choice">
-              <input type="radio" name="style" value="Replays only" checked>
-              <span><strong>Just the moments I choose</strong><small>Keep a rolling replay ready and save only when I press <span id="style-hotkey-copy">Alt + F10</span>.</small></span>
-              <span class="tag">Simple</span>
-            </label>
-            <label class="choice">
-              <input type="radio" name="style" value="Replays + full game sessions">
-              <span><strong>Moments and complete game sessions</strong><small>Automatically keep the whole session for supported games, plus manual replays.</small></span>
-            </label>
+        <section class="screen capture-settings" data-screen="1" hidden>
+          <div class="eyebrow">Capture + recording</div>
+          <h2>Choose what Clipline records.</h2>
+          <p class="lede">Set the capture source, audio devices, and default replay quality.</p>
+          <div class="settings-card">
+            <div class="settings-section-title">Audio</div>
+            <div class="setting-row">
+              <label class="setting-label" for="record-output-audio"><strong>Audio output</strong><small>Sound playing through Windows.</small></label>
+              <select class="field" id="record-output-audio">
+                <option>Default Windows output</option>
+                <option>Speakers (Realtek Audio)</option>
+                <option>Off</option>
+              </select>
+            </div>
+            <div class="setting-row">
+              <label class="setting-label" for="record-input-audio"><strong>Audio input</strong><small>Microphone recorded on a separate track.</small></label>
+              <select class="field" id="record-input-audio">
+                <option>Off</option>
+                <option>Default Windows microphone</option>
+                <option>Microphone (USB Audio)</option>
+              </select>
+            </div>
+
+            <div class="settings-section-title">Capture</div>
+            <div class="setting-row">
+              <label class="setting-label" for="record-target"><strong>Capture target</strong><small>The screen or window Clipline watches.</small></label>
+              <select class="field" id="record-target">
+                <option>Primary display</option>
+                <option>Choose a display</option>
+                <option>Choose a window</option>
+                <option>Choose a region</option>
+              </select>
+            </div>
+            <div class="setting-row">
+              <div class="setting-label"><strong>Pause recorder when no game is open</strong><small>Wait quietly until Clipline recognizes a supported game.</small></div>
+              <label class="startup-control">
+                <span>Pause automatically</span>
+                <input id="record-pause-no-game" type="checkbox" checked>
+                <span class="switch" aria-hidden="true"></span>
+              </label>
+            </div>
+
+            <div class="settings-section-title">Recording</div>
+            <div class="setting-row">
+              <label class="setting-label" for="record-save-length"><strong>Save length</strong><small>How much recent footage each replay keeps.</small></label>
+              <select class="field" id="record-save-length">
+                <option value="15">15 seconds</option>
+                <option value="30" selected>30 seconds</option>
+                <option value="60">1 minute</option>
+                <option value="120">2 minutes</option>
+              </select>
+            </div>
+            <div class="setting-row">
+              <label class="setting-label" for="record-output-size"><strong>Output size</strong><small>Maximum saved video resolution.</small></label>
+              <select class="field" id="record-output-size">
+                <option>Source</option>
+                <option>1440p</option>
+                <option selected>1080p</option>
+                <option>720p</option>
+              </select>
+            </div>
+            <div class="setting-row">
+              <label class="setting-label" for="record-quality"><strong>Video quality</strong><small>Higher quality uses more disk space.</small></label>
+              <select class="field" id="record-quality">
+                <option>Compact</option>
+                <option selected>Balanced</option>
+                <option>Sharp</option>
+                <option>Maximum</option>
+              </select>
+            </div>
+            <div class="setting-row">
+              <label class="setting-label" for="record-fps"><strong>FPS</strong><small>Higher frame rates look smoother and use more resources.</small></label>
+              <select class="field" id="record-fps">
+                <option>30</option>
+                <option selected>60</option>
+                <option>90</option>
+                <option>120</option>
+              </select>
+            </div>
           </div>
         </section>
 
         <section class="screen" data-screen="2" hidden>
-          <div class="eyebrow">Capture behavior</div>
-          <h2>When should Clipline be ready?</h2>
-          <p class="lede">This is the biggest privacy and performance choice in setup.</p>
-          <div class="choices">
-            <label class="choice">
-              <input type="radio" name="capture" value="Only while a supported game is open" checked>
-              <span><strong>Only while I’m playing</strong><small>Wait quietly until Clipline recognizes a supported game.</small></span>
-              <span class="tag">Recommended</span>
-            </label>
-            <label class="choice">
-              <input type="radio" name="capture" value="Always ready on the primary display">
-              <span><strong>Always keep replay ready</strong><small>Capture the primary display when no supported game is open.</small></span>
-            </label>
-          </div>
-        </section>
-
-        <section class="screen" data-screen="3" hidden>
-          <div class="eyebrow">Audio</div>
-          <h2>What should clips sound like?</h2>
-          <p class="lede">Clipline can record what you hear and your microphone on separate tracks.</p>
-          <div class="toggles">
-            <label class="toggle">
-              <span><strong>Desktop and game audio</strong><small>Include the audio playing through Windows.</small></span>
-              <input name="desktopAudio" type="checkbox" checked>
-              <span class="switch" aria-hidden="true"></span>
-            </label>
-            <label class="toggle">
-              <span><strong>Microphone</strong><small>Include your default microphone on a separate track.</small></span>
-              <input name="microphone" type="checkbox">
-              <span class="switch" aria-hidden="true"></span>
-            </label>
-          </div>
-        </section>
-
-        <section class="screen" data-screen="4" hidden>
           <div class="eyebrow">Ready to go</div>
           <h2>Here’s how Clipline will work.</h2>
           <p class="lede">A plain-language summary before anything starts recording.</p>
           <div class="summary">
-            <div class="summary-row"><span>Saving</span><strong id="summary-style"></strong></div>
-            <div class="summary-row"><span>Clipline runs</span><strong id="summary-capture"></strong></div>
-            <div class="summary-row"><span>Desktop audio</span><strong id="summary-audio"></strong></div>
-            <div class="summary-row"><span>Microphone</span><strong id="summary-mic"></strong></div>
             <div class="summary-row"><span>Replay hotkey</span><strong id="summary-hotkey"></strong></div>
             <div class="summary-row"><span>Media folder</span><strong id="summary-folder"></strong></div>
             <div class="summary-row"><span>Disk quota</span><strong id="summary-quota"></strong></div>
             <div class="summary-row"><span>Launch on startup</span><strong id="summary-startup"></strong></div>
+            <div class="summary-row"><span>Audio output</span><strong id="summary-output-audio"></strong></div>
+            <div class="summary-row"><span>Audio input</span><strong id="summary-input-audio"></strong></div>
+            <div class="summary-row"><span>Capture target</span><strong id="summary-target"></strong></div>
+            <div class="summary-row"><span>Pause without a game</span><strong id="summary-pause"></strong></div>
+            <div class="summary-row"><span>Save length</span><strong id="summary-length"></strong></div>
+            <div class="summary-row"><span>Output size</span><strong id="summary-size"></strong></div>
+            <div class="summary-row"><span>Video quality</span><strong id="summary-quality"></strong></div>
+            <div class="summary-row"><span>FPS</span><strong id="summary-fps"></strong></div>
           </div>
           <div class="ready-note">Nothing has been recorded or changed in this HTML prototype.</div>
         </section>
@@ -502,10 +488,6 @@
     const toast = document.querySelector("#toast");
     let step = 0;
 
-    function selected(name) {
-      return document.querySelector(`[name="${name}"]:checked`);
-    }
-
     function render() {
       screens.forEach((screen, index) => { screen.hidden = index !== step; });
       progress.forEach((item, index) => {
@@ -513,17 +495,20 @@
         item.querySelector("span").textContent = index < step ? "✓" : index + 1;
       });
       back.hidden = step === 0;
-      next.textContent = step === 4 ? "Start Clipline" : "Continue";
-      document.querySelector("#style-hotkey-copy").textContent = document.querySelector("#setup-hotkey").value;
-      if (step === 4) {
-        document.querySelector("#summary-style").textContent = selected("style").value;
-        document.querySelector("#summary-capture").textContent = selected("capture").value;
-        document.querySelector("#summary-audio").textContent = document.querySelector("[name=desktopAudio]").checked ? "On" : "Off";
-        document.querySelector("#summary-mic").textContent = document.querySelector("[name=microphone]").checked ? "On" : "Off";
+      next.textContent = step === screens.length - 1 ? "Start Clipline" : "Continue";
+      if (step === screens.length - 1) {
         document.querySelector("#summary-hotkey").textContent = document.querySelector("#setup-hotkey").value;
         document.querySelector("#summary-folder").textContent = document.querySelector("#setup-folder").value;
         document.querySelector("#summary-quota").textContent = `${document.querySelector("#setup-quota").value} GB`;
         document.querySelector("#summary-startup").textContent = document.querySelector("#setup-startup").checked ? "On" : "Off";
+        document.querySelector("#summary-output-audio").textContent = document.querySelector("#record-output-audio").value;
+        document.querySelector("#summary-input-audio").textContent = document.querySelector("#record-input-audio").value;
+        document.querySelector("#summary-target").textContent = document.querySelector("#record-target").value;
+        document.querySelector("#summary-pause").textContent = document.querySelector("#record-pause-no-game").checked ? "On" : "Off";
+        document.querySelector("#summary-length").textContent = document.querySelector("#record-save-length").selectedOptions[0].textContent;
+        document.querySelector("#summary-size").textContent = document.querySelector("#record-output-size").value;
+        document.querySelector("#summary-quality").textContent = document.querySelector("#record-quality").value;
+        document.querySelector("#summary-fps").textContent = `${document.querySelector("#record-fps").value} FPS`;
       }
     }
 
@@ -537,11 +522,15 @@
       document.querySelector("#setup-hotkey").value = "Alt + F10";
       document.querySelector("#setup-folder").value = "C:\\Users\\You\\Videos\\Clipline";
       document.querySelector("#setup-quota").value = "10";
-      document.querySelector("#setup-startup").checked = false;
-      document.querySelector("[name=style]").checked = true;
-      document.querySelector("[name=capture]").checked = true;
-      document.querySelector("[name=desktopAudio]").checked = true;
-      document.querySelector("[name=microphone]").checked = false;
+      document.querySelector("#setup-startup").checked = true;
+      document.querySelector("#record-output-audio").value = "Default Windows output";
+      document.querySelector("#record-input-audio").value = "Off";
+      document.querySelector("#record-target").value = "Primary display";
+      document.querySelector("#record-pause-no-game").checked = true;
+      document.querySelector("#record-save-length").value = "30";
+      document.querySelector("#record-output-size").value = "1080p";
+      document.querySelector("#record-quality").value = "Balanced";
+      document.querySelector("#record-fps").value = "60";
       toast.hidden = true;
       step = 0;
       render();
