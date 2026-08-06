@@ -381,6 +381,10 @@ async function finishFirstRunSetup() {
 }
 
 async function openFirstRunSetup(settings) {
+  const finish = $("first-run-finish");
+  finish.disabled = false;
+  finish.textContent = "Start Clipline";
+  $("first-run-back").disabled = false;
   const app = document.querySelector(".app");
   app.inert = true;
   app.setAttribute("aria-hidden", "true");
@@ -394,6 +398,16 @@ async function openFirstRunSetup(settings) {
   syncFirstRunRecordingFields();
   $("first-run-next").focus();
 }
+
+$("play-first-run-wizard").addEventListener("click", async () => {
+  syncSettingsDraftFromForm({ resetDiscard: false });
+  if (settingsHaveUnsavedChanges()) {
+    showSettingsDiscardWarning();
+    return;
+  }
+  toggleSettings(false);
+  await openFirstRunSetup(currentSettings);
+});
 
 $("first-run-browse").addEventListener("click", async () => {
   $("first-run-error").textContent = "";

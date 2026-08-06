@@ -28,6 +28,10 @@ Finishing copies the wizard choices into the existing Settings model, calls the 
 dismissing the wizard. First-run background controls are inert, the titlebar remains available, and
 keyboard Tab can leave the hotkey recorder.
 
+Settings now includes a `Misc` tab with a `Play first-time wizard` action. It reopens the real
+wizard, protects unsaved Settings edits with the existing discard warning, and resets the final
+action state so the setup flow can be completed more than once in the same app session.
+
 Persistence/startup classification and UI contracts cover the new behavior. Full workspace tests,
 fresh-cache warning-denied workspace Clippy, JavaScript syntax checks, formatting, and diff checks
 are green. A development build launched against isolated `%APPDATA%`; Basics, device-backed Capture

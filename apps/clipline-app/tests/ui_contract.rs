@@ -4295,6 +4295,54 @@ fn first_run_setup_covers_approved_defaults_and_save_flow() {
 }
 
 #[test]
+fn settings_misc_tab_replays_first_run_setup() {
+    let html = index_html();
+    let wizard = read_ui_js("first-run.js");
+
+    for required in [
+        "id=\"settings-tab-misc\"",
+        "id=\"settings-panel-misc\"",
+        "id=\"play-first-run-wizard\"",
+        ">Play first-time wizard</button>",
+    ] {
+        assert!(
+            html.contains(required),
+            "settings wizard replay UI must include `{required}`"
+        );
+    }
+    for required in [
+        "$(\"play-first-run-wizard\").addEventListener(\"click\"",
+        "settingsHaveUnsavedChanges()",
+        "showSettingsDiscardWarning()",
+        "toggleSettings(false)",
+        "openFirstRunSetup(currentSettings)",
+    ] {
+        assert!(
+            wizard.contains(required),
+            "settings wizard replay action must include `{required}`"
+        );
+    }
+    let open_start = wizard
+        .find("async function openFirstRunSetup")
+        .expect("first-run setup opener");
+    let open_end = wizard[open_start..]
+        .find("\n}\n\n$(\"play-first-run-wizard\")")
+        .map(|offset| open_start + offset)
+        .expect("first-run setup opener end");
+    let opener = &wizard[open_start..open_end];
+    for required in [
+        "finish.disabled = false",
+        "finish.textContent = \"Start Clipline\"",
+        "$(\"first-run-back\").disabled = false",
+    ] {
+        assert!(
+            opener.contains(required),
+            "reopening the wizard must reset `{required}`"
+        );
+    }
+}
+
+#[test]
 fn gallery_supports_multi_select_bulk_actions() {
     let html = index_html();
     let js = main_js();
@@ -4762,6 +4810,7 @@ fn settings_tabs_and_support_phases_are_accessible() {
         ("storage", "false"),
         ("cloud", "false"),
         ("hotkeys", "false"),
+        ("misc", "false"),
         ("support", "false"),
     ] {
         assert!(
