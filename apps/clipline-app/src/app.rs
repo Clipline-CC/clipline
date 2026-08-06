@@ -264,7 +264,6 @@ fn ensure_foreground_microphone_test(state: &WindowLifecycleState) -> Result<(),
 struct FrontendReadyResponse {
     warnings: Vec<String>,
     window_lifecycle: WindowLifecycleSnapshot,
-    first_run: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -729,14 +728,12 @@ fn frontend_ready<R: Runtime>(
     app: AppHandle<R>,
     runtime: tauri::State<RuntimeState>,
     startup_warnings: tauri::State<StartupWarnings>,
-    first_run: tauri::State<FirstRunState>,
     window_lifecycle: tauri::State<WindowLifecycleState>,
     readiness: tauri::State<FrontendReadinessState>,
 ) -> FrontendReadyResponse {
     let generation = readiness.mark_ready();
-    let first_run_pending = first_run.pending();
     log_diagnostic(format!(
-        "frontend_ready received generation={} first_run_pending={first_run_pending} webviews={}",
+        "frontend_ready received generation={} webviews={}",
         generation
             .map(|value| value.to_string())
             .unwrap_or_else(|| "none".into()),
@@ -748,7 +745,6 @@ fn frontend_ready<R: Runtime>(
     FrontendReadyResponse {
         warnings: startup_warnings.snapshot(),
         window_lifecycle: window_lifecycle.snapshot(),
-        first_run: first_run_pending,
     }
 }
 
@@ -767,22 +763,6 @@ impl StartupWarnings {
                 "startup diagnostics could not be read because their lock was poisoned: {error}"
             )],
         }
-    }
-}
-
-struct FirstRunState(AtomicBool);
-
-impl FirstRunState {
-    fn new(pending: bool) -> Self {
-        Self(AtomicBool::new(pending))
-    }
-
-    fn pending(&self) -> bool {
-        self.0.load(Ordering::Acquire)
-    }
-
-    fn complete(&self) -> bool {
-        self.0.swap(false, Ordering::AcqRel)
     }
 }
 
@@ -2201,20 +2181,6 @@ fn set_recording<R: Runtime>(
     state.set_recording(app, recording)
 }
 
-#[tauri::command]
-fn complete_first_run<R: Runtime>(
-    app: AppHandle<R>,
-    state: tauri::State<RuntimeState>,
-    first_run: tauri::State<FirstRunState>,
-) -> Result<bool, String> {
-    if !first_run.pending() {
-        return Ok(true);
-    }
-    state.start_recording(app)?;
-    first_run.complete();
-    Ok(true)
-}
-
 /// Whether this build bundles a fixed WebView2 runtime (the "standalone"
 /// installer variant). The install mode comes from the Tauri config baked in
 /// at compile time, so the answer is a property of the installed binary, not
@@ -2797,7 +2763,6 @@ pub fn run() {
     let startup_load = AppSettings::load_for_startup();
     let mut settings = startup_load.settings;
     let mut startup_warnings = startup_load.warnings;
-    let first_run_pending = startup_load.fresh_install;
     for warning in &startup_warnings {
         log_diagnostic(format!("settings recovery: {warning}"));
         tracing::warn!(event = "settings_recovery_warning", message = %warning);
@@ -2855,7 +2820,6 @@ pub fn run() {
     tauri::Builder::default()
         .manage(RuntimeState::new(settings.clone(), lol_url))
         .manage(StartupWarnings::new(startup_warnings))
-        .manage(FirstRunState::new(first_run_pending))
         .manage(WindowLifecycleState::default())
         .manage(MainWindowOpenQueue::default())
         .manage(FrontendReadinessState::default())
@@ -2898,7 +2862,6 @@ pub fn run() {
             save_replay,
             restart_as_administrator,
             set_recording,
-            complete_first_run,
             get_settings,
             minimize_main_window,
             choose_media_folder,
@@ -3087,15 +3050,13 @@ pub fn run() {
                 .build(app)?;
             log_diagnostic(format!("tray build complete webviews={}", webview_labels(app.handle())));
 
-            if !first_run_pending {
-                if let Err(e) = app
-                    .state::<RuntimeState>()
-                    .start_recording(app.handle().clone())
-                {
-                    let message = format!("recorder startup failed: {e}");
-                    tracing::error!(event = "recorder_startup_failed", message = %message);
-                    let _ = app.handle().emit("error", message);
-                }
+            if let Err(e) = app
+                .state::<RuntimeState>()
+                .start_recording(app.handle().clone())
+            {
+                let message = format!("recorder startup failed: {e}");
+                tracing::error!(event = "recorder_startup_failed", message = %message);
+                let _ = app.handle().emit("error", message);
             }
             spawn_game_detector(app.handle().clone());
 
@@ -3530,16 +3491,6 @@ mod tests {
             vec!["settings recovered"],
             "recreated UIs must see the same durable startup warnings"
         );
-    }
-
-    #[test]
-    fn first_run_state_stays_complete_after_the_walkthrough_finishes() {
-        let state = FirstRunState::new(true);
-
-        assert!(state.pending());
-        assert!(state.complete());
-        assert!(!state.pending());
-        assert!(!state.complete());
     }
 
     #[test]
@@ -5043,7 +4994,7 @@ mod tests {
     }
 
     #[test]
-    fn native_shell_starts_recorder_after_single_instance_accepts_process_unless_first_run() {
+    fn native_shell_starts_recorder_after_single_instance_accepts_process() {
         let app = include_str!("app.rs");
         let run_start = app.find("pub fn run()").expect("run function should exist");
         let run_body = &app[run_start..];
@@ -5060,9 +5011,6 @@ mod tests {
         let recorder_start = run_body
             .find("start_recording(app.handle().clone())")
             .expect("setup should start the recorder after plugins are installed");
-        let first_run_guard = run_body
-            .find("if !first_run_pending")
-            .expect("fresh installs must keep the recorder paused for setup");
 
         assert!(
             single_instance < setup,
@@ -5071,10 +5019,6 @@ mod tests {
         assert!(
             setup < recorder_start,
             "initial recorder startup must happen from setup after single-instance registration"
-        );
-        assert!(
-            first_run_guard < recorder_start,
-            "the first-run guard must wrap recorder startup"
         );
         assert!(
             !run_body[..single_instance].contains("service::spawn("),

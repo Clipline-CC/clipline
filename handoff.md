@@ -4,25 +4,6 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
-## Checkpoint (2026-08-06): first-start walkthrough
-
-Plan: `docs/superpowers/plans/2026-08-06-first-start-walkthrough.md` (`4b54bf5c`).
-
-Genuine fresh installs now keep the recorder stopped while a required three-step modal explains
-local capture/privacy and collects capture, full-session, desktop-audio, and microphone choices.
-The recommended path selects supported games only, full sessions, desktop audio, and no microphone;
-`Use defaults` preserves the existing desktop-fallback defaults. Both exits save settings before
-the new `complete_first_run` command starts recording. Primary settings, backup recovery, and
-invalid-settings recovery do not replay onboarding.
-
-Fresh/install/recovery classification, one-way completion state, native startup ordering, and the
-modal/save-before-start DOM contract have regression coverage. Workspace tests, warning-denied
-workspace Clippy, JS syntax, and whitespace checks are green. Manual isolated-profile checks cover
-all three rendered steps, persisted selections, recorder activation after Finish, and no walkthrough
-on the next launch.
-
----
-
 ## Checkpoint (2026-08-05): sparse-capture GOP watchdog
 
 Plan: `docs/superpowers/plans/2026-08-05-sparse-capture-gop-watchdog.md` (`0d5ec35`).

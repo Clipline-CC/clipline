@@ -719,94 +719,6 @@ async function restartAsAdministrator() {
 
 /* ---- boot ---- */
 
-function firstRunCaptureChoice() {
-  return document.querySelector('input[name="first-run-capture"]:checked')?.value || "games_only";
-}
-
-function updateFirstRunSummary() {
-  const gamesOnly = firstRunCaptureChoice() === "games_only";
-  const sessions = $("first-run-full-sessions").checked;
-  const audio = $("first-run-desktop-audio").checked;
-  const mic = $("first-run-microphone").checked;
-  $("first-run-summary").innerHTML = `<strong>Clipline will start ${gamesOnly ? "when a supported game opens" : "with a primary-display replay"}.</strong><span>${sessions ? "Supported games save full sessions" : "Supported games keep replays only"}; desktop audio ${audio ? "on" : "off"}; microphone ${mic ? "on" : "off"}.</span>`;
-}
-
-function renderFirstRunStep() {
-  document.querySelectorAll("[data-first-run-step]").forEach((panel) => {
-    panel.hidden = Number(panel.dataset.firstRunStep) !== firstRunStep;
-  });
-  $("first-run-progress").textContent = `Step ${firstRunStep + 1} of 3`;
-  $("first-run-back").hidden = firstRunStep === 0;
-  $("first-run-next").hidden = firstRunStep === 2;
-  $("first-run-finish").hidden = firstRunStep !== 2;
-  if (firstRunStep === 2) updateFirstRunSummary();
-}
-
-function showFirstRunWalkthrough() {
-  const dialog = $("first-run-dialog");
-  if (dialog.open) return;
-  firstRunStep = 0;
-  $("first-run-status").textContent = "";
-  renderFirstRunStep();
-  dialog.showModal();
-  $("first-run-next").focus();
-}
-
-function firstRunSettings() {
-  const next = cloneSettings(currentSettings);
-  next.games = { ...defaultGameSettings(), ...(next.games || {}) };
-  next.games.auto_detect = true;
-  next.games.pause_when_no_game = firstRunCaptureChoice() === "games_only";
-  next.games.plugins = { ...(next.games.plugins || {}) };
-  const recordingMode = $("first-run-full-sessions").checked ? "full_session" : "replays_only";
-  for (const plugin of gamePlugins) {
-    next.games.plugins[plugin.id] = {
-      ...gamePluginSetting(plugin),
-      recording_mode: recordingMode,
-    };
-  }
-  next.audio = { ...defaultAudioSettings(), ...(next.audio || {}) };
-  next.audio.output_enabled = $("first-run-desktop-audio").checked;
-  next.audio.mic_enabled = $("first-run-microphone").checked;
-  return next;
-}
-
-async function finishFirstRun({ useDefaults = false } = {}) {
-  if (firstRunSaving || !currentSettings) return;
-  firstRunSaving = true;
-  const buttons = $("first-run-dialog").querySelectorAll("button");
-  buttons.forEach((button) => { button.disabled = true; });
-  $("first-run-status").textContent = "Saving setup...";
-  try {
-    const settings = useDefaults ? cloneSettings(currentSettings) : firstRunSettings();
-    const saved = await invoke("save_settings", { settings });
-    await invoke("complete_first_run");
-    firstRunPending = false;
-    fillSettings(saved);
-    $("first-run-dialog").close();
-  } catch (e) {
-    $("first-run-status").textContent = String(e);
-  } finally {
-    firstRunSaving = false;
-    buttons.forEach((button) => { button.disabled = false; });
-  }
-}
-
-$("first-run-dialog").addEventListener("cancel", (ev) => {
-  ev.preventDefault();
-});
-$("first-run-next").addEventListener("click", () => {
-  firstRunStep = Math.min(2, firstRunStep + 1);
-  renderFirstRunStep();
-});
-$("first-run-back").addEventListener("click", () => {
-  firstRunStep = Math.max(0, firstRunStep - 1);
-  renderFirstRunStep();
-});
-$("first-run-finish").addEventListener("click", () => finishFirstRun());
-$("first-run-defaults").addEventListener("click", () => finishFirstRun({ useDefaults: true }));
-$("first-run-step-3").addEventListener("change", updateFirstRunSummary);
-
 updateViews();
 syncPlayState();
 syncVolume();
@@ -878,7 +790,6 @@ async function reportFrontendReady() {
     if (Array.isArray(warnings) && warnings.length) {
       $("error").textContent = warnings.join(" ");
     }
-    firstRunPending = response && response.first_run === true;
     applyWindowLifecycleSnapshot(response && response.window_lifecycle);
   } catch (e) {
     console.warn("frontend_ready failed:", e);
@@ -900,7 +811,6 @@ async function loadInitialSettings(lifecycleWork = captureForegroundWork()) {
   }
   if (!isForegroundWorkCurrent(lifecycleWork)) return false;
   fillSettings(settings);
-  if (firstRunPending) showFirstRunWalkthrough();
   window.setTimeout(() => {
     if (isForegroundWorkCurrent(lifecycleWork)) {
       checkForUpdates({ manual: false });

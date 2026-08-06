@@ -55,49 +55,6 @@ fn legacy_buffer_setting_mirrors_the_replay_window() {
     );
 }
 
-#[test]
-fn first_run_walkthrough_is_modal_accessible_and_starts_only_after_save() {
-    let html = index_html();
-    let js = main_js();
-
-    for required in [
-        "id=\"first-run-dialog\"",
-        "aria-labelledby=\"first-run-title\"",
-        "id=\"first-run-step-1\"",
-        "id=\"first-run-step-2\"",
-        "id=\"first-run-step-3\"",
-        "id=\"first-run-back\"",
-        "id=\"first-run-next\"",
-        "id=\"first-run-finish\"",
-        "id=\"first-run-defaults\"",
-    ] {
-        assert!(
-            html.contains(required),
-            "missing walkthrough contract: {required}"
-        );
-    }
-    assert!(
-        js.contains("function showFirstRunWalkthrough()")
-            && js.contains("function renderFirstRunStep()")
-            && js.contains("ev.preventDefault();"),
-        "walkthrough must render explicit steps and reject accidental dialog cancellation"
-    );
-    let finish = js
-        .find("async function finishFirstRun")
-        .expect("walkthrough must have one completion path");
-    let finish = &js[finish..];
-    let save = finish
-        .find("invoke(\"save_settings\"")
-        .expect("walkthrough must persist settings");
-    let start = finish
-        .find("invoke(\"complete_first_run\"")
-        .expect("walkthrough must explicitly release first-run recorder pause");
-    assert!(
-        save < start,
-        "walkthrough must save successfully before recording starts"
-    );
-}
-
 /// Concatenated app UI scripts (everything except player-core.js).
 fn main_js() -> String {
     APP_UI_JS
