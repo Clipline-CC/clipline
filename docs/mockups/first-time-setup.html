@@ -309,6 +309,127 @@
       background: var(--good);
       transition: width .2s ease;
     }
+    .games-page .lede { margin-bottom: 22px; }
+    .discovery-card {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: rgba(30, 24, 18, .7);
+    }
+    .discovery-intro {
+      display: grid;
+      grid-template-columns: 46px minmax(0, 1fr) auto;
+      gap: 16px;
+      align-items: center;
+      padding: 18px;
+      border-bottom: 1px solid var(--line);
+    }
+    .discovery-mark {
+      display: grid;
+      width: 46px;
+      height: 46px;
+      place-items: center;
+      border: 1px solid #5c4727;
+      border-radius: 11px;
+      background: #21190f;
+      color: var(--accent);
+      font-size: 22px;
+    }
+    .discovery-copy strong { display: block; margin-bottom: 4px; font-size: 14px; }
+    .discovery-copy span { color: var(--muted); font-size: 12.5px; line-height: 1.45; }
+    .small-button {
+      padding: 9px 13px;
+      border: 1px solid #5c4727;
+      border-radius: 7px;
+      background: #241b11;
+      color: var(--text);
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 650;
+    }
+    .small-button:hover { border-color: #9a6b19; background: #2d2112; }
+    .small-button.primary { border-color: var(--accent); background: var(--accent); color: #1b1308; }
+    .small-button.primary:hover { background: #ffc34d; }
+    .small-button:disabled { opacity: .4; cursor: not-allowed; }
+    .discovery-body { padding: 18px; }
+    .discovery-empty {
+      display: grid;
+      min-height: 200px;
+      place-content: center;
+      justify-items: center;
+      gap: 9px;
+      color: var(--muted);
+      text-align: center;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .discovery-empty strong { color: var(--text); font-size: 14px; }
+    .spinner {
+      width: 28px;
+      height: 28px;
+      border: 2px solid #4b3b29;
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin .7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .detected-head,
+    .detected-actions {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    .detected-head { margin-bottom: 12px; }
+    .detected-head strong { font-size: 13px; }
+    .detected-head span,
+    .detected-actions span { color: var(--muted); font-size: 12px; }
+    .detected-list { display: grid; gap: 8px; }
+    .detected-game {
+      display: grid;
+      grid-template-columns: auto 42px minmax(0, 1fr);
+      gap: 12px;
+      align-items: center;
+      padding: 11px 12px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: #15110e;
+      cursor: pointer;
+    }
+    .detected-game:hover,
+    .detected-game:has(input:checked) { border-color: #70562c; background: #1d170f; }
+    .detected-game input { accent-color: var(--accent); }
+    .game-icon {
+      display: grid;
+      width: 42px;
+      height: 42px;
+      place-items: center;
+      border-radius: 9px;
+      background: linear-gradient(145deg, #594322, #20170d);
+      color: #ffd991;
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: .04em;
+    }
+    .game-icon.blue { background: linear-gradient(145deg, #285d72, #13222b); color: #bfefff; }
+    .game-icon.red { background: linear-gradient(145deg, #6d3029, #261413); color: #ffd0c9; }
+    .detected-meta { min-width: 0; }
+    .detected-meta strong,
+    .detected-meta span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .detected-meta strong { margin-bottom: 4px; font-size: 13.5px; }
+    .detected-meta span { color: var(--muted); font-size: 11.5px; }
+    .detected-actions {
+      margin-top: 14px;
+      padding-top: 14px;
+      border-top: 1px solid var(--line);
+    }
+    .added-games {
+      margin-top: 14px;
+      color: var(--good);
+      font-size: 12.5px;
+    }
+    .added-games[hidden],
+    .discovery-state[hidden] { display: none; }
     .switch {
       position: relative;
       width: 42px;
@@ -397,7 +518,8 @@
       <ol class="steps" aria-label="Setup progress">
         <li data-progress="0"><span>1</span>Basics</li>
         <li data-progress="1"><span>2</span>Capture + recording</li>
-        <li data-progress="2"><span>3</span>Review</li>
+        <li data-progress="2"><span>3</span>Games</li>
+        <li data-progress="3"><span>4</span>Review</li>
       </ol>
       <p class="privacy"><strong>Private by default.</strong><br>Your recordings stay on this PC unless you choose to upload one.</p>
     </aside>
@@ -560,7 +682,62 @@
           </div>
         </section>
 
-        <section class="screen" data-screen="2" hidden>
+        <section class="screen games-page" data-screen="2" hidden>
+          <div class="eyebrow">Games</div>
+          <h2>Find the games you play.</h2>
+          <p class="lede">Clipline can scan Steam and running game windows, then add the games you want it to recognize.</p>
+          <div class="discovery-card">
+            <div class="discovery-intro">
+              <div class="discovery-mark" aria-hidden="true">⌕</div>
+              <div class="discovery-copy">
+                <strong>Detect games on this PC</strong>
+                <span>Only local app information is checked. Nothing is uploaded.</span>
+              </div>
+              <button class="small-button" id="detect-games" type="button">Detect Games</button>
+            </div>
+            <div class="discovery-body">
+              <div class="discovery-state discovery-empty" id="games-idle">
+                <strong>No scan yet</strong>
+                <span>Run detection to find installed and currently running games.</span>
+              </div>
+              <div class="discovery-state discovery-empty" id="games-scanning" hidden>
+                <div class="spinner" aria-hidden="true"></div>
+                <strong>Scanning installed games…</strong>
+                <span>This usually takes a few seconds.</span>
+              </div>
+              <div class="discovery-state" id="games-results" hidden>
+                <div class="detected-head">
+                  <strong>3 games found</strong>
+                  <span>Select the games Clipline should recognize.</span>
+                </div>
+                <div class="detected-list">
+                  <label class="detected-game">
+                    <input type="checkbox" name="detected-game" value="Counter-Strike 2">
+                    <span class="game-icon blue" aria-hidden="true">CS</span>
+                    <span class="detected-meta"><strong>Counter-Strike 2</strong><span>Steam · Running · cs2.exe</span></span>
+                  </label>
+                  <label class="detected-game">
+                    <input type="checkbox" name="detected-game" value="Factorio">
+                    <span class="game-icon" aria-hidden="true">FA</span>
+                    <span class="detected-meta"><strong>Factorio</strong><span>Steam · factorio.exe</span></span>
+                  </label>
+                  <label class="detected-game">
+                    <input type="checkbox" name="detected-game" value="Hades II">
+                    <span class="game-icon red" aria-hidden="true">H2</span>
+                    <span class="detected-meta"><strong>Hades II</strong><span>Steam · Hades2.exe</span></span>
+                  </label>
+                </div>
+                <div class="detected-actions">
+                  <span id="games-selection-count">No games selected</span>
+                  <button class="small-button primary" id="add-detected-games" type="button" disabled>Add selected games</button>
+                </div>
+                <div class="added-games" id="games-added" role="status" hidden></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="screen" data-screen="3" hidden>
           <div class="eyebrow">Ready to go</div>
           <h2>Here’s how Clipline will work.</h2>
           <p class="lede">A plain-language summary before anything starts recording.</p>
@@ -577,6 +754,7 @@
             <div class="summary-row"><span>Output size</span><strong id="summary-size"></strong></div>
             <div class="summary-row"><span>Video quality</span><strong id="summary-quality"></strong></div>
             <div class="summary-row"><span>FPS</span><strong id="summary-fps"></strong></div>
+            <div class="summary-row"><span>Games</span><strong id="summary-games"></strong></div>
           </div>
           <div class="ready-note">Nothing has been recorded or changed in this HTML prototype.</div>
         </section>
@@ -598,6 +776,8 @@
     const next = document.querySelector("#next");
     const toast = document.querySelector("#toast");
     let step = 0;
+    let addedGames = [];
+    let scanTimer;
 
     const qualityPresets = [
       { label: "Compact", hint: "smaller files" },
@@ -679,6 +859,38 @@
         `${fps.value} FPS — ${fps.hint}.`;
     }
 
+    function selectedGames() {
+      return [...document.querySelectorAll('input[name="detected-game"]:checked')]
+        .map((checkbox) => checkbox.value);
+    }
+
+    function syncGameControls() {
+      const selected = selectedGames();
+      document.querySelector("#games-selection-count").textContent = selected.length
+        ? `${selected.length} game${selected.length === 1 ? "" : "s"} selected`
+        : "No games selected";
+      document.querySelector("#add-detected-games").disabled = selected.length === 0;
+    }
+
+    function showGameState(state) {
+      for (const name of ["idle", "scanning", "results"]) {
+        document.querySelector(`#games-${name}`).hidden = name !== state;
+      }
+    }
+
+    function resetGames() {
+      window.clearTimeout(scanTimer);
+      addedGames = [];
+      document.querySelectorAll('input[name="detected-game"]').forEach((checkbox) => {
+        checkbox.checked = false;
+      });
+      document.querySelector("#detect-games").disabled = false;
+      document.querySelector("#detect-games").textContent = "Detect Games";
+      document.querySelector("#games-added").hidden = true;
+      showGameState("idle");
+      syncGameControls();
+    }
+
     function render() {
       screens.forEach((screen, index) => { screen.hidden = index !== step; });
       progress.forEach((item, index) => {
@@ -709,6 +921,9 @@
         const quality = qualitySelection();
         document.querySelector("#summary-quality").textContent = `${quality.label} · ${quality.bitrate} Mbps`;
         document.querySelector("#summary-fps").textContent = `${fpsSelection().value} FPS`;
+        document.querySelector("#summary-games").textContent = addedGames.length
+          ? addedGames.join(", ")
+          : "None added";
       }
     }
 
@@ -739,6 +954,7 @@
       document.querySelector("#record-output-size").value = "1080p";
       document.querySelector("#record-quality").value = "1";
       document.querySelector("#record-fps").value = "1";
+      resetGames();
       toast.hidden = true;
       step = 0;
       render();
@@ -758,6 +974,29 @@
     document.querySelector("#record-test-mic").addEventListener("click", (event) => {
       event.currentTarget.dataset.testing = event.currentTarget.dataset.testing === "true" ? "false" : "true";
       syncCaptureControls();
+    });
+    document.querySelector("#detect-games").addEventListener("click", (event) => {
+      const button = event.currentTarget;
+      window.clearTimeout(scanTimer);
+      button.disabled = true;
+      button.textContent = "Scanning…";
+      document.querySelector("#games-added").hidden = true;
+      showGameState("scanning");
+      scanTimer = window.setTimeout(() => {
+        button.disabled = false;
+        button.textContent = "Scan again";
+        showGameState("results");
+        syncGameControls();
+      }, 700);
+    });
+    document.querySelectorAll('input[name="detected-game"]').forEach((checkbox) => {
+      checkbox.addEventListener("change", syncGameControls);
+    });
+    document.querySelector("#add-detected-games").addEventListener("click", () => {
+      addedGames = selectedGames();
+      const status = document.querySelector("#games-added");
+      status.textContent = `✓ ${addedGames.length} game${addedGames.length === 1 ? "" : "s"} ready to add`;
+      status.hidden = false;
     });
     document.querySelector("#browse-folder").addEventListener("click", () => {
       document.querySelector("#setup-folder").select();
