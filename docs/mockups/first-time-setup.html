@@ -226,6 +226,7 @@
     }
     .capture-settings .lede { margin-bottom: 18px; }
     .capture-settings .setting-row { min-height: 68px; padding-top: 12px; padding-bottom: 12px; }
+    .capture-settings .expanded-row { align-items: start; padding-top: 16px; padding-bottom: 16px; }
     .settings-section-title {
       padding: 9px 18px;
       border-bottom: 1px solid var(--line);
@@ -235,6 +236,78 @@
       font-weight: 750;
       letter-spacing: .12em;
       text-transform: uppercase;
+    }
+    .control-stack { display: grid; gap: 10px; min-width: 0; }
+    .check-line {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 12.5px;
+      cursor: pointer;
+    }
+    .check-line input { accent-color: var(--accent); }
+    .check-line:has(input:disabled),
+    .control-stack select:disabled,
+    .control-stack input:disabled { opacity: .45; cursor: not-allowed; }
+    .range-line {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 58px;
+      gap: 12px;
+      align-items: center;
+    }
+    input[type="range"] {
+      width: 100%;
+      margin: 0;
+      accent-color: var(--accent);
+      cursor: pointer;
+    }
+    .range-value,
+    .setting-summary {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.4;
+    }
+    .range-value { text-align: right; }
+    .range-scale {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      color: #756a5b;
+      font-size: 10px;
+    }
+    .preset-row { display: flex; gap: 7px; }
+    .preset-row button,
+    .mic-test-row button {
+      padding: 6px 9px;
+      border: 1px solid #493b2b;
+      border-radius: 6px;
+      background: #211a14;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 11.5px;
+    }
+    .preset-row button:hover,
+    .mic-test-row button:hover { color: var(--text); background: #2a2118; }
+    .mic-test-row {
+      display: grid;
+      grid-template-columns: auto minmax(80px, 1fr) 72px;
+      gap: 9px;
+      align-items: center;
+    }
+    .mic-meter {
+      overflow: hidden;
+      height: 7px;
+      border-radius: 99px;
+      background: #0d0b09;
+      box-shadow: inset 0 0 0 1px var(--line);
+    }
+    .mic-meter span {
+      display: block;
+      width: 0;
+      height: 100%;
+      background: var(--good);
+      transition: width .2s ease;
     }
     .switch {
       position: relative;
@@ -373,35 +446,67 @@
           <p class="lede">Set the capture source, audio devices, and default replay quality.</p>
           <div class="settings-card">
             <div class="settings-section-title">Audio</div>
-            <div class="setting-row">
-              <label class="setting-label" for="record-output-audio"><strong>Audio output</strong><small>Sound playing through Windows.</small></label>
-              <select class="field" id="record-output-audio">
-                <option>Default Windows output</option>
-                <option>Speakers (Realtek Audio)</option>
-                <option>Off</option>
-              </select>
+            <div class="setting-row expanded-row">
+              <div class="setting-label"><strong>Audio output</strong><small>Sound from the selected Windows playback device.</small></div>
+              <div class="control-stack">
+                <label class="check-line">
+                  <input id="record-output-enabled" type="checkbox" checked>
+                  <span>Record output audio</span>
+                </label>
+                <label class="check-line">
+                  <input id="record-split-output" type="checkbox">
+                  <span>Experimental app audio tracks</span>
+                </label>
+                <select class="field" id="record-output-audio" aria-label="Audio output device">
+                  <option>Default output device</option>
+                  <option>Speakers (Realtek Audio)</option>
+                  <option>Headphones (USB Audio)</option>
+                </select>
+                <div class="range-line">
+                  <input id="record-output-volume" aria-label="Audio output volume" type="range" min="0" max="2" step="0.05" value="1">
+                  <output id="record-output-volume-value" class="range-value">100%</output>
+                </div>
+              </div>
             </div>
-            <div class="setting-row">
-              <label class="setting-label" for="record-input-audio"><strong>Audio input</strong><small>Microphone recorded on a separate track.</small></label>
-              <select class="field" id="record-input-audio">
-                <option>Off</option>
-                <option>Default Windows microphone</option>
-                <option>Microphone (USB Audio)</option>
-              </select>
+            <div class="setting-row expanded-row">
+              <div class="setting-label"><strong>Audio input</strong><small>Voice input mixed into saved clip audio.</small></div>
+              <div class="control-stack">
+                <label class="check-line">
+                  <input id="record-input-enabled" type="checkbox">
+                  <span>Record microphone</span>
+                </label>
+                <select class="field" id="record-input-audio" aria-label="Audio input device">
+                  <option>Default microphone</option>
+                  <option>Microphone Array (Realtek Audio)</option>
+                  <option>Microphone (USB Audio)</option>
+                </select>
+                <div class="range-line">
+                  <input id="record-input-volume" aria-label="Audio input volume" type="range" min="0" max="2" step="0.05" value="1">
+                  <output id="record-input-volume-value" class="range-value">100%</output>
+                </div>
+                <label class="check-line">
+                  <input id="record-input-mono" type="checkbox" checked>
+                  <span>Mono</span>
+                </label>
+                <div class="mic-test-row">
+                  <button id="record-test-mic" type="button">Test mic</button>
+                  <div class="mic-meter" aria-hidden="true"><span id="record-mic-meter"></span></div>
+                  <span id="record-mic-status" class="setting-summary">Not testing</span>
+                </div>
+              </div>
             </div>
 
             <div class="settings-section-title">Capture</div>
             <div class="setting-row">
-              <label class="setting-label" for="record-target"><strong>Capture target</strong><small>The screen or window Clipline watches.</small></label>
+              <label class="setting-label" for="record-target"><strong>Capture target</strong><small>What the recorder captures when no custom game is active.</small></label>
               <select class="field" id="record-target">
                 <option>Primary display</option>
-                <option>Choose a display</option>
-                <option>Choose a window</option>
-                <option>Choose a region</option>
+                <option>Display 2</option>
+                <option>Set region</option>
               </select>
             </div>
             <div class="setting-row">
-              <div class="setting-label"><strong>Pause recorder when no game is open</strong><small>Wait quietly until Clipline recognizes a supported game.</small></div>
+              <div class="setting-label"><strong>Pause recorder when no game is open</strong><small>Reduce background load until an enabled game is detected.</small></div>
               <label class="startup-control">
                 <span>Pause automatically</span>
                 <input id="record-pause-no-game" type="checkbox" checked>
@@ -410,41 +515,47 @@
             </div>
 
             <div class="settings-section-title">Recording</div>
-            <div class="setting-row">
-              <label class="setting-label" for="record-save-length"><strong>Save length</strong><small>How much recent footage each replay keeps.</small></label>
-              <select class="field" id="record-save-length">
-                <option value="15">15 seconds</option>
-                <option value="30" selected>30 seconds</option>
-                <option value="60">1 minute</option>
-                <option value="120">2 minutes</option>
-              </select>
+            <div class="setting-row expanded-row">
+              <div class="setting-label"><strong>Save length</strong><small>How much recent footage each replay saves.</small></div>
+              <div class="control-stack">
+                <input id="record-save-length" aria-label="Save length" type="range" min="5" max="120" step="5" value="30">
+                <div class="range-scale" aria-hidden="true"><span>5 sec</span><span>1 min</span><span>2 min</span></div>
+                <div class="preset-row" aria-label="Save length presets">
+                  <button type="button" data-length="30">30 sec</button>
+                  <button type="button" data-length="60">1 min</button>
+                  <button type="button" data-length="120">2 min</button>
+                </div>
+                <output id="record-length-summary" class="setting-summary">Save Replay writes the last 30 sec.</output>
+              </div>
             </div>
             <div class="setting-row">
-              <label class="setting-label" for="record-output-size"><strong>Output size</strong><small>Maximum saved video resolution.</small></label>
-              <select class="field" id="record-output-size">
-                <option>Source</option>
-                <option>1440p</option>
-                <option selected>1080p</option>
-                <option>720p</option>
-              </select>
+              <label class="setting-label" for="record-output-size"><strong>Output size</strong><small>Caps saved video resolution while preserving aspect ratio.</small></label>
+              <div class="control-stack">
+                <select class="field" id="record-output-size">
+                  <option>Source</option>
+                  <option>1440p</option>
+                  <option selected>1080p</option>
+                  <option>720p</option>
+                  <option>480p</option>
+                </select>
+                <output id="record-size-summary" class="setting-summary">1080p output, up to 1920 × 1080.</output>
+              </div>
             </div>
-            <div class="setting-row">
-              <label class="setting-label" for="record-quality"><strong>Video quality</strong><small>Higher quality uses more disk space.</small></label>
-              <select class="field" id="record-quality">
-                <option>Compact</option>
-                <option selected>Balanced</option>
-                <option>Sharp</option>
-                <option>Maximum</option>
-              </select>
+            <div class="setting-row expanded-row">
+              <div class="setting-label"><strong>Video quality</strong><small>Higher quality keeps more detail and uses more disk space.</small></div>
+              <div class="control-stack">
+                <input id="record-quality" aria-label="Video quality" type="range" min="0" max="3" step="1" value="1">
+                <div class="range-scale" aria-hidden="true"><span>Compact</span><span>Balanced</span><span>Sharp</span><span>Maximum</span></div>
+                <output id="record-quality-summary" class="setting-summary">Balanced quality — good default. 8 Mbps.</output>
+              </div>
             </div>
-            <div class="setting-row">
-              <label class="setting-label" for="record-fps"><strong>FPS</strong><small>Higher frame rates look smoother and use more resources.</small></label>
-              <select class="field" id="record-fps">
-                <option>30</option>
-                <option selected>60</option>
-                <option>90</option>
-                <option>120</option>
-              </select>
+            <div class="setting-row expanded-row">
+              <div class="setting-label"><strong>FPS</strong><small>Higher FPS feels smoother and costs more performance.</small></div>
+              <div class="control-stack">
+                <input id="record-fps" aria-label="FPS" type="range" min="0" max="3" step="1" value="1">
+                <div class="range-scale" aria-hidden="true"><span>30 FPS</span><span>60 FPS</span><span>90 FPS</span><span>120 FPS</span></div>
+                <output id="record-fps-summary" class="setting-summary">60 FPS — good default for most games.</output>
+              </div>
             </div>
           </div>
         </section>
@@ -488,6 +599,86 @@
     const toast = document.querySelector("#toast");
     let step = 0;
 
+    const qualityPresets = [
+      { label: "Compact", hint: "smaller files" },
+      { label: "Balanced", hint: "good default" },
+      { label: "Sharp", hint: "more detail" },
+      { label: "Maximum", hint: "largest files" },
+    ];
+    const qualityBitrates = {
+      Source: [6, 12, 24, 40],
+      "1440p": [6, 12, 24, 40],
+      "1080p": [4, 8, 16, 24],
+      "720p": [2.5, 5, 8, 12],
+      "480p": [1.5, 3, 5, 8],
+    };
+    const fpsPresets = [
+      { value: 30, hint: "lighter on the PC" },
+      { value: 60, hint: "good default for most games" },
+      { value: 90, hint: "smoother for high-refresh play" },
+      { value: 120, hint: "best for high-refresh footage" },
+    ];
+    const sizeHints = {
+      Source: "Uses the captured size, capped only when needed for encoder compatibility.",
+      "1440p": "1440p output, up to 2560 × 1440.",
+      "1080p": "1080p output, up to 1920 × 1080.",
+      "720p": "720p output, up to 1280 × 720.",
+      "480p": "480p output, up to 854 × 480.",
+    };
+
+    function durationLabel(seconds) {
+      const total = Number(seconds);
+      if (total < 60) return `${total} sec`;
+      const minutes = Math.floor(total / 60);
+      const rest = total % 60;
+      return rest ? `${minutes} min ${rest} sec` : `${minutes} min`;
+    }
+
+    function volumeLabel(value) {
+      return `${Math.round(Number(value) * 100)}%`;
+    }
+
+    function qualitySelection() {
+      const index = Number(document.querySelector("#record-quality").value);
+      const size = document.querySelector("#record-output-size").value;
+      return { ...qualityPresets[index], bitrate: qualityBitrates[size][index] };
+    }
+
+    function fpsSelection() {
+      return fpsPresets[Number(document.querySelector("#record-fps").value)];
+    }
+
+    function syncCaptureControls() {
+      const outputEnabled = document.querySelector("#record-output-enabled").checked;
+      for (const selector of ["#record-split-output", "#record-output-audio", "#record-output-volume"]) {
+        document.querySelector(selector).disabled = !outputEnabled;
+      }
+      document.querySelector("#record-output-volume-value").textContent =
+        volumeLabel(document.querySelector("#record-output-volume").value);
+      document.querySelector("#record-input-volume-value").textContent =
+        volumeLabel(document.querySelector("#record-input-volume").value);
+
+      const testing = document.querySelector("#record-test-mic").dataset.testing === "true";
+      for (const selector of ["#record-input-audio", "#record-input-volume", "#record-input-mono"]) {
+        document.querySelector(selector).disabled = testing;
+      }
+      document.querySelector("#record-test-mic").textContent = testing ? "Stop testing" : "Test mic";
+      document.querySelector("#record-mic-meter").style.width = testing ? "62%" : "0";
+      document.querySelector("#record-mic-status").textContent = testing ? "Input detected" : "Not testing";
+
+      const seconds = document.querySelector("#record-save-length").value;
+      document.querySelector("#record-length-summary").textContent =
+        `Save Replay writes the last ${durationLabel(seconds)}.`;
+      const size = document.querySelector("#record-output-size").value;
+      document.querySelector("#record-size-summary").textContent = sizeHints[size];
+      const quality = qualitySelection();
+      document.querySelector("#record-quality-summary").textContent =
+        `${quality.label} quality — ${quality.hint}. ${quality.bitrate} Mbps.`;
+      const fps = fpsSelection();
+      document.querySelector("#record-fps-summary").textContent =
+        `${fps.value} FPS — ${fps.hint}.`;
+    }
+
     function render() {
       screens.forEach((screen, index) => { screen.hidden = index !== step; });
       progress.forEach((item, index) => {
@@ -496,25 +687,35 @@
       });
       back.hidden = step === 0;
       next.textContent = step === screens.length - 1 ? "Start Clipline" : "Continue";
+      syncCaptureControls();
       if (step === screens.length - 1) {
         document.querySelector("#summary-hotkey").textContent = document.querySelector("#setup-hotkey").value;
         document.querySelector("#summary-folder").textContent = document.querySelector("#setup-folder").value;
         document.querySelector("#summary-quota").textContent = `${document.querySelector("#setup-quota").value} GB`;
         document.querySelector("#summary-startup").textContent = document.querySelector("#setup-startup").checked ? "On" : "Off";
-        document.querySelector("#summary-output-audio").textContent = document.querySelector("#record-output-audio").value;
-        document.querySelector("#summary-input-audio").textContent = document.querySelector("#record-input-audio").value;
+        const outputEnabled = document.querySelector("#record-output-enabled").checked;
+        const splitOutput = document.querySelector("#record-split-output").checked;
+        document.querySelector("#summary-output-audio").textContent = outputEnabled
+          ? `${document.querySelector("#record-output-audio").value} · ${volumeLabel(document.querySelector("#record-output-volume").value)}${splitOutput ? " · app tracks" : ""}`
+          : "Off";
+        const inputEnabled = document.querySelector("#record-input-enabled").checked;
+        document.querySelector("#summary-input-audio").textContent = inputEnabled
+          ? `${document.querySelector("#record-input-audio").value} · ${volumeLabel(document.querySelector("#record-input-volume").value)} · ${document.querySelector("#record-input-mono").checked ? "mono" : "stereo"}`
+          : "Off";
         document.querySelector("#summary-target").textContent = document.querySelector("#record-target").value;
         document.querySelector("#summary-pause").textContent = document.querySelector("#record-pause-no-game").checked ? "On" : "Off";
-        document.querySelector("#summary-length").textContent = document.querySelector("#record-save-length").selectedOptions[0].textContent;
+        document.querySelector("#summary-length").textContent = durationLabel(document.querySelector("#record-save-length").value);
         document.querySelector("#summary-size").textContent = document.querySelector("#record-output-size").value;
-        document.querySelector("#summary-quality").textContent = document.querySelector("#record-quality").value;
-        document.querySelector("#summary-fps").textContent = `${document.querySelector("#record-fps").value} FPS`;
+        const quality = qualitySelection();
+        document.querySelector("#summary-quality").textContent = `${quality.label} · ${quality.bitrate} Mbps`;
+        document.querySelector("#summary-fps").textContent = `${fpsSelection().value} FPS`;
       }
     }
 
     back.addEventListener("click", () => { step = Math.max(0, step - 1); render(); });
     next.addEventListener("click", () => {
       if (step < screens.length - 1) { step += 1; render(); return; }
+      toast.textContent = "Prototype complete — no settings were changed.";
       toast.hidden = false;
       window.setTimeout(() => { toast.hidden = true; }, 2600);
     });
@@ -523,17 +724,40 @@
       document.querySelector("#setup-folder").value = "C:\\Users\\You\\Videos\\Clipline";
       document.querySelector("#setup-quota").value = "10";
       document.querySelector("#setup-startup").checked = true;
-      document.querySelector("#record-output-audio").value = "Default Windows output";
-      document.querySelector("#record-input-audio").value = "Off";
+      document.querySelector("#record-output-enabled").checked = true;
+      document.querySelector("#record-split-output").checked = false;
+      document.querySelector("#record-output-audio").value = "Default output device";
+      document.querySelector("#record-output-volume").value = "1";
+      document.querySelector("#record-input-enabled").checked = false;
+      document.querySelector("#record-input-audio").value = "Default microphone";
+      document.querySelector("#record-input-volume").value = "1";
+      document.querySelector("#record-input-mono").checked = true;
+      document.querySelector("#record-test-mic").dataset.testing = "false";
       document.querySelector("#record-target").value = "Primary display";
       document.querySelector("#record-pause-no-game").checked = true;
       document.querySelector("#record-save-length").value = "30";
       document.querySelector("#record-output-size").value = "1080p";
-      document.querySelector("#record-quality").value = "Balanced";
-      document.querySelector("#record-fps").value = "60";
+      document.querySelector("#record-quality").value = "1";
+      document.querySelector("#record-fps").value = "1";
       toast.hidden = true;
       step = 0;
       render();
+    });
+    for (const selector of [
+      "#record-output-enabled", "#record-output-volume", "#record-input-volume",
+      "#record-save-length", "#record-output-size", "#record-quality", "#record-fps",
+    ]) {
+      document.querySelector(selector).addEventListener("input", syncCaptureControls);
+    }
+    document.querySelectorAll("[data-length]").forEach((button) => {
+      button.addEventListener("click", () => {
+        document.querySelector("#record-save-length").value = button.dataset.length;
+        syncCaptureControls();
+      });
+    });
+    document.querySelector("#record-test-mic").addEventListener("click", (event) => {
+      event.currentTarget.dataset.testing = event.currentTarget.dataset.testing === "true" ? "false" : "true";
+      syncCaptureControls();
     });
     document.querySelector("#browse-folder").addEventListener("click", () => {
       document.querySelector("#setup-folder").select();
