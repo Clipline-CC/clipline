@@ -4282,6 +4282,14 @@ fn first_run_setup_covers_approved_defaults_and_save_flow() {
         css_rule_body(&css, ".first-run-actions").contains("padding-right: 28px"),
         "wizard navigation should sit near the bottom-right window edge"
     );
+    let detected_row_start = css
+        .rfind(".first-run-detected-game {")
+        .expect("detected-game override");
+    assert!(
+        css_rule_body(&css[detected_row_start..], ".first-run-detected-game {")
+            .contains("grid-template-columns: auto auto minmax(0, 1fr)"),
+        "detected games must align checkbox, icon, and text in that order"
+    );
     for required in [
         "invoke(\"detect_installed_games\"",
         "invoke(\"save_settings\"",
