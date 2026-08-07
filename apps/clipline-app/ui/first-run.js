@@ -390,7 +390,17 @@ async function stopFirstRunMicTest() {
   stopMicTestUi("stopped");
 }
 
+function showFirstRunIntro() {
+  const overlay = $("first-run-setup");
+  overlay.classList.add("intro");
+  $("first-run-intro").hidden = false;
+  $("first-run-error").textContent = "";
+}
+
 function showFirstRunStep(step) {
+  const overlay = $("first-run-setup");
+  overlay.classList.remove("intro");
+  $("first-run-intro").hidden = true;
   firstRunStep = Math.max(0, Math.min(3, step));
   document.querySelectorAll("[data-first-run-page]").forEach((page) => {
     page.hidden = Number(page.dataset.firstRunPage) !== firstRunStep;
@@ -506,12 +516,12 @@ async function openFirstRunSetup(settings) {
   $("first-run-setup").hidden = false;
   $("first-run-media-dir").value = settings.media_dir || "";
   renderFirstRunSupportedGames();
-  showFirstRunStep(0);
+  showFirstRunIntro();
+  $("first-run-start-setup").focus();
   await Promise.all([ensureDisplaysLoaded(), ensureAudioDevicesLoaded()]);
   renderFirstRunCaptureTargets();
   renderFirstRunAudioDevices();
   syncFirstRunRecordingFields();
-  $("first-run-next").focus();
 }
 
 $("play-first-run-wizard").addEventListener("click", async () => {
@@ -583,6 +593,10 @@ for (const id of [
 
 $("first-run-test-mic").addEventListener("click", () => testMic("first-run"));
 $("first-run-detect-games").addEventListener("click", detectFirstRunGames);
+$("first-run-start-setup").addEventListener("click", () => {
+  showFirstRunStep(0);
+  $("first-run-next").focus();
+});
 $("first-run-auto-setup").addEventListener("click", applyFirstRunRecommendedSetup);
 $("first-run-select-all").addEventListener("change", (event) => {
   firstRunSelectedCandidateIds.clear();

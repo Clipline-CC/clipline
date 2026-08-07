@@ -4373,6 +4373,51 @@ fn first_run_setup_offers_a_one_click_recommended_preset() {
 }
 
 #[test]
+fn first_run_setup_opens_on_a_full_app_welcome_choice() {
+    let html = index_html();
+    let css = styles_css();
+    let wizard = read_ui_js("first-run.js");
+
+    for required in [
+        "id=\"first-run-intro\"",
+        ">Welcome to Clipline.</h1>",
+        "id=\"first-run-start-setup\"",
+        ">Start setup</button>",
+        "id=\"first-run-auto-setup\"",
+        ">Set this up for me</button>",
+    ] {
+        assert!(
+            html.contains(required),
+            "first-run welcome screen must include `{required}`"
+        );
+    }
+    let intro = html.find("id=\"first-run-intro\"").expect("welcome screen");
+    let basics = html.find("id=\"first-run-basics\"").expect("Basics page");
+    assert!(intro < basics, "welcome choices must precede the manual wizard");
+
+    assert!(
+        css.contains(".first-run-setup.intro")
+            && css.contains(".first-run-intro")
+            && css.contains(".first-run-intro[hidden]"),
+        "the welcome screen must replace the normal wizard chrome"
+    );
+    for required in [
+        "function showFirstRunIntro()",
+        "overlay.classList.add(\"intro\")",
+        "$(\"first-run-intro\").hidden = false",
+        "overlay.classList.remove(\"intro\")",
+        "$(\"first-run-intro\").hidden = true",
+        "$(\"first-run-start-setup\").addEventListener(\"click\"",
+        "showFirstRunIntro();",
+    ] {
+        assert!(
+            wizard.contains(required),
+            "welcome-screen controller must include `{required}`"
+        );
+    }
+}
+
+#[test]
 fn first_run_detected_games_use_one_step_selection() {
     let html = index_html();
     let wizard = read_ui_js("first-run.js");

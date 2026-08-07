@@ -102,9 +102,117 @@
 .first-run-detected-games[hidden],
 .first-run-detected-actions[hidden],
 .first-run-added-games[hidden],
+.first-run-intro[hidden],
 .first-run-auto-summary[hidden],
 .first-run-auto-warning[hidden] {
   display: none;
+}
+
+.first-run-setup.intro {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.first-run-setup.intro > .first-run-sidebar,
+.first-run-setup.intro > .first-run-main {
+  display: none;
+}
+
+.first-run-intro {
+  display: grid;
+  min-width: 0;
+  overflow-y: auto;
+  place-items: center;
+  padding: clamp(40px, 7vw, 90px);
+  background:
+    radial-gradient(circle at 72% 24%, rgba(var(--accent-rgb), .13), transparent 30rem),
+    radial-gradient(circle at 20% 80%, rgba(var(--ok-rgb), .06), transparent 26rem);
+}
+
+.first-run-intro-inner {
+  display: grid;
+  width: min(900px, 100%);
+  gap: 28px;
+}
+
+.first-run-intro-brand {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+}
+
+.first-run-intro-brand img {
+  width: 42px;
+  height: 42px;
+}
+
+.first-run-intro-copy h1 {
+  margin: 0 0 12px;
+  color: var(--text-max);
+  font: 650 clamp(36px, 5vw, 58px)/1 var(--font-display);
+  letter-spacing: -.035em;
+}
+
+.first-run-intro-copy p {
+  max-width: 680px;
+  margin: 0 0 9px;
+  color: var(--text-soft);
+  font-size: 17px;
+  line-height: 1.5;
+}
+
+.first-run-intro-copy > span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.first-run-intro-choices {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.first-run-intro-choice {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+  min-height: 190px;
+  padding: 22px;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: rgba(var(--scrim-d-rgb), .58);
+}
+
+.first-run-intro-choice.recommended {
+  border-color: rgba(var(--accent-rgb), .48);
+  background: rgba(var(--accent-rgb), .075);
+  box-shadow: 0 12px 36px rgba(var(--scrim-a-rgb), .2);
+}
+
+.first-run-intro-choice > span {
+  margin-bottom: 11px;
+  color: var(--accent);
+  font: 650 10px/1 var(--font-display);
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+
+.first-run-intro-choice strong {
+  color: var(--text-strong);
+  font: 630 18px/1.25 var(--font-display);
+}
+
+.first-run-intro-choice p {
+  flex: 1 1 auto;
+  margin: 8px 0 20px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.first-run-intro-choice button {
+  align-self: stretch;
+  min-width: 150px;
 }
 
 .first-run-sidebar {
@@ -221,42 +329,20 @@
   font-size: 14px;
 }
 
-.first-run-auto-card {
-  display: flex;
-  align-items: center;
-  gap: 24px;
-  margin-bottom: 14px;
-  padding: 16px 18px;
-  border: 1px solid rgba(var(--accent-rgb), .34);
-  border-radius: 10px;
-  background: rgba(var(--accent-rgb), .065);
-}
-
-.first-run-auto-card > div,
 .first-run-auto-summary {
   display: grid;
   gap: 5px;
 }
 
-.first-run-auto-card > div {
-  flex: 1 1 auto;
-}
-
-.first-run-auto-card strong,
 .first-run-auto-summary strong {
   color: var(--text-strong);
   font: 620 13px/1.25 var(--font-display);
 }
 
-.first-run-auto-card span,
 .first-run-auto-summary span {
   color: var(--muted);
   font-size: 11px;
   line-height: 1.45;
-}
-
-.first-run-auto-card button {
-  flex: 0 0 auto;
 }
 
 .first-run-auto-summary {
@@ -585,6 +671,16 @@
 
   .first-run-content {
     padding-inline: 28px;
+  }
+
+  .first-run-intro {
+    padding: 36px;
+  }
+}
+
+@media (max-width: 720px) {
+  .first-run-intro-choices {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 

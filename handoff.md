@@ -8,12 +8,14 @@
 
 Plan: `docs/superpowers/plans/2026-08-07-smart-configuration.md` (`abbfbba8`).
 
-The Basics page now offers `Set this up for me` for users who do not want to tune the full
-wizard. It reuses the existing wizard form and Settings transaction: device enumeration completes
-first, then the draft is set to Alt+F10, 10 GB, launch on startup, primary display, default output
-audio at 100%, 30-second memory replay, 720p, Balanced quality, 60 FPS, pause without a game, and
-all built-in game integrations. The default microphone is enabled at 100% mono only when an input
-device is available.
+The wizard now opens on a full-app welcome screen that introduces Clipline before showing two
+prominent choices. `Start setup` opens the existing four-page manual wizard; `Set this up for me`
+runs the recommended flow for users who do not want to tune it. The recommendation reuses the
+existing wizard form and Settings transaction: device enumeration completes first, then the draft
+is set to Alt+F10, 10 GB, launch on startup, primary display, default output audio at 100%,
+30-second memory replay, 720p, Balanced quality, 60 FPS, pause without a game, and all built-in
+game integrations. The default microphone is enabled at 100% mono only when an input device is
+available.
 
 The same installed-game detector runs immediately and stages every result for addition. The flow
 then jumps to Review, where a compact `Set up for you` card summarizes the profile, microphone
@@ -23,11 +25,12 @@ selection. Nothing is persisted until `Start Clipline`; finishing adds any stage
 the existing `save_settings` transaction.
 
 The one-click markup, preset values, microphone availability rule, all-game selection, Review
-state, and no-early-save boundary are protected by the UI contract. JavaScript syntax, full
-workspace tests, warning-denied workspace Clippy from a clean `clipline-app` cache, and diff checks
-are green. Manual retest: open Settings > Misc > Play first-time wizard, click `Set this up for
-me`, confirm the scan lands on Review with 720p / 60 FPS / Balanced / 30 sec in memory, use Back to
-edit the game selection, and finish only if it is safe to replace the current development settings.
+state, welcome choice, and no-early-save boundary are protected by the UI contract. JavaScript
+syntax, full workspace tests, warning-denied workspace Clippy from a clean `clipline-app` cache,
+and diff checks are green. Manual retest: open Settings > Misc > Play first-time wizard, click `Set
+this up for me`, confirm the scan lands on Review with 720p / 60 FPS / Balanced / 30 sec in memory,
+then reopen the wizard and confirm `Start setup` opens Basics. Finish only if it is safe to replace
+the current development settings.
 
 ---
 

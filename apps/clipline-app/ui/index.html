@@ -905,7 +905,34 @@
     </main>
   </div>
 
-  <section id="first-run-setup" class="first-run-setup" role="dialog" aria-modal="true" aria-labelledby="first-run-title" hidden>
+  <section id="first-run-setup" class="first-run-setup" role="dialog" aria-modal="true" aria-label="Clipline setup" hidden>
+    <div id="first-run-intro" class="first-run-intro" hidden>
+      <div class="first-run-intro-inner">
+        <div class="first-run-intro-brand">
+          <img src="assets/clipline-icon.svg" alt="" aria-hidden="true" />
+          <span class="first-run-kicker">First-time setup</span>
+        </div>
+        <div class="first-run-intro-copy">
+          <h1>Welcome to Clipline.</h1>
+          <p>Clipline keeps a rolling recording of your games, so the moments worth keeping are always one hotkey away.</p>
+          <span>Your recordings stay private on this PC unless you choose to upload one.</span>
+        </div>
+        <div class="first-run-intro-choices">
+          <div class="first-run-intro-choice">
+            <span>Choose every detail</span>
+            <strong>Set Clipline up your way.</strong>
+            <p>Pick your hotkey, audio devices, recording quality, and games.</p>
+            <button id="first-run-start-setup" type="button">Start setup</button>
+          </div>
+          <div class="first-run-intro-choice recommended">
+            <span>Recommended</span>
+            <strong>Get ready in one click.</strong>
+            <p>We'll choose a smooth 720p60 setup and find your games. The default microphone will be enabled when one is available.</p>
+            <button id="first-run-auto-setup" class="primary" type="button">Set this up for me</button>
+          </div>
+        </div>
+      </div>
+    </div>
     <aside class="first-run-sidebar">
       <div>
         <img class="first-run-logo" src="assets/clipline-icon.svg" alt="" aria-hidden="true" />
@@ -926,13 +953,6 @@
           <span class="first-run-kicker">Basic setup</span>
           <h1 id="first-run-title">Set up the essentials.</h1>
           <p class="first-run-lede">Choose where clips go, how much space they can use, and how you want to open Clipline.</p>
-          <div class="first-run-auto-card">
-            <div>
-              <strong>Want the easy setup?</strong>
-              <span>We'll choose a smooth 720p60 replay setup and find the games on this PC. The default microphone will be enabled when one is available.</span>
-            </div>
-            <button id="first-run-auto-setup" class="primary" type="button">Set this up for me</button>
-          </div>
           <div class="first-run-card">
             <div class="first-run-row">
               <label for="first-run-hotkey"><strong>Replay button hotkey</strong><span>Saves the most recent replay.</span></label>
