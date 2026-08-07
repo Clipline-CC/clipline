@@ -4273,6 +4273,11 @@ fn first_run_setup_covers_approved_defaults_and_save_flow() {
             && css.contains("display: none"),
         "first-run overlay and dynamic states need explicit hidden rules"
     );
+    assert!(
+        css_rule_body(&css, ".first-run-folder-control input")
+            .contains("width: 0 !important"),
+        "the media-folder input must flex inside the row without pushing Browse out of bounds"
+    );
     for required in [
         "invoke(\"detect_installed_games\"",
         "invoke(\"save_settings\"",

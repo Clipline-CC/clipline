@@ -298,6 +298,7 @@
 
 .first-run-folder-control input {
   flex: 1 1 auto;
+  width: 0 !important;
 }
 
 .first-run-number-control input {
