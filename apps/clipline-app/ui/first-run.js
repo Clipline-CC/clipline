@@ -170,10 +170,12 @@ function renderFirstRunDetectedGames() {
 
 function syncFirstRunDetectedCount() {
   const count = firstRunSelectedCandidateIds.size;
+  const selectAll = $("first-run-select-all");
+  selectAll.checked = count > 0 && count === firstRunCandidates.length;
+  selectAll.indeterminate = count > 0 && count < firstRunCandidates.length;
   $("first-run-detected-count").textContent = count
     ? `${count} game${count === 1 ? "" : "s"} selected`
     : "No games selected";
-  $("first-run-add-games").disabled = count === 0;
 }
 
 async function detectFirstRunGames() {
@@ -468,7 +470,15 @@ for (const id of [
 
 $("first-run-test-mic").addEventListener("click", () => testMic("first-run"));
 $("first-run-detect-games").addEventListener("click", detectFirstRunGames);
-$("first-run-add-games").addEventListener("click", addFirstRunDetectedGames);
+$("first-run-select-all").addEventListener("change", (event) => {
+  firstRunSelectedCandidateIds.clear();
+  if (event.currentTarget.checked) {
+    for (const candidate of firstRunCandidates) {
+      firstRunSelectedCandidateIds.add(detectedGameKey(candidate));
+    }
+  }
+  renderFirstRunDetectedGames();
+});
 $("first-run-back").addEventListener("click", async () => {
   await stopFirstRunMicTest();
   showFirstRunStep(firstRunStep - 1);
@@ -480,6 +490,9 @@ $("first-run-next").addEventListener("click", async () => {
       $("first-run-error").textContent = error;
       return;
     }
+  }
+  if (firstRunStep === 2 && firstRunSelectedCandidateIds.size) {
+    addFirstRunDetectedGames();
   }
   await stopFirstRunMicTest();
   showFirstRunStep(firstRunStep + 1);

@@ -31,6 +31,8 @@ keyboard Tab can leave the hotkey recorder.
 Settings now includes a `Misc` tab with a `Play first-time wizard` action. It reopens the real
 wizard, protects unsaved Settings edits with the existing discard warning, and resets the final
 action state so the setup flow can be completed more than once in the same app session.
+Detected Other Games now support Select all, and checked games are added automatically when
+Continue opens Review; the redundant `Add selected games` step was removed.
 
 Persistence/startup classification and UI contracts cover the new behavior. Full workspace tests,
 fresh-cache warning-denied workspace Clippy, JavaScript syntax checks, formatting, and diff checks

@@ -4312,6 +4312,43 @@ fn first_run_setup_covers_approved_defaults_and_save_flow() {
 }
 
 #[test]
+fn first_run_detected_games_use_one_step_selection() {
+    let html = index_html();
+    let wizard = read_ui_js("first-run.js");
+
+    assert!(
+        html.contains("id=\"first-run-select-all\" type=\"checkbox\"")
+            && html.contains(">Select all</span>"),
+        "detected games must offer a Select all checkbox"
+    );
+    assert!(
+        !html.contains("id=\"first-run-add-games\"")
+            && !wizard.contains("$(\"first-run-add-games\")"),
+        "game selection must not require a separate Add selected games action"
+    );
+    for required in [
+        "$(\"first-run-select-all\").addEventListener(\"change\"",
+        "selectAll.indeterminate = count > 0 && count < firstRunCandidates.length",
+        "if (firstRunStep === 2 && firstRunSelectedCandidateIds.size)",
+        "addFirstRunDetectedGames();",
+    ] {
+        assert!(
+            wizard.contains(required),
+            "one-step detected-game selection must include `{required}`"
+        );
+    }
+    let next_handler = wizard
+        .find("$(\"first-run-next\").addEventListener(\"click\"")
+        .expect("Continue handler");
+    let next_handler = &wizard[next_handler..];
+    assert!(
+        next_handler.find("addFirstRunDetectedGames();")
+            < next_handler.find("showFirstRunStep(firstRunStep + 1);"),
+        "Continue must add selected games before rendering Review"
+    );
+}
+
+#[test]
 fn settings_misc_tab_replays_first_run_setup() {
     let html = index_html();
     let wizard = read_ui_js("first-run.js");
