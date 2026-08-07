@@ -64,7 +64,7 @@ listen("mic-test", (e) => {
 
 listen("mic-test-error", (e) => {
   stopMicTestUi("error");
-  $("error").textContent = e.payload;
+  $(micTestSurface === "first-run" ? "first-run-error" : "error").textContent = e.payload;
 });
 
 listen("mic-test-stopped", () => {
@@ -799,6 +799,8 @@ async function loadInitialSettings(lifecycleWork = captureForegroundWork()) {
   if (!lifecycleWork) return false;
   await loadGamePlugins(lifecycleWork);
   if (!isForegroundWorkCurrent(lifecycleWork)) return false;
+  const needsFirstRunSetup = await invoke("needs_first_run_setup");
+  if (!isForegroundWorkCurrent(lifecycleWork)) return false;
   let settings = await invoke("get_settings");
   if (!isForegroundWorkCurrent(lifecycleWork)) return false;
   // The registry Run key is the ground truth for startup. Reconcile the UI
@@ -811,6 +813,7 @@ async function loadInitialSettings(lifecycleWork = captureForegroundWork()) {
   }
   if (!isForegroundWorkCurrent(lifecycleWork)) return false;
   fillSettings(settings);
+  if (needsFirstRunSetup) await openFirstRunSetup(settings);
   window.setTimeout(() => {
     if (isForegroundWorkCurrent(lifecycleWork)) {
       checkForUpdates({ manual: false });

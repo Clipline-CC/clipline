@@ -140,7 +140,7 @@ impl Default for AppSettings {
             disk_quota_gb: 10.0,
             media_dir: default_media_dir(),
             replay_storage: ReplayStorageSettings::default(),
-            hotkey: "Alt+F10".into(),
+            hotkey: "F6".into(),
             hotkey_secondary: None,
             open_on_startup: false,
             close_to_tray: true,

@@ -41,7 +41,7 @@ fn defaults_match_current_recorder_behavior() {
     assert_eq!(settings.disk_quota_gb, 10.0);
     assert_eq!(settings.media_dir, default_media_dir());
     assert_eq!(settings.replay_storage, ReplayStorageSettings::default());
-    assert_eq!(settings.hotkey, "Alt+F10");
+    assert_eq!(settings.hotkey, "F6");
     assert!(!settings.open_on_startup);
     assert!(settings.close_to_tray);
     assert!(!settings.minimize_to_tray);
@@ -656,7 +656,7 @@ fn load_migrates_invalid_legacy_hotkey_without_resetting_settings() {
 
     let settings = AppSettings::load_from(&path).unwrap();
 
-    assert_eq!(settings.hotkey, "Alt+F10");
+    assert_eq!(settings.hotkey, "F6");
     assert_eq!(settings.capture_mode, CaptureMode::DisplayRegion);
     assert_eq!(settings.capture_region.width, 1280);
     assert_eq!(settings.bitrate_mbps, 24.0);
@@ -745,7 +745,7 @@ fn validation_rejects_secondary_hotkey_matching_primary() {
         ..AppSettings::default()
     };
     assert!(blank.validate().is_ok());
-    assert_eq!(blank.hotkeys(), vec!["Alt+F10"]);
+    assert_eq!(blank.hotkeys(), vec!["F6"]);
 }
 
 #[test]
@@ -846,7 +846,7 @@ fn load_repairs_invalid_fields_without_resetting_valid_neighbors() {
     assert_eq!(settings.video_encoder, VideoEncoder::Auto);
     assert_eq!(settings.disk_quota_gb, 0.0);
     assert_eq!(settings.media_dir, default_media_dir());
-    assert_eq!(settings.hotkey, "Alt+F10");
+    assert_eq!(settings.hotkey, "F6");
     assert!(settings.validate().is_ok());
 }
 
@@ -1378,6 +1378,25 @@ fn startup_defaults_quietly_only_when_primary_and_backup_are_missing() {
 
     assert_eq!(loaded.settings, AppSettings::default());
     assert!(loaded.warnings.is_empty());
+    assert!(loaded.first_run);
+}
+
+#[test]
+fn startup_with_saved_settings_is_not_a_first_run() {
+    let dir = TestDir::new("clipline-settings", "startup-existing-install");
+    let path = dir.path().join("settings.json");
+    let settings = AppSettings {
+        buffer_seconds: 30.0,
+        replay_window_s: 30.0,
+        ..AppSettings::default()
+    };
+    settings.save_to(&path).unwrap();
+
+    let loaded = AppSettings::load_for_startup_from(&path);
+
+    assert_eq!(loaded.settings, settings);
+    assert!(loaded.warnings.is_empty());
+    assert!(!loaded.first_run);
 }
 
 #[test]
@@ -1421,6 +1440,7 @@ fn startup_quarantines_invalid_primary_and_recovers_last_known_good_backup() {
     let loaded = AppSettings::load_for_startup_from(&path);
 
     assert_eq!(loaded.settings, recovered);
+    assert!(!loaded.first_run);
     assert_eq!(loaded.warnings.len(), 1);
     assert!(loaded.warnings[0].contains("recovered"));
     assert!(!path.exists());
@@ -1442,6 +1462,7 @@ fn startup_quarantines_invalid_primary_before_using_visible_safe_defaults() {
     let loaded = AppSettings::load_for_startup_from(&path);
 
     assert_eq!(loaded.settings, AppSettings::default());
+    assert!(!loaded.first_run);
     assert_eq!(loaded.warnings.len(), 1);
     assert!(loaded.warnings[0].contains("safe defaults"));
     assert!(loaded.warnings[0].contains("preserved"));
@@ -1463,6 +1484,7 @@ fn startup_leaves_unreadable_primary_untouched_while_recovering_backup() {
     let loaded = AppSettings::load_for_startup_from(&path);
 
     assert_eq!(loaded.settings, recovered);
+    assert!(!loaded.first_run);
     assert_eq!(loaded.warnings.len(), 1);
     assert!(loaded.warnings[0].contains("left untouched"));
     assert!(path.is_dir());

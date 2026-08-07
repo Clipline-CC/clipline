@@ -4,6 +4,89 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-07): one-click recommended setup
+
+Plan: `docs/superpowers/plans/2026-08-07-smart-configuration.md` (`abbfbba8`).
+
+The wizard now opens on a full-app welcome screen that introduces Clipline before showing two
+prominent choices. `Start setup` opens the existing four-page manual wizard; `Set this up for me`
+runs the recommended flow for users who do not want to tune it. The recommendation reuses the
+existing wizard form and Settings transaction: device enumeration completes first, then the draft
+is set to F6, 10 GB, launch on startup, primary display, default output audio at 100%,
+30-second memory replay, 720p, Balanced quality, 60 FPS, pause without a game, and all built-in
+game integrations. The default microphone is enabled at 100% mono only when an input device is
+available.
+
+F6 is also the backend settings default, startup-registration fallback, and initial rail label.
+Existing saved hotkeys are preserved; this change intentionally does not migrate current users.
+
+The same installed-game detector runs immediately and stages every result for addition. The flow
+then jumps to Review, where a compact `Set up for you` card summarizes the profile, microphone
+state, and detected-game count. Detection failure is non-fatal: Review explains it and Back exposes
+the existing retry control. Back also lets the user edit the generated draft and detected-game
+selection. Nothing is persisted until `Start Clipline`; finishing adds any staged games and uses
+the existing `save_settings` transaction.
+
+PR review hardening made the Settings replay path safe for existing users. Replayed setup seeds
+every wizard-owned field from the saved settings, preserves the secondary hotkey, game auto-detect,
+advanced recording mode, and other controls the wizard does not expose, and offers Cancel plus
+Escape to discard the draft and return to Settings. Detected games remain staged through Review
+and are added only inside the successful save attempt; scans lock navigation while pending and
+their transient results reset whenever the wizard opens. Finishing a replay preserves the current
+recording state, while a genuine first run still starts recording after save. Review now discloses
+memory versus disk replay storage, the recommended preset selects the enumerated primary display,
+and the automatic update check waits until genuine first-run setup closes.
+
+The one-click markup, preset values, microphone availability rule, all-game selection, Review
+state, welcome choice, and no-early-save boundary are protected by the UI contract. JavaScript
+syntax, full workspace tests, warning-denied workspace Clippy from a clean `clipline-app` cache,
+and diff checks are green. Manual retest: open Settings > Misc > Play first-time wizard, confirm
+Cancel and Escape return to Misc without changing settings, then reopen it and verify `Start setup`
+shows the saved values. Click `Set this up for me`, confirm the scan lands on Review with 720p /
+60 FPS / Balanced / 30 sec in memory, and save only if those preset changes are wanted.
+
+---
+
+## Checkpoint (2026-08-06): first-run setup wizard
+
+Plan: `docs/superpowers/plans/2026-08-06-first-run-setup-wizard.md` (`b681e28`).
+
+Clipline now distinguishes a genuinely new install (neither `settings.json` nor its recovery copy
+exists) from a recovered or damaged existing install. New installs keep the recorder stopped and
+open a four-page, non-skippable setup flow inside the native shell. Existing installs retain their
+previous startup behavior, and any successful settings save clears the in-process first-run flag so
+a recreated WebView cannot reopen onboarding.
+
+The wizard implements the approved Basics, Capture + recording, Games, and Review screens. Its
+intentional first-run defaults are F6, the normal media directory, 10 GB, launch on startup,
+output audio on/default/100%, microphone off/default/100%/mono, primary display, pause without a
+game, 30-second replay, 1080p, Balanced quality, and 60 FPS. Supported game profiles come from the
+real plugin catalog and start enabled according to their profile defaults. Other Games runs the
+existing installed-game detector inline and converts selected results through the same custom-game
+normalization used by Settings. Device enumeration, display enumeration, mic testing, folder
+selection, hotkey parsing, and range presets are also shared with the existing UI.
+
+Finishing copies the wizard choices into the existing Settings model, calls the existing
+`save_settings` transaction, and only then starts recording. Save failures remain visible without
+dismissing the wizard. First-run background controls are inert, the titlebar remains available, and
+keyboard Tab can leave the hotkey recorder.
+
+Settings now includes a `Misc` tab with a `Play first-time wizard` action. It reopens the real
+wizard, protects unsaved Settings edits with the existing discard warning, seeds wizard controls
+from saved settings, and resets transient state so the setup flow can be completed more than once
+in the same app session. Detected Other Games support Select all, and checked games stay staged
+until the final save; the redundant `Add selected games` step was removed.
+
+Persistence/startup classification and UI contracts cover the new behavior. Full workspace tests,
+fresh-cache warning-denied workspace Clippy, JavaScript syntax checks, formatting, and diff checks
+are green. A development build launched against isolated `%APPDATA%`; Basics, device-backed Capture
++ recording, supported Games, and a real installed-game scan were visually checked at the normal
+1200×760 inner window size. Manual retest: walk all four pages, optionally test the microphone and
+game detector, finish setup, confirm recording starts, then restart and confirm the wizard does not
+return.
+
+---
+
 ## Checkpoint (2026-08-05): sparse-capture GOP watchdog
 
 Plan: `docs/superpowers/plans/2026-08-05-sparse-capture-gop-watchdog.md` (`0d5ec35`).

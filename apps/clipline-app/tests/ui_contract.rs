@@ -22,6 +22,7 @@ const APP_UI_JS: &[&str] = &[
     "cloud.js",
     "review-player.js",
     "support.js",
+    "first-run.js",
     "main.js",
 ];
 
@@ -4165,6 +4166,7 @@ fn ui_is_split_into_markup_styles_and_logic() {
         "src=\"library.js\"",
         "src=\"cloud.js\"",
         "src=\"review-player.js\"",
+        "src=\"first-run.js\"",
         "type=\"module\" src=\"bootstrap.mjs\"",
     ] {
         assert!(html.contains(asset), "index.html must reference {asset}");
@@ -4216,6 +4218,372 @@ fn ui_is_split_into_markup_styles_and_logic() {
         assert!(
             chunk[tag_end + 1..body_end].trim().is_empty(),
             "script tag #{i} must not have an inline body"
+        );
+    }
+}
+
+#[test]
+fn first_run_setup_covers_approved_defaults_and_save_flow() {
+    let html = index_html();
+    let css = styles_css();
+    let wizard = read_ui_js("first-run.js");
+    let settings = read_ui_js("settings.js");
+    let main = read_ui_js("main.js");
+    let app = app_rs();
+
+    for required in [
+        "id=\"first-run-setup\"",
+        "id=\"first-run-basics\"",
+        "id=\"first-run-capture\"",
+        "id=\"first-run-games\"",
+        "id=\"first-run-review\"",
+        "id=\"first-run-hotkey\" value=\"F6\"",
+        "id=\"rail-hotkey\" class=\"rail-hotkey\" title=\"Save Replay: F6\">F6</div>",
+        "id=\"rail-save\" title=\"Save Replay (F6)\"",
+        "id=\"first-run-media-dir\"",
+        "id=\"first-run-quota\" type=\"number\" min=\"1\" max=\"1000\" value=\"10\"",
+        "id=\"first-run-startup\" type=\"checkbox\" checked",
+        "id=\"first-run-output-enabled\" type=\"checkbox\" checked",
+        "id=\"first-run-output-device\"",
+        "id=\"first-run-output-volume\"",
+        "id=\"first-run-split-output\"",
+        "id=\"first-run-mic-enabled\"",
+        "id=\"first-run-mic-device\"",
+        "id=\"first-run-mic-volume\"",
+        "id=\"first-run-mic-mono\" type=\"checkbox\" checked",
+        "id=\"first-run-test-mic\"",
+        "id=\"first-run-capture-target\"",
+        "id=\"first-run-pause-no-game\" type=\"checkbox\" checked",
+        "id=\"first-run-replay\" type=\"range\" min=\"5\" max=\"120\" step=\"5\" value=\"30\"",
+        "id=\"first-run-resolution\"",
+        "<option value=\"1080p\" selected>1080p</option>",
+        "id=\"first-run-quality\" type=\"range\" min=\"0\" max=\"3\" step=\"1\" value=\"1\"",
+        "id=\"first-run-fps\" type=\"range\" min=\"0\" max=\"3\" step=\"1\" value=\"1\"",
+        "id=\"first-run-supported-games\"",
+        "id=\"first-run-detect-games\"",
+        "id=\"first-run-detected-games\"",
+        "id=\"first-run-summary-storage\"",
+        "id=\"first-run-cancel\"",
+        "id=\"first-run-finish\"",
+        "id=\"first-run-error\"",
+    ] {
+        assert!(
+            html.contains(required),
+            "first-run setup must include `{required}`"
+        );
+    }
+
+    assert!(
+        css.contains(".first-run-setup[hidden]")
+            && css.contains(".first-run-empty-state[hidden]")
+            && css.contains("display: none"),
+        "first-run overlay and dynamic states need explicit hidden rules"
+    );
+    assert!(
+        css_rule_body(&css, ".first-run-folder-control input").contains("width: 0 !important"),
+        "the media-folder input must flex inside the row without pushing Browse out of bounds"
+    );
+    let detected_row_start = css
+        .rfind(".first-run-detected-game {")
+        .expect("detected-game override");
+    assert!(
+        css_rule_body(&css[detected_row_start..], ".first-run-detected-game {")
+            .contains("grid-template-columns: auto auto minmax(0, 1fr)"),
+        "detected games must align checkbox, icon, and text in that order"
+    );
+    for required in [
+        "invoke(\"detect_installed_games\"",
+        "invoke(\"save_settings\"",
+        "invoke(\"set_recording\", { recording: true })",
+        "customGameFromDetectedCandidate",
+        "gamePluginSetting",
+        "if (event.key === \"Tab\") return",
+        "$(\"first-run-next\").focus()",
+    ] {
+        assert!(
+            wizard.contains(required),
+            "first-run controller must include `{required}`"
+        );
+    }
+    assert!(
+        main.contains("invoke(\"needs_first_run_setup\")")
+            && main.contains("openFirstRunSetup(settings)"),
+        "startup must ask the backend whether to open the setup wizard"
+    );
+    assert!(
+        settings.contains("$(\"set-hotkey\").value || \"F6\"")
+            && settings.contains("String(hotkey || \"F6\")")
+            && app.contains("vec![parse_hotkey(\"F6\").unwrap()]"),
+        "all startup UI and registration fallbacks must use the shipped F6 default"
+    );
+    assert_eq!(
+        css.matches(".first-run-auto-summary {").count(),
+        1,
+        "recommended-summary layout and box styling belong in one CSS rule"
+    );
+}
+
+#[test]
+fn first_run_setup_offers_a_one_click_recommended_preset() {
+    let html = index_html();
+    let wizard = read_ui_js("first-run.js");
+
+    for required in [
+        "id=\"first-run-auto-setup\"",
+        ">Set this up for me</button>",
+        "The default microphone will be enabled when one is available.",
+        "id=\"first-run-auto-summary\"",
+        "id=\"first-run-auto-summary-text\"",
+        "id=\"first-run-auto-warning\"",
+    ] {
+        assert!(
+            html.contains(required),
+            "recommended setup UI must include `{required}`"
+        );
+    }
+
+    let helper_start = wizard
+        .find("async function applyFirstRunRecommendedSetup()")
+        .expect("recommended setup helper");
+    let helper_end = wizard[helper_start..]
+        .find("\n}\n\nfunction updateFirstRunReview")
+        .map(|offset| helper_start + offset)
+        .expect("recommended setup helper end");
+    let helper = &wizard[helper_start..helper_end];
+    for required in [
+        "$(\"first-run-hotkey\").value = \"F6\"",
+        "$(\"first-run-quota\").value = \"10\"",
+        "$(\"first-run-startup\").checked = true",
+        "$(\"first-run-output-enabled\").checked = true",
+        "$(\"first-run-split-output\").checked = false",
+        "audioDevices.inputs.length > 0",
+        "$(\"first-run-pause-no-game\").checked = true",
+        "$(\"first-run-replay\").value = \"30\"",
+        "$(\"first-run-resolution\").value = \"720p\"",
+        "$(\"first-run-quality\").value = \"1\"",
+        "$(\"first-run-fps\").value = \"1\"",
+        "input.checked = true",
+        "primaryDisplay()",
+        "displayCaptureValue(primary)",
+        "await detectFirstRunGames()",
+        "firstRunSelectedCandidateIds.add(detectedGameKey(candidate))",
+        "showFirstRunStep(3)",
+    ] {
+        assert!(
+            helper.contains(required),
+            "recommended preset must include `{required}`"
+        );
+    }
+    assert!(
+        !helper.contains("save_settings"),
+        "recommended setup must remain a draft until Start Clipline"
+    );
+    assert!(
+        wizard.contains("$(\"first-run-auto-setup\").addEventListener(\"click\"")
+            && wizard.contains("firstRunRecommendation.warning")
+            && wizard.contains("firstRunSelectedCandidateIds.size"),
+        "recommended setup must be wired to Review with game and warning state"
+    );
+}
+
+#[test]
+fn first_run_setup_opens_on_a_full_app_welcome_choice() {
+    let html = index_html();
+    let css = styles_css();
+    let wizard = read_ui_js("first-run.js");
+
+    for required in [
+        "id=\"first-run-intro\"",
+        ">Welcome to Clipline.</h1>",
+        "id=\"first-run-start-setup\"",
+        ">Start setup</button>",
+        "id=\"first-run-auto-setup\"",
+        ">Set this up for me</button>",
+    ] {
+        assert!(
+            html.contains(required),
+            "first-run welcome screen must include `{required}`"
+        );
+    }
+    let intro = html.find("id=\"first-run-intro\"").expect("welcome screen");
+    let basics = html.find("id=\"first-run-basics\"").expect("Basics page");
+    assert!(
+        intro < basics,
+        "welcome choices must precede the manual wizard"
+    );
+
+    assert!(
+        css.contains(".first-run-setup.intro")
+            && css.contains(".first-run-intro")
+            && css.contains(".first-run-intro[hidden]"),
+        "the welcome screen must replace the normal wizard chrome"
+    );
+    for required in [
+        "function showFirstRunIntro()",
+        "overlay.classList.add(\"intro\")",
+        "$(\"first-run-intro\").hidden = false",
+        "overlay.classList.remove(\"intro\")",
+        "$(\"first-run-intro\").hidden = true",
+        "$(\"first-run-start-setup\").addEventListener(\"click\"",
+        "showFirstRunIntro();",
+    ] {
+        assert!(
+            wizard.contains(required),
+            "welcome-screen controller must include `{required}`"
+        );
+    }
+}
+
+#[test]
+fn first_run_detected_games_use_one_step_selection() {
+    let html = index_html();
+    let wizard = read_ui_js("first-run.js");
+
+    assert!(
+        html.contains("id=\"first-run-select-all\" type=\"checkbox\" disabled")
+            && html.contains(">Select all</span>"),
+        "detected games must offer a Select all checkbox"
+    );
+    let select_all = html
+        .find("id=\"first-run-select-all\"")
+        .expect("Select all");
+    let detect = html
+        .find("id=\"first-run-detect-games\"")
+        .expect("Detect Games");
+    let detected_list = html
+        .find("id=\"first-run-detected-games\"")
+        .expect("detected games list");
+    assert!(
+        select_all < detect && detect < detected_list,
+        "Select all must sit beside Detect Games above the detected list"
+    );
+    assert!(
+        !html.contains("id=\"first-run-add-games\"")
+            && !wizard.contains("$(\"first-run-add-games\")"),
+        "game selection must not require a separate Add selected games action"
+    );
+    for required in [
+        "$(\"first-run-select-all\").addEventListener(\"change\"",
+        "selectAll.disabled = firstRunCandidates.length === 0",
+        "selectAll.indeterminate = count > 0 && count < firstRunCandidates.length",
+        "function firstRunDetectedGameAdditions()",
+        "const additions = firstRunDetectedGameAdditions();",
+        "setFirstRunDetectionPending(true)",
+        "setFirstRunDetectionPending(false)",
+    ] {
+        assert!(
+            wizard.contains(required),
+            "one-step detected-game selection must include `{required}`"
+        );
+    }
+    let next_handler = wizard
+        .find("$(\"first-run-next\").addEventListener(\"click\"")
+        .expect("Continue handler");
+    let next_handler = &wizard[next_handler
+        ..wizard
+            .find("$(\"first-run-finish\").addEventListener")
+            .expect("Finish handler")];
+    assert!(
+        !next_handler.contains("firstRunDetectedGameAdditions"),
+        "Continue must keep detected games staged so Back can revise the selection"
+    );
+}
+
+#[test]
+fn replayed_first_run_setup_is_cancelable_and_preserves_hidden_settings() {
+    let html = index_html();
+    let wizard = read_ui_js("first-run.js");
+    let main = read_ui_js("main.js");
+
+    assert!(
+        html.contains(
+            "id=\"first-run-cancel\" class=\"first-run-cancel\" type=\"button\" hidden>Cancel</button>",
+        )
+            && html.contains("<span>Replay storage</span><strong id=\"first-run-summary-storage\""),
+        "Settings replay needs an exit and must disclose recommended memory storage"
+    );
+    for required in [
+        "openFirstRunSetup(currentSettings, true)",
+        "function seedFirstRunFromSettings(settings)",
+        "$(\"first-run-hotkey\").value = settings.hotkey || \"F6\"",
+        "$(\"first-run-quota\").value = String(settings.disk_quota_gb ?? 10)",
+        "$(\"first-run-output-enabled\").checked = !!audio.output_enabled",
+        "$(\"first-run-pause-no-game\").checked = !!games.pause_when_no_game",
+        "$(\"first-run-resolution\").value = resolution",
+        "function resetFirstRunGameDetection()",
+        "async function cancelFirstRunSetup()",
+        "closeFirstRunSetup({ discard: true })",
+        "toggleSettings(true)",
+        "if (!firstRunReplay) $(\"set-hotkey-2\").value = \"\"",
+        "if (!firstRunReplay || firstRunRecommendation)",
+        "const shouldStartRecording = !firstRunReplay",
+        "if (shouldStartRecording)",
+        "firstRunCloseResolver",
+        "event.key !== \"Escape\"",
+    ] {
+        assert!(
+            wizard.contains(required),
+            "safe Settings replay must include `{required}`"
+        );
+    }
+    assert!(
+        main.find("await openFirstRunSetup(settings)")
+            < main.find("checkForUpdates({ manual: false })"),
+        "automatic update checks must be scheduled only after first-run setup closes"
+    );
+    assert!(
+        wizard.contains("outputResolutionOption($(\"first-run-resolution\").value).id",),
+        "Review and field syncing must normalize output resolution consistently"
+    );
+}
+
+#[test]
+fn settings_misc_tab_replays_first_run_setup() {
+    let html = index_html();
+    let wizard = read_ui_js("first-run.js");
+
+    for required in [
+        "id=\"settings-tab-misc\"",
+        "id=\"settings-panel-misc\"",
+        "id=\"play-first-run-wizard\"",
+        ">Play first-time wizard</button>",
+    ] {
+        assert!(
+            html.contains(required),
+            "settings wizard replay UI must include `{required}`"
+        );
+    }
+    for required in [
+        "$(\"play-first-run-wizard\").addEventListener(\"click\"",
+        "settingsHaveUnsavedChanges()",
+        "showSettingsDiscardWarning()",
+        "toggleSettings(false)",
+        "openFirstRunSetup(currentSettings, true)",
+    ] {
+        assert!(
+            wizard.contains(required),
+            "settings wizard replay action must include `{required}`"
+        );
+    }
+    let open_start = wizard
+        .find("async function openFirstRunSetup")
+        .expect("first-run setup opener");
+    let open_end = wizard[open_start..]
+        .find("\n}\n\n$(\"play-first-run-wizard\")")
+        .map(|offset| open_start + offset)
+        .expect("first-run setup opener end");
+    let opener = &wizard[open_start..open_end];
+    for required in [
+        "finish.disabled = false",
+        "finish.textContent = replay ? \"Save Settings\" : \"Start Clipline\"",
+        "$(\"first-run-back\").disabled = false",
+        "$(\"first-run-cancel\").hidden = !replay",
+        "resetFirstRunGameDetection()",
+        "seedFirstRunFromSettings(settings)",
+    ] {
+        assert!(
+            opener.contains(required),
+            "reopening the wizard must reset `{required}`"
         );
     }
 }
@@ -4688,6 +5056,7 @@ fn settings_tabs_and_support_phases_are_accessible() {
         ("storage", "false"),
         ("cloud", "false"),
         ("hotkeys", "false"),
+        ("misc", "false"),
         ("support", "false"),
     ] {
         assert!(

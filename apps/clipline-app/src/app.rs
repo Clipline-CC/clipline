@@ -1,4 +1,4 @@
-//! Tauri shell: tray, Alt+F10 global hotkey, status webview — all thin
+//! Tauri shell: tray, F6 global hotkey, status webview — all thin
 //! wiring around the recorder service thread.
 
 use std::path::{Path, PathBuf};
@@ -45,6 +45,22 @@ const WINDOW_LIFECYCLE_EVENT: &str = "window-lifecycle";
 // Frontend readiness is tracked per window generation via
 // FrontendReadinessState. The repair dialog remains process-global.
 static WEBVIEW_REPAIR_NOTICE_SHOWN: AtomicBool = AtomicBool::new(false);
+
+struct FirstRunState(AtomicBool);
+
+impl FirstRunState {
+    fn new(first_run: bool) -> Self {
+        Self(AtomicBool::new(first_run))
+    }
+
+    fn is_pending(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+
+    fn complete(&self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -2278,6 +2294,11 @@ fn get_settings(state: tauri::State<RuntimeState>) -> AppSettings {
     state.settings()
 }
 
+#[tauri::command]
+fn needs_first_run_setup(state: tauri::State<FirstRunState>) -> bool {
+    state.is_pending()
+}
+
 async fn choose_folder_dialog(
     title: &'static str,
     current_dir: PathBuf,
@@ -2614,6 +2635,7 @@ fn settings_transaction_error(primary: String, rollback_errors: Vec<String>) -> 
 fn save_settings<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<RuntimeState>,
+    first_run_state: tauri::State<FirstRunState>,
     tray_items: tauri::State<TrayItems<R>>,
     storage_settings: tauri::State<crate::library::StorageSettings>,
     media_folder_authorization: tauri::State<NativeMediaFolderAuthorization>,
@@ -2752,6 +2774,7 @@ fn save_settings<R: Runtime>(
     storage_settings.set_quota_bytes(quota_bytes);
     storage_settings.set_media_dir(media_dir.clone());
     media_folder_authorization.commit(&media_dir);
+    first_run_state.complete();
     Ok(settings)
 }
 
@@ -2761,6 +2784,7 @@ pub fn run() {
         log_diagnostic(format!("capture diagnostic setup: {error}"));
     }
     let startup_load = AppSettings::load_for_startup();
+    let first_run = startup_load.first_run;
     let mut settings = startup_load.settings;
     let mut startup_warnings = startup_load.warnings;
     for warning in &startup_warnings {
@@ -2815,10 +2839,11 @@ pub fn run() {
         .unwrap_or_else(|_| service::default_clips_dir());
     let media_dir_for_setup = media_dir.clone();
     let startup_global_hotkeys =
-        global_hotkeys(&settings).unwrap_or_else(|_| vec![parse_hotkey("Alt+F10").unwrap()]);
+        global_hotkeys(&settings).unwrap_or_else(|_| vec![parse_hotkey("F6").unwrap()]);
 
     tauri::Builder::default()
         .manage(RuntimeState::new(settings.clone(), lol_url))
+        .manage(FirstRunState::new(first_run))
         .manage(StartupWarnings::new(startup_warnings))
         .manage(WindowLifecycleState::default())
         .manage(MainWindowOpenQueue::default())
@@ -2863,6 +2888,7 @@ pub fn run() {
             restart_as_administrator,
             set_recording,
             get_settings,
+            needs_first_run_setup,
             minimize_main_window,
             choose_media_folder,
             choose_replay_cache_folder,
@@ -3050,13 +3076,15 @@ pub fn run() {
                 .build(app)?;
             log_diagnostic(format!("tray build complete webviews={}", webview_labels(app.handle())));
 
-            if let Err(e) = app
-                .state::<RuntimeState>()
-                .start_recording(app.handle().clone())
-            {
-                let message = format!("recorder startup failed: {e}");
-                tracing::error!(event = "recorder_startup_failed", message = %message);
-                let _ = app.handle().emit("error", message);
+            if !first_run {
+                if let Err(e) = app
+                    .state::<RuntimeState>()
+                    .start_recording(app.handle().clone())
+                {
+                    let message = format!("recorder startup failed: {e}");
+                    tracing::error!(event = "recorder_startup_failed", message = %message);
+                    let _ = app.handle().emit("error", message);
+                }
             }
             spawn_game_detector(app.handle().clone());
 
@@ -5011,14 +5039,17 @@ mod tests {
         let recorder_start = run_body
             .find("start_recording(app.handle().clone())")
             .expect("setup should start the recorder after plugins are installed");
+        let first_run_gate = run_body
+            .find("if !first_run")
+            .expect("first-run setup must gate initial recorder startup");
 
         assert!(
             single_instance < setup,
             "single-instance plugin must be installed before setup runs"
         );
         assert!(
-            setup < recorder_start,
-            "initial recorder startup must happen from setup after single-instance registration"
+            setup < first_run_gate && first_run_gate < recorder_start,
+            "initial recorder startup must happen from setup after the first-run gate"
         );
         assert!(
             !run_body[..single_instance].contains("service::spawn("),

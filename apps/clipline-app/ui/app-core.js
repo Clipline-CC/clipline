@@ -184,6 +184,7 @@ var NOTICE_TOAST_MS = 2600;
 var noticeToastTimer = 0;
 var pendingPostRefreshFeedback = null;
 var micTestRunning = false;
+var micTestSurface = "settings";
 var micAudioContext = null;
 var micAudioCursor = 0;
 var micAudioSources = [];
