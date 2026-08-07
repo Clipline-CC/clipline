@@ -4278,6 +4278,10 @@ fn first_run_setup_covers_approved_defaults_and_save_flow() {
             .contains("width: 0 !important"),
         "the media-folder input must flex inside the row without pushing Browse out of bounds"
     );
+    assert!(
+        css_rule_body(&css, ".first-run-actions").contains("padding-right: 28px"),
+        "wizard navigation should sit near the bottom-right window edge"
+    );
     for required in [
         "invoke(\"detect_installed_games\"",
         "invoke(\"save_settings\"",

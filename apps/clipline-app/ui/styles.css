@@ -510,6 +510,7 @@
   gap: 9px;
   min-height: 67px;
   padding: 13px clamp(34px, 6vw, 76px);
+  padding-right: 28px;
   border-top: 1px solid var(--line);
   background: rgba(var(--scrim-c-rgb), .88);
 }
