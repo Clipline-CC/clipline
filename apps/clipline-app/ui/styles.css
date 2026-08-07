@@ -101,11 +101,18 @@
 .first-run-empty-state[hidden],
 .first-run-detected-games[hidden],
 .first-run-detected-actions[hidden],
-.first-run-added-games[hidden],
 .first-run-intro[hidden],
 .first-run-auto-summary[hidden],
-.first-run-auto-warning[hidden] {
+.first-run-auto-warning[hidden],
+.first-run-cancel[hidden] {
   display: none;
+}
+
+.first-run-cancel {
+  position: absolute;
+  z-index: 2;
+  top: 18px;
+  right: 20px;
 }
 
 .first-run-setup.intro {
@@ -332,6 +339,11 @@
 .first-run-auto-summary {
   display: grid;
   gap: 5px;
+  margin-bottom: 14px;
+  padding: 15px 17px;
+  border: 1px solid rgba(var(--accent-rgb), .34);
+  border-radius: 10px;
+  background: rgba(var(--accent-rgb), .065);
 }
 
 .first-run-auto-summary strong {
@@ -343,14 +355,6 @@
   color: var(--muted);
   font-size: 11px;
   line-height: 1.45;
-}
-
-.first-run-auto-summary {
-  margin-bottom: 14px;
-  padding: 15px 17px;
-  border: 1px solid rgba(var(--accent-rgb), .34);
-  border-radius: 10px;
-  background: rgba(var(--accent-rgb), .065);
 }
 
 .first-run-auto-summary .first-run-auto-warning {
@@ -610,13 +614,6 @@
   justify-content: space-between;
   padding: 10px 14px;
   border-top: 1px solid var(--line);
-}
-
-.first-run-added-games {
-  padding: 10px 14px;
-  border-top: 1px solid var(--line);
-  color: var(--ok);
-  font-size: 11px;
 }
 
 .first-run-summary > div {

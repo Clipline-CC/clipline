@@ -5,6 +5,9 @@ var firstRunStep = 0;
 var firstRunCandidates = [];
 var firstRunSelectedCandidateIds = new Set();
 var firstRunRecommendation = null;
+var firstRunReplay = false;
+var firstRunDetectionPending = false;
+var firstRunCloseResolver = null;
 
 function firstRunSelectedText(id) {
   const select = $(id);
@@ -95,6 +98,40 @@ function renderFirstRunCaptureTargets() {
     : target.options[0].value;
 }
 
+function seedFirstRunFromSettings(settings) {
+  const audio = { ...defaultAudioSettings(), ...(settings.audio || {}) };
+  const games = { ...defaultGameSettings(), ...(settings.games || {}) };
+  const replay = Math.min(120, Math.max(5, Number(settings.replay_window_s) || 60));
+  const resolution = outputResolutionOption(settings.output_resolution).id;
+  $("first-run-hotkey").value = settings.hotkey || "F6";
+  $("first-run-media-dir").value = settings.media_dir || "";
+  $("first-run-quota").value = String(settings.disk_quota_gb ?? 10);
+  $("first-run-startup").checked = !!settings.open_on_startup;
+  $("first-run-output-enabled").checked = !!audio.output_enabled;
+  $("first-run-split-output").checked = audio.split_output_by_process === true;
+  $("first-run-output-device").value = audio.output_device_id || "";
+  $("first-run-output-volume").value = String(audio.output_volume ?? 1);
+  $("first-run-mic-enabled").checked = !!audio.mic_enabled;
+  $("first-run-mic-device").value = audio.mic_device_id || "";
+  $("first-run-mic-volume").value = String(audio.mic_volume ?? 1);
+  $("first-run-mic-mono").checked = (audio.mic_channels || "mono") === "mono";
+  $("first-run-pause-no-game").checked = !!games.pause_when_no_game;
+  $("first-run-replay").value = String(replay);
+  $("first-run-resolution").value = resolution;
+  $("first-run-quality").value = String(settings.video_quality
+    ? PlayerCore.qualityIndexForId(settings.video_quality)
+    : qualityIndexForBitrate(settings.bitrate_mbps, resolution));
+  $("first-run-fps").value = String(smoothnessIndexForFps(settings.fps));
+  const capture = captureSettingsValue(settings);
+  if (Array.from($("first-run-capture-target").options).some(
+    (option) => option.value === capture,
+  )) {
+    $("first-run-capture-target").value = capture;
+  }
+  syncFirstRunAudioFields();
+  syncFirstRunRecordingFields();
+}
+
 function renderFirstRunSupportedGames() {
   const root = $("first-run-supported-games");
   root.replaceChildren();
@@ -176,16 +213,39 @@ function syncFirstRunDetectedCount() {
   selectAll.disabled = firstRunCandidates.length === 0;
   selectAll.checked = count > 0 && count === firstRunCandidates.length;
   selectAll.indeterminate = count > 0 && count < firstRunCandidates.length;
-  if (firstRunRecommendation) firstRunRecommendation.gameCount = count;
   $("first-run-detected-count").textContent = count
     ? `${count} game${count === 1 ? "" : "s"} selected`
     : "No games selected";
 }
 
+function resetFirstRunGameDetection() {
+  firstRunCandidates = [];
+  firstRunSelectedCandidateIds.clear();
+  syncFirstRunDetectedCount();
+  $("first-run-detected-games").hidden = true;
+  $("first-run-detected-actions").hidden = true;
+  const status = $("first-run-game-scan-status");
+  status.hidden = false;
+  status.replaceChildren();
+  const title = document.createElement("strong");
+  title.textContent = "No scan yet";
+  const detail = document.createElement("span");
+  detail.textContent = "Run detection to find installed and currently running games.";
+  status.append(title, detail);
+}
+
+function setFirstRunDetectionPending(pending) {
+  firstRunDetectionPending = pending;
+  $("first-run-detect-games").disabled = pending;
+  $("first-run-back").disabled = pending;
+  $("first-run-next").disabled = pending;
+  $("first-run-cancel").disabled = pending;
+}
+
 async function detectFirstRunGames() {
   const scanButton = $("first-run-detect-games");
   const status = $("first-run-game-scan-status");
-  scanButton.disabled = true;
+  setFirstRunDetectionPending(true);
   scanButton.textContent = "Scanning...";
   firstRunCandidates = [];
   firstRunSelectedCandidateIds.clear();
@@ -223,40 +283,27 @@ async function detectFirstRunGames() {
     }
     return false;
   } finally {
-    scanButton.disabled = false;
+    setFirstRunDetectionPending(false);
     scanButton.textContent = "Detect Games";
   }
 }
 
-function addFirstRunDetectedGames() {
+function firstRunDetectedGameAdditions() {
   const selected = firstRunCandidates.filter((candidate) =>
     firstRunSelectedCandidateIds.has(detectedGameKey(candidate)),
   );
   const usedIds = new Set(customGames.map((game) => game.id));
-  const additions = selected
+  return selected
     .filter((candidate) =>
       !customGames.some((game) => customGameMatchesCandidate(game, candidate)))
     .map((candidate) => customGameFromDetectedCandidate(candidate, usedIds));
-  if (additions.length) customGames.push(...additions);
-  const selectedKeys = new Set(selected.map(detectedGameKey));
-  firstRunCandidates = firstRunCandidates.filter(
-    (candidate) => !selectedKeys.has(detectedGameKey(candidate)),
-  );
-  firstRunSelectedCandidateIds.clear();
-  renderFirstRunDetectedGames();
-  const added = $("first-run-added-games");
-  added.hidden = false;
-  added.textContent = additions.length
-    ? `Added ${additions.map((game) => game.name).join(", ")}.`
-    : "Those games were already added.";
-  if (firstRunRecommendation) firstRunRecommendation.gameCount = additions.length;
-  return additions;
 }
 
 async function applyFirstRunRecommendedSetup() {
   const button = $("first-run-auto-setup");
   button.disabled = true;
   button.textContent = "Setting up...";
+  setFirstRunDetectionPending(true);
   $("first-run-error").textContent = "";
   firstRunRecommendation = null;
   try {
@@ -276,10 +323,12 @@ async function applyFirstRunRecommendedSetup() {
     $("first-run-mic-device").value = "";
     $("first-run-mic-volume").value = "1";
     $("first-run-mic-mono").checked = true;
+    const primary = primaryDisplay();
+    const primaryCapture = primary ? displayCaptureValue(primary) : "primary_monitor";
     if (Array.from($("first-run-capture-target").options).some(
-      (option) => option.value === "primary_monitor",
+      (option) => option.value === primaryCapture,
     )) {
-      $("first-run-capture-target").value = "primary_monitor";
+      $("first-run-capture-target").value = primaryCapture;
     }
     $("first-run-pause-no-game").checked = true;
     $("first-run-replay").value = "30";
@@ -298,7 +347,6 @@ async function applyFirstRunRecommendedSetup() {
     }
     syncFirstRunDetectedCount();
     firstRunRecommendation = {
-      gameCount: firstRunSelectedCandidateIds.size,
       microphoneAvailable,
       warning: detected
         ? ""
@@ -308,6 +356,7 @@ async function applyFirstRunRecommendedSetup() {
   } catch (error) {
     $("first-run-error").textContent = String(error);
   } finally {
+    setFirstRunDetectionPending(false);
     button.disabled = false;
     button.textContent = "Set this up for me";
   }
@@ -316,7 +365,7 @@ async function applyFirstRunRecommendedSetup() {
 function updateFirstRunReview() {
   const quality = recordingQualityPreset(
     Number($("first-run-quality").value),
-    $("first-run-resolution").value,
+    outputResolutionOption($("first-run-resolution").value).id,
   );
   const smoothness = smoothnessPreset(Number($("first-run-fps").value));
   const supported = Array.from(
@@ -345,6 +394,9 @@ function updateFirstRunReview() {
   $("first-run-summary-capture").textContent = firstRunSelectedText("first-run-capture-target");
   $("first-run-summary-pause").textContent = $("first-run-pause-no-game").checked ? "On" : "Off";
   $("first-run-summary-replay").textContent = settingDurationLabel($("first-run-replay").value);
+  $("first-run-summary-storage").textContent = firstRunRecommendation
+    ? "Memory"
+    : $("set-replay-disk-enabled").checked ? "Disk" : "Memory";
   $("first-run-summary-resolution").textContent = firstRunSelectedText("first-run-resolution");
   $("first-run-summary-quality").textContent = `${quality.label} (${quality.bitrate} Mbps)`;
   $("first-run-summary-fps").textContent = smoothness.label;
@@ -361,7 +413,7 @@ function updateFirstRunReview() {
       : firstRunRecommendation.microphoneAvailable
         ? "Microphone off"
         : "No microphone available";
-    const gameCount = firstRunRecommendation.gameCount;
+    const gameCount = firstRunSelectedCandidateIds.size;
     $("first-run-auto-summary-text").textContent =
       `${firstRunSelectedText("first-run-resolution")} at ${smoothness.label}, ${quality.label} quality, `
       + `${settingDurationLabel($("first-run-replay").value)} replays in memory, ${microphone}. `
@@ -422,7 +474,7 @@ function showFirstRunStep(step) {
 
 function applyFirstRunFormToSettings() {
   $("set-hotkey").value = $("first-run-hotkey").value.trim();
-  $("set-hotkey-2").value = "";
+  if (!firstRunReplay) $("set-hotkey-2").value = "";
   $("set-media-dir").value = $("first-run-media-dir").value.trim();
   $("set-quota").value = $("first-run-quota").value;
   $("set-open-on-startup").checked = $("first-run-startup").checked;
@@ -440,7 +492,9 @@ function applyFirstRunFormToSettings() {
     captureTargetDirty = true;
     syncCaptureFields();
   }
-  $("set-games-auto-detect").checked = true;
+  if (!firstRunReplay || firstRunRecommendation) {
+    $("set-games-auto-detect").checked = true;
+  }
   $("set-games-pause-when-empty").checked = $("first-run-pause-no-game").checked;
   $("set-buffer").value = $("first-run-replay").value;
   $("set-replay").value = $("first-run-replay").value;
@@ -448,8 +502,10 @@ function applyFirstRunFormToSettings() {
   $("set-bitrate").value = $("first-run-quality").value;
   $("set-fps").value = $("first-run-fps").value;
   if (firstRunRecommendation) $("set-replay-disk-enabled").checked = false;
-  $("recording-mode-basic").checked = true;
-  $("recording-mode-advanced").checked = false;
+  if (!firstRunReplay || firstRunRecommendation) {
+    $("recording-mode-basic").checked = true;
+    $("recording-mode-advanced").checked = false;
+  }
   for (const plugin of gamePlugins) {
     const input = document.querySelector(`[data-first-run-plugin="${plugin.id}"]`);
     gamePluginSettings[plugin.id] = normalizeGamePluginSettings({
@@ -464,64 +520,98 @@ function applyFirstRunFormToSettings() {
   return readSettings();
 }
 
-function closeFirstRunSetup() {
+function closeFirstRunSetup({ discard = false } = {}) {
+  const replayed = firstRunReplay;
+  const resolveClosed = firstRunCloseResolver;
+  firstRunReplay = false;
+  firstRunCloseResolver = null;
   $("first-run-setup").hidden = true;
   const app = document.querySelector(".app");
   app.inert = false;
   app.removeAttribute("aria-hidden");
+  if (replayed) {
+    if (discard && currentSettings) fillSettings(currentSettings);
+    toggleSettings(true);
+  }
+  if (resolveClosed) resolveClosed();
+}
+
+async function cancelFirstRunSetup() {
+  if (!firstRunReplay || firstRunDetectionPending) return;
+  await stopFirstRunMicTest();
+  closeFirstRunSetup({ discard: true });
 }
 
 async function finishFirstRunSetup() {
   const finish = $("first-run-finish");
+  const shouldStartRecording = !firstRunReplay;
+  const previousCustomGames = customGames;
+  const additions = firstRunDetectedGameAdditions();
   finish.disabled = true;
-  finish.textContent = "Starting...";
+  finish.textContent = shouldStartRecording ? "Starting..." : "Saving...";
   $("first-run-back").disabled = true;
+  $("first-run-cancel").disabled = true;
   $("first-run-error").textContent = "";
   await stopFirstRunMicTest();
   try {
-    if (firstRunSelectedCandidateIds.size) addFirstRunDetectedGames();
+    if (additions.length) customGames = [...customGames, ...additions];
     const settings = applyFirstRunFormToSettings();
     const saved = await invoke("save_settings", { settings });
     fillSettings(saved);
     closeFirstRunSetup();
-    try {
-      recordingRequested = await invoke("set_recording", { recording: true });
-      updateCaptureStatus();
-      await refresh();
-    } catch (error) {
-      $("error").textContent = `Setup was saved, but recording could not start: ${error}`;
+    if (shouldStartRecording) {
+      try {
+        recordingRequested = await invoke("set_recording", { recording: true });
+        updateCaptureStatus();
+        await refresh();
+      } catch (error) {
+        $("error").textContent = `Setup was saved, but recording could not start: ${error}`;
+      }
     }
   } catch (error) {
+    customGames = previousCustomGames;
+    renderCustomGames();
     $("first-run-error").textContent = String(error);
     finish.disabled = false;
-    finish.textContent = "Start Clipline";
+    finish.textContent = shouldStartRecording ? "Start Clipline" : "Save Settings";
     $("first-run-back").disabled = false;
+    $("first-run-cancel").disabled = false;
   }
 }
 
-async function openFirstRunSetup(settings) {
+async function openFirstRunSetup(settings, replay = false) {
+  const closed = new Promise((resolve) => {
+    firstRunCloseResolver = resolve;
+  });
   const finish = $("first-run-finish");
   const autoSetup = $("first-run-auto-setup");
+  firstRunReplay = replay;
   finish.disabled = false;
-  finish.textContent = "Start Clipline";
+  finish.textContent = replay ? "Save Settings" : "Start Clipline";
   autoSetup.disabled = false;
   autoSetup.textContent = "Set this up for me";
   firstRunRecommendation = null;
+  resetFirstRunGameDetection();
+  setFirstRunDetectionPending(false);
   $("first-run-auto-summary").hidden = true;
   $("first-run-auto-warning").hidden = true;
   $("first-run-back").disabled = false;
+  $("first-run-cancel").hidden = !replay;
   const app = document.querySelector(".app");
   app.inert = true;
   app.setAttribute("aria-hidden", "true");
   $("first-run-setup").hidden = false;
   $("first-run-media-dir").value = settings.media_dir || "";
   renderFirstRunSupportedGames();
+  if (replay) seedFirstRunFromSettings(settings);
   showFirstRunIntro();
   $("first-run-start-setup").focus();
   await Promise.all([ensureDisplaysLoaded(), ensureAudioDevicesLoaded()]);
   renderFirstRunCaptureTargets();
   renderFirstRunAudioDevices();
-  syncFirstRunRecordingFields();
+  if (replay) seedFirstRunFromSettings(settings);
+  else syncFirstRunRecordingFields();
+  return closed;
 }
 
 $("play-first-run-wizard").addEventListener("click", async () => {
@@ -531,7 +621,7 @@ $("play-first-run-wizard").addEventListener("click", async () => {
     return;
   }
   toggleSettings(false);
-  await openFirstRunSetup(currentSettings);
+  await openFirstRunSetup(currentSettings, true);
 });
 
 $("first-run-browse").addEventListener("click", async () => {
@@ -598,6 +688,12 @@ $("first-run-start-setup").addEventListener("click", () => {
   $("first-run-next").focus();
 });
 $("first-run-auto-setup").addEventListener("click", applyFirstRunRecommendedSetup);
+$("first-run-cancel").addEventListener("click", cancelFirstRunSetup);
+$("first-run-setup").addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || !firstRunReplay || firstRunDetectionPending) return;
+  event.preventDefault();
+  cancelFirstRunSetup();
+});
 $("first-run-select-all").addEventListener("change", (event) => {
   firstRunSelectedCandidateIds.clear();
   if (event.currentTarget.checked) {
@@ -608,19 +704,18 @@ $("first-run-select-all").addEventListener("change", (event) => {
   renderFirstRunDetectedGames();
 });
 $("first-run-back").addEventListener("click", async () => {
+  if (firstRunDetectionPending) return;
   await stopFirstRunMicTest();
   showFirstRunStep(firstRunStep - 1);
 });
 $("first-run-next").addEventListener("click", async () => {
+  if (firstRunDetectionPending) return;
   if (firstRunStep === 0) {
     const error = validateFirstRunBasics();
     if (error) {
       $("first-run-error").textContent = error;
       return;
     }
-  }
-  if (firstRunStep === 2 && firstRunSelectedCandidateIds.size) {
-    addFirstRunDetectedGames();
   }
   await stopFirstRunMicTest();
   showFirstRunStep(firstRunStep + 1);

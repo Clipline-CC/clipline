@@ -27,13 +27,23 @@ the existing retry control. Back also lets the user edit the generated draft and
 selection. Nothing is persisted until `Start Clipline`; finishing adds any staged games and uses
 the existing `save_settings` transaction.
 
+PR review hardening made the Settings replay path safe for existing users. Replayed setup seeds
+every wizard-owned field from the saved settings, preserves the secondary hotkey, game auto-detect,
+advanced recording mode, and other controls the wizard does not expose, and offers Cancel plus
+Escape to discard the draft and return to Settings. Detected games remain staged through Review
+and are added only inside the successful save attempt; scans lock navigation while pending and
+their transient results reset whenever the wizard opens. Finishing a replay preserves the current
+recording state, while a genuine first run still starts recording after save. Review now discloses
+memory versus disk replay storage, the recommended preset selects the enumerated primary display,
+and the automatic update check waits until genuine first-run setup closes.
+
 The one-click markup, preset values, microphone availability rule, all-game selection, Review
 state, welcome choice, and no-early-save boundary are protected by the UI contract. JavaScript
 syntax, full workspace tests, warning-denied workspace Clippy from a clean `clipline-app` cache,
-and diff checks are green. Manual retest: open Settings > Misc > Play first-time wizard, click `Set
-this up for me`, confirm the scan lands on Review with 720p / 60 FPS / Balanced / 30 sec in memory,
-then reopen the wizard and confirm `Start setup` opens Basics. Finish only if it is safe to replace
-the current development settings.
+and diff checks are green. Manual retest: open Settings > Misc > Play first-time wizard, confirm
+Cancel and Escape return to Misc without changing settings, then reopen it and verify `Start setup`
+shows the saved values. Click `Set this up for me`, confirm the scan lands on Review with 720p /
+60 FPS / Balanced / 30 sec in memory, and save only if those preset changes are wanted.
 
 ---
 
@@ -62,10 +72,10 @@ dismissing the wizard. First-run background controls are inert, the titlebar rem
 keyboard Tab can leave the hotkey recorder.
 
 Settings now includes a `Misc` tab with a `Play first-time wizard` action. It reopens the real
-wizard, protects unsaved Settings edits with the existing discard warning, and resets the final
-action state so the setup flow can be completed more than once in the same app session.
-Detected Other Games now support Select all, and checked games are added automatically when
-Continue opens Review; the redundant `Add selected games` step was removed.
+wizard, protects unsaved Settings edits with the existing discard warning, seeds wizard controls
+from saved settings, and resets transient state so the setup flow can be completed more than once
+in the same app session. Detected Other Games support Select all, and checked games stay staged
+until the final save; the redundant `Add selected games` step was removed.
 
 Persistence/startup classification and UI contracts cover the new behavior. Full workspace tests,
 fresh-cache warning-denied workspace Clippy, JavaScript syntax checks, formatting, and diff checks

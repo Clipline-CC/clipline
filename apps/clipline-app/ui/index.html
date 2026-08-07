@@ -906,6 +906,7 @@
   </div>
 
   <section id="first-run-setup" class="first-run-setup" role="dialog" aria-modal="true" aria-label="Clipline setup" hidden>
+    <button id="first-run-cancel" type="button" hidden>Cancel</button>
     <div id="first-run-intro" class="first-run-intro" hidden>
       <div class="first-run-intro-inner">
         <div class="first-run-intro-brand">
@@ -1084,14 +1085,13 @@
             <div id="first-run-detected-actions" class="first-run-detected-actions" hidden>
               <span id="first-run-detected-count">No games selected</span>
             </div>
-            <div id="first-run-added-games" class="first-run-added-games" role="status" hidden></div>
           </div>
         </section>
 
         <section id="first-run-review" class="first-run-page" data-first-run-page="3" hidden>
           <span class="first-run-kicker">Ready to go</span>
           <h1>Here's how Clipline will work.</h1>
-          <p class="first-run-lede">Review your choices before Clipline starts recording.</p>
+          <p class="first-run-lede">Review your choices before they are saved.</p>
           <div id="first-run-auto-summary" class="first-run-auto-summary" hidden>
             <strong>Set up for you</strong>
             <span id="first-run-auto-summary-text"></span>
@@ -1107,6 +1107,7 @@
             <div><span>Capture target</span><strong id="first-run-summary-capture"></strong></div>
             <div><span>Pause without a game</span><strong id="first-run-summary-pause"></strong></div>
             <div><span>Save length</span><strong id="first-run-summary-replay"></strong></div>
+            <div><span>Replay storage</span><strong id="first-run-summary-storage"></strong></div>
             <div><span>Output size</span><strong id="first-run-summary-resolution"></strong></div>
             <div><span>Video quality</span><strong id="first-run-summary-quality"></strong></div>
             <div><span>FPS</span><strong id="first-run-summary-fps"></strong></div>
