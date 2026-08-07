@@ -4496,7 +4496,9 @@ fn replayed_first_run_setup_is_cancelable_and_preserves_hidden_settings() {
     let main = read_ui_js("main.js");
 
     assert!(
-        html.contains("id=\"first-run-cancel\" type=\"button\" hidden>Cancel</button>")
+        html.contains(
+            "id=\"first-run-cancel\" class=\"first-run-cancel\" type=\"button\" hidden>Cancel</button>",
+        )
             && html.contains("<span>Replay storage</span><strong id=\"first-run-summary-storage\""),
         "Settings replay needs an exit and must disclose recommended memory storage"
     );
