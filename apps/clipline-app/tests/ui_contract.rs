@@ -4317,9 +4317,18 @@ fn first_run_detected_games_use_one_step_selection() {
     let wizard = read_ui_js("first-run.js");
 
     assert!(
-        html.contains("id=\"first-run-select-all\" type=\"checkbox\"")
+        html.contains("id=\"first-run-select-all\" type=\"checkbox\" disabled")
             && html.contains(">Select all</span>"),
         "detected games must offer a Select all checkbox"
+    );
+    let select_all = html.find("id=\"first-run-select-all\"").expect("Select all");
+    let detect = html.find("id=\"first-run-detect-games\"").expect("Detect Games");
+    let detected_list = html
+        .find("id=\"first-run-detected-games\"")
+        .expect("detected games list");
+    assert!(
+        select_all < detect && detect < detected_list,
+        "Select all must sit beside Detect Games above the detected list"
     );
     assert!(
         !html.contains("id=\"first-run-add-games\"")
@@ -4328,6 +4337,7 @@ fn first_run_detected_games_use_one_step_selection() {
     );
     for required in [
         "$(\"first-run-select-all\").addEventListener(\"change\"",
+        "selectAll.disabled = firstRunCandidates.length === 0",
         "selectAll.indeterminate = count > 0 && count < firstRunCandidates.length",
         "if (firstRunStep === 2 && firstRunSelectedCandidateIds.size)",
         "addFirstRunDetectedGames();",

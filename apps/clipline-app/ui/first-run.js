@@ -129,6 +129,7 @@ function renderFirstRunDetectedGames() {
   const status = $("first-run-game-scan-status");
   root.replaceChildren();
   if (!firstRunCandidates.length) {
+    syncFirstRunDetectedCount();
     root.hidden = true;
     $("first-run-detected-actions").hidden = true;
     status.hidden = false;
@@ -171,6 +172,7 @@ function renderFirstRunDetectedGames() {
 function syncFirstRunDetectedCount() {
   const count = firstRunSelectedCandidateIds.size;
   const selectAll = $("first-run-select-all");
+  selectAll.disabled = firstRunCandidates.length === 0;
   selectAll.checked = count > 0 && count === firstRunCandidates.length;
   selectAll.indeterminate = count > 0 && count < firstRunCandidates.length;
   $("first-run-detected-count").textContent = count
@@ -185,6 +187,7 @@ async function detectFirstRunGames() {
   scanButton.textContent = "Scanning...";
   firstRunCandidates = [];
   firstRunSelectedCandidateIds.clear();
+  syncFirstRunDetectedCount();
   $("first-run-detected-games").hidden = true;
   $("first-run-detected-actions").hidden = true;
   status.hidden = false;
