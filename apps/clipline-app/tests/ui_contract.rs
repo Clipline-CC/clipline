@@ -4312,6 +4312,67 @@ fn first_run_setup_covers_approved_defaults_and_save_flow() {
 }
 
 #[test]
+fn first_run_setup_offers_a_one_click_recommended_preset() {
+    let html = index_html();
+    let wizard = read_ui_js("first-run.js");
+
+    for required in [
+        "id=\"first-run-auto-setup\"",
+        ">Set this up for me</button>",
+        "The default microphone will be enabled when one is available.",
+        "id=\"first-run-auto-summary\"",
+        "id=\"first-run-auto-summary-text\"",
+        "id=\"first-run-auto-warning\"",
+    ] {
+        assert!(
+            html.contains(required),
+            "recommended setup UI must include `{required}`"
+        );
+    }
+
+    let helper_start = wizard
+        .find("async function applyFirstRunRecommendedSetup()")
+        .expect("recommended setup helper");
+    let helper_end = wizard[helper_start..]
+        .find("\n}\n\nfunction updateFirstRunReview")
+        .map(|offset| helper_start + offset)
+        .expect("recommended setup helper end");
+    let helper = &wizard[helper_start..helper_end];
+    for required in [
+        "$(\"first-run-hotkey\").value = \"Alt+F10\"",
+        "$(\"first-run-quota\").value = \"10\"",
+        "$(\"first-run-startup\").checked = true",
+        "$(\"first-run-output-enabled\").checked = true",
+        "$(\"first-run-split-output\").checked = false",
+        "audioDevices.inputs.length > 0",
+        "$(\"first-run-pause-no-game\").checked = true",
+        "$(\"first-run-replay\").value = \"30\"",
+        "$(\"first-run-resolution\").value = \"720p\"",
+        "$(\"first-run-quality\").value = \"1\"",
+        "$(\"first-run-fps\").value = \"1\"",
+        "input.checked = true",
+        "await detectFirstRunGames()",
+        "firstRunSelectedCandidateIds.add(detectedGameKey(candidate))",
+        "showFirstRunStep(3)",
+    ] {
+        assert!(
+            helper.contains(required),
+            "recommended preset must include `{required}`"
+        );
+    }
+    assert!(
+        !helper.contains("save_settings"),
+        "recommended setup must remain a draft until Start Clipline"
+    );
+    assert!(
+        wizard.contains("$(\"first-run-auto-setup\").addEventListener(\"click\"")
+            && wizard.contains("firstRunRecommendation.warning")
+            && wizard.contains("firstRunSelectedCandidateIds.size"),
+        "recommended setup must be wired to Review with game and warning state"
+    );
+}
+
+#[test]
 fn first_run_detected_games_use_one_step_selection() {
     let html = index_html();
     let wizard = read_ui_js("first-run.js");

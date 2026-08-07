@@ -926,6 +926,13 @@
           <span class="first-run-kicker">Basic setup</span>
           <h1 id="first-run-title">Set up the essentials.</h1>
           <p class="first-run-lede">Choose where clips go, how much space they can use, and how you want to open Clipline.</p>
+          <div class="first-run-auto-card">
+            <div>
+              <strong>Want the easy setup?</strong>
+              <span>We'll choose a smooth 720p60 replay setup and find the games on this PC. The default microphone will be enabled when one is available.</span>
+            </div>
+            <button id="first-run-auto-setup" class="primary" type="button">Set this up for me</button>
+          </div>
           <div class="first-run-card">
             <div class="first-run-row">
               <label for="first-run-hotkey"><strong>Replay button hotkey</strong><span>Saves the most recent replay.</span></label>
@@ -1065,6 +1072,11 @@
           <span class="first-run-kicker">Ready to go</span>
           <h1>Here's how Clipline will work.</h1>
           <p class="first-run-lede">Review your choices before Clipline starts recording.</p>
+          <div id="first-run-auto-summary" class="first-run-auto-summary" hidden>
+            <strong>Set up for you</strong>
+            <span id="first-run-auto-summary-text"></span>
+            <span id="first-run-auto-warning" class="first-run-auto-warning" hidden></span>
+          </div>
           <div class="first-run-summary">
             <div><span>Replay hotkey</span><strong id="first-run-summary-hotkey"></strong></div>
             <div><span>Media folder</span><strong id="first-run-summary-folder"></strong></div>

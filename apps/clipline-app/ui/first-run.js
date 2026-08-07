@@ -4,6 +4,7 @@
 var firstRunStep = 0;
 var firstRunCandidates = [];
 var firstRunSelectedCandidateIds = new Set();
+var firstRunRecommendation = null;
 
 function firstRunSelectedText(id) {
   const select = $(id);
@@ -175,6 +176,7 @@ function syncFirstRunDetectedCount() {
   selectAll.disabled = firstRunCandidates.length === 0;
   selectAll.checked = count > 0 && count === firstRunCandidates.length;
   selectAll.indeterminate = count > 0 && count < firstRunCandidates.length;
+  if (firstRunRecommendation) firstRunRecommendation.gameCount = count;
   $("first-run-detected-count").textContent = count
     ? `${count} game${count === 1 ? "" : "s"} selected`
     : "No games selected";
@@ -204,9 +206,22 @@ async function detectFirstRunGames() {
     });
     firstRunCandidates = Array.isArray(candidates) ? candidates : [];
     renderFirstRunDetectedGames();
+    if (firstRunRecommendation) firstRunRecommendation.warning = "";
+    return true;
   } catch (error) {
-    status.hidden = true;
+    status.hidden = false;
+    status.replaceChildren();
+    const title = document.createElement("strong");
+    title.textContent = "Game detection did not finish";
+    const detail = document.createElement("span");
+    detail.textContent = "Try Detect Games again, or continue without detected games.";
+    status.append(title, detail);
     $("first-run-error").textContent = String(error);
+    if (firstRunRecommendation) {
+      firstRunRecommendation.warning =
+        "Game detection could not finish. You can go Back and try it again, or continue without detected games.";
+    }
+    return false;
   } finally {
     scanButton.disabled = false;
     scanButton.textContent = "Detect Games";
@@ -234,6 +249,68 @@ function addFirstRunDetectedGames() {
   added.textContent = additions.length
     ? `Added ${additions.map((game) => game.name).join(", ")}.`
     : "Those games were already added.";
+  if (firstRunRecommendation) firstRunRecommendation.gameCount = additions.length;
+  return additions;
+}
+
+async function applyFirstRunRecommendedSetup() {
+  const button = $("first-run-auto-setup");
+  button.disabled = true;
+  button.textContent = "Setting up...";
+  $("first-run-error").textContent = "";
+  firstRunRecommendation = null;
+  try {
+    await Promise.all([ensureDisplaysLoaded(), ensureAudioDevicesLoaded()]);
+    renderFirstRunCaptureTargets();
+    renderFirstRunAudioDevices();
+
+    $("first-run-hotkey").value = "Alt+F10";
+    $("first-run-quota").value = "10";
+    $("first-run-startup").checked = true;
+    $("first-run-output-enabled").checked = true;
+    $("first-run-split-output").checked = false;
+    $("first-run-output-device").value = "";
+    $("first-run-output-volume").value = "1";
+    const microphoneAvailable = audioDevices.inputs.length > 0;
+    $("first-run-mic-enabled").checked = microphoneAvailable;
+    $("first-run-mic-device").value = "";
+    $("first-run-mic-volume").value = "1";
+    $("first-run-mic-mono").checked = true;
+    if (Array.from($("first-run-capture-target").options).some(
+      (option) => option.value === "primary_monitor",
+    )) {
+      $("first-run-capture-target").value = "primary_monitor";
+    }
+    $("first-run-pause-no-game").checked = true;
+    $("first-run-replay").value = "30";
+    $("first-run-resolution").value = "720p";
+    $("first-run-quality").value = "1";
+    $("first-run-fps").value = "1";
+    for (const input of document.querySelectorAll("[data-first-run-plugin]")) {
+      input.checked = true;
+    }
+    syncFirstRunAudioFields();
+    syncFirstRunRecordingFields();
+
+    const detected = await detectFirstRunGames();
+    for (const candidate of firstRunCandidates) {
+      firstRunSelectedCandidateIds.add(detectedGameKey(candidate));
+    }
+    syncFirstRunDetectedCount();
+    firstRunRecommendation = {
+      gameCount: firstRunSelectedCandidateIds.size,
+      microphoneAvailable,
+      warning: detected
+        ? ""
+        : "Game detection could not finish. You can go Back and try it again, or continue without detected games.",
+    };
+    showFirstRunStep(3);
+  } catch (error) {
+    $("first-run-error").textContent = String(error);
+  } finally {
+    button.disabled = false;
+    button.textContent = "Set this up for me";
+  }
 }
 
 function updateFirstRunReview() {
@@ -248,6 +325,13 @@ function updateFirstRunReview() {
     const plugin = gamePlugins.find((item) => item.id === input.dataset.firstRunPlugin);
     return plugin ? plugin.name : input.dataset.firstRunPlugin;
   });
+  const stagedGames = firstRunCandidates.filter((candidate) =>
+    firstRunSelectedCandidateIds.has(detectedGameKey(candidate)),
+  );
+  const otherGames = [
+    ...customGames.map((game) => game.name),
+    ...stagedGames.map((game) => game.name || "Detected game"),
+  ];
   $("first-run-summary-hotkey").textContent = $("first-run-hotkey").value;
   $("first-run-summary-folder").textContent = $("first-run-media-dir").value;
   $("first-run-summary-quota").textContent = `${$("first-run-quota").value} GB`;
@@ -265,9 +349,27 @@ function updateFirstRunReview() {
   $("first-run-summary-quality").textContent = `${quality.label} (${quality.bitrate} Mbps)`;
   $("first-run-summary-fps").textContent = smoothness.label;
   $("first-run-summary-supported").textContent = supported.length ? supported.join(", ") : "None";
-  $("first-run-summary-other").textContent = customGames.length
-    ? customGames.map((game) => game.name).join(", ")
+  $("first-run-summary-other").textContent = otherGames.length
+    ? otherGames.join(", ")
     : "None added";
+
+  const autoSummary = $("first-run-auto-summary");
+  autoSummary.hidden = !firstRunRecommendation;
+  if (firstRunRecommendation) {
+    const microphone = $("first-run-mic-enabled").checked
+      ? "Default microphone on"
+      : firstRunRecommendation.microphoneAvailable
+        ? "Microphone off"
+        : "No microphone available";
+    const gameCount = firstRunRecommendation.gameCount;
+    $("first-run-auto-summary-text").textContent =
+      `${firstRunSelectedText("first-run-resolution")} at ${smoothness.label}, ${quality.label} quality, `
+      + `${settingDurationLabel($("first-run-replay").value)} replays in memory, ${microphone}. `
+      + `${gameCount} detected game${gameCount === 1 ? "" : "s"} ready to add.`;
+    const warning = $("first-run-auto-warning");
+    warning.textContent = firstRunRecommendation.warning;
+    warning.hidden = !firstRunRecommendation.warning;
+  }
 }
 
 function validateFirstRunBasics() {
@@ -335,6 +437,7 @@ function applyFirstRunFormToSettings() {
   $("set-output-resolution").value = $("first-run-resolution").value;
   $("set-bitrate").value = $("first-run-quality").value;
   $("set-fps").value = $("first-run-fps").value;
+  if (firstRunRecommendation) $("set-replay-disk-enabled").checked = false;
   $("recording-mode-basic").checked = true;
   $("recording-mode-advanced").checked = false;
   for (const plugin of gamePlugins) {
@@ -366,6 +469,7 @@ async function finishFirstRunSetup() {
   $("first-run-error").textContent = "";
   await stopFirstRunMicTest();
   try {
+    if (firstRunSelectedCandidateIds.size) addFirstRunDetectedGames();
     const settings = applyFirstRunFormToSettings();
     const saved = await invoke("save_settings", { settings });
     fillSettings(saved);
@@ -387,8 +491,14 @@ async function finishFirstRunSetup() {
 
 async function openFirstRunSetup(settings) {
   const finish = $("first-run-finish");
+  const autoSetup = $("first-run-auto-setup");
   finish.disabled = false;
   finish.textContent = "Start Clipline";
+  autoSetup.disabled = false;
+  autoSetup.textContent = "Set this up for me";
+  firstRunRecommendation = null;
+  $("first-run-auto-summary").hidden = true;
+  $("first-run-auto-warning").hidden = true;
   $("first-run-back").disabled = false;
   const app = document.querySelector(".app");
   app.inert = true;
@@ -473,6 +583,7 @@ for (const id of [
 
 $("first-run-test-mic").addEventListener("click", () => testMic("first-run"));
 $("first-run-detect-games").addEventListener("click", detectFirstRunGames);
+$("first-run-auto-setup").addEventListener("click", applyFirstRunRecommendedSetup);
 $("first-run-select-all").addEventListener("change", (event) => {
   firstRunSelectedCandidateIds.clear();
   if (event.currentTarget.checked) {
