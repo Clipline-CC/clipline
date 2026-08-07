@@ -1650,7 +1650,7 @@ function updateCaptureStatus() {
 }
 
 function saveHotkeyLabel() {
-  return (currentSettings && currentSettings.hotkey) || $("set-hotkey").value || "Alt+F10";
+  return (currentSettings && currentSettings.hotkey) || $("set-hotkey").value || "F6";
 }
 
 function saveSecondaryHotkeyLabel() {
@@ -1658,7 +1658,7 @@ function saveSecondaryHotkeyLabel() {
 }
 
 function updateHotkeyLabels(hotkey = saveHotkeyLabel(), secondary = saveSecondaryHotkeyLabel()) {
-  const label = String(hotkey || "Alt+F10");
+  const label = String(hotkey || "F6");
   // The rail stays compact with the primary keybind; tooltips list both.
   const full = secondary ? `${label} / ${secondary}` : label;
   $("rail-hotkey").textContent = label;

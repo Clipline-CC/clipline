@@ -4227,7 +4227,9 @@ fn first_run_setup_covers_approved_defaults_and_save_flow() {
     let html = index_html();
     let css = styles_css();
     let wizard = read_ui_js("first-run.js");
+    let settings = read_ui_js("settings.js");
     let main = read_ui_js("main.js");
+    let app = app_rs();
 
     for required in [
         "id=\"first-run-setup\"",
@@ -4235,7 +4237,9 @@ fn first_run_setup_covers_approved_defaults_and_save_flow() {
         "id=\"first-run-capture\"",
         "id=\"first-run-games\"",
         "id=\"first-run-review\"",
-        "id=\"first-run-hotkey\" value=\"Alt+F10\"",
+        "id=\"first-run-hotkey\" value=\"F6\"",
+        "id=\"rail-hotkey\" class=\"rail-hotkey\" title=\"Save Replay: F6\">F6</div>",
+        "id=\"rail-save\" title=\"Save Replay (F6)\"",
         "id=\"first-run-media-dir\"",
         "id=\"first-run-quota\" type=\"number\" min=\"1\" max=\"1000\" value=\"10\"",
         "id=\"first-run-startup\" type=\"checkbox\" checked",
@@ -4309,6 +4313,12 @@ fn first_run_setup_covers_approved_defaults_and_save_flow() {
             && main.contains("openFirstRunSetup(settings)"),
         "startup must ask the backend whether to open the setup wizard"
     );
+    assert!(
+        settings.contains("$(\"set-hotkey\").value || \"F6\"")
+            && settings.contains("String(hotkey || \"F6\")")
+            && app.contains("vec![parse_hotkey(\"F6\").unwrap()]"),
+        "all startup UI and registration fallbacks must use the shipped F6 default"
+    );
 }
 
 #[test]
@@ -4339,7 +4349,7 @@ fn first_run_setup_offers_a_one_click_recommended_preset() {
         .expect("recommended setup helper end");
     let helper = &wizard[helper_start..helper_end];
     for required in [
-        "$(\"first-run-hotkey\").value = \"Alt+F10\"",
+        "$(\"first-run-hotkey\").value = \"F6\"",
         "$(\"first-run-quota\").value = \"10\"",
         "$(\"first-run-startup\").checked = true",
         "$(\"first-run-output-enabled\").checked = true",

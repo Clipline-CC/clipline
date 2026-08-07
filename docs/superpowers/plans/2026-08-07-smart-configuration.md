@@ -17,7 +17,7 @@ reliable enough.
 
 ### Basics
 
-- Replay hotkey: `Alt+F10`.
+- Replay hotkey: `F6`.
 - Media folder: the normal default on first launch; preserve the current wizard value when replayed
   from Settings.
 - Saved-clip quota: 10 GB.

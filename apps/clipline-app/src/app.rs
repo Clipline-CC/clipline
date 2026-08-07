@@ -1,4 +1,4 @@
-//! Tauri shell: tray, Alt+F10 global hotkey, status webview — all thin
+//! Tauri shell: tray, F6 global hotkey, status webview — all thin
 //! wiring around the recorder service thread.
 
 use std::path::{Path, PathBuf};
@@ -2839,7 +2839,7 @@ pub fn run() {
         .unwrap_or_else(|_| service::default_clips_dir());
     let media_dir_for_setup = media_dir.clone();
     let startup_global_hotkeys =
-        global_hotkeys(&settings).unwrap_or_else(|_| vec![parse_hotkey("Alt+F10").unwrap()]);
+        global_hotkeys(&settings).unwrap_or_else(|_| vec![parse_hotkey("F6").unwrap()]);
 
     tauri::Builder::default()
         .manage(RuntimeState::new(settings.clone(), lol_url))

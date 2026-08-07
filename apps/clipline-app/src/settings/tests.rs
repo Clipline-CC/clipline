@@ -41,7 +41,7 @@ fn defaults_match_current_recorder_behavior() {
     assert_eq!(settings.disk_quota_gb, 10.0);
     assert_eq!(settings.media_dir, default_media_dir());
     assert_eq!(settings.replay_storage, ReplayStorageSettings::default());
-    assert_eq!(settings.hotkey, "Alt+F10");
+    assert_eq!(settings.hotkey, "F6");
     assert!(!settings.open_on_startup);
     assert!(settings.close_to_tray);
     assert!(!settings.minimize_to_tray);
@@ -656,7 +656,7 @@ fn load_migrates_invalid_legacy_hotkey_without_resetting_settings() {
 
     let settings = AppSettings::load_from(&path).unwrap();
 
-    assert_eq!(settings.hotkey, "Alt+F10");
+    assert_eq!(settings.hotkey, "F6");
     assert_eq!(settings.capture_mode, CaptureMode::DisplayRegion);
     assert_eq!(settings.capture_region.width, 1280);
     assert_eq!(settings.bitrate_mbps, 24.0);
@@ -745,7 +745,7 @@ fn validation_rejects_secondary_hotkey_matching_primary() {
         ..AppSettings::default()
     };
     assert!(blank.validate().is_ok());
-    assert_eq!(blank.hotkeys(), vec!["Alt+F10"]);
+    assert_eq!(blank.hotkeys(), vec!["F6"]);
 }
 
 #[test]
@@ -846,7 +846,7 @@ fn load_repairs_invalid_fields_without_resetting_valid_neighbors() {
     assert_eq!(settings.video_encoder, VideoEncoder::Auto);
     assert_eq!(settings.disk_quota_gb, 0.0);
     assert_eq!(settings.media_dir, default_media_dir());
-    assert_eq!(settings.hotkey, "Alt+F10");
+    assert_eq!(settings.hotkey, "F6");
     assert!(settings.validate().is_ok());
 }
 

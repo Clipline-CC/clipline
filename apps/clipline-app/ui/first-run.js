@@ -264,7 +264,7 @@ async function applyFirstRunRecommendedSetup() {
     renderFirstRunCaptureTargets();
     renderFirstRunAudioDevices();
 
-    $("first-run-hotkey").value = "Alt+F10";
+    $("first-run-hotkey").value = "F6";
     $("first-run-quota").value = "10";
     $("first-run-startup").checked = true;
     $("first-run-output-enabled").checked = true;

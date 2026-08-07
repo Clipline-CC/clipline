@@ -12,10 +12,13 @@ The wizard now opens on a full-app welcome screen that introduces Clipline befor
 prominent choices. `Start setup` opens the existing four-page manual wizard; `Set this up for me`
 runs the recommended flow for users who do not want to tune it. The recommendation reuses the
 existing wizard form and Settings transaction: device enumeration completes first, then the draft
-is set to Alt+F10, 10 GB, launch on startup, primary display, default output audio at 100%,
+is set to F6, 10 GB, launch on startup, primary display, default output audio at 100%,
 30-second memory replay, 720p, Balanced quality, 60 FPS, pause without a game, and all built-in
 game integrations. The default microphone is enabled at 100% mono only when an input device is
 available.
+
+F6 is also the backend settings default, startup-registration fallback, and initial rail label.
+Existing saved hotkeys are preserved; this change intentionally does not migrate current users.
 
 The same installed-game detector runs immediately and stages every result for addition. The flow
 then jumps to Review, where a compact `Set up for you` card summarizes the profile, microphone
@@ -45,7 +48,7 @@ previous startup behavior, and any successful settings save clears the in-proces
 a recreated WebView cannot reopen onboarding.
 
 The wizard implements the approved Basics, Capture + recording, Games, and Review screens. Its
-intentional first-run defaults are Alt+F10, the normal media directory, 10 GB, launch on startup,
+intentional first-run defaults are F6, the normal media directory, 10 GB, launch on startup,
 output audio on/default/100%, microphone off/default/100%/mono, primary display, pause without a
 game, 30-second replay, 1080p, Balanced quality, and 60 FPS. Supported game profiles come from the
 real plugin catalog and start enabled according to their profile defaults. Other Games runs the
