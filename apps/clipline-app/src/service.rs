@@ -29,8 +29,8 @@ use clipline_capture::{
 };
 use clipline_events::{is_review_event, ClipAudioTrack, EventKind, MarkerLog, PlayerSummary};
 use clipline_storage::{
-    clip_ownership_marker_path, enforce_quota_with_protection, ensure_clip_owned,
-    recover_recording_files, remove_clip_ownership_marker, storage_status, StorageStatus,
+    clip_ownership_marker_path, ensure_clip_owned, recover_recording_files,
+    remove_clip_ownership_marker, storage_status, StorageStatus,
 };
 use clipline_storage::{session_label, SessionTracker};
 
@@ -42,6 +42,8 @@ use crate::util::{unix_now as unix_now_u64, unix_now_i64};
 pub use clipline_capture::probe::Codec;
 
 const LOW_REPLAY_CACHE_DISK_RESERVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const REPLAY_SAVE_QUOTA_RESERVE_BYTES: u64 = 4 * 1024 * 1024;
+const FULL_SESSION_QUOTA_RESERVE_BYTES: u64 = 64 * 1024 * 1024;
 const REPLAY_CACHE_RUN_PREFIX: &str = "clipline-replay-cache-";
 const REPLAY_CACHE_OWNER_FILE: &str = ".clipline-run.json";
 const AMBIGUOUS_REPLAY_CACHE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
@@ -522,11 +524,14 @@ pub enum Event {
         markers: usize,
         #[serde(default)]
         full_session: bool,
-        gc_deleted: usize,
-        gc_freed_bytes: u64,
         storage_total_bytes: u64,
         storage_quota_bytes: Option<u64>,
         storage_over_quota: bool,
+    },
+    StorageQuotaFull {
+        total_bytes: u64,
+        quota_bytes: u64,
+        required_bytes: u64,
     },
     Error {
         message: String,
@@ -561,7 +566,7 @@ pub struct ServiceOptions {
     pub buffer_bytes: usize,
     /// Where the rolling replay buffer stores encoded GOP segments.
     pub replay_storage: ReplayStorageOptions,
-    /// Saved clip disk quota. None disables save-time GC.
+    /// Saved-media quota. None disables quota blocking.
     pub disk_quota_bytes: Option<u64>,
     pub recording_mode: RecordingMode,
     pub fps: u32,
@@ -577,6 +582,34 @@ pub struct ServiceOptions {
 }
 
 pub const DEFAULT_DISK_QUOTA_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+
+fn quota_would_be_exceeded(
+    total_bytes: u64,
+    quota_bytes: Option<u64>,
+    required_bytes: u64,
+) -> bool {
+    quota_bytes.is_some_and(|quota| {
+        total_bytes > quota || required_bytes > quota.saturating_sub(total_bytes)
+    })
+}
+
+fn storage_quota_full_event(
+    clips_dir: &Path,
+    quota_bytes: Option<u64>,
+    required_bytes: u64,
+) -> Result<Option<Event>, String> {
+    let status = storage_status(clips_dir, quota_bytes)
+        .map_err(|error| format!("storage status for {clips_dir:?}: {error}"))?;
+    Ok(
+        quota_would_be_exceeded(status.total_bytes, quota_bytes, required_bytes).then(|| {
+            Event::StorageQuotaFull {
+                total_bytes: status.total_bytes,
+                quota_bytes: quota_bytes.expect("a quota is present when capacity is exceeded"),
+                required_bytes,
+            }
+        }),
+    )
+}
 
 impl Default for ServiceOptions {
     fn default() -> Self {
@@ -816,6 +849,44 @@ fn open_wgc(
 }
 
 fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> Result<(), String> {
+    let (clips_dir, fell_back) = clips_dir_resolved(&opts.media_dir, default_clips_dir)?;
+    let _ = events.send(Event::MediaRootResolved {
+        path: clips_dir.display().to_string(),
+        fell_back,
+    });
+    if fell_back {
+        warn_user(
+            events,
+            format!(
+                "media folder {:?} is unavailable; saving to {:?} instead",
+                opts.media_dir, clips_dir
+            ),
+        );
+    }
+    if is_within_temp(&clips_dir, &std::env::temp_dir()) {
+        warn_user(
+            events,
+            format!(
+                "saving recordings to a temporary folder {clips_dir:?} that the system may delete; choose a Media folder in Settings"
+            ),
+        );
+    }
+    if opts.recover_abandoned_recordings {
+        recover_abandoned_recordings(&clips_dir, events);
+    }
+    let startup_reserve = if opts.recording_mode == RecordingMode::FullSession {
+        FULL_SESSION_QUOTA_RESERVE_BYTES
+    } else {
+        1
+    };
+    if let Some(event) =
+        storage_quota_full_event(&clips_dir, opts.disk_quota_bytes, startup_reserve)?
+    {
+        let _ = events.send(event);
+        send_stopped(events);
+        return Ok(());
+    }
+
     let init = |e: &dyn std::fmt::Display| format!("init: {e}");
     let (device, _ctx) = d3d11::create_device().map_err(|e| init(&e))?;
     let clock = WgcCapture::new_clock().map_err(|e| init(&e))?;
@@ -863,31 +934,6 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
         label = %encoder_status,
     );
 
-    let (clips_dir, fell_back) = clips_dir_resolved(&opts.media_dir, default_clips_dir)?;
-    let _ = events.send(Event::MediaRootResolved {
-        path: clips_dir.display().to_string(),
-        fell_back,
-    });
-    if fell_back {
-        warn_user(
-            events,
-            format!(
-                "media folder {:?} is unavailable; saving to {:?} instead",
-                opts.media_dir, clips_dir
-            ),
-        );
-    }
-    if is_within_temp(&clips_dir, &std::env::temp_dir()) {
-        // Windows reclaims %TEMP% (Storage Sense, Disk Cleanup), so saving here
-        // risks silently losing replays. Surface it loudly instead of failing.
-        warn_user(
-            events,
-            format!(
-                "saving recordings to a temporary folder {clips_dir:?} that the system may delete; choose a Media folder in Settings"
-            ),
-        );
-    }
-
     let mut prepared_replay = prepare_replay_storage(&opts)?;
     let replay_cache_dir = prepared_replay.run_dir.clone();
     let replay_storage = match &opts.replay_storage {
@@ -914,9 +960,6 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
         .collect();
     for (audio, _) in audio_tracks {
         rec = rec.with_audio(audio);
-    }
-    if opts.recover_abandoned_recordings {
-        recover_abandoned_recordings(&clips_dir, events);
     }
     // Saves land in a session folder: one per recorder run, with a dedicated
     // folder per detected match. Folders are created lazily at save time.
@@ -991,6 +1034,29 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
 
         if last_status.elapsed() >= Duration::from_secs(1) {
             last_status = Instant::now();
+            if full_session.is_some() {
+                if let Some(event) = storage_quota_full_event(
+                    &clips_dir,
+                    opts.disk_quota_bytes,
+                    FULL_SESSION_QUOTA_RESERVE_BYTES,
+                )? {
+                    let _ = events.send(event);
+                    let _ = shutdown_recorder(
+                        &mut rec,
+                        &mut full_session,
+                        RecorderFinishContext {
+                            marker_log: &marker_log,
+                            player_summary: player_summary.full_session_summary(),
+                            audio_tracks: &audio_track_metadata,
+                            clips_dir: &clips_dir,
+                            opts: &opts,
+                            events,
+                        },
+                    );
+                    send_stopped(events);
+                    return Ok(());
+                }
+            }
             if full_session.is_none() {
                 if let Some((oldest_media_s, _)) =
                     rec.save_window_bounds(opts.replay_window_s, None)
@@ -1028,6 +1094,34 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
         loop {
             match cmd_rx.try_recv() {
                 Ok(Cmd::Save) => {
+                    let replay_payload_bytes =
+                        u64::try_from(rec.save_window_bytes(opts.replay_window_s, None))
+                            .unwrap_or(u64::MAX);
+                    if replay_payload_bytes > 0 {
+                        let required_bytes =
+                            replay_payload_bytes.saturating_add(REPLAY_SAVE_QUOTA_RESERVE_BYTES);
+                        if let Some(event) = storage_quota_full_event(
+                            &clips_dir,
+                            opts.disk_quota_bytes,
+                            required_bytes,
+                        )? {
+                            let _ = events.send(event);
+                            let _ = shutdown_recorder(
+                                &mut rec,
+                                &mut full_session,
+                                RecorderFinishContext {
+                                    marker_log: &marker_log,
+                                    player_summary: player_summary.full_session_summary(),
+                                    audio_tracks: &audio_track_metadata,
+                                    clips_dir: &clips_dir,
+                                    opts: &opts,
+                                    events,
+                                },
+                            );
+                            send_stopped(events);
+                            return Ok(());
+                        }
+                    }
                     let session_dir = clips_dir.join(session.current());
                     if let Err(e) = std::fs::create_dir_all(&session_dir) {
                         let _ = events.send(Event::Error {
@@ -1050,7 +1144,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                                 player_summary.active_replay_summary(),
                                 &audio_track_metadata,
                             );
-                            emit_saved_clip(
+                            let status = emit_saved_clip(
                                 events,
                                 &clips_dir,
                                 &path,
@@ -1063,6 +1157,27 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                                 },
                                 &opts,
                             );
+                            if status.is_over_quota() {
+                                if let Some(event) =
+                                    storage_quota_full_event(&clips_dir, opts.disk_quota_bytes, 0)?
+                                {
+                                    let _ = events.send(event);
+                                }
+                                let _ = shutdown_recorder(
+                                    &mut rec,
+                                    &mut full_session,
+                                    RecorderFinishContext {
+                                        marker_log: &marker_log,
+                                        player_summary: player_summary.full_session_summary(),
+                                        audio_tracks: &audio_track_metadata,
+                                        clips_dir: &clips_dir,
+                                        opts: &opts,
+                                        events,
+                                    },
+                                );
+                                send_stopped(events);
+                                return Ok(());
+                            }
                         }
                         Err(e) => {
                             let _ = events.send(Event::Error { message: e });
@@ -1330,15 +1445,13 @@ fn current_ffmpeg_capability_identity() -> String {
         .as_ref()
         .map(|path| crate::ffmpeg_install::managed_root(path));
     let locate = ffmpeg::locate();
-    let status = crate::ffmpeg_install::runtime_status_for_dirs(
-        managed_dir.as_deref(),
-        locate.as_deref(),
-    )
-    .unwrap_or_else(|_| crate::ffmpeg_runtime::FfmpegRuntimeStatus {
-        kind: crate::ffmpeg_runtime::FfmpegDiscoveryKind::Missing,
-        managed: None,
-        locate_path: locate.clone(),
-    });
+    let status =
+        crate::ffmpeg_install::runtime_status_for_dirs(managed_dir.as_deref(), locate.as_deref())
+            .unwrap_or_else(|_| crate::ffmpeg_runtime::FfmpegRuntimeStatus {
+                kind: crate::ffmpeg_runtime::FfmpegDiscoveryKind::Missing,
+                managed: None,
+                locate_path: locate.clone(),
+            });
     ffmpeg_capability_identity(status.managed.as_ref(), status.locate_path.as_deref())
 }
 
@@ -1886,11 +1999,11 @@ fn shutdown_recorder(
         Err(e) => {
             let message = format!("finish: {e}");
             warn_user(ctx.events, message.clone());
-            discard_full_session_recording(
+            preserve_full_session_recording(
                 rec,
                 full_session,
                 ctx.events,
-                "full session discarded because recording could not finish cleanly",
+                "full session could not finish cleanly and was kept for recovery",
             );
             Some(message)
         }
@@ -1962,11 +2075,10 @@ fn begin_full_session_recording(
             }
         };
     if let Err(e) = rec.start_full_session(file) {
-        let _ = std::fs::remove_file(&temp_path);
-        let _ = remove_clip_ownership_marker(&temp_path);
-        warn_user(
+        handle_full_session_finish_error(
+            &temp_path,
             events,
-            format!("full-session recording unavailable; start writer: {e}"),
+            &format!("full-session recording unavailable; start writer: {e}"),
         );
         return None;
     }
@@ -1974,7 +2086,6 @@ fn begin_full_session_recording(
         final_path,
         temp_path,
         wall_start_unix: unix_now_i64(),
-        min_duration_s: minimum_full_session_duration_s(active_game),
     })
 }
 
@@ -1988,26 +2099,11 @@ fn finish_full_session_recording(
     };
     match rec.finish_full_session() {
         Ok(Some(summary)) if summary.duration_s.is_finite() && summary.duration_s <= 0.0 => {
-            warn_user(
+            handle_full_session_finish_error(
+                &recording.temp_path,
                 ctx.events,
-                "full session ended before any footage was written".into(),
+                "full session ended before any footage was written",
             );
-            remove_discarded_clip(&recording.temp_path);
-        }
-        Ok(Some(summary))
-            if should_discard_full_session_for_min_duration(
-                recording.min_duration_s,
-                summary.duration_s,
-            ) =>
-        {
-            warn_user(
-                ctx.events,
-                format!(
-                    "full session discarded because it was only {:.1}s; ignoring a brief startup/update window",
-                    summary.duration_s
-                ),
-            );
-            remove_discarded_clip(&recording.temp_path);
         }
         Ok(Some(summary)) => {
             let seconds = if summary.duration_s.is_finite() {
@@ -2047,11 +2143,11 @@ fn finish_full_session_recording(
             );
         }
         Ok(None) => {
-            warn_user(
+            handle_full_session_finish_error(
+                &recording.temp_path,
                 ctx.events,
-                "full session ended before any footage was written".into(),
+                "full session ended before any footage was written",
             );
-            remove_discarded_clip(&recording.temp_path);
         }
         Err(error) => {
             handle_full_session_finish_error(&recording.temp_path, ctx.events, &error.to_string());
@@ -2106,7 +2202,7 @@ fn rename_finalized_session(recording: &FullSessionRecording, events: &Sender<Ev
     }
 }
 
-fn discard_full_session_recording(
+fn preserve_full_session_recording(
     rec: &mut LiveRecorder,
     recording: &mut Option<FullSessionRecording>,
     events: &Sender<Event>,
@@ -2118,8 +2214,7 @@ fn discard_full_session_recording(
     if let Err(e) = rec.finish_full_session() {
         warn_user(events, format!("stop full-session writer: {e}"));
     }
-    remove_discarded_clip(&recording.temp_path);
-    warn_user(events, reason.to_string());
+    handle_full_session_finish_error(&recording.temp_path, events, reason);
 }
 
 fn remove_discarded_clip(path: &Path) {
@@ -2131,32 +2226,6 @@ struct FullSessionRecording {
     final_path: PathBuf,
     temp_path: PathBuf,
     wall_start_unix: i64,
-    min_duration_s: f64,
-}
-
-fn minimum_full_session_duration_s(active_game: Option<&ActiveGame>) -> f64 {
-    match active_game {
-        Some(game)
-            if game
-                .identity
-                .is_built_in_plugin(crate::game_plugins::OSU_ID) =>
-        {
-            10.0
-        }
-        _ => 0.0,
-    }
-}
-
-#[cfg(test)]
-fn should_discard_full_session_duration(active_game: Option<&ActiveGame>, duration_s: f64) -> bool {
-    should_discard_full_session_for_min_duration(
-        minimum_full_session_duration_s(active_game),
-        duration_s,
-    )
-}
-
-fn should_discard_full_session_for_min_duration(min_duration_s: f64, duration_s: f64) -> bool {
-    min_duration_s > 0.0 && duration_s.is_finite() && duration_s < min_duration_s
 }
 
 fn unique_media_path(session_dir: &Path, prefix: &str) -> PathBuf {
@@ -2322,28 +2391,15 @@ fn emit_saved_clip(
     seconds: f64,
     meta: SavedClipMeta,
     opts: &ServiceOptions,
-) {
-    let report = match enforce_quota_with_protection(
-        clips_dir,
-        opts.disk_quota_bytes,
-        Some(path),
-        crate::cloud_upload::is_active_upload_source,
-    ) {
-        Ok(report) => report,
+) -> StorageStatus {
+    let status = match storage_status(clips_dir, opts.disk_quota_bytes) {
+        Ok(status) => status,
         Err(e) => {
-            warn_user(events, format!("storage cleanup: {e}"));
-            let status = storage_status(clips_dir, opts.disk_quota_bytes).unwrap_or_else(|e| {
-                warn_user(events, format!("storage status: {e}"));
-                StorageStatus {
-                    clip_count: 0,
-                    total_bytes: 0,
-                    quota_bytes: opts.disk_quota_bytes,
-                }
-            });
-            clipline_storage::GcReport {
-                deleted_clips: 0,
-                freed_bytes: 0,
-                status,
+            warn_user(events, format!("storage status: {e}"));
+            StorageStatus {
+                clip_count: 0,
+                total_bytes: 0,
+                quota_bytes: opts.disk_quota_bytes,
             }
         }
     };
@@ -2355,12 +2411,11 @@ fn emit_saved_clip(
         recording_end_unix: meta.recording_end_unix,
         markers: meta.markers,
         full_session: meta.full_session,
-        gc_deleted: report.deleted_clips,
-        gc_freed_bytes: report.freed_bytes,
-        storage_total_bytes: report.status.total_bytes,
-        storage_quota_bytes: report.status.quota_bytes,
-        storage_over_quota: report.status.is_over_quota(),
+        storage_total_bytes: status.total_bytes,
+        storage_quota_bytes: status.quota_bytes,
+        storage_over_quota: status.is_over_quota(),
     });
+    status
 }
 
 fn save(
@@ -2598,9 +2653,17 @@ fn is_within_temp(dir: &Path, temp_dir: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{ffmpeg_capability_identity, ffmpeg_capability_slot};
+    use super::{ffmpeg_capability_identity, ffmpeg_capability_slot, quota_would_be_exceeded};
     use clipline_capture::{Codec, EncoderApi, EncoderBackend, EncoderCapability};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn saved_media_quota_blocks_only_when_the_requested_write_would_cross_it() {
+        assert!(!quota_would_be_exceeded(90, Some(100), 10));
+        assert!(quota_would_be_exceeded(90, Some(100), 11));
+        assert!(quota_would_be_exceeded(u64::MAX, Some(u64::MAX), 1));
+        assert!(!quota_would_be_exceeded(u64::MAX, None, u64::MAX));
+    }
 
     #[test]
     fn ffmpeg_capability_slot_reuses_same_identity() {
@@ -2652,7 +2715,10 @@ mod tests {
             manifest_sha256: "bb".into(),
         };
         assert_eq!(
-            ffmpeg_capability_identity(Some(&managed), Some(std::path::Path::new("C:/ext/ffmpeg.exe"))),
+            ffmpeg_capability_identity(
+                Some(&managed),
+                Some(std::path::Path::new("C:/ext/ffmpeg.exe"))
+            ),
             "managed:C:/managed:bb"
         );
         assert_eq!(
@@ -3749,7 +3815,6 @@ mod tests {
             final_path,
             temp_path: dir.path().join("session.mp4.recording"),
             wall_start_unix: 0,
-            min_duration_s: 0.0,
         };
         let (tx, rx) = mpsc::channel();
 
@@ -3766,7 +3831,6 @@ mod tests {
             final_path: dir.path().join("missing-parent").join("session.mp4"),
             temp_path: temp_path.clone(),
             wall_start_unix: 0,
-            min_duration_s: 0.0,
         };
         let (tx, rx) = mpsc::channel();
 
@@ -3813,7 +3877,6 @@ mod tests {
             final_path: dir.path().join("session.mp4"),
             temp_path: dir.path().join("session.mp4.recording"),
             wall_start_unix: 0,
-            min_duration_s: 0.0,
         };
         let (tx, rx) = mpsc::channel();
 
@@ -3928,42 +3991,5 @@ mod tests {
         assert!(finalized.get());
         assert!(message.starts_with("replay cache disk is low"), "{message}");
         assert!(message.contains("finish: writer failed"), "{message}");
-    }
-
-    #[test]
-    fn osu_full_session_duration_policy_discards_boot_transients_only() {
-        let osu = ActiveGame {
-            identity: crate::game_identity::GameIdentity::built_in_plugin(
-                crate::game_plugins::OSU_ID,
-            )
-            .unwrap(),
-            name: "osu!".into(),
-        };
-        let league = ActiveGame {
-            identity: crate::game_identity::GameIdentity::built_in_plugin(
-                crate::game_plugins::LEAGUE_OF_LEGENDS_ID,
-            )
-            .unwrap(),
-            name: "League of Legends".into(),
-        };
-        let custom_osu_impostor = ActiveGame {
-            identity: crate::game_identity::GameIdentity::custom(crate::game_plugins::OSU_ID),
-            name: "Unrelated custom game".into(),
-        };
-
-        assert_eq!(minimum_full_session_duration_s(Some(&osu)), 10.0);
-        assert!(should_discard_full_session_duration(Some(&osu), 9.9));
-        assert!(!should_discard_full_session_duration(Some(&osu), 10.0));
-        assert_eq!(minimum_full_session_duration_s(Some(&league)), 0.0);
-        assert_eq!(
-            minimum_full_session_duration_s(Some(&custom_osu_impostor)),
-            0.0
-        );
-        assert!(!should_discard_full_session_duration(
-            Some(&custom_osu_impostor),
-            3.0
-        ));
-        assert!(!should_discard_full_session_duration(Some(&league), 3.0));
-        assert!(!should_discard_full_session_duration(None, 3.0));
     }
 }

@@ -35,9 +35,32 @@ listen("saved", (e) => {
   $("error").textContent = "";
   const s = e.payload;
   const savedKind = s.full_session ? "session" : "replay";
-  setNotice(s.gc_deleted
-    ? `cleaned up ${s.gc_deleted} old clip${s.gc_deleted > 1 ? "s" : ""} (${fmtBytes(s.gc_freed_bytes)})`
-    : `saved ${fmtDur(s.seconds)} ${savedKind}`, { transient: true });
+  setNotice(`saved ${fmtDur(s.seconds)} ${savedKind}`, { transient: true });
+  requestRefresh();
+});
+
+function showStorageQuotaFull(payload) {
+  storageQuotaBlocked = true;
+  storageQuotaState = payload || storageQuotaState || {};
+  recordingActive = false;
+  recorderWaitingForGame = false;
+  recordingRequested = false;
+  const used = Number(storageQuotaState.total_bytes) || 0;
+  const quota = Number(storageQuotaState.quota_bytes) || 0;
+  const needed = Number(storageQuotaState.required_bytes) || 0;
+  $("storage-quota-usage").textContent = needed > 0
+    ? `${fmtBytes(used)} used of ${fmtBytes(quota)} · ${fmtBytes(needed)} needed for this recording`
+    : `${fmtBytes(used)} used of ${fmtBytes(quota)}`;
+  updateCaptureStatus();
+  if (!$("storage-quota-dialog").open) $("storage-quota-dialog").showModal();
+}
+
+listen("storage-quota-full", (event) => showStorageQuotaFull(event.payload));
+listen("storage-quota-resolved", () => {
+  storageQuotaBlocked = false;
+  storageQuotaState = null;
+  if ($("storage-quota-dialog").open) $("storage-quota-dialog").close();
+  updateCaptureStatus();
   requestRefresh();
 });
 
@@ -498,7 +521,38 @@ $("keys-dialog").addEventListener("click", (ev) => {
   if (ev.target === $("keys-dialog")) $("keys-dialog").close();
 });
 
-$("rail-save").addEventListener("click", () => invoke("save_replay"));
+$("rail-save").addEventListener("click", () => {
+  if (storageQuotaBlocked) showStorageQuotaFull(storageQuotaState);
+  else invoke("save_replay");
+});
+$("storage-quota-manage").addEventListener("click", () => $("storage-quota-dialog").close());
+$("storage-quota-folder").addEventListener("click", async () => {
+  try {
+    await invoke("open_media_folder");
+  } catch (error) {
+    $("error").textContent = String(error);
+  }
+});
+$("storage-quota-settings").addEventListener("click", () => {
+  $("storage-quota-dialog").close();
+  toggleSettings(true);
+  activateSettingsTab($("settings-tab-storage"), { focus: true });
+});
+$("storage-quota-recheck").addEventListener("click", async () => {
+  const button = $("storage-quota-recheck");
+  button.disabled = true;
+  try {
+    await invoke("recheck_storage_quota");
+    requestRefresh();
+  } catch (error) {
+    $("error").textContent = String(error);
+  } finally {
+    button.disabled = false;
+  }
+});
+$("storage-quota-dialog").addEventListener("click", (event) => {
+  if (event.target === $("storage-quota-dialog")) $("storage-quota-dialog").close();
+});
 $("rail-profile").addEventListener("click", openRailProfile);
 $("rail-settings").addEventListener("click", () => {
   if (settingsOpen) requestSettingsClose();

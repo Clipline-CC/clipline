@@ -1265,6 +1265,10 @@ label span { white-space: nowrap; }
   color: var(--accent);
 }
 
+#rail-status.blocked {
+  color: var(--danger);
+}
+
 .rail-label {
   max-width: 100%;
   overflow: hidden;
@@ -3224,6 +3228,7 @@ button.primary.settings-save-glow {
 #update-dialog,
 #elevation-dialog,
 #upload-dialog,
+#storage-quota-dialog,
 #rename-file-dialog {
   width: 380px;
   padding: 0;
@@ -3238,7 +3243,11 @@ button.primary.settings-save-glow {
 #update-dialog::backdrop,
 #elevation-dialog::backdrop,
 #upload-dialog::backdrop,
+#storage-quota-dialog::backdrop,
 #rename-file-dialog::backdrop { background: rgba(var(--scrim-b-rgb), 0.62); }
+
+#storage-quota-dialog { width: min(500px, calc(100vw - 32px)); }
+.storage-quota-actions { flex-wrap: wrap; }
 
 #detected-games-dialog,
 #game-window-picker-dialog {

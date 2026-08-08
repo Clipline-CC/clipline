@@ -1226,7 +1226,7 @@ fn parses_plain_function_key_hotkey() {
 }
 
 #[test]
-fn quota_zero_disables_gc() {
+fn quota_zero_disables_quota_lock() {
     assert_eq!(quota_bytes_from_gb(0.0).unwrap(), None);
     assert_eq!(quota_bytes_from_gb(0.5).unwrap(), Some(512 * 1024 * 1024));
 }

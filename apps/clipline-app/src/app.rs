@@ -758,6 +758,9 @@ fn frontend_ready<R: Runtime>(
     if let Some(status) = runtime.durable_recorder_status_for_replay() {
         let _ = app.emit("status", status);
     }
+    if let Some(event) = runtime.durable_quota_event_for_replay() {
+        let _ = app.emit("storage-quota-full", event);
+    }
     FrontendReadyResponse {
         warnings: startup_warnings.snapshot(),
         window_lifecycle: window_lifecycle.snapshot(),
@@ -984,6 +987,7 @@ struct RuntimeInner {
     last_recorder_status: Option<RecorderDiagnosticStatus>,
     last_storage_status: Option<StorageDiagnosticStatus>,
     recent_recorder_error: bool,
+    quota_blocked: Option<Event>,
 }
 
 #[derive(Clone)]
@@ -1070,6 +1074,7 @@ impl RuntimeState {
             last_recorder_status: None,
             last_storage_status: None,
             recent_recorder_error: false,
+            quota_blocked: None,
         };
         if let Some(tx) = tx {
             Self::install_recording_sender(&mut inner, tx);
@@ -1094,10 +1099,36 @@ impl RuntimeState {
         }
         if !recording {
             inner.tx = None;
-            inner.recording_desired = false;
+            if inner.quota_blocked.is_none() {
+                inner.recording_desired = false;
+            }
             inner.recording_generation = inner.recording_generation.wrapping_add(1);
             inner.last_save_request = None;
         }
+        true
+    }
+
+    fn accept_service_quota(&self, generation: u64, event: &Event) -> bool {
+        let Event::StorageQuotaFull {
+            total_bytes,
+            quota_bytes,
+            ..
+        } = event
+        else {
+            return false;
+        };
+        let Ok(mut inner) = self.0.lock() else {
+            return false;
+        };
+        if inner.recording_generation != generation || inner.tx.is_none() {
+            return false;
+        }
+        inner.quota_blocked = Some(event.clone());
+        inner.last_storage_status = Some(StorageDiagnosticStatus {
+            total_bytes: *total_bytes,
+            quota_bytes: Some(*quota_bytes),
+            over_quota: true,
+        });
         true
     }
 
@@ -1142,6 +1173,7 @@ impl RuntimeState {
                     over_quota: *storage_over_quota,
                 });
             }
+            Event::StorageQuotaFull { .. } => {}
             Event::Error { .. } => inner.recent_recorder_error = true,
             Event::MediaRootResolved { .. } => {}
         }
@@ -1151,6 +1183,7 @@ impl RuntimeState {
         let inner = self.0.lock().ok()?;
         (inner.recording_desired
             && inner.tx.is_none()
+            && inner.quota_blocked.is_none()
             && !recorder_should_run(&inner.settings, inner.active_game.as_ref()))
         .then(waiting_for_game_status)
     }
@@ -1174,6 +1207,10 @@ impl RuntimeState {
             encoder: status.encoder.clone(),
             capture_backend: status.capture_backend.clone(),
         })
+    }
+
+    fn durable_quota_event_for_replay(&self) -> Option<Event> {
+        self.0.lock().ok()?.quota_blocked.clone()
     }
 
     fn waiting_generation_is_current(&self, generation: u64) -> bool {
@@ -1238,6 +1275,7 @@ impl RuntimeState {
 
     fn prepare_service_restart(inner: &mut RuntimeInner) -> Result<PreparedServiceRestart, String> {
         let should_run = inner.recording_desired
+            && inner.quota_blocked.is_none()
             && recorder_should_run(&inner.settings, inner.active_game.as_ref());
         let next_options = if should_run {
             let mut options = match Self::options(inner) {
@@ -1264,8 +1302,13 @@ impl RuntimeState {
         Ok(PreparedServiceRestart {
             old_tx,
             replacement: next_options.map(|options| (options, generation)),
-            waiting_for_game: inner.recording_desired && !should_run,
-            waiting_generation: (inner.recording_desired && !should_run).then_some(generation),
+            waiting_for_game: inner.recording_desired
+                && inner.quota_blocked.is_none()
+                && !should_run,
+            waiting_generation: (inner.recording_desired
+                && inner.quota_blocked.is_none()
+                && !should_run)
+                .then_some(generation),
         })
     }
 
@@ -1275,6 +1318,7 @@ impl RuntimeState {
         tx: Sender<Cmd>,
     ) -> Result<u64, Sender<Cmd>> {
         if !inner.recording_desired
+            || inner.quota_blocked.is_some()
             || inner.recording_generation != generation
             || inner.tx.is_some()
         {
@@ -1295,7 +1339,10 @@ impl RuntimeState {
         } else {
             inner.active_game.as_ref()
         };
-        if inner.recording_desired && recorder_should_run(&settings, active_game) {
+        if inner.recording_desired
+            && inner.quota_blocked.is_none()
+            && recorder_should_run(&settings, active_game)
+        {
             Self::options_for(
                 &settings,
                 inner.lol_url.clone(),
@@ -1322,7 +1369,9 @@ impl RuntimeState {
         } else {
             inner.active_game.as_ref()
         };
-        let should_run = inner.recording_desired && recorder_should_run(&settings, active_game);
+        let should_run = inner.recording_desired
+            && inner.quota_blocked.is_none()
+            && recorder_should_run(&settings, active_game);
         let next_options = if should_run {
             let mut options = Self::options_for(
                 &settings,
@@ -1348,7 +1397,8 @@ impl RuntimeState {
         } else {
             None
         };
-        let waiting_for_game = inner.recording_desired && !should_run;
+        let waiting_for_game =
+            inner.recording_desired && inner.quota_blocked.is_none() && !should_run;
         if waiting_for_game {
             inner.recording_generation = inner.recording_generation.wrapping_add(1);
             inner.last_save_request = None;
@@ -1401,6 +1451,9 @@ impl RuntimeState {
         const DOUBLE_TRIGGER_DEBOUNCE: Duration = Duration::from_millis(150);
 
         if let Ok(mut inner) = self.0.lock() {
+            if inner.quota_blocked.is_some() {
+                return false;
+            }
             let Some(tx) = inner.tx.as_ref().cloned() else {
                 return false;
             };
@@ -1417,6 +1470,67 @@ impl RuntimeState {
             }
         }
         false
+    }
+
+    fn request_save_or_show_quota<R: Runtime>(&self, app: &AppHandle<R>) -> bool {
+        if self.request_save() {
+            return true;
+        }
+        if let Some(event) = self.durable_quota_event_for_replay() {
+            let _ = app.emit("storage-quota-full", event);
+        }
+        false
+    }
+
+    fn recheck_storage_quota<R: Runtime>(
+        &self,
+        app: AppHandle<R>,
+        media_dir: &Path,
+        quota_bytes: Option<u64>,
+    ) -> Result<bool, String> {
+        let (required_bytes, still_stopping) = {
+            let inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+            match inner.quota_blocked.as_ref() {
+                Some(Event::StorageQuotaFull { required_bytes, .. }) => {
+                    (*required_bytes, inner.tx.is_some())
+                }
+                _ => return Ok(true),
+            }
+        };
+        if still_stopping {
+            if let Some(event) = self.durable_quota_event_for_replay() {
+                let _ = app.emit("storage-quota-full", event);
+            }
+            return Ok(false);
+        }
+        let status = clipline_storage::storage_status(media_dir, quota_bytes)
+            .map_err(|error| format!("storage status for {media_dir:?}: {error}"))?;
+        if quota_bytes.is_some_and(|quota| {
+            status.total_bytes > quota || required_bytes > quota.saturating_sub(status.total_bytes)
+        }) {
+            let event = Event::StorageQuotaFull {
+                total_bytes: status.total_bytes,
+                quota_bytes: quota_bytes.expect("quota checked above"),
+                required_bytes,
+            };
+            {
+                let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+                inner.quota_blocked = Some(event.clone());
+            }
+            let _ = app.emit("storage-quota-full", event);
+            return Ok(false);
+        }
+
+        let should_restart = {
+            let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+            inner.quota_blocked = None;
+            inner.recording_desired
+        };
+        let _ = app.emit("storage-quota-resolved", ());
+        if should_restart {
+            self.start_recording(app)?;
+        }
+        Ok(true)
     }
 
     fn send(&self, cmd: Cmd) -> bool {
@@ -1548,21 +1662,27 @@ impl RuntimeState {
     }
 
     fn start_recording<R: Runtime>(&self, app: AppHandle<R>) -> Result<bool, String> {
-        let started = {
+        let (started, blocked) = {
             let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
             if inner.tx.is_some() {
                 return Ok(true);
             }
             inner.recording_desired = true;
             inner.last_save_request = None;
-            if recorder_should_run(&inner.settings, inner.active_game.as_ref()) {
+            if let Some(event) = inner.quota_blocked.clone() {
+                (None, Some(event))
+            } else if recorder_should_run(&inner.settings, inner.active_game.as_ref()) {
                 let (tx, rx) = service::spawn(Self::options(&inner)?);
                 let generation = Self::install_recording_sender(&mut inner, tx);
-                Some((rx, generation))
+                (Some((rx, generation)), None)
             } else {
-                None
+                (None, None)
             }
         };
+        if let Some(event) = blocked {
+            let _ = app.emit("storage-quota-full", event);
+            return Ok(false);
+        }
         if let Some((rx, generation)) = started {
             pump_events(app, rx, generation);
         } else if let Some(status) = self.current_waiting_status() {
@@ -1735,8 +1855,21 @@ fn active_game_still_configured(settings: &AppSettings, active: Option<&Detected
 }
 
 #[tauri::command]
-fn save_replay(state: tauri::State<RuntimeState>) {
-    state.request_save();
+fn save_replay<R: Runtime>(app: AppHandle<R>, state: tauri::State<RuntimeState>) {
+    state.request_save_or_show_quota(&app);
+}
+
+#[tauri::command]
+fn recheck_storage_quota<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<RuntimeState>,
+    storage_settings: tauri::State<crate::library::StorageSettings>,
+) -> Result<bool, String> {
+    state.recheck_storage_quota(
+        app,
+        &storage_settings.media_dir(),
+        storage_settings.quota_bytes(),
+    )
 }
 
 #[tauri::command]
@@ -2780,6 +2913,10 @@ fn save_settings<R: Runtime>(
     }
     storage_settings.set_quota_bytes(quota_bytes);
     storage_settings.set_media_dir(media_dir.clone());
+    if let Err(error) = state.recheck_storage_quota(app.clone(), &media_dir, quota_bytes) {
+        tracing::warn!(event = "storage_quota_recheck_failed", error = %error);
+        let _ = app.emit("error", error);
+    }
     media_folder_authorization.commit(&media_dir);
     first_run_state.complete();
     Ok(settings)
@@ -2885,7 +3022,7 @@ pub fn run() {
                     if event.state() == ShortcutState::Pressed {
                         let state = _app.state::<RuntimeState>();
                         if state.active_shortcut_matches(shortcut) {
-                            state.request_save();
+                            state.request_save_or_show_quota(_app);
                         }
                     }
                 })
@@ -2893,6 +3030,7 @@ pub fn run() {
         )
         .invoke_handler(tauri::generate_handler![
             save_replay,
+            recheck_storage_quota,
             restart_as_administrator,
             set_recording,
             get_settings,
@@ -2978,7 +3116,7 @@ pub fn run() {
             if let Err(e) = crate::hotkeys::install_save_hook(&settings.hotkeys(), {
                 let app = app.handle().clone();
                 move || {
-                    app.state::<RuntimeState>().request_save();
+                    app.state::<RuntimeState>().request_save_or_show_quota(&app);
                 }
             }) {
                 let message = format!("low-level save hotkey unavailable: {e}");
@@ -3050,7 +3188,7 @@ pub fn run() {
                     }
                     "save" => {
                         log_diagnostic("tray menu event: save");
-                        app.state::<RuntimeState>().request_save();
+                        app.state::<RuntimeState>().request_save_or_show_quota(app);
                     }
                     "diagnostics" => {
                         log_diagnostic("tray menu event: diagnostics");
@@ -3383,7 +3521,16 @@ where
 fn pump_events<R: Runtime>(handle: AppHandle<R>, event_rx: Receiver<Event>, generation: u64) {
     std::thread::spawn(move || {
         for event in event_rx {
-            handle.state::<RuntimeState>().observe_runtime_event(&event);
+            if matches!(&event, Event::StorageQuotaFull { .. }) {
+                if !handle
+                    .state::<RuntimeState>()
+                    .accept_service_quota(generation, &event)
+                {
+                    continue;
+                }
+            } else {
+                handle.state::<RuntimeState>().observe_runtime_event(&event);
+            }
             if let Event::MediaRootResolved { path, .. } = &event {
                 let media_root = PathBuf::from(path);
                 handle
@@ -3402,6 +3549,7 @@ fn pump_events<R: Runtime>(handle: AppHandle<R>, event_rx: Receiver<Event>, gene
                 Event::MediaRootResolved { .. } => Ok(()),
                 Event::Status { .. } => handle.emit("status", &event),
                 Event::Saved { .. } => handle.emit("saved", &event),
+                Event::StorageQuotaFull { .. } => handle.emit("storage-quota-full", &event),
                 Event::Error { message } => handle.emit("error", message.clone()),
             };
             if let Event::Saved {
@@ -3508,7 +3656,7 @@ mod tests {
     }
 
     #[test]
-    fn quota_parser_zero_disables_gc() {
+    fn quota_parser_zero_disables_quota_lock() {
         assert_eq!(parse_quota_gb("0").unwrap(), None);
     }
 
@@ -3950,6 +4098,66 @@ mod tests {
     }
 
     #[test]
+    fn quota_lock_blocks_save_commands_and_preserves_recording_intent_after_stop() {
+        let (tx, rx) = mpsc::channel();
+        let state = RuntimeState::with_sender(tx, AppSettings::default(), None);
+        let generation = state.0.lock().unwrap().recording_generation;
+        let event = Event::StorageQuotaFull {
+            total_bytes: 100,
+            quota_bytes: 100,
+            required_bytes: 10,
+        };
+        assert!(state.accept_service_quota(generation, &event));
+
+        assert!(!state.request_save());
+        assert!(rx.try_recv().is_err());
+        assert!(state.accept_service_status(generation, false));
+        let inner = state.0.lock().unwrap();
+        assert!(inner.tx.is_none());
+        assert!(inner.recording_desired);
+        assert!(inner.quota_blocked.is_some());
+    }
+
+    #[test]
+    fn quota_lock_prevents_prepared_recorder_restarts() {
+        let mut inner = RuntimeState::new(AppSettings::default(), None)
+            .0
+            .into_inner()
+            .unwrap();
+        inner.recording_desired = true;
+        inner.quota_blocked = Some(Event::StorageQuotaFull {
+            total_bytes: 100,
+            quota_bytes: 100,
+            required_bytes: 1,
+        });
+
+        let prepared = RuntimeState::prepare_service_restart(&mut inner).unwrap();
+
+        assert!(prepared.replacement.is_none());
+        assert!(!prepared.waiting_for_game);
+    }
+
+    #[test]
+    fn stale_recorder_cannot_quota_lock_a_new_generation() {
+        let (old_tx, _old_rx) = mpsc::channel();
+        let state = RuntimeState::with_sender(old_tx, AppSettings::default(), None);
+        let old_generation = state.0.lock().unwrap().recording_generation;
+        let (new_tx, _new_rx) = mpsc::channel();
+        {
+            let mut inner = state.0.lock().unwrap();
+            RuntimeState::install_recording_sender(&mut inner, new_tx);
+        }
+        let event = Event::StorageQuotaFull {
+            total_bytes: 100,
+            quota_bytes: 100,
+            required_bytes: 1,
+        };
+
+        assert!(!state.accept_service_quota(old_generation, &event));
+        assert!(state.0.lock().unwrap().quota_blocked.is_none());
+    }
+
+    #[test]
     fn stopped_status_clears_matching_recording_sender() {
         let (tx, rx) = mpsc::channel();
         let state = RuntimeState::with_sender(tx, AppSettings::default(), None);
@@ -4201,6 +4409,7 @@ mod tests {
             last_recorder_status: None,
             last_storage_status: None,
             recent_recorder_error: false,
+            quota_blocked: None,
         };
 
         let prepared = RuntimeState::prepare_service_restart(&mut inner).unwrap();
@@ -4229,6 +4438,7 @@ mod tests {
             last_recorder_status: None,
             last_storage_status: None,
             recent_recorder_error: false,
+            quota_blocked: None,
         };
 
         let prepared = RuntimeState::prepare_service_restart(&mut inner).unwrap();
@@ -4484,6 +4694,7 @@ mod tests {
             last_recorder_status: None,
             last_storage_status: None,
             recent_recorder_error: false,
+            quota_blocked: None,
         };
 
         let err = match RuntimeState::prepare_service_restart(&mut inner) {
@@ -4517,6 +4728,7 @@ mod tests {
             last_recorder_status: None,
             last_storage_status: None,
             recent_recorder_error: false,
+            quota_blocked: None,
         };
 
         let prepared = RuntimeState::prepare_service_restart(&mut inner).unwrap();
@@ -4659,6 +4871,7 @@ mod tests {
             last_recorder_status: None,
             last_storage_status: None,
             recent_recorder_error: false,
+            quota_blocked: None,
         };
 
         let err = match RuntimeState::prepare_service_restart(&mut inner) {
@@ -4689,6 +4902,7 @@ mod tests {
             last_recorder_status: None,
             last_storage_status: None,
             recent_recorder_error: false,
+            quota_blocked: None,
         };
 
         assert!(RuntimeState::prepare_service_restart(&mut inner).is_err());
@@ -4864,6 +5078,7 @@ mod tests {
             last_recorder_status: None,
             last_storage_status: None,
             recent_recorder_error: false,
+            quota_blocked: None,
         };
         let osu = DetectedGame {
             identity: crate::game_identity::GameIdentity::built_in_plugin(
@@ -5711,6 +5926,7 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
             last_recorder_status: None,
             last_storage_status: None,
             recent_recorder_error: false,
+            quota_blocked: None,
         };
 
         let opts = RuntimeState::options(&inner).unwrap();
@@ -5757,6 +5973,7 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
             last_recorder_status: None,
             last_storage_status: None,
             recent_recorder_error: false,
+            quota_blocked: None,
         };
 
         let opts = RuntimeState::options(&inner).unwrap();

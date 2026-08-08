@@ -490,7 +490,8 @@ fn active_recording_status_identifies_the_selected_encoder() {
     );
     assert!(
         update_status.contains("Stop recording · ${activeEncoderLabel}")
-            && update_status.contains("$(\"rail-status\").title = recordingActive")
+            && update_status.contains("$(\"rail-status\").title = storageQuotaBlocked")
+            && update_status.contains(": recordingActive")
             && update_status.contains("? recordingTitle")
             && update_status.contains(": `Start ${source} recording`;"),
         "the active recorder status must assign the concrete encoder selected by Automatic mode to the visible tooltip"
@@ -1723,8 +1724,7 @@ fn local_library_cards_show_cloud_upload_activity() {
         "busy local cloud uploads should render a labelled spinner beside the clip title"
     );
     assert!(
-        card.find("nameRow.appendChild(name);")
-            < card.find("nameRow.appendChild(spinner);"),
+        card.find("nameRow.appendChild(name);") < card.find("nameRow.appendChild(spinner);"),
         "the upload spinner should follow the complete clip title"
     );
 }
@@ -4193,8 +4193,7 @@ fn app_notice_toasts_auto_clear() {
     for required in [
         "setNotice(\"clip renamed\", { transient: true })",
         "setNotice(\"clip deleted\", { transient: true })",
-        "setNotice(s.gc_deleted",
-        ": `saved ${fmtDur(s.seconds)} ${savedKind}`, { transient: true });",
+        "setNotice(`saved ${fmtDur(s.seconds)} ${savedKind}`, { transient: true });",
     ] {
         assert!(
             js.contains(required),
@@ -5164,5 +5163,39 @@ fn frontend_failures_are_forwarded_to_bounded_native_diagnostics() {
             && core.contains("window.addEventListener(\"unhandledrejection\"")
             && core.contains("invoke(\"log_frontend_event\""),
         "global JavaScript failures must be sent to the validated native diagnostic command"
+    );
+}
+
+#[test]
+fn quota_full_is_a_durable_non_destructive_recording_lock() {
+    let html = index_html();
+    let main = main_js();
+    let settings = read_ui_js("settings.js");
+
+    for required in [
+        r#"id="storage-quota-dialog""#,
+        r#"aria-labelledby="storage-quota-title""#,
+        r#"id="storage-quota-manage""#,
+        r#"id="storage-quota-settings""#,
+        r#"id="storage-quota-recheck""#,
+        "Your clips were not deleted",
+        "Clipline stops recording when this limit is reached",
+    ] {
+        assert!(
+            html.contains(required),
+            "missing quota safety UI: {required}"
+        );
+    }
+    assert!(
+        main.contains(r#"listen("storage-quota-full""#)
+            && main.contains(r#"listen("storage-quota-resolved""#)
+            && main.contains(r#"invoke("recheck_storage_quota""#)
+            && !main.contains("cleaned up ${s.gc_deleted}"),
+        "the frontend must persist and recover the quota lock without cleanup messaging"
+    );
+    assert!(
+        settings.contains("storageQuotaBlocked")
+            && settings.contains("Recording disabled — storage quota full"),
+        "recording and replay controls must render disabled while quota is blocked"
     );
 }

@@ -4,6 +4,36 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-07): saved-media quotas are non-destructive
+
+Plan: `docs/superpowers/plans/2026-08-07-non-destructive-storage-quota.md` (`88e6d10`).
+
+The oldest-first saved-clip collector has been removed from `clipline-storage`; there is no longer
+an automatic saved-media deletion API. Storage scans are observational, and only explicit Library
+deletes may remove a saved clip. Zero-byte reservations and temporary replay-cache segments remain
+the only automatic cleanup targets. Short and imperfectly finalized non-empty full sessions are
+kept for recovery instead of discarded.
+
+The recorder now resolves and recovers its media root before opening capture hardware, then blocks
+startup when the library has no capacity. Replay saves measure the selected encoded window and add
+conservative muxing headroom before creating an output file. Full sessions reserve 64 MiB for safe
+finalization and recheck once per second; a completed output that unexpectedly crosses the limit is
+kept and locks future recording.
+
+Quota-full is a durable backend state that gates recorder starts, restarts, save commands, global
+and low-level hotkeys, and tray saves. The frontend shows an accessible modal, marks recording as
+disabled, and offers Library management, the media folder, Storage settings, and an explicit
+recheck. Raising/disabling the quota, switching to a media folder with enough room, or deleting
+enough clips clears the lock and resumes recording when it was previously desired.
+
+The prior handoff entries describing saved-clip auto-GC are historical and are superseded by this
+checkpoint and `ddoc.md`.
+
+Validation is green: the full workspace test suite, fresh-cache warning-denied workspace Clippy,
+JavaScript syntax checks, and diff checks all pass.
+
+---
+
 ## Checkpoint (2026-08-07): cancellable clipboard export and library feedback
 
 Plan: `docs/superpowers/plans/2026-08-07-clipboard-library-qol.md` (`02758a4`).
