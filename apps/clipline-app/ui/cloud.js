@@ -741,17 +741,34 @@ async function uploadClipToCloud(clip, request = {}) {
     }
     const uploadStatus = result?.record?.upload_status || "";
     const uploadFinished = ["uploaded_private", "uploaded_public"].includes(uploadStatus);
+    const shareUrl = uploadFinished ? cloudShareUrl(result?.record) : "";
+    let linkCopied = false;
+    let clipboardError = "";
+    if (shareUrl) {
+      try {
+        await navigator.clipboard.writeText(shareUrl);
+        linkCopied = true;
+      } catch (error) {
+        clipboardError = `cloud link could not be copied: ${error}`;
+      }
+    }
+    const completionParts = ["cloud upload finished"];
+    if (linkCopied) completionParts.push("link copied");
+    if (result?.local_deleted) completionParts.push("local copy deleted");
     const refreshCompleted = await refresh();
     finishPostRefreshFeedback(refreshCompleted, {
-      error: result && result.record ? result.record.error : "",
+      error: [result?.record?.error, clipboardError].filter(Boolean).join(" · "),
       notice: uploadStatus === "uploaded_processing"
         ? "cloud upload processing"
         : uploadFinished
-          ? result.local_deleted
-            ? "cloud upload finished · local copy deleted"
-            : "cloud upload finished"
+          ? completionParts.join(" · ")
           : "",
     });
+    if (uploadFinished && result.local_deleted) {
+      if (currentClip) closeReview();
+      gallerySource = "cloud";
+      exitSelectMode();
+    }
     loadCloudClips({ force: true });
   } catch (e) {
     setDeckStatus("");

@@ -1678,8 +1678,9 @@ fn cloud_upload_completion_preserves_equivalent_paths_and_reports_local_deletion
             && upload
                 .contains("[\"uploaded_private\", \"uploaded_public\"].includes(uploadStatus)")
             && upload.contains("? \"cloud upload processing\"")
-            && upload.contains("? \"cloud upload finished · local copy deleted\"")
-            && upload.contains(": \"cloud upload finished\""),
+            && upload.contains("const completionParts = [\"cloud upload finished\"];")
+            && upload.contains("completionParts.push(\"local copy deleted\");")
+            && upload.contains("? completionParts.join(\" · \")"),
         "cloud uploads must distinguish remote processing from completed uploads"
     );
 
@@ -1705,9 +1706,31 @@ fn cloud_upload_completion_preserves_equivalent_paths_and_reports_local_deletion
         .expect("cloud upload completion settles feedback against the refresh result");
     assert!(
         refresh < feedback
-            && upload.contains("error: result && result.record ? result.record.error : \"\",")
+            && upload.contains(
+                "error: [result?.record?.error, clipboardError].filter(Boolean).join(\" · \"),"
+            )
             && upload.contains("notice: uploadStatus === \"uploaded_processing\""),
         "intentional deletion and upload errors must be delivered only after the authoritative refresh settles"
+    );
+
+    assert!(
+        upload.contains(
+            "const shareUrl = uploadFinished ? cloudShareUrl(result?.record) : \"\";"
+        ) && upload.contains("await navigator.clipboard.writeText(shareUrl);")
+            && upload.contains("completionParts.push(\"link copied\");"),
+        "completed public and unlisted uploads should copy their canonical share URL"
+    );
+    let redirect = upload
+        .find("if (uploadFinished && result.local_deleted) {")
+        .expect("confirmed local deletion redirects to the Cloud Library");
+    let cloud_reload = upload
+        .rfind("loadCloudClips({ force: true });")
+        .expect("upload completion reloads the Cloud Library");
+    assert!(
+        upload[redirect..cloud_reload].contains("if (currentClip) closeReview();")
+            && upload[redirect..cloud_reload].contains("gallerySource = \"cloud\";")
+            && upload[redirect..cloud_reload].contains("exitSelectMode();"),
+        "only a completed upload with confirmed local deletion should close Review and select Cloud"
     );
 }
 

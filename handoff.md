@@ -4,6 +4,23 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-08): Cloud upload completion handoff
+
+Plan: `docs/superpowers/plans/2026-08-08-cloud-upload-completion-handoff.md` (`f57eb87`).
+
+Completed public and unlisted Cloud uploads now copy the server-issued canonical share URL to the
+clipboard automatically. Private uploads continue to expose no share URL. Clipboard permission or
+ownership failures are reported separately and never change a successful upload into a failure.
+
+When `Delete local after upload` succeeds and the backend confirms the local file is gone, the UI
+closes Review and switches the Library to Cloud before reloading it. Requested-but-failed cleanup
+does not redirect or close the preserved local clip.
+
+The focused UI contract, JavaScript syntax check, full workspace suite, and warning-denied workspace
+Clippy pass are green.
+
+---
+
 ## Checkpoint (2026-08-08): League game type filtering
 
 Plan: `docs/superpowers/plans/2026-08-08-league-game-type-filter.md` (`2b4714e`).
