@@ -139,6 +139,8 @@ impl StorageSettings {
 pub struct ClipGame {
     pub id: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue: Option<clipline_lol::LeagueQueue>,
 }
 
 #[derive(serde::Serialize)]
@@ -428,6 +430,7 @@ fn game_from_markers(markers: Option<&ClipMarkers>) -> Option<ClipGame> {
     Some(ClipGame {
         id: plugin_id.to_string(),
         name,
+        queue: None,
     })
 }
 
@@ -3918,6 +3921,32 @@ mod tests {
         assert_eq!(clips.len(), 1);
         assert_eq!(clips[0].duration_s, Some(42.5));
         assert_eq!(clips[0].markers.as_ref().unwrap().markers.len(), 1);
+    }
+
+    #[test]
+    fn list_clips_preserves_optional_league_queue_metadata() {
+        let dir = TestDir::new("clipline-library", "league-queue-metadata");
+        let media = dir.path().join("media");
+        let session = media.join("ranked-match");
+        touch_mp4(&session.join("session_1.mp4"));
+        std::fs::write(
+            session.join("clipline-session.json"),
+            r#"{
+              "id":"league_of_legends",
+              "name":"League of Legends",
+              "queue":{"id":420,"category":"ranked-solo-duo","label":"Ranked Solo/Duo"}
+            }"#,
+        )
+        .unwrap();
+
+        let clips = list_clips_from_dir(media).unwrap().clips;
+        let queue = clips[0]
+            .game
+            .as_ref()
+            .and_then(|game| game.queue.as_ref())
+            .expect("queue metadata should survive the library scan");
+        assert_eq!(queue.id, 420);
+        assert_eq!(queue.label, "Ranked Solo/Duo");
     }
 
     #[test]

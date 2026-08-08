@@ -4,6 +4,28 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-08): League game type filtering
+
+Plan: `docs/superpowers/plans/2026-08-08-league-game-type-filter.md` (`2b4714e`).
+
+New League recordings are enriched once per match with the queue reported by the local League
+Client. Clipline derives the client lockfile from the already-detected game executable and makes a
+short, authenticated loopback-only request; it needs no Riot login, developer key, remote service,
+or game-process access. Queue failures are best-effort and never stop recording.
+
+The raw queue ID, a stable category, and a friendly label are merged into the existing
+`clipline-session.json` sidecar. Late results update both replay match folders and full-session
+folders created before League's APIs were ready. Existing sidecars remain backward-compatible.
+
+The local Library shows the friendly mode on League cards and reveals a Game type selector when
+categorized League recordings exist. Ranked Solo/Duo, Ranked Flex, Normal, ARAM, Arena, Custom,
+Other, and legacy Unknown compose with the existing clip-kind filter and search/sort/group controls.
+
+Focused LCU, sidecar, library, and UI-contract tests pass. The full workspace suite and a fresh-cache,
+warning-denied workspace Clippy pass are also green.
+
+---
+
 ## Checkpoint (2026-08-07): Nightly 0.1.46
 
 Plan: `docs/superpowers/plans/2026-08-07-nightly-0.1.46.md` (`dfac393`).

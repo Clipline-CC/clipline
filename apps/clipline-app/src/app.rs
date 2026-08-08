@@ -1259,6 +1259,7 @@ impl RuntimeState {
             opts.active_game = Some(service::ActiveGame {
                 identity: game.identity.clone(),
                 name: game.name.clone(),
+                exe_path: game.exe_path.as_deref().map(PathBuf::from),
             });
         }
         Ok(opts)
@@ -4306,6 +4307,7 @@ mod tests {
             window_title: format!("{name} Window"),
             process_id: hwnd as u32,
             exe_name: format!("{name}.exe"),
+            exe_path: None,
             recording_mode: GameRecordingMode::FullSession,
         }
     }
@@ -4319,6 +4321,7 @@ mod tests {
             window_title: format!("{name} Window"),
             process_id: hwnd as u32,
             exe_name: format!("{name}.exe"),
+            exe_path: None,
             recording_mode: GameRecordingMode::FullSession,
         }
     }
@@ -4870,6 +4873,7 @@ mod tests {
                 window_title: "Game".into(),
                 process_id: 7,
                 exe_name: "game.exe".into(),
+                exe_path: None,
                 recording_mode: GameRecordingMode::FullSession,
             }),
             osu_title_events: Vec::new(),
@@ -5012,6 +5016,7 @@ mod tests {
             window_title: "Loading".into(),
             process_id: 7,
             exe_name: "game.exe".into(),
+            exe_path: None,
             recording_mode: GameRecordingMode::ReplaysOnly,
         };
         let updated_title = DetectedGame {
@@ -5048,6 +5053,7 @@ mod tests {
             window_title: "Game".into(),
             process_id: 7,
             exe_name: "game.exe".into(),
+            exe_path: None,
             recording_mode: GameRecordingMode::ReplaysOnly,
         };
         let updated_mode = DetectedGame {
@@ -5097,6 +5103,7 @@ mod tests {
             window_title: "osu! - xi - Blue Zenith [FOUR DIMENSIONS]".into(),
             process_id: 7,
             exe_name: "osu!.exe".into(),
+            exe_path: None,
             recording_mode: GameRecordingMode::FullSession,
         };
         let league = DetectedGame {
@@ -5194,6 +5201,7 @@ mod tests {
             window_title: "League of Legends (TM) Client".into(),
             process_id: 7,
             exe_name: "League of Legends.exe".into(),
+            exe_path: None,
             recording_mode: GameRecordingMode::FullSession,
         };
         let mut settings = AppSettings::default();
@@ -5925,6 +5933,7 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
                 window_title: "Game Window".into(),
                 process_id: 7,
                 exe_name: "game.exe".into(),
+                exe_path: None,
                 recording_mode: GameRecordingMode::FullSession,
             }),
             osu_title_events: Vec::new(),
@@ -5972,6 +5981,9 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
                 window_title: "League".into(),
                 process_id: 7,
                 exe_name: "League of Legends.exe".into(),
+                exe_path: Some(
+                    r"C:\Riot Games\League of Legends\Game\League of Legends.exe".into(),
+                ),
                 recording_mode: GameRecordingMode::FullSession,
             }),
             osu_title_events: Vec::new(),
@@ -5992,6 +6004,12 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
             Some(crate::game_plugins::LEAGUE_OF_LEGENDS_ID)
         );
         assert_eq!(opts.lol_url.as_deref(), Some("http://mock"));
+        assert_eq!(
+            opts.active_game.as_ref().and_then(|game| game.exe_path.as_deref()),
+            Some(Path::new(
+                r"C:\Riot Games\League of Legends\Game\League of Legends.exe"
+            ))
+        );
     }
 
     #[test]

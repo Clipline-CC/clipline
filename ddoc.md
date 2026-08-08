@@ -172,6 +172,14 @@ Poll `GET https://127.0.0.1:2999/liveclientdata/eventdata` (self-signed cert —
 
 Community-observed but **not in Riot's official sample**: `FirstBlood` (field `Recipient`) and `GameEnd` (field `Result`) — implement defensively and verify against live games before relying on them. We also pull `playerlist`/`activeplayer` to identify the local player and mark *their* kills/deaths distinctly. Poll cadence ~1–2 Hz; because `EventID` is monotonic, we de-dupe and only append new events.
 
+**Queue tagging.** Once per detected match, Clipline derives the local League Client lockfile from
+the captured game executable and reads `gameData.queue.id` from the authenticated loopback
+`/lol-gameflow/v1/session` endpoint. The raw ID, stable category, and friendly mode label are stored
+in the existing session sidecar. The Library can therefore show and filter familiar types such as
+Ranked Solo/Duo, Ranked Flex, Normal, ARAM, and Arena without a Riot login, remote API key, or cloud
+lookup. This is best-effort enrichment: unavailable or changed LCU data never interrupts recording,
+and legacy/unenriched League sessions remain readable as an unknown game type.
+
 #### 5b. VALORANT adapter (constrained)
 Riot's Vanguard FAQ confirms in-game/LCU APIs "should continue to function" and that "overlays and internal tools using the API, game client, and in-game APIs should continue to function," but VALORANT has **no personal keys**, a selective production-key approval process, mandatory RSO opt-in, and undocumented/unsupported `glz`/local endpoints. Real-time kill events are not reliably exposed. **Additionally, a production API key is a secret: it cannot be embedded in an open-source, locally-distributed binary** — anyone could extract it from the client or read it in the repo. First-party post-match enrichment would therefore require a hosted key-holding proxy, which conflicts with the no-cloud-cost, local-first stance. **Strategy:**
 1. **Kill-feed OCR (primary, real-time):** computer vision on the kill feed / spike timer captured from our *own* WGC frames — no game memory access, no API key, fully anti-cheat-safe, the same class of technique Powder/Medal use.

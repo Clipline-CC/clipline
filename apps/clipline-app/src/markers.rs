@@ -3,11 +3,12 @@
 //! forwarding anchored events to the recorder service. The League game
 //! plugin owns when this source is attached to a recorder session.
 
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use clipline_events::{EventKind, GameEvent, PlayerSummary};
-use clipline_lol::{poll_once_with_continuity, EventTracker, LiveClient};
+use clipline_lol::{poll_once_with_continuity, EventTracker, LcuClient, LeagueQueue, LiveClient};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const RETRY_INTERVAL: Duration = Duration::from_secs(5);
@@ -18,6 +19,7 @@ const MATCH_ABSENCE_FAILURES: u32 = 6;
 pub enum PollerMsg {
     Event(GameEvent),
     PlayerSummary(PlayerSummary),
+    Queue(LeagueQueue),
     MatchStarted,
     MatchEnded,
     Heartbeat,
@@ -78,6 +80,10 @@ impl MatchLifecycle {
     fn consecutive_failures(&self) -> u32 {
         self.consecutive_failures
     }
+
+    fn is_active(&self) -> bool {
+        self.match_active
+    }
 }
 
 fn failure_backoff(consecutive_failures: u32) -> Duration {
@@ -99,8 +105,13 @@ fn send_boundary(tx: &Sender<PollerMsg>, boundary: MatchBoundary) -> bool {
 
 /// Spawn the poller. `base_url` overrides the local Live Client endpoint
 /// (mock servers in tests/demos); `recording_t0` is the wall-clock twin of
-/// the capture clock origin, sampled at the same time.
-pub fn spawn(base_url: Option<String>, recording_t0: Instant) -> Receiver<PollerMsg> {
+/// the capture clock origin, sampled at the same time. The League executable
+/// locates the local client lockfile for best-effort queue identification.
+pub fn spawn(
+    base_url: Option<String>,
+    recording_t0: Instant,
+    game_executable: Option<PathBuf>,
+) -> Receiver<PollerMsg> {
     let (tx, rx) = mpsc::channel();
     std::thread::Builder::new()
         .name("clipline-lol-poller".into())
@@ -130,6 +141,7 @@ pub fn spawn(base_url: Option<String>, recording_t0: Instant) -> Receiver<Poller
                 let mut tracker = EventTracker::default();
                 let mut lifecycle = MatchLifecycle::default();
                 let mut local_player = None;
+                let mut queue_attempted = false;
 
                 loop {
                     // Outside a game, the endpoint normally refuses requests.
@@ -164,6 +176,9 @@ pub fn spawn(base_url: Option<String>, recording_t0: Instant) -> Receiver<Poller
                                 .iter()
                                 .any(|event| event.kind == EventKind::GameEnd);
                             let decision = lifecycle.poll_succeeded(batch.new_match, has_game_end);
+                            if decision.before_events.contains(&MatchBoundary::Started) {
+                                queue_attempted = false;
+                            }
                             for boundary in decision.before_events {
                                 if !send_boundary(&tx, boundary) {
                                     return;
@@ -177,6 +192,26 @@ pub fn spawn(base_url: Option<String>, recording_t0: Instant) -> Receiver<Poller
                             for event in batch.events {
                                 if tx.send(PollerMsg::Event(event)).is_err() {
                                     return;
+                                }
+                            }
+                            if !queue_attempted && lifecycle.is_active() {
+                                queue_attempted = true;
+                                if let Some(executable) = game_executable.as_deref() {
+                                    let queue = match LcuClient::from_game_executable(executable) {
+                                        Ok(client) => client.current_queue().await,
+                                        Err(error) => Err(error),
+                                    };
+                                    match queue {
+                                        Ok(queue) => {
+                                            if tx.send(PollerMsg::Queue(queue)).is_err() {
+                                                return;
+                                            }
+                                        }
+                                        Err(error) => tracing::debug!(
+                                            event = "lol_queue_lookup_failed",
+                                            error = %error,
+                                        ),
+                                    }
                                 }
                             }
                             if decision.end_after_events

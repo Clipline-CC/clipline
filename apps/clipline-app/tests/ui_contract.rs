@@ -5205,3 +5205,29 @@ fn quota_full_is_a_durable_non_destructive_recording_lock() {
         "recording and replay controls must render disabled while quota is blocked"
     );
 }
+
+#[test]
+fn league_game_type_metadata_filters_the_local_library() {
+    let html = index_html();
+    let main = read_ui_js("main.js");
+    let app_core = read_ui_js("app-core.js");
+    let library = read_ui_js("library.js");
+
+    assert!(
+        html.contains(r#"id="gallery-game-type""#) && html.contains(">Game type: All<"),
+        "the local library must expose an independent League game-type selector"
+    );
+    assert!(
+        app_core.contains("galleryGameType")
+            && main.contains(r#"$("gallery-game-type").addEventListener("change""#),
+        "the selector must own stable state and rerender when changed"
+    );
+    assert!(
+        library.contains("function syncLeagueGameTypeFilter")
+            && library.contains("c.game.queue.category")
+            && library.contains("galleryGameType !== \"all\"")
+            && library.contains("c.game.queue.label")
+            && library.contains("galleryGameType}"),
+        "queue metadata must drive visibility, filtering, card labels, search, and pagination identity"
+    );
+}

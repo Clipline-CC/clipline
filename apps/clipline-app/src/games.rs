@@ -23,6 +23,7 @@ pub struct DetectedGame {
     pub window_title: String,
     pub process_id: u32,
     pub exe_name: String,
+    pub exe_path: Option<String>,
     pub recording_mode: GameRecordingMode,
 }
 
@@ -81,6 +82,7 @@ pub fn detect_active_game_from_windows(
                 window_title: window.title.clone(),
                 process_id: window.process_id,
                 exe_name: window.exe_name.clone(),
+                exe_path: window.exe_path.clone(),
                 recording_mode: game.recording_mode,
             });
         }
@@ -122,6 +124,7 @@ fn detect_built_in_game_from_windows(
                 window_title: window.title.clone(),
                 process_id: window.process_id,
                 exe_name: window.exe_name.clone(),
+                exe_path: window.exe_path.clone(),
                 recording_mode: plugin_settings.recording_mode,
             });
         }
@@ -451,6 +454,10 @@ mod tests {
         );
         assert_eq!(detected.name, "League of Legends");
         assert_eq!(detected.hwnd, 2);
+        assert_eq!(
+            detected.exe_path.as_deref(),
+            Some(r"C:\Riot Games\League of Legends\Game\League of Legends.exe")
+        );
         assert_eq!(detected.recording_mode, GameRecordingMode::FullSession);
     }
 

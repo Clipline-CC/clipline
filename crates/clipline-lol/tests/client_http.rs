@@ -1,4 +1,4 @@
-use clipline_lol::LiveClient;
+use clipline_lol::{LcuClient, LeagueQueue, LeagueQueueCategory, LiveClient};
 use httpmock::prelude::*;
 use serde_json::json;
 
@@ -53,4 +53,47 @@ async fn connection_refused_is_an_error_not_a_panic() {
     // Nothing listens on this port.
     let client = LiveClient::new("http://127.0.0.1:9").unwrap();
     assert!(client.event_data().await.is_err());
+}
+
+#[tokio::test]
+async fn lcu_gameflow_session_returns_authenticated_queue_tag() {
+    let server = MockServer::start();
+    let request = server.mock(|when, then| {
+        when.method(GET)
+            .path("/lol-gameflow/v1/session")
+            .header("authorization", "Basic cmlvdDp0b2tlbg==");
+        then.status(200).json_body(json!({
+            "gameData": { "queue": { "id": 420 } }
+        }));
+    });
+
+    let client = LcuClient::new(server.base_url(), "token").unwrap();
+    let queue = client.current_queue().await.unwrap();
+
+    request.assert();
+    assert_eq!(queue, LeagueQueue::from_id(420));
+    assert_eq!(queue.category, LeagueQueueCategory::RankedSoloDuo);
+    assert_eq!(queue.label, "Ranked Solo/Duo");
+}
+
+#[test]
+fn common_queue_ids_map_to_stable_user_categories() {
+    let cases = [
+        (420, LeagueQueueCategory::RankedSoloDuo, "Ranked Solo/Duo"),
+        (440, LeagueQueueCategory::RankedFlex, "Ranked Flex"),
+        (400, LeagueQueueCategory::Normal, "Normal Draft"),
+        (490, LeagueQueueCategory::Normal, "Quickplay"),
+        (450, LeagueQueueCategory::Aram, "ARAM"),
+        (1700, LeagueQueueCategory::Arena, "Arena"),
+        (0, LeagueQueueCategory::Custom, "Custom"),
+        (2300, LeagueQueueCategory::Other, "Brawl"),
+        (999_999, LeagueQueueCategory::Other, "Other"),
+    ];
+
+    for (id, category, label) in cases {
+        let queue = LeagueQueue::from_id(id);
+        assert_eq!(queue.id, id);
+        assert_eq!(queue.category, category);
+        assert_eq!(queue.label, label);
+    }
 }

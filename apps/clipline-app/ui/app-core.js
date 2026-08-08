@@ -113,6 +113,7 @@ var localLibraryWarning = "";
 var railProfileAvatarKey = "";
 var railProfileAvatarRequest = 0;
 var galleryFilter = "all";
+var galleryGameType = "all";
 var gallerySort = "new";
 var galleryGroup = "smart";
 var gallerySearch = "";

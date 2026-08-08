@@ -1214,6 +1214,7 @@ function clipCard(c) {
   info.className = "card-sub";
   const digest = markerDigest(markers, presentation);
   const infoParts = [];
+  if (c.game && c.game.queue && c.game.queue.label) infoParts.push(c.game.queue.label);
   if (Number.isFinite(c.duration_s)) infoParts.push(fmtDur(c.duration_s));
   infoParts.push(`${c.size_mb.toFixed(1)} MB`);
   infoParts.push(fmtAgo(Date.now() / 1000, c.modified_unix));
@@ -1331,6 +1332,55 @@ function syncBulkBar() {
 
 /* ---- gallery: filter / sort / group ---- */
 
+const LEAGUE_GAME_TYPE_OPTIONS = [
+  ["ranked-solo-duo", "Ranked Solo/Duo"],
+  ["ranked-flex", "Ranked Flex"],
+  ["normal", "Normal"],
+  ["aram", "ARAM"],
+  ["arena", "Arena"],
+  ["custom", "Custom"],
+  ["other", "Other"],
+  ["unknown", "Unknown"],
+];
+
+function syncLeagueGameTypeFilter() {
+  const select = $("gallery-game-type");
+  if (!select) return;
+  const present = new Set();
+  let hasCategorizedLeagueClip = false;
+  for (const c of clipsCache) {
+    if (!c.game || c.game.id !== "league_of_legends") continue;
+    if (c.game.queue && c.game.queue.category) {
+      present.add(c.game.queue.category);
+      hasCategorizedLeagueClip = true;
+    } else {
+      present.add("unknown");
+    }
+  }
+
+  select.hidden = !hasCategorizedLeagueClip;
+  if (!hasCategorizedLeagueClip) {
+    galleryGameType = "all";
+    return;
+  }
+
+  const previous = galleryGameType;
+  select.replaceChildren();
+  const all = document.createElement("option");
+  all.value = "all";
+  all.textContent = "Game type: All";
+  select.appendChild(all);
+  for (const [value, label] of LEAGUE_GAME_TYPE_OPTIONS) {
+    if (!present.has(value)) continue;
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = `Game type: ${label}`;
+    select.appendChild(option);
+  }
+  galleryGameType = present.has(previous) ? previous : "all";
+  select.value = galleryGameType;
+}
+
 function filterGalleryClips(clips) {
   const items = [];
   let maxModifiedUnix = 0;
@@ -1339,9 +1389,16 @@ function filterGalleryClips(clips) {
     if ((galleryFilter === "replay" || galleryFilter === "session" || galleryFilter === "trim")
       && kind !== galleryFilter) continue;
     if (galleryFilter === "marked" && !clipMarkers(c).length) continue;
+    if (galleryGameType !== "all") {
+      const category = c.game && c.game.id === "league_of_legends"
+        ? (c.game.queue && c.game.queue.category || "unknown")
+        : null;
+      if (category !== galleryGameType) continue;
+    }
     if (gallerySearch) {
       const champ = c.markers && c.markers.player_summary ? c.markers.player_summary.champion_name : "";
-      const hay = `${clipDisplayTitle(c)} ${c.name} ${champ} ${c.session || ""} ${c.game ? c.game.name : ""}`.toLowerCase();
+      const queue = c.game && c.game.queue ? c.game.queue.label : "";
+      const hay = `${clipDisplayTitle(c)} ${c.name} ${champ} ${c.session || ""} ${c.game ? c.game.name : ""} ${queue}`.toLowerCase();
       if (!hay.includes(gallerySearch)) continue;
     }
     items.push(c);
@@ -1517,6 +1574,7 @@ function renderClips() {
   root.hidden = showingCloud;
   if (cloudRoot) cloudRoot.hidden = !showingCloud;
   $("gallery-filter").hidden = showingCloud;
+  $("gallery-game-type").hidden = showingCloud;
   $("gallery-group").hidden = showingCloud;
   $("gallery-sort").hidden = showingCloud;
   syncSelectionControls();
@@ -1528,6 +1586,7 @@ function renderClips() {
     loadCloudClips();
     return;
   }
+  syncLeagueGameTypeFilter();
   beginBoundedGalleryRender();
   pruneLocalPosterCache(clipsCache);
   const filteredResult = filterGalleryClips(clipsCache);
@@ -1539,7 +1598,7 @@ function renderClips() {
   const firstItems = firstGroup && firstGroup.clips || [];
   const lastItems = lastGroup && lastGroup.clips || [];
   const identity = groupedGalleryIdentity(
-    `local|${galleryFilter}|${gallerySort}|${galleryGroup}|${gallerySearch}`,
+    `local|${galleryFilter}|${galleryGameType}|${gallerySort}|${galleryGroup}|${gallerySearch}`,
     filtered.length,
     firstItems[0],
     lastItems[lastItems.length - 1],

@@ -2042,6 +2042,7 @@ fn game_from_markers(markers: &ClipMarkers) -> Option<crate::library::ClipGame> 
     Some(crate::library::ClipGame {
         id: id.to_string(),
         name: crate::game_plugins::display_name_for_game_id(game_id).to_string(),
+        queue: None,
     })
 }
 

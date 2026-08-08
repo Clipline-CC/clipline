@@ -181,6 +181,10 @@ $("ffmpeg-runtime-cancel").addEventListener("click", () => {
   });
 });
 $("gallery-sort").addEventListener("change", (ev) => { gallerySort = ev.target.value; renderClips(); });
+$("gallery-game-type").addEventListener("change", (ev) => {
+  galleryGameType = ev.target.value;
+  renderClips();
+});
 $("gallery-group").addEventListener("change", (ev) => { galleryGroup = ev.target.value; renderClips(); });
 $("gallery-filter").addEventListener("click", (ev) => {
   const chip = ev.target.closest(".g-chip");
