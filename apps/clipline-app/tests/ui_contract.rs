@@ -1722,6 +1722,11 @@ fn local_library_cards_show_cloud_upload_activity() {
             && css.contains("@keyframes clip-upload-spin"),
         "busy local cloud uploads should render a labelled spinner beside the clip title"
     );
+    assert!(
+        card.find("nameRow.appendChild(name);")
+            < card.find("nameRow.appendChild(spinner);"),
+        "the upload spinner should follow the complete clip title"
+    );
 }
 
 #[test]
@@ -3156,6 +3161,7 @@ fn league_event_rail_minion_actor_pngs_are_square_portraits() {
 fn no_native_browser_dialogs() {
     let js = main_js();
     let css = styles_css();
+    let html = index_html();
     // window.confirm/alert render browser chrome ("tauri.localhost says") —
     // use the in-app #confirm-dialog instead.
     for banned in ["confirm(", "alert("] {
@@ -3195,6 +3201,15 @@ fn no_native_browser_dialogs() {
             && css.contains("#rename-file-dialog")
             && css.contains(".context-menu button.danger-text"),
         "native context menus must be suppressed and library rows must expose an app-owned clip menu"
+    );
+
+    let rename_file = html.find("id=\"clip-menu-rename-file\"").unwrap();
+    let copy = html.find("id=\"clip-menu-copy\"").unwrap();
+    let copy_shareable = html.find("id=\"clip-menu-copy-shareable\"").unwrap();
+    let delete = html.find("id=\"clip-menu-delete\"").unwrap();
+    assert!(
+        rename_file < copy && copy < copy_shareable && copy_shareable < delete,
+        "clipboard actions should sit between Rename file and Delete"
     );
 }
 

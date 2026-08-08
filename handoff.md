@@ -22,7 +22,7 @@ Library share exports use the clip's default audio-track selection when the clip
 open in Review.
 
 Cloud uploads now publish app-wide start and completion notices. While a local clip's cloud record
-is queued, uploading, processing, or retrying, a spinner appears at the left of its Library title;
+is queued, uploading, processing, or retrying, a spinner appears immediately after its Library title;
 the existing byte progress, deck status, refresh arbitration, retry state, and local-delete
 feedback remain intact.
 

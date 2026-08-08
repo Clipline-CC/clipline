@@ -1172,12 +1172,6 @@ function clipCard(c) {
   meta.className = "card-meta";
   const nameRow = document.createElement("div");
   nameRow.className = "card-name";
-  if (uploadBusy) {
-    const spinner = document.createElement("span");
-    spinner.className = "clip-upload-spinner";
-    spinner.title = "Uploading clip";
-    nameRow.appendChild(spinner);
-  }
   const previewIcon = cardPreview.icon && cardPreview.icon.url ? cardPreview.icon : null;
   const game = clipGameIcon(c);
   const cardIcon = previewIcon || (game ? { type: "game", url: game.url, label: game.label } : null);
@@ -1207,6 +1201,12 @@ function clipCard(c) {
   name.className = "t";
   name.textContent = cardTitle;
   nameRow.appendChild(name);
+  if (uploadBusy) {
+    const spinner = document.createElement("span");
+    spinner.className = "clip-upload-spinner";
+    spinner.title = "Uploading clip";
+    nameRow.appendChild(spinner);
+  }
   const cloudVisibility = cloudVisibilityEl(cloudRecord);
   if (cloudVisibility) nameRow.appendChild(cloudVisibility);
 
