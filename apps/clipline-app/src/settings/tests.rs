@@ -749,18 +749,21 @@ fn validation_rejects_secondary_hotkey_matching_primary() {
 }
 
 #[test]
-fn recording_hotkey_is_optional_normalized_and_distinct_from_save_replay() {
+fn recording_hotkeys_are_optional_normalized_and_distinct_from_each_other_and_save_replay() {
     assert_eq!(AppSettings::default().recording_hotkey, None);
+    assert_eq!(AppSettings::default().recording_hotkey_secondary, None);
 
     let dir = TestDir::new("clipline-settings", "recording-hotkey-round-trip");
     let path = dir.path().join("settings.json");
     let settings = AppSettings {
         recording_hotkey: Some("ctrl+shift+r".into()),
+        recording_hotkey_secondary: Some("alt+mouse4".into()),
         ..AppSettings::default()
     };
     settings.save_to(&path).unwrap();
     let loaded = AppSettings::load_from(&path).unwrap();
     assert_eq!(loaded.recording_hotkey.as_deref(), Some("Ctrl+Shift+R"));
+    assert_eq!(loaded.recording_hotkey_secondary.as_deref(), Some("Alt+Mouse4"));
 
     let primary_conflict = AppSettings {
         recording_hotkey: Some("f6".into()),
@@ -774,6 +777,13 @@ fn recording_hotkey_is_optional_normalized_and_distinct_from_save_replay() {
         ..AppSettings::default()
     };
     assert!(secondary_conflict.validate().is_err());
+
+    let recording_conflict = AppSettings {
+        recording_hotkey: Some("Alt+R".into()),
+        recording_hotkey_secondary: Some("alt+r".into()),
+        ..AppSettings::default()
+    };
+    assert!(recording_conflict.validate().is_err());
 }
 
 #[test]

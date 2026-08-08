@@ -188,6 +188,8 @@ impl AppSettings {
                 .and_then(|raw| normalize_hotkey(&raw).ok()),
             recording_hotkey: string_field(object, "recording_hotkey")
                 .and_then(|raw| normalize_hotkey(&raw).ok()),
+            recording_hotkey_secondary: string_field(object, "recording_hotkey_secondary")
+                .and_then(|raw| normalize_hotkey(&raw).ok()),
             open_on_startup: bool_field(object, "open_on_startup")
                 .unwrap_or(defaults.open_on_startup),
             close_to_tray: bool_field(object, "close_to_tray").unwrap_or(defaults.close_to_tray),
@@ -219,6 +221,17 @@ impl AppSettings {
         {
             settings.recording_hotkey = None;
         }
+        if settings
+            .recording_hotkey_secondary
+            .as_deref()
+            .is_some_and(|recording| {
+                recording == settings.hotkey
+                    || settings.hotkey_secondary.as_deref() == Some(recording)
+                    || settings.recording_hotkey.as_deref() == Some(recording)
+            })
+        {
+            settings.recording_hotkey_secondary = None;
+        }
         settings.buffer_seconds = super::compatibility_buffer_seconds(&settings);
         settings.bitrate_mbps = settings.effective_bitrate_mbps();
         if matches!(settings.capture_mode, CaptureMode::WindowTitle)
@@ -240,6 +253,11 @@ impl AppSettings {
             Some(raw) if !raw.trim().is_empty() => Some(normalize_hotkey(raw)?),
             _ => None,
         };
+        settings.recording_hotkey_secondary =
+            match settings.recording_hotkey_secondary.as_deref() {
+                Some(raw) if !raw.trim().is_empty() => Some(normalize_hotkey(raw)?),
+                _ => None,
+            };
         settings.games.normalize();
         settings.cloud.normalize();
         settings.osu.normalize();

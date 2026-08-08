@@ -833,15 +833,17 @@
                 <span id="hotkey-status" class="hint">Click a field, then press F1-F11/F13-F24, middle mouse, Mouse4, Mouse5, or a modified keyboard key. Esc clears the keybind.</span>
               </div>
             </div>
-            <div class="setting-row" data-settings-key="recording_hotkey">
+            <div class="setting-row" data-settings-key="recording_hotkey recording_hotkey_secondary">
               <div class="setting-info">
                 <strong>Start / Stop recording</strong>
-                <span>Optional global shortcut for starting or finalizing a full-session recording. The replay buffer stays on when recording stops.</span>
+                <span>Optional global shortcuts for starting or finalizing a full-session recording. Either keybind toggles recording; the replay buffer stays on when recording stops.</span>
               </div>
               <div class="hotkey-recorder">
-                <div class="hotkey-recorder-row single">
-                  <input id="set-recording-hotkey" spellcheck="false" readonly inputmode="none" placeholder="Not set" aria-describedby="hotkey-status" />
+                <div class="hotkey-recorder-row">
+                  <input id="set-recording-hotkey" spellcheck="false" readonly inputmode="none" placeholder="Not set" aria-describedby="recording-hotkey-status" />
+                  <input id="set-recording-hotkey-2" spellcheck="false" readonly inputmode="none" placeholder="Not set" aria-describedby="recording-hotkey-status" />
                 </div>
+                <span id="recording-hotkey-status" class="hint">Click a field, then press F1-F11/F13-F24, middle mouse, Mouse4, Mouse5, or a modified keyboard key. Esc clears the keybind.</span>
               </div>
             </div>
           </div>

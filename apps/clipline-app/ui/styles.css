@@ -1871,13 +1871,10 @@ button.primary.settings-save-glow {
   min-width: 0;
 }
 
-.hotkey-recorder-row.single {
-  grid-template-columns: minmax(0, 1fr);
-}
-
 #set-hotkey,
 #set-hotkey-2,
-#set-recording-hotkey {
+#set-recording-hotkey,
+#set-recording-hotkey-2 {
   cursor: pointer;
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
@@ -1885,14 +1882,17 @@ button.primary.settings-save-glow {
 
 #set-hotkey.recording,
 #set-hotkey-2.recording,
-#set-recording-hotkey.recording {
+#set-recording-hotkey.recording,
+#set-recording-hotkey-2.recording {
   border-color: var(--accent);
   background: var(--hotkey-rec-bg);
   box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.18);
 }
 
-#hotkey-status[data-state="ready"] { color: var(--ok); }
-#hotkey-status[data-state="error"] { color: var(--warn); }
+#hotkey-status[data-state="ready"],
+#recording-hotkey-status[data-state="ready"] { color: var(--ok); }
+#hotkey-status[data-state="error"],
+#recording-hotkey-status[data-state="error"] { color: var(--warn); }
 
 .recording-control {
   display: grid;

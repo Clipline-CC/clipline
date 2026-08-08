@@ -2211,6 +2211,9 @@ fn recording_hotkey_and_rail_control_a_real_full_session() {
 
     for required in [
         "id=\"set-recording-hotkey\"",
+        "id=\"set-recording-hotkey-2\"",
+        "id=\"recording-hotkey-status\"",
+        "aria-describedby=\"recording-hotkey-status\"",
         "Start / Stop recording",
         "id=\"rail-buffer\"",
         "id=\"rail-buffer-dot\"",
@@ -2221,9 +2224,14 @@ fn recording_hotkey_and_rail_control_a_real_full_session() {
         );
     }
     for required in [
-        "recording_hotkey: $(\"set-recording-hotkey\").value.trim() || null",
+        "const recordingKeybinds = [\"set-recording-hotkey\", \"set-recording-hotkey-2\"]",
+        "recording_hotkey: recordingKeybinds[0] || null",
+        "recording_hotkey_secondary: recordingKeybinds[1] || null",
         "$(\"set-recording-hotkey\").value = s.recording_hotkey || \"\"",
-        "const HOTKEY_FIELD_IDS = [\"set-hotkey\", \"set-hotkey-2\", \"set-recording-hotkey\"]",
+        "$(\"set-recording-hotkey-2\").value = s.recording_hotkey_secondary || \"\"",
+        "const HOTKEY_FIELD_IDS = [\"set-hotkey\", \"set-hotkey-2\", \"set-recording-hotkey\", \"set-recording-hotkey-2\"]",
+        "function hotkeyStatusId(fieldId)",
+        "return fieldId.startsWith(\"set-recording-hotkey\") ? \"recording-hotkey-status\" : \"hotkey-status\";",
         "$(\"rail-status\").addEventListener(\"click\", toggleSessionRecording)",
         "$(\"rail-buffer\").addEventListener(\"click\", toggleRecording)",
         "invoke(\"set_session_recording\"",

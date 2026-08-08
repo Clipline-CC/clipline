@@ -221,6 +221,7 @@ function fillSettings(s) {
   $("set-hotkey").value = s.hotkey;
   $("set-hotkey-2").value = s.hotkey_secondary || "";
   $("set-recording-hotkey").value = s.recording_hotkey || "";
+  $("set-recording-hotkey-2").value = s.recording_hotkey_secondary || "";
   updateHotkeyLabels(s.hotkey, s.hotkey_secondary || "");
   $("set-open-on-startup").checked = !!s.open_on_startup;
   $("set-close-to-tray").checked = s.close_to_tray !== false;
@@ -317,10 +318,14 @@ function readHotkeySettings() {
   const keybinds = ["set-hotkey", "set-hotkey-2"]
     .map((fieldId) => $(fieldId).value.trim())
     .filter(Boolean);
+  const recordingKeybinds = ["set-recording-hotkey", "set-recording-hotkey-2"]
+    .map((fieldId) => $(fieldId).value.trim())
+    .filter(Boolean);
   return {
     hotkey: keybinds[0] || "",
     hotkey_secondary: keybinds[1] || null,
-    recording_hotkey: $("set-recording-hotkey").value.trim() || null,
+    recording_hotkey: recordingKeybinds[0] || null,
+    recording_hotkey_secondary: recordingKeybinds[1] || null,
   };
 }
 
@@ -1736,28 +1741,32 @@ async function toggleSessionRecording() {
 
 // All shortcut fields share capture and conflict handling. Esc clears a field;
 // at least one Save Replay keybind must remain, while recording is optional.
-const HOTKEY_FIELD_IDS = ["set-hotkey", "set-hotkey-2", "set-recording-hotkey"];
+const HOTKEY_FIELD_IDS = ["set-hotkey", "set-hotkey-2", "set-recording-hotkey", "set-recording-hotkey-2"];
 const HOTKEY_IDLE_MESSAGE = "Click a field to record a shortcut. Esc clears it.";
 
-function setHotkeyStatus(message, state = "") {
-  const status = $("hotkey-status");
+function hotkeyStatusId(fieldId) {
+  return fieldId.startsWith("set-recording-hotkey") ? "recording-hotkey-status" : "hotkey-status";
+}
+
+function setHotkeyStatus(fieldId, message, state = "") {
+  const status = $(hotkeyStatusId(fieldId));
   status.textContent = message;
   status.dataset.state = state;
 }
 
 function beginHotkeyCapture(fieldId) {
   if (activeHotkeyCaptureId && activeHotkeyCaptureId !== fieldId) {
-    $(activeHotkeyCaptureId).classList.remove("recording");
+    endHotkeyCapture(activeHotkeyCaptureId);
   }
   activeHotkeyCaptureId = fieldId;
   $(fieldId).classList.add("recording");
-  setHotkeyStatus("Press an F-key, mouse button, or Ctrl/Alt/Shift plus a keyboard key - or Esc to clear.", "recording");
+  setHotkeyStatus(fieldId, "Press an F-key, mouse button, or Ctrl/Alt/Shift plus a keyboard key - or Esc to clear.", "recording");
 }
 
 function endHotkeyCapture(fieldId, message = HOTKEY_IDLE_MESSAGE, state = "") {
   if (activeHotkeyCaptureId === fieldId) activeHotkeyCaptureId = null;
   $(fieldId).classList.remove("recording");
-  setHotkeyStatus(message, state);
+  setHotkeyStatus(fieldId, message, state);
 }
 
 function endAllHotkeyCaptures() {
@@ -1785,7 +1794,7 @@ function applyHotkeyCaptureResult(fieldId, result) {
   switch (result.kind) {
     case "captured":
       if (HOTKEY_FIELD_IDS.some((other) => other !== fieldId && $(other).value === result.value)) {
-        setHotkeyStatus("Already used by another Clipline action.", "error");
+        setHotkeyStatus(fieldId, "Already used by another Clipline action.", "error");
         break;
       }
       $(fieldId).value = result.value;
@@ -1793,7 +1802,7 @@ function applyHotkeyCaptureResult(fieldId, result) {
       syncSettingsDraftFromForm();
       break;
     case "pending":
-      setHotkeyStatus(result.message, "recording");
+      setHotkeyStatus(fieldId, result.message, "recording");
       break;
     case "cancel":
       // Esc clears the keybind; the other field can still hold one.
@@ -1803,7 +1812,7 @@ function applyHotkeyCaptureResult(fieldId, result) {
       $(fieldId).blur();
       break;
     case "invalid":
-      setHotkeyStatus(result.message, "error");
+      setHotkeyStatus(fieldId, result.message, "error");
       break;
   }
 }

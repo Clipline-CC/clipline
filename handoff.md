@@ -7,12 +7,14 @@
 ## Checkpoint (2026-08-08): Manual recording control and honest rail state
 
 Plans: `docs/superpowers/plans/2026-08-08-recording-toggle-hotkey.md` (`89645d5`, refined by
-`32b4ab5`).
+`32b4ab5` and `00e0593`).
 
-Settings > Hotkeys now offers an optional system-wide Start / Stop recording shortcut. It accepts
-the same function, modified keyboard, and mouse inputs as Save Replay, rejects cross-action
-collisions, and remains unset by default for existing and new users. The shared low-level hook
-dispatches the two actions distinctly, including while Clipline is tray-hidden.
+Settings > Hotkeys now offers two optional system-wide Start / Stop recording shortcuts. They
+accept the same function, modified keyboard, and mouse inputs as Save Replay, reject duplicate and
+cross-action bindings, and remain unset by default for existing and new users. Save Replay and
+recording each own their capture-status message, so feedback stays beneath the field being edited.
+The shared low-level hook dispatches the two actions distinctly, including while Clipline is
+tray-hidden.
 
 Record now means a real saved full-session recording. Starting it attaches Clipline's existing
 full-session writer to the live encoded stream—or wakes capture when games-only mode is waiting—so

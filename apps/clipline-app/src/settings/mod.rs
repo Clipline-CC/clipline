@@ -97,6 +97,9 @@ pub struct AppSettings {
     /// Optional system-wide keybind for starting or stopping a full-session recording.
     #[serde(default)]
     pub recording_hotkey: Option<String>,
+    /// Optional second keybind for starting or stopping a full-session recording.
+    #[serde(default)]
+    pub recording_hotkey_secondary: Option<String>,
     #[serde(default)]
     pub open_on_startup: bool,
     #[serde(default = "default_enabled")]
@@ -146,6 +149,7 @@ impl Default for AppSettings {
             hotkey: "F6".into(),
             hotkey_secondary: None,
             recording_hotkey: None,
+            recording_hotkey_secondary: None,
             open_on_startup: false,
             close_to_tray: true,
             minimize_to_tray: false,
@@ -175,10 +179,15 @@ impl AppSettings {
         hotkeys
     }
 
-    pub fn recording_hotkey(&self) -> Option<&str> {
-        self.recording_hotkey
-            .as_deref()
-            .filter(|hotkey| !hotkey.trim().is_empty())
+    pub fn recording_hotkeys(&self) -> Vec<&str> {
+        [
+            self.recording_hotkey.as_deref(),
+            self.recording_hotkey_secondary.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|hotkey| !hotkey.trim().is_empty())
+        .collect()
     }
 
     pub fn to_service_options(&self, lol_url: Option<String>) -> Result<ServiceOptions, String> {

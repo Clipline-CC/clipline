@@ -111,13 +111,28 @@ impl AppSettings {
         if secondary.as_deref() == Some(primary.as_str()) {
             return Err("secondary hotkey matches the primary hotkey".into());
         }
-        if let Some(recording) = self.recording_hotkey.as_deref() {
-            if !recording.trim().is_empty() {
-                let recording = super::hotkey::normalize_hotkey(recording)?;
-                if recording == primary || secondary.as_deref() == Some(recording.as_str()) {
-                    return Err("recording hotkey matches a Save Replay hotkey".into());
-                }
+        let recording_primary = self
+            .recording_hotkey
+            .as_deref()
+            .filter(|hotkey| !hotkey.trim().is_empty())
+            .map(super::hotkey::normalize_hotkey)
+            .transpose()?;
+        let recording_secondary = self
+            .recording_hotkey_secondary
+            .as_deref()
+            .filter(|hotkey| !hotkey.trim().is_empty())
+            .map(super::hotkey::normalize_hotkey)
+            .transpose()?;
+        for recording in [&recording_primary, &recording_secondary]
+            .into_iter()
+            .flatten()
+        {
+            if recording == &primary || secondary.as_ref() == Some(recording) {
+                return Err("recording hotkey matches a Save Replay hotkey".into());
             }
+        }
+        if recording_secondary == recording_primary && recording_primary.is_some() {
+            return Err("secondary recording hotkey matches the primary recording hotkey".into());
         }
         self.cloud.validate()?;
         self.osu.validate()?;

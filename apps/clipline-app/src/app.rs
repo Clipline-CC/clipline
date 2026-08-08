@@ -2837,7 +2837,9 @@ fn rollback_settings_side_effects<R: Runtime>(
         }
     }
     if applied.hook_hotkeys {
-        if let Err(error) = crate::hotkeys::set_hotkeys(&old.hotkeys(), old.recording_hotkey()) {
+        if let Err(error) =
+            crate::hotkeys::set_hotkeys(&old.hotkeys(), &old.recording_hotkeys())
+        {
             errors.push(format!("restore low-level hotkeys: {error}"));
         }
     }
@@ -2886,6 +2888,10 @@ fn save_settings<R: Runtime>(
         Some(raw) if !raw.trim().is_empty() => Some(crate::settings::normalize_hotkey(raw)?),
         _ => None,
     };
+    settings.recording_hotkey_secondary = match settings.recording_hotkey_secondary.as_deref() {
+        Some(raw) if !raw.trim().is_empty() => Some(crate::settings::normalize_hotkey(raw)?),
+        _ => None,
+    };
     settings.games.normalize();
     settings.validate()?;
     let media_dir = settings.media_dir_path()?;
@@ -2918,9 +2924,10 @@ fn save_settings<R: Runtime>(
         |shortcut| shortcuts.unregister(shortcut),
     )?;
     applied.global_hotkeys = true;
-    if let Err(primary) =
-        crate::hotkeys::set_hotkeys(&settings.hotkeys(), settings.recording_hotkey())
-    {
+    if let Err(primary) = crate::hotkeys::set_hotkeys(
+        &settings.hotkeys(),
+        &settings.recording_hotkeys(),
+    ) {
         let rollback = rollback_settings_side_effects(
             &app,
             &tray_items,
@@ -3218,7 +3225,7 @@ pub fn run() {
             }
             if let Err(e) = crate::hotkeys::install_hotkey_hook(
                 &settings.hotkeys(),
-                settings.recording_hotkey(),
+                &settings.recording_hotkeys(),
                 {
                 let app = app.handle().clone();
                 move |action| match action {
