@@ -1879,43 +1879,57 @@ async function openFolder() {
   }
 }
 
-async function copyClipToClipboard(event) {
-  if (!currentClip) return;
-  if (isCloudOnlyReviewClip(currentClip)) return;
-  const original = Boolean(event?.shiftKey);
-  $("copy-clip").disabled = true;
+async function copyClipToClipboard(event, clip = currentClip, originalOverride = null) {
+  if (!clip) return;
+  if (isCloudOnlyReviewClip(clip)) return;
+  const reviewingClip = currentClip && PlayerCore.sameClipPath(currentClip.path, clip.path);
+  const original = originalOverride
+    ?? (Boolean(event?.shiftKey) || Number(clip.duration_s) > 5 * 60);
+  const audioTrackIds = reviewingClip
+    ? selectedAudioTrackIdsForClip(clip)
+    : defaultAudioTrackIds(clip);
+  if (reviewingClip) $("copy-clip").disabled = true;
   $("error").textContent = "";
   if (original) {
-    setDeckStatus("");
+    if (reviewingClip) setDeckStatus("");
   } else {
-    setDeckStatus("preparing shareable clip...");
+    if (reviewingClip) setDeckStatus("preparing shareable clip...");
+    else setNotice("preparing shareable clip...");
   }
   try {
     await invoke("copy_clip_to_clipboard", {
       request: {
-        path: currentClip.path,
+        path: clip.path,
         audioTrackIds: original
           ? null
-          : clipAudioTracks(currentClip).length
-            ? selectedAudioTrackIdsForClip(currentClip)
+          : clipAudioTracks(clip).length
+            ? audioTrackIds
             : null,
         original,
       },
     });
-    setDeckStatus(original ? "original clip copied" : "shareable clip copied", { transient: true });
+    const message = original ? "original clip copied" : "shareable clip copied";
+    if (reviewingClip) {
+      setDeckStatus(message, { transient: true });
+    }
+    setNotice(message, { transient: true });
   } catch (e) {
     const error = String(e);
-    if (!original && ffmpegRuntimeUnavailable(error)) {
+    if (error === "shareable clipboard export cancelled") {
+      if (reviewingClip) setDeckStatus("");
+      setNotice("");
+    } else if (reviewingClip && !original && ffmpegRuntimeUnavailable(error)) {
       setDeckStatus("FFmpeg is needed to prepare a shareable clip.");
       setDeckStatusAction("Install FFmpeg", () => {
-        void ensureFfmpegRuntime(() => copyClipToClipboard({ shiftKey: false })).catch(() => {});
+        void ensureFfmpegRuntime(() => copyClipToClipboard(null, clip, false)).catch(() => {});
       });
     } else {
-      setDeckStatus("");
+      if (reviewingClip) setDeckStatus("");
+      setNotice("");
       $("error").textContent = error;
     }
   } finally {
-    $("copy-clip").disabled = false;
+    if (reviewingClip) $("copy-clip").disabled = false;
   }
 }
 

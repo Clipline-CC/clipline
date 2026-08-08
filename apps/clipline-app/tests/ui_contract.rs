@@ -490,7 +490,8 @@ fn active_recording_status_identifies_the_selected_encoder() {
     );
     assert!(
         update_status.contains("Stop recording · ${activeEncoderLabel}")
-            && update_status.contains("$(\"rail-status\").title = recordingActive")
+            && update_status.contains("$(\"rail-status\").title = storageQuotaBlocked")
+            && update_status.contains(": recordingActive")
             && update_status.contains("? recordingTitle")
             && update_status.contains(": `Start ${source} recording`;"),
         "the active recorder status must assign the concrete encoder selected by Automatic mode to the visible tooltip"
@@ -874,6 +875,8 @@ fn review_player_owns_all_controls() {
         "id=\"clip-menu-play\"",
         "id=\"clip-menu-open-cloud-page\"",
         "id=\"clip-menu-copy-cloud-link\"",
+        "id=\"clip-menu-copy\"",
+        "id=\"clip-menu-copy-shareable\"",
         "id=\"clip-menu-upload\"",
         "id=\"clip-menu-rename\"",
         "id=\"clip-menu-delete\"",
@@ -1670,6 +1673,17 @@ fn cloud_upload_completion_preserves_equivalent_paths_and_reports_local_deletion
     let upload = js_function_body(&cloud, "uploadClipToCloud");
 
     assert!(
+        upload.contains("setNotice(\"cloud upload started\", { transient: true });")
+            && upload.contains("const uploadStatus = result?.record?.upload_status || \"\";")
+            && upload
+                .contains("[\"uploaded_private\", \"uploaded_public\"].includes(uploadStatus)")
+            && upload.contains("? \"cloud upload processing\"")
+            && upload.contains("? \"cloud upload finished · local copy deleted\"")
+            && upload.contains(": \"cloud upload finished\""),
+        "cloud uploads must distinguish remote processing from completed uploads"
+    );
+
+    assert!(
         refresh_clips
             .contains("PlayerCore.sameClipPath(clip.path, currentPath)"),
         "post-upload Library refreshes must preserve reviews across equivalent Windows path spellings"
@@ -1692,10 +1706,29 @@ fn cloud_upload_completion_preserves_equivalent_paths_and_reports_local_deletion
     assert!(
         refresh < feedback
             && upload.contains("error: result && result.record ? result.record.error : \"\",")
-            && upload.contains(
-                "notice: result && result.local_deleted\n        ? \"cloud upload ready · local copy deleted\""
-            ),
+            && upload.contains("notice: uploadStatus === \"uploaded_processing\""),
         "intentional deletion and upload errors must be delivered only after the authoritative refresh settles"
+    );
+}
+
+#[test]
+fn local_library_cards_show_cloud_upload_activity() {
+    let library = read_ui_js("library.js");
+    let css = styles_css();
+    let card = js_function_body(&library, "clipCard");
+
+    assert!(
+        card.contains("const uploadBusy = cloudRecord")
+            && card.contains("[\"queued\", \"uploading\", \"processing\", \"retrying\"]")
+            && card.contains("spinner.className = \"clip-upload-spinner\";")
+            && card.contains("spinner.title = \"Uploading clip\";")
+            && css.contains(".clip-upload-spinner")
+            && css.contains("@keyframes clip-upload-spin"),
+        "busy local cloud uploads should render a labelled spinner beside the clip title"
+    );
+    assert!(
+        card.find("nameRow.appendChild(name);") < card.find("nameRow.appendChild(spinner);"),
+        "the upload spinner should follow the complete clip title"
     );
 }
 
@@ -3131,6 +3164,7 @@ fn league_event_rail_minion_actor_pngs_are_square_portraits() {
 fn no_native_browser_dialogs() {
     let js = main_js();
     let css = styles_css();
+    let html = index_html();
     // window.confirm/alert render browser chrome ("tauri.localhost says") —
     // use the in-app #confirm-dialog instead.
     for banned in ["confirm(", "alert("] {
@@ -3148,6 +3182,8 @@ fn no_native_browser_dialogs() {
             && js.contains("$(\"clip-menu-play\").addEventListener(\"click\"")
             && js.contains("$(\"clip-menu-open-cloud-page\").addEventListener(\"click\"")
             && js.contains("$(\"clip-menu-copy-cloud-link\").addEventListener(\"click\"")
+            && js.contains("$(\"clip-menu-copy\").addEventListener(\"click\"")
+            && js.contains("$(\"clip-menu-copy-shareable\").addEventListener(\"click\"")
             && js.contains("$(\"clip-menu-upload\").addEventListener(\"click\"")
             && js.contains("$(\"clip-menu-rename\").addEventListener(\"click\"")
             && js.contains("$(\"clip-menu-rename-file\").addEventListener(\"click\"")
@@ -3168,6 +3204,15 @@ fn no_native_browser_dialogs() {
             && css.contains("#rename-file-dialog")
             && css.contains(".context-menu button.danger-text"),
         "native context menus must be suppressed and library rows must expose an app-owned clip menu"
+    );
+
+    let rename_file = html.find("id=\"clip-menu-rename-file\"").unwrap();
+    let copy = html.find("id=\"clip-menu-copy\"").unwrap();
+    let copy_shareable = html.find("id=\"clip-menu-copy-shareable\"").unwrap();
+    let delete = html.find("id=\"clip-menu-delete\"").unwrap();
+    assert!(
+        rename_file < copy && copy < copy_shareable && copy_shareable < delete,
+        "clipboard actions should sit between Rename file and Delete"
     );
 }
 
@@ -3833,7 +3878,7 @@ fn deck_status_success_toasts_auto_clear() {
         "setDeckStatus(audioSelectionLabel(currentClip), { transient: true })",
         "setDeckStatus(\"clip renamed\", { transient: true })",
         "setDeckStatus(`exported ${exportedLabel} · keyframe-aligned ${fmtTenths(exported.aligned_start_s)} – ${fmtTenths(exported.aligned_end_s)}`, { transient: true })",
-        "setDeckStatus(original ? \"original clip copied\" : \"shareable clip copied\", { transient: true })",
+        "setDeckStatus(message, { transient: true })",
         "setDeckStatus(\"cloud link copied\", { transient: true })",
         "setDeckStatus(\"cloud upload ready\", { transient: true })",
     ] {
@@ -4068,6 +4113,8 @@ fn clipboard_copy_distinguishes_shareable_and_original_paths() {
     assert!(
         library.contains("pub struct CopyClipToClipboardRequest")
             && library.contains("pub original: bool")
+            && library.contains("pub struct ClipboardExportState")
+            && library.contains("fn is_cancelled(&self) -> bool")
             && library.contains("request: CopyClipToClipboardRequest")
             && library.contains("window: tauri::WebviewWindow")
             && library.contains(".hwnd()")
@@ -4082,28 +4129,35 @@ fn clipboard_copy_distinguishes_shareable_and_original_paths() {
     assert!(
         js.contains("await invoke(\"copy_clip_to_clipboard\", {")
             && js.contains("request: {")
-            && js.contains("path: currentClip.path")
+            && js.contains("path: clip.path")
             && js.contains("audioTrackIds: original")
-            && js.contains(": clipAudioTracks(currentClip).length")
-            && js.contains("selectedAudioTrackIdsForClip(currentClip)"),
+            && js.contains(": clipAudioTracks(clip).length")
+            && js.contains("selectedAudioTrackIdsForClip(clip)"),
         "normal copy should send selected audio while original copy should bypass audio selection"
     );
     assert!(
-        js.contains("async function copyClipToClipboard(event)")
-            && js.contains("const original = Boolean(event?.shiftKey);")
+        js.contains("async function copyClipToClipboard(event, clip = currentClip, originalOverride = null)")
+            && js.contains("Boolean(event?.shiftKey) || Number(clip.duration_s) > 5 * 60")
             && js.contains("original,")
             && js.contains("setDeckStatus(\"preparing shareable clip...\")")
-            && js.contains(
-                "setDeckStatus(original ? \"original clip copied\" : \"shareable clip copied\", { transient: true })"
-            )
+            && js.contains("setDeckStatus(message, { transient: true })")
+            && js.contains("if (error === \"shareable clipboard export cancelled\")")
             && js.contains(
                 "$(\"copy-clip\").addEventListener(\"click\", (event) => copyClipToClipboard(event));"
             ),
-        "copy interaction should reserve Shift+click for the untouched original"
+        "toolbar copy should adapt to long clips and quietly ignore superseded exports"
     );
     assert!(
-        html.contains("title=\"Copy shareable clip to clipboard (Shift+click for original)\""),
-        "the otherwise-hidden Shift+click behavior must be documented in the tooltip"
+        html.contains("id=\"clip-menu-copy\"")
+            && html.contains("id=\"clip-menu-copy-shareable\"")
+            && html.contains("Shift+click copies the original"),
+        "the explicit context actions and adaptive toolbar behavior must be discoverable"
+    );
+    assert!(
+        app.contains(".manage(crate::library::ClipboardExportState::default())")
+            && app.contains("state::<crate::library::ClipboardExportState>().cancel()")
+            && library.contains("run_share_ffmpeg(&mut command, remaining, || job.is_cancelled())"),
+        "closing Clipline must cancel the active backend export and its FFmpeg child"
     );
     assert!(
         library.contains("\"share-export-v3-aac-h264-cbr8m\""),
@@ -4141,8 +4195,7 @@ fn app_notice_toasts_auto_clear() {
     for required in [
         "setNotice(\"clip renamed\", { transient: true })",
         "setNotice(\"clip deleted\", { transient: true })",
-        "setNotice(s.gc_deleted",
-        ": `saved ${fmtDur(s.seconds)} ${savedKind}`, { transient: true });",
+        "setNotice(`saved ${fmtDur(s.seconds)} ${savedKind}`, { transient: true });",
     ] {
         assert!(
             js.contains(required),
@@ -5112,5 +5165,43 @@ fn frontend_failures_are_forwarded_to_bounded_native_diagnostics() {
             && core.contains("window.addEventListener(\"unhandledrejection\"")
             && core.contains("invoke(\"log_frontend_event\""),
         "global JavaScript failures must be sent to the validated native diagnostic command"
+    );
+}
+
+#[test]
+fn quota_full_is_a_durable_non_destructive_recording_lock() {
+    let html = index_html();
+    let main = main_js();
+    let app_core = read_ui_js("app-core.js");
+    let settings = read_ui_js("settings.js");
+
+    for required in [
+        r#"id="storage-quota-dialog""#,
+        r#"aria-labelledby="storage-quota-title""#,
+        r#"id="storage-quota-manage""#,
+        r#"id="storage-quota-settings""#,
+        r#"id="storage-quota-recheck""#,
+        "Your clips were not deleted",
+        "Clipline stops recording when this limit is reached",
+    ] {
+        assert!(
+            html.contains(required),
+            "missing quota safety UI: {required}"
+        );
+    }
+    assert!(
+        main.contains(r#"listen("storage-quota-full""#)
+            && main.contains(r#"listen("storage-quota-resolved""#)
+            && main.contains(r#"invoke("recheck_storage_quota", { announce: true })"#)
+            && main.contains("recordingRequested = true;")
+            && app_core.contains(r#"invoke("recheck_storage_quota", { announce: false })"#)
+            && app_core.contains("updateStorageQuotaUsage(s);")
+            && !main.contains("cleaned up ${s.gc_deleted}"),
+        "background quota recovery must stay silent while manual checks may reopen the dialog"
+    );
+    assert!(
+        settings.contains("storageQuotaBlocked")
+            && settings.contains("Recording disabled — storage quota full"),
+        "recording and replay controls must render disabled while quota is blocked"
     );
 }

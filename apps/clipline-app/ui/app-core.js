@@ -131,6 +131,8 @@ var settingsDraft = null;
 var recordingActive = false;
 var recordingRequested = false;
 var recorderWaitingForGame = false;
+var storageQuotaBlocked = false;
+var storageQuotaState = null;
 var fullSessionRecordingActive = false;
 var displays = [];
 var displaysLoaded = false;
@@ -504,6 +506,10 @@ async function refreshStorage(work = captureForegroundWork()) {
   $("rail-library-status").title = `${plural(s.clip_count, "clip")} in library`;
   $("gallery-storage-used").textContent =
     `· ${fmtLibraryStorageUsage(s.total_bytes, quotaGb)}`;
+  if (storageQuotaBlocked) {
+    updateStorageQuotaUsage(s);
+    await invoke("recheck_storage_quota", { announce: false });
+  }
   return true;
 }
 

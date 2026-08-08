@@ -1632,20 +1632,26 @@ function updateCaptureStatus() {
   const recordingTitle = activeEncoderLabel
     ? `Stop recording · ${activeEncoderLabel}`
     : "Stop recording";
-  $("rail-status").classList.toggle("stopped", !recordingRequested);
+  $("rail-status").classList.toggle("stopped", !recordingRequested || storageQuotaBlocked);
   $("rail-status").classList.toggle("waiting", recorderWaitingForGame);
+  $("rail-status").classList.toggle("blocked", storageQuotaBlocked);
   $("rail-status").setAttribute("aria-pressed", String(recordingRequested));
-  $("rail-status").title = recordingActive
+  $("rail-status").setAttribute("aria-disabled", String(storageQuotaBlocked));
+  $("rail-status").title = storageQuotaBlocked
+    ? "Recording disabled — storage quota full"
+    : recordingActive
     ? recordingTitle
     : recorderWaitingForGame
       ? "Stop waiting for a game"
       : `Start ${source} recording`;
-  $("rail-status-text").textContent = recordingActive
+  $("rail-status-text").textContent = storageQuotaBlocked
+    ? "Full"
+    : recordingActive
     ? "Rec"
     : recorderWaitingForGame
       ? "Waiting"
       : "Off";
-  $("rail-save").disabled = !recordingActive;
+  $("rail-save").disabled = storageQuotaBlocked || !recordingActive;
   renderRailGame();
 }
 
@@ -1676,6 +1682,10 @@ function fallbackCaptureSourceLabel(settings) {
 
 
 async function toggleRecording() {
+  if (storageQuotaBlocked) {
+    showStorageQuotaFull(storageQuotaState);
+    return;
+  }
   const next = !recordingRequested;
   $("rail-status").disabled = true;
   try {

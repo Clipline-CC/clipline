@@ -17,7 +17,10 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::ptr;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex, OnceLock,
+};
 use std::time::{Duration, Instant};
 
 use clipline_capture::{Codec, EncoderBackend};
@@ -43,6 +46,44 @@ use crate::windows::last_os_error;
 pub struct StorageSettings {
     quota_bytes: Mutex<Option<u64>>,
     media_dir: Mutex<PathBuf>,
+}
+
+#[derive(Clone, Default)]
+pub struct ClipboardExportState {
+    generation: Arc<AtomicU64>,
+}
+
+impl ClipboardExportState {
+    fn begin(&self) -> ClipboardExportJob {
+        let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        ClipboardExportJob {
+            generation,
+            current: Arc::clone(&self.generation),
+        }
+    }
+
+    pub fn cancel(&self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+struct ClipboardExportJob {
+    generation: u64,
+    current: Arc<AtomicU64>,
+}
+
+impl ClipboardExportJob {
+    fn is_cancelled(&self) -> bool {
+        self.current.load(Ordering::Acquire) != self.generation
+    }
+
+    fn ensure_active(&self) -> Result<(), String> {
+        if self.is_cancelled() {
+            Err("shareable clipboard export cancelled".into())
+        } else {
+            Ok(())
+        }
+    }
 }
 
 impl StorageSettings {
@@ -1394,13 +1435,14 @@ fn clipboard_copy_path(
     source: &Path,
     selected_audio_track_ids: Option<&[String]>,
     original: bool,
+    job: &ClipboardExportJob,
 ) -> Result<PathBuf, String> {
     clipboard_copy_path_with_exporter(
         source,
         selected_audio_track_ids,
         original,
         &crate::settings::share_export_cache_dir(),
-        |source, target, mode| export_share_compatible_file(source, target, mode.as_ref()),
+        |source, target, mode| export_share_compatible_file(source, target, mode.as_ref(), job),
     )
 }
 
@@ -1509,7 +1551,9 @@ fn export_share_compatible_file(
     source: &Path,
     target: &Path,
     audio_mode: Option<&ShareAudioExportMode>,
+    job: &ClipboardExportJob,
 ) -> Result<(), String> {
+    job.ensure_active()?;
     let mut intermediate = None;
     let (input, has_audio) = match audio_mode {
         Some(ShareAudioExportMode::Remux(indices)) => {
@@ -1534,7 +1578,9 @@ fn export_share_compatible_file(
         }
     };
 
-    let result = transcode_share_file_with_ffmpeg(source, &input, target, has_audio);
+    let result = job
+        .ensure_active()
+        .and_then(|()| transcode_share_file_with_ffmpeg(source, &input, target, has_audio, job));
     if let Some(intermediate) = intermediate {
         let _ = std::fs::remove_file(intermediate);
     }
@@ -1546,6 +1592,7 @@ fn transcode_share_file_with_ffmpeg(
     input: &Path,
     target: &Path,
     has_audio: bool,
+    job: &ClipboardExportJob,
 ) -> Result<(), String> {
     let ffmpeg = clipline_capture::ffmpeg::locate()
         .ok_or_else(|| "ffmpeg is not available for a shareable clipboard export".to_string())?;
@@ -1557,6 +1604,7 @@ fn transcode_share_file_with_ffmpeg(
     let mut last_error = String::new();
 
     for mode in video_modes {
+        job.ensure_active()?;
         let Some(remaining) = remaining_share_export_timeout(deadline, Instant::now()) else {
             last_error = format!(
                 "ffmpeg share export exhausted its {} second timeout",
@@ -1572,7 +1620,7 @@ fn transcode_share_file_with_ffmpeg(
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
-        match run_share_ffmpeg(&mut command, remaining) {
+        match run_share_ffmpeg(&mut command, remaining, || job.is_cancelled()) {
             Ok(output) if output.status.success() => return Ok(()),
             Ok(output) => {
                 last_error = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -1708,7 +1756,11 @@ struct ShareFfmpegOutput {
     stderr: Vec<u8>,
 }
 
-fn run_share_ffmpeg(command: &mut Command, timeout: Duration) -> Result<ShareFfmpegOutput, String> {
+fn run_share_ffmpeg(
+    command: &mut Command,
+    timeout: Duration,
+    is_cancelled: impl Fn() -> bool,
+) -> Result<ShareFfmpegOutput, String> {
     const MAX_STDERR_BYTES: usize = 128 * 1024;
 
     let mut child = command
@@ -1735,6 +1787,11 @@ fn run_share_ffmpeg(command: &mut Command, timeout: Duration) -> Result<ShareFfm
         .checked_add(timeout)
         .unwrap_or_else(Instant::now);
     let status = loop {
+        if is_cancelled() {
+            let _ = child.kill();
+            let _ = child.wait();
+            break Err("ffmpeg share export cancelled".into());
+        }
         match child.try_wait() {
             Ok(Some(status)) => break Ok(status),
             Ok(None) if Instant::now() < deadline => {
@@ -2098,17 +2155,20 @@ pub fn reveal_clip(path: String, settings: tauri::State<StorageSettings>) -> Res
 pub async fn copy_clip_to_clipboard(
     request: CopyClipToClipboardRequest,
     settings: tauri::State<'_, StorageSettings>,
+    exports: tauri::State<'_, ClipboardExportState>,
     window: tauri::WebviewWindow,
 ) -> Result<(), String> {
     let target = validate_clip_path(&settings, &request.path)?;
     let audio_track_ids = request.audio_track_ids;
     let original = request.original;
+    let job = exports.begin();
     let owner = window
         .hwnd()
         .map_err(|error| format!("get Clipline window handle: {error}"))?
         .0 as isize;
     tauri::async_runtime::spawn_blocking(move || {
-        let share_path = clipboard_copy_path(&target, audio_track_ids.as_deref(), original)?;
+        let share_path = clipboard_copy_path(&target, audio_track_ids.as_deref(), original, &job)?;
+        job.ensure_active()?;
         copy_file_to_clipboard(&share_path, owner as HWND)
     })
     .await
@@ -2553,6 +2613,21 @@ mod tests {
     };
     use clipline_test_utils::TestDir;
     use shiguredo_opus::{Encoder, EncoderConfig};
+
+    #[test]
+    fn clipboard_export_generation_cancels_only_existing_jobs() {
+        let state = ClipboardExportState::default();
+        let first = state.begin();
+        assert!(!first.is_cancelled());
+
+        state.cancel();
+        assert!(first.is_cancelled());
+
+        let second = state.begin();
+        assert!(!second.is_cancelled());
+        state.cancel();
+        assert!(second.is_cancelled());
+    }
 
     fn marker(t_s: f64) -> ClipMarker {
         marker_with(t_s, EventKind::ChampionKill, true)

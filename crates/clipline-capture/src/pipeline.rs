@@ -72,6 +72,13 @@ impl ReplayWindow<'_> {
             }
         }
     }
+
+    fn bytes(&self) -> usize {
+        match self {
+            Self::Memory(segments) => segments.iter().map(|segment| segment.byte_len()).sum(),
+            Self::Disk(segments) => segments.iter().map(|segment| segment.byte_len()).sum(),
+        }
+    }
 }
 
 impl ReplayStorage {
@@ -108,6 +115,10 @@ impl ReplayStorage {
         exclude_before_s: Option<f64>,
     ) -> Option<(f64, f64)> {
         self.save_window(window_s, exclude_before_s).bounds()
+    }
+
+    fn save_window_bytes(&self, window_s: f64, exclude_before_s: Option<f64>) -> usize {
+        self.save_window(window_s, exclude_before_s).bytes()
     }
 
     fn save_window(&self, window_s: f64, exclude_before_s: Option<f64>) -> ReplayWindow<'_> {
@@ -366,6 +377,12 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
         exclude_before_s: Option<f64>,
     ) -> Option<(f64, f64)> {
         self.ring.save_window_bounds(window_s, exclude_before_s)
+    }
+
+    /// Encoded payload bytes in the replay window that would be saved.
+    /// Container tables and headers are not included.
+    pub fn save_window_bytes(&self, window_s: f64, exclude_before_s: Option<f64>) -> usize {
+        self.ring.save_window_bytes(window_s, exclude_before_s)
     }
 
     pub fn encoder(&self) -> &E {
@@ -2858,6 +2875,25 @@ mod tests {
         );
         whole.run_to_end().unwrap();
         assert_eq!(whole.ring().unwrap().len(), rec.ring().unwrap().len());
+    }
+
+    #[test]
+    fn save_window_bytes_measures_only_the_selected_encoded_segments() {
+        let mut recorder = Recorder::new(
+            MockCapture::new(90, 30),
+            MockEncoder::new(30, 30),
+            usize::MAX,
+        );
+        recorder.run_to_end().unwrap();
+        let ring = recorder.ring().unwrap();
+        let selected_bytes: usize = ring
+            .save_window(1.5, None)
+            .into_iter()
+            .map(Segment::byte_len)
+            .sum();
+
+        assert_eq!(recorder.save_window_bytes(1.5, None), selected_bytes);
+        assert!(selected_bytes < recorder.ring_bytes());
     }
 
     /// Shifts a capture source's pts later — models the real lead-in

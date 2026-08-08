@@ -4,6 +4,71 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-07): saved-media quotas are non-destructive
+
+Plan: `docs/superpowers/plans/2026-08-07-non-destructive-storage-quota.md` (`88e6d10`).
+
+The oldest-first saved-clip collector has been removed from `clipline-storage`; there is no longer
+an automatic saved-media deletion API. Storage scans are observational, and only explicit Library
+deletes may remove a saved clip. Zero-byte reservations and temporary replay-cache segments remain
+the only automatic cleanup targets. Short and imperfectly finalized non-empty full sessions are
+kept for recovery instead of discarded.
+
+The recorder now resolves and recovers its media root before opening capture hardware, then blocks
+startup when the library has no capacity. Replay saves measure the selected encoded window and add
+conservative muxing headroom before creating an output file. Full sessions reserve 64 MiB for safe
+finalization; their once-per-second check combines the startup inventory total with only the active
+file size instead of rescanning the media tree. Inspection failures are logged and skipped rather
+than terminating recording. A completed output that unexpectedly crosses the limit is kept and
+locks future recording.
+
+Quota-full is a durable backend state that gates recorder starts, restarts, save commands, global
+and low-level hotkeys, and tray saves. The frontend shows an accessible modal, marks recording as
+disabled, and offers Library management, the media folder, Storage settings, and an explicit
+recheck. Raising/disabling the quota, switching to a media folder with enough room, or deleting
+enough clips clears the lock and resumes recording when it was previously desired.
+Refresh-driven rechecks update the displayed usage silently, so dismissing the dialog to manage
+clips does not reopen it after every deletion; the explicit Check again action may announce it.
+
+The prior handoff entries describing saved-clip auto-GC are historical and are superseded by this
+checkpoint and `ddoc.md`.
+
+Validation is green: the full workspace test suite, fresh-cache warning-denied workspace Clippy,
+JavaScript syntax checks, and diff checks all pass.
+
+---
+
+## Checkpoint (2026-08-07): cancellable clipboard export and library feedback
+
+Plan: `docs/superpowers/plans/2026-08-07-clipboard-library-qol.md` (`02758a4`).
+
+Clipboard share exports now have a process-owned generation token. Starting another copy cancels
+the prior job; closing the main WebView to the tray or quitting Clipline also cancels the active
+job. The FFmpeg polling loop observes cancellation every 25 ms, kills and reaps the child, and
+returns through the existing temporary-file cleanup. Cancellation is rechecked before Windows
+clipboard ownership changes, so a completed-but-abandoned export cannot replace clipboard data.
+
+The Review copy button remains shareable by default through five minutes. Longer clips now copy
+the original media file immediately, and Shift-click still explicitly copies the original. Local
+Library cards expose both `Copy to clipboard` (original) and `Copy shareable clip` (forced
+compatible export) in their right-click menu; cloud-only and game-play menus hide both actions.
+Library share exports use the clip's default audio-track selection when the clip is not already
+open in Review.
+
+Cloud uploads now publish app-wide start and completion notices. While a local clip's cloud record
+is queued, uploading, processing, or retrying, a spinner appears immediately after its Library title;
+the existing byte progress, deck status, refresh arbitration, retry state, and local-delete
+feedback remain intact.
+
+The cancellation generation, five-minute rule, context-menu ownership, upload notices, and busy
+indicator are contract-tested. Full workspace tests, fresh-cache warning-denied workspace Clippy,
+JavaScript syntax checks, and diff checks are green. Manual retest: right-click a local clip and
+try both copy actions; open a clip over five minutes and confirm normal toolbar Copy reports the
+original; force a shareable export and close Clipline while it runs; upload a clip and confirm the
+start notice, title spinner, and completion notice.
+
+---
+
 ## Checkpoint (2026-08-07): one-click recommended setup
 
 Plan: `docs/superpowers/plans/2026-08-07-smart-configuration.md` (`abbfbba8`).

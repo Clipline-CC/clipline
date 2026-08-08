@@ -1265,6 +1265,10 @@ label span { white-space: nowrap; }
   color: var(--accent);
 }
 
+#rail-status.blocked {
+  color: var(--danger);
+}
+
 .rail-label {
   max-width: 100%;
   overflow: hidden;
@@ -3077,6 +3081,16 @@ button.primary.settings-save-glow {
 .card-meta { padding: 9px 11px 11px; display: grid; gap: 3px; min-width: 0; }
 .card-name { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 13.5px; font-weight: 600; }
 .card-name .t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.clip-upload-spinner {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  border: 2px solid rgba(var(--accent-rgb), 0.28);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: clip-upload-spin 0.8s linear infinite;
+}
+@keyframes clip-upload-spin { to { transform: rotate(360deg); } }
 .card-game-ico { width: 18px; height: 18px; flex: none; border-radius: 5px; object-fit: contain; }
 .card-game-ico.portrait { object-fit: cover; border: 1px solid var(--line-strong); background: var(--well); }
 .card-game-ico.placeholder { display: flex; align-items: center; justify-content: center; background: var(--well); color: var(--muted); }
@@ -3214,6 +3228,7 @@ button.primary.settings-save-glow {
 #update-dialog,
 #elevation-dialog,
 #upload-dialog,
+#storage-quota-dialog,
 #rename-file-dialog {
   width: 380px;
   padding: 0;
@@ -3228,7 +3243,11 @@ button.primary.settings-save-glow {
 #update-dialog::backdrop,
 #elevation-dialog::backdrop,
 #upload-dialog::backdrop,
+#storage-quota-dialog::backdrop,
 #rename-file-dialog::backdrop { background: rgba(var(--scrim-b-rgb), 0.62); }
+
+#storage-quota-dialog { width: min(500px, calc(100vw - 32px)); }
+.storage-quota-actions { flex-wrap: wrap; }
 
 #detected-games-dialog,
 #game-window-picker-dialog {

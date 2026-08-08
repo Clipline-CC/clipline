@@ -3,6 +3,14 @@
 Clipline uses Tauri's signed updater. The app checks a channel-specific
 `latest.json` file uploaded as a GitHub Release asset.
 
+## Upcoming storage behavior change
+
+Saved-media quotas no longer remove the oldest clips automatically. Existing
+installs that reach their configured quota will instead pause recording and
+replay saves until the user deletes media or raises the quota. Clipline retains
+all non-empty recordings, including short osu! sessions that older builds
+discarded as startup transients.
+
 ## Nightly
 
 The enabled channel is Nightly:
