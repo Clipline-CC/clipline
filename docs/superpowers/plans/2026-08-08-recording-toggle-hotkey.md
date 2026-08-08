@@ -5,10 +5,13 @@ keybind, while making replay-buffer readiness a distinct UI state.
 
 ## Product decisions
 
-- Add an optional `Start / Stop recording` keybind under Settings > Hotkeys.
+- Add two optional `Start / Stop recording` keybinds under Settings > Hotkeys; either toggles the
+  same full-session recording action, matching Save Replay's two-field layout.
 - Support the same F-keys, modified keyboard keys, and mouse buttons as Save Replay.
 - Leave the keybind unset by default so upgrades do not claim a new system-wide shortcut.
-- Reject a recording keybind that duplicates either Save Replay keybind.
+- Reject duplicates across all Save Replay and Start / Stop recording keybinds.
+- Give each hotkey row its own capture/status message so recording feedback never appears under
+  Save Replay.
 - The action controls the full-session writer, not the replay buffer. Starting records new footage
   from that point forward; stopping finalizes the session while the replay buffer stays available.
 - If capture is off or waiting for a game, an explicit manual recording starts capture and bypasses
@@ -24,17 +27,19 @@ keybind, while making replay-buffer readiness a distinct UI state.
 
 ## Minimal architecture
 
-Persist one optional setting and extend the existing low-level hotkey dispatcher from one action
-to two (`SaveReplay` and `ToggleRecording`). Add start/stop-full-session commands to the existing
-recorder loop, reusing its one encoder, full-session finalization, metadata, and quota paths.
+Persist two optional recording shortcut settings and extend the existing low-level hotkey
+dispatcher from one action to two (`SaveReplay` and `ToggleRecording`). Add start/stop-full-session
+commands to the existing recorder loop, reusing its one encoder, full-session finalization,
+metadata, and quota paths.
 
 ## Plan-driven implementation
 
 ### Task 1: Lock the contracts
 
-- [ ] Add settings tests for the optional default, normalization, and cross-action conflicts.
+- [ ] Add settings tests for both optional defaults, normalization, and all cross-action conflicts.
 - [ ] Add a hotkey dispatcher test proving each binding invokes only its own action.
-- [ ] Add a UI contract for the field, persistence, capture, and optional-clear behavior.
+- [ ] Add a UI contract for both fields, persistence, capture, optional-clear behavior, and
+      independent row status messages.
 - [ ] Add recorder-loop tests for starting and stopping a full-session sink independently of the
       replay service.
 
