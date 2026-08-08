@@ -506,7 +506,10 @@ async function refreshStorage(work = captureForegroundWork()) {
   $("rail-library-status").title = `${plural(s.clip_count, "clip")} in library`;
   $("gallery-storage-used").textContent =
     `· ${fmtLibraryStorageUsage(s.total_bytes, quotaGb)}`;
-  if (storageQuotaBlocked) await invoke("recheck_storage_quota");
+  if (storageQuotaBlocked) {
+    updateStorageQuotaUsage(s);
+    await invoke("recheck_storage_quota", { announce: false });
+  }
   return true;
 }
 

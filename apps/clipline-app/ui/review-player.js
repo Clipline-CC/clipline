@@ -1910,12 +1910,15 @@ async function copyClipToClipboard(event, clip = currentClip, originalOverride =
     });
     const message = original ? "original clip copied" : "shareable clip copied";
     if (reviewingClip) {
-      setDeckStatus(original ? "original clip copied" : "shareable clip copied", { transient: true });
+      setDeckStatus(message, { transient: true });
     }
     setNotice(message, { transient: true });
   } catch (e) {
     const error = String(e);
-    if (reviewingClip && !original && ffmpegRuntimeUnavailable(error)) {
+    if (error === "shareable clipboard export cancelled") {
+      if (reviewingClip) setDeckStatus("");
+      setNotice("");
+    } else if (reviewingClip && !original && ffmpegRuntimeUnavailable(error)) {
       setDeckStatus("FFmpeg is needed to prepare a shareable clip.");
       setDeckStatusAction("Install FFmpeg", () => {
         void ensureFfmpegRuntime(() => copyClipToClipboard(null, clip, false)).catch(() => {});

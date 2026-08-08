@@ -39,18 +39,21 @@ listen("saved", (e) => {
   requestRefresh();
 });
 
-function showStorageQuotaFull(payload) {
-  storageQuotaBlocked = true;
-  storageQuotaState = payload || storageQuotaState || {};
-  recordingActive = false;
-  recorderWaitingForGame = false;
-  recordingRequested = false;
+function updateStorageQuotaUsage(payload) {
+  storageQuotaState = { ...(storageQuotaState || {}), ...(payload || {}) };
   const used = Number(storageQuotaState.total_bytes) || 0;
   const quota = Number(storageQuotaState.quota_bytes) || 0;
   const needed = Number(storageQuotaState.required_bytes) || 0;
   $("storage-quota-usage").textContent = needed > 0
     ? `${fmtBytes(used)} used of ${fmtBytes(quota)} · ${fmtBytes(needed)} needed for this recording`
     : `${fmtBytes(used)} used of ${fmtBytes(quota)}`;
+}
+
+function showStorageQuotaFull(payload) {
+  storageQuotaBlocked = true;
+  updateStorageQuotaUsage(payload);
+  recordingActive = false;
+  recorderWaitingForGame = false;
   updateCaptureStatus();
   if (!$("storage-quota-dialog").open) $("storage-quota-dialog").showModal();
 }
@@ -59,6 +62,7 @@ listen("storage-quota-full", (event) => showStorageQuotaFull(event.payload));
 listen("storage-quota-resolved", () => {
   storageQuotaBlocked = false;
   storageQuotaState = null;
+  recordingRequested = true;
   if ($("storage-quota-dialog").open) $("storage-quota-dialog").close();
   updateCaptureStatus();
   requestRefresh();
@@ -521,10 +525,7 @@ $("keys-dialog").addEventListener("click", (ev) => {
   if (ev.target === $("keys-dialog")) $("keys-dialog").close();
 });
 
-$("rail-save").addEventListener("click", () => {
-  if (storageQuotaBlocked) showStorageQuotaFull(storageQuotaState);
-  else invoke("save_replay");
-});
+$("rail-save").addEventListener("click", () => invoke("save_replay"));
 $("storage-quota-manage").addEventListener("click", () => $("storage-quota-dialog").close());
 $("storage-quota-folder").addEventListener("click", async () => {
   try {
@@ -542,7 +543,7 @@ $("storage-quota-recheck").addEventListener("click", async () => {
   const button = $("storage-quota-recheck");
   button.disabled = true;
   try {
-    await invoke("recheck_storage_quota");
+    await invoke("recheck_storage_quota", { announce: true });
     requestRefresh();
   } catch (error) {
     $("error").textContent = String(error);

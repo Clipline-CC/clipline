@@ -593,22 +593,41 @@ fn quota_would_be_exceeded(
     })
 }
 
+fn storage_quota_event_for_usage(
+    total_bytes: u64,
+    quota_bytes: Option<u64>,
+    required_bytes: u64,
+) -> Option<Event> {
+    quota_would_be_exceeded(total_bytes, quota_bytes, required_bytes).then(|| {
+        Event::StorageQuotaFull {
+            total_bytes,
+            quota_bytes: quota_bytes.expect("a quota is present when capacity is exceeded"),
+            required_bytes,
+        }
+    })
+}
+
+fn storage_status_or_warn(clips_dir: &Path, quota_bytes: Option<u64>) -> Option<StorageStatus> {
+    match storage_status(clips_dir, quota_bytes) {
+        Ok(status) => Some(status),
+        Err(error) => {
+            tracing::warn!(
+                event = "storage_quota_inspection_failed",
+                path = ?clips_dir,
+                error = %error,
+            );
+            None
+        }
+    }
+}
+
 fn storage_quota_full_event(
     clips_dir: &Path,
     quota_bytes: Option<u64>,
     required_bytes: u64,
-) -> Result<Option<Event>, String> {
-    let status = storage_status(clips_dir, quota_bytes)
-        .map_err(|error| format!("storage status for {clips_dir:?}: {error}"))?;
-    Ok(
-        quota_would_be_exceeded(status.total_bytes, quota_bytes, required_bytes).then(|| {
-            Event::StorageQuotaFull {
-                total_bytes: status.total_bytes,
-                quota_bytes: quota_bytes.expect("a quota is present when capacity is exceeded"),
-                required_bytes,
-            }
-        }),
-    )
+) -> Option<Event> {
+    let status = storage_status_or_warn(clips_dir, quota_bytes)?;
+    storage_quota_event_for_usage(status.total_bytes, quota_bytes, required_bytes)
 }
 
 impl Default for ServiceOptions {
@@ -879,13 +898,15 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
     } else {
         1
     };
-    if let Some(event) =
-        storage_quota_full_event(&clips_dir, opts.disk_quota_bytes, startup_reserve)?
-    {
+    let startup_storage = storage_status_or_warn(&clips_dir, opts.disk_quota_bytes);
+    if let Some(event) = startup_storage.as_ref().and_then(|status| {
+        storage_quota_event_for_usage(status.total_bytes, opts.disk_quota_bytes, startup_reserve)
+    }) {
         let _ = events.send(event);
         send_stopped(events);
         return Ok(());
     }
+    let mut saved_media_baseline_bytes = startup_storage.map(|status| status.total_bytes);
 
     let init = |e: &dyn std::fmt::Display| format!("init: {e}");
     let (device, _ctx) = d3d11::create_device().map_err(|e| init(&e))?;
@@ -1034,12 +1055,13 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
 
         if last_status.elapsed() >= Duration::from_secs(1) {
             last_status = Instant::now();
-            if full_session.is_some() {
-                if let Some(event) = storage_quota_full_event(
-                    &clips_dir,
+            if let Some(recording) = full_session.as_ref() {
+                if let Some(event) = full_session_quota_full_event(
+                    recording,
+                    saved_media_baseline_bytes,
                     opts.disk_quota_bytes,
                     FULL_SESSION_QUOTA_RESERVE_BYTES,
-                )? {
+                ) {
                     let _ = events.send(event);
                     let _ = shutdown_recorder(
                         &mut rec,
@@ -1104,7 +1126,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                             &clips_dir,
                             opts.disk_quota_bytes,
                             required_bytes,
-                        )? {
+                        ) {
                             let _ = events.send(event);
                             let _ = shutdown_recorder(
                                 &mut rec,
@@ -1157,9 +1179,25 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                                 },
                                 &opts,
                             );
+                            if status.clip_count > 0 {
+                                match full_session.as_ref() {
+                                    Some(recording) => {
+                                        if let Ok(metadata) =
+                                            std::fs::metadata(&recording.temp_path)
+                                        {
+                                            saved_media_baseline_bytes = Some(
+                                                status.total_bytes.saturating_sub(metadata.len()),
+                                            );
+                                        }
+                                    }
+                                    None => {
+                                        saved_media_baseline_bytes = Some(status.total_bytes);
+                                    }
+                                }
+                            }
                             if status.is_over_quota() {
                                 if let Some(event) =
-                                    storage_quota_full_event(&clips_dir, opts.disk_quota_bytes, 0)?
+                                    storage_quota_full_event(&clips_dir, opts.disk_quota_bytes, 0)
                                 {
                                     let _ = events.send(event);
                                 }
@@ -2228,6 +2266,31 @@ struct FullSessionRecording {
     wall_start_unix: i64,
 }
 
+fn full_session_quota_full_event(
+    recording: &FullSessionRecording,
+    saved_media_baseline_bytes: Option<u64>,
+    quota_bytes: Option<u64>,
+    required_bytes: u64,
+) -> Option<Event> {
+    let baseline = saved_media_baseline_bytes?;
+    let active_bytes = match std::fs::metadata(&recording.temp_path) {
+        Ok(metadata) => metadata.len(),
+        Err(error) => {
+            tracing::warn!(
+                event = "full_session_quota_inspection_failed",
+                path = ?recording.temp_path,
+                error = %error,
+            );
+            return None;
+        }
+    };
+    storage_quota_event_for_usage(
+        baseline.saturating_add(active_bytes),
+        quota_bytes,
+        required_bytes,
+    )
+}
+
 fn unique_media_path(session_dir: &Path, prefix: &str) -> PathBuf {
     unique_media_path_at(session_dir, prefix, unix_now_u64())
 }
@@ -2653,7 +2716,10 @@ fn is_within_temp(dir: &Path, temp_dir: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{ffmpeg_capability_identity, ffmpeg_capability_slot, quota_would_be_exceeded};
+    use super::{
+        ffmpeg_capability_identity, ffmpeg_capability_slot, full_session_quota_full_event,
+        quota_would_be_exceeded, storage_quota_full_event, Event, FullSessionRecording,
+    };
     use clipline_capture::{Codec, EncoderApi, EncoderBackend, EncoderCapability};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -2663,6 +2729,37 @@ mod tests {
         assert!(quota_would_be_exceeded(90, Some(100), 11));
         assert!(quota_would_be_exceeded(u64::MAX, Some(u64::MAX), 1));
         assert!(!quota_would_be_exceeded(u64::MAX, None, u64::MAX));
+    }
+
+    #[test]
+    fn unreadable_quota_status_skips_the_check_instead_of_stopping_recording() {
+        let dir = clipline_test_utils::TestDir::new("clipline-service", "quota-inspection-error");
+        let file = dir.path().join("not-a-media-directory");
+        std::fs::write(&file, b"file").unwrap();
+
+        assert!(storage_quota_full_event(&file, Some(100), 1).is_none());
+    }
+
+    #[test]
+    fn full_session_quota_uses_cached_library_bytes_plus_active_file() {
+        let dir = clipline_test_utils::TestDir::new("clipline-service", "quota-active-file");
+        let temp_path = dir.path().join("session.mp4.recording");
+        std::fs::write(&temp_path, [0; 15]).unwrap();
+        let recording = FullSessionRecording {
+            final_path: dir.path().join("session.mp4"),
+            temp_path,
+            wall_start_unix: 0,
+        };
+
+        let event = full_session_quota_full_event(&recording, Some(80), Some(100), 6).unwrap();
+        assert!(matches!(
+            event,
+            Event::StorageQuotaFull {
+                total_bytes: 95,
+                quota_bytes: 100,
+                required_bytes: 6,
+            }
+        ));
     }
 
     #[test]

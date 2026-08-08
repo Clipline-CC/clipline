@@ -17,14 +17,18 @@ kept for recovery instead of discarded.
 The recorder now resolves and recovers its media root before opening capture hardware, then blocks
 startup when the library has no capacity. Replay saves measure the selected encoded window and add
 conservative muxing headroom before creating an output file. Full sessions reserve 64 MiB for safe
-finalization and recheck once per second; a completed output that unexpectedly crosses the limit is
-kept and locks future recording.
+finalization; their once-per-second check combines the startup inventory total with only the active
+file size instead of rescanning the media tree. Inspection failures are logged and skipped rather
+than terminating recording. A completed output that unexpectedly crosses the limit is kept and
+locks future recording.
 
 Quota-full is a durable backend state that gates recorder starts, restarts, save commands, global
 and low-level hotkeys, and tray saves. The frontend shows an accessible modal, marks recording as
 disabled, and offers Library management, the media folder, Storage settings, and an explicit
 recheck. Raising/disabling the quota, switching to a media folder with enough room, or deleting
 enough clips clears the lock and resumes recording when it was previously desired.
+Refresh-driven rechecks update the displayed usage silently, so dismissing the dialog to manage
+clips does not reopen it after every deletion; the explicit Check again action may announce it.
 
 The prior handoff entries describing saved-clip auto-GC are historical and are superseded by this
 checkpoint and `ddoc.md`.

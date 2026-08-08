@@ -1674,10 +1674,13 @@ fn cloud_upload_completion_preserves_equivalent_paths_and_reports_local_deletion
 
     assert!(
         upload.contains("setNotice(\"cloud upload started\", { transient: true });")
-            && upload.contains("const uploadFinished = result && result.record")
+            && upload.contains("const uploadStatus = result?.record?.upload_status || \"\";")
+            && upload
+                .contains("[\"uploaded_private\", \"uploaded_public\"].includes(uploadStatus)")
+            && upload.contains("? \"cloud upload processing\"")
             && upload.contains("? \"cloud upload finished · local copy deleted\"")
             && upload.contains(": \"cloud upload finished\""),
-        "cloud uploads must announce both their start and successful completion app-wide"
+        "cloud uploads must distinguish remote processing from completed uploads"
     );
 
     assert!(
@@ -1703,7 +1706,7 @@ fn cloud_upload_completion_preserves_equivalent_paths_and_reports_local_deletion
     assert!(
         refresh < feedback
             && upload.contains("error: result && result.record ? result.record.error : \"\",")
-            && upload.contains("notice: uploadFinished"),
+            && upload.contains("notice: uploadStatus === \"uploaded_processing\""),
         "intentional deletion and upload errors must be delivered only after the authoritative refresh settles"
     );
 }
@@ -3875,7 +3878,7 @@ fn deck_status_success_toasts_auto_clear() {
         "setDeckStatus(audioSelectionLabel(currentClip), { transient: true })",
         "setDeckStatus(\"clip renamed\", { transient: true })",
         "setDeckStatus(`exported ${exportedLabel} · keyframe-aligned ${fmtTenths(exported.aligned_start_s)} – ${fmtTenths(exported.aligned_end_s)}`, { transient: true })",
-        "setDeckStatus(original ? \"original clip copied\" : \"shareable clip copied\", { transient: true })",
+        "setDeckStatus(message, { transient: true })",
         "setDeckStatus(\"cloud link copied\", { transient: true })",
         "setDeckStatus(\"cloud upload ready\", { transient: true })",
     ] {
@@ -4137,13 +4140,12 @@ fn clipboard_copy_distinguishes_shareable_and_original_paths() {
             && js.contains("Boolean(event?.shiftKey) || Number(clip.duration_s) > 5 * 60")
             && js.contains("original,")
             && js.contains("setDeckStatus(\"preparing shareable clip...\")")
-            && js.contains(
-                "setDeckStatus(original ? \"original clip copied\" : \"shareable clip copied\", { transient: true })"
-            )
+            && js.contains("setDeckStatus(message, { transient: true })")
+            && js.contains("if (error === \"shareable clipboard export cancelled\")")
             && js.contains(
                 "$(\"copy-clip\").addEventListener(\"click\", (event) => copyClipToClipboard(event));"
             ),
-        "toolbar copy should use the original for Shift+click and videos longer than five minutes"
+        "toolbar copy should adapt to long clips and quietly ignore superseded exports"
     );
     assert!(
         html.contains("id=\"clip-menu-copy\"")
@@ -5170,6 +5172,7 @@ fn frontend_failures_are_forwarded_to_bounded_native_diagnostics() {
 fn quota_full_is_a_durable_non_destructive_recording_lock() {
     let html = index_html();
     let main = main_js();
+    let app_core = read_ui_js("app-core.js");
     let settings = read_ui_js("settings.js");
 
     for required in [
@@ -5189,9 +5192,12 @@ fn quota_full_is_a_durable_non_destructive_recording_lock() {
     assert!(
         main.contains(r#"listen("storage-quota-full""#)
             && main.contains(r#"listen("storage-quota-resolved""#)
-            && main.contains(r#"invoke("recheck_storage_quota""#)
+            && main.contains(r#"invoke("recheck_storage_quota", { announce: true })"#)
+            && main.contains("recordingRequested = true;")
+            && app_core.contains(r#"invoke("recheck_storage_quota", { announce: false })"#)
+            && app_core.contains("updateStorageQuotaUsage(s);")
             && !main.contains("cleaned up ${s.gc_deleted}"),
-        "the frontend must persist and recover the quota lock without cleanup messaging"
+        "background quota recovery must stay silent while manual checks may reopen the dialog"
     );
     assert!(
         settings.contains("storageQuotaBlocked")

@@ -1487,6 +1487,7 @@ impl RuntimeState {
         app: AppHandle<R>,
         media_dir: &Path,
         quota_bytes: Option<u64>,
+        announce: bool,
     ) -> Result<bool, String> {
         let (required_bytes, still_stopping) = {
             let inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
@@ -1498,8 +1499,10 @@ impl RuntimeState {
             }
         };
         if still_stopping {
-            if let Some(event) = self.durable_quota_event_for_replay() {
-                let _ = app.emit("storage-quota-full", event);
+            if announce {
+                if let Some(event) = self.durable_quota_event_for_replay() {
+                    let _ = app.emit("storage-quota-full", event);
+                }
             }
             return Ok(false);
         }
@@ -1517,7 +1520,9 @@ impl RuntimeState {
                 let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
                 inner.quota_blocked = Some(event.clone());
             }
-            let _ = app.emit("storage-quota-full", event);
+            if announce {
+                let _ = app.emit("storage-quota-full", event);
+            }
             return Ok(false);
         }
 
@@ -1864,11 +1869,13 @@ fn recheck_storage_quota<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<RuntimeState>,
     storage_settings: tauri::State<crate::library::StorageSettings>,
+    announce: bool,
 ) -> Result<bool, String> {
     state.recheck_storage_quota(
         app,
         &storage_settings.media_dir(),
         storage_settings.quota_bytes(),
+        announce,
     )
 }
 
@@ -2913,7 +2920,7 @@ fn save_settings<R: Runtime>(
     }
     storage_settings.set_quota_bytes(quota_bytes);
     storage_settings.set_media_dir(media_dir.clone());
-    if let Err(error) = state.recheck_storage_quota(app.clone(), &media_dir, quota_bytes) {
+    if let Err(error) = state.recheck_storage_quota(app.clone(), &media_dir, quota_bytes, true) {
         tracing::warn!(event = "storage_quota_recheck_failed", error = %error);
         let _ = app.emit("error", error);
     }

@@ -739,16 +739,18 @@ async function uploadClipToCloud(clip, request = {}) {
         setDeckStatus("cloud upload processing");
       }
     }
-    const uploadFinished = result && result.record
-      && result.record.upload_status !== "failed";
+    const uploadStatus = result?.record?.upload_status || "";
+    const uploadFinished = ["uploaded_private", "uploaded_public"].includes(uploadStatus);
     const refreshCompleted = await refresh();
     finishPostRefreshFeedback(refreshCompleted, {
       error: result && result.record ? result.record.error : "",
-      notice: uploadFinished
-        ? result.local_deleted
-          ? "cloud upload finished · local copy deleted"
-          : "cloud upload finished"
-        : "",
+      notice: uploadStatus === "uploaded_processing"
+        ? "cloud upload processing"
+        : uploadFinished
+          ? result.local_deleted
+            ? "cloud upload finished · local copy deleted"
+            : "cloud upload finished"
+          : "",
     });
     loadCloudClips({ force: true });
   } catch (e) {
