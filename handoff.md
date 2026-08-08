@@ -4,6 +4,23 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-08): Mid-stream manual recording origin
+
+Plan: `docs/superpowers/plans/2026-08-08-manual-full-session-origin.md` (`3d93050`).
+
+Starting a manual full-session recording while the replay buffer was already inside a GOP could
+retain an Opus packet beginning just before the new file's first video keyframe. Finalization then
+rejected that packet with `media sample timestamp precedes recording origin` and preserved a
+recoverable `.mp4.recording` file instead of producing the finished session.
+
+The full-session writer now reuses the replay exporter's origin-aware audio selection. It discards
+only samples before the first recorded GOP origin and preserves all later audio/video. A focused
+fixture starts recording midway through an active, audio-straddled GOP and verifies the session
+summary and finalized MP4. The full workspace suite, warning-denied workspace Clippy, fresh-cache
+capture-crate Clippy, and post-clean focused regression are green.
+
+---
+
 ## Checkpoint (2026-08-08): Manual recording control and honest rail state
 
 Plans: `docs/superpowers/plans/2026-08-08-recording-toggle-hotkey.md` (`89645d5`, refined by

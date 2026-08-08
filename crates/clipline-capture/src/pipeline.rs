@@ -1045,7 +1045,7 @@ fn write_full_session_segment(
         *writer = Some(HybridMp4Writer::new_multi(target, track_cfgs)?);
     }
     let writer = writer.as_mut().expect("writer initialized");
-    let audio_selections = segment_audio_selections(&seg, None)?;
+    let audio_selections = segment_audio_selections(&seg, Some(origin_s))?;
     let timelines = set_segment_decode_times(
         writer,
         seg.pts_start_s,
@@ -2967,6 +2967,39 @@ mod tests {
             first.audio[0].pts_start_s.unwrap() >= first.pts_start_s - 1e-9,
             "the first kept Opus packet must not precede the video origin"
         );
+        assert!((summary.duration_s - 2.0).abs() < 1e-6);
+        assert!(
+            clipline_mp4::walker::movie_duration_s(&std::fs::read(full_path).unwrap()).is_some()
+        );
+    }
+
+    #[test]
+    fn full_session_started_mid_stream_drops_audio_before_its_new_origin() {
+        use crate::mock::MockAudioSource;
+
+        let dir = TestDir::new("clipline-pipeline", "mid-stream-full-session-origin");
+        let full_path = dir.path().join("full.mp4");
+        let cap = OffsetCapture {
+            inner: MockCapture::new(90, 30),
+            offset_s: 0.51,
+        };
+        let mut recorder = Recorder::new(cap, MockEncoder::new(30, 30), usize::MAX)
+            .with_audio(Box::new(MockAudioSource::new(48_000, 20)));
+
+        for _ in 0..45 {
+            assert!(recorder.step().unwrap());
+        }
+        recorder
+            .start_full_session(std::fs::File::create(&full_path).unwrap())
+            .unwrap();
+        recorder.run_to_end().unwrap();
+
+        let segments: Vec<_> = recorder.ring().unwrap().segments().collect();
+        assert!(
+            segments[1].audio[0].pts_start_s.unwrap() < segments[1].pts_start_s,
+            "fixture must attach while audio straddles the next GOP origin"
+        );
+        let summary = recorder.finish_full_session().unwrap().unwrap();
         assert!((summary.duration_s - 2.0).abs() < 1e-6);
         assert!(
             clipline_mp4::walker::movie_duration_s(&std::fs::read(full_path).unwrap()).is_some()
