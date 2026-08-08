@@ -4,6 +4,27 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-07): Nightly 0.1.46
+
+Plan: `docs/superpowers/plans/2026-08-07-nightly-0.1.46.md` (`dfac393`).
+
+Nightly 0.1.46 is the one-week soak candidate for Clipline's first stable release. It combines the
+slim regular installer and on-demand FFmpeg runtime, lower tray memory through a destroyable
+WebView, the sparse-capture GOP watchdog fix, first-run manual and one-click setup, F6 as the new
+install default, cancellable and Library-accessible clipboard workflows, visible Cloud upload
+progress, and the non-destructive saved-media quota lock.
+
+PR #142 merged to `develop` at `7315a6e9` after green Ubuntu and Windows checks. Microsoft's
+current WebView2 release documentation lists Runtime 151 as the stable line and SDK 1.0.4129.50 as
+requiring Runtime 151.0.4129.50 or newer. The pinned standalone payload remains the later
+151.0.4129.59 x64 Fixed Version CAB and was re-reviewed for this release on 2026-08-07.
+
+The release commit advances only Clipline/Tauri version metadata, the WebView2 review dates, this
+handoff, and the release plan from the CI-green merge. Publication and downloaded-asset hashes are
+recorded here after all signed assets are independently verified.
+
+---
+
 ## Checkpoint (2026-08-07): saved-media quotas are non-destructive
 
 Plan: `docs/superpowers/plans/2026-08-07-non-destructive-storage-quota.md` (`88e6d10`).
