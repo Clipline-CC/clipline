@@ -2011,6 +2011,12 @@ fn publish_window_lifecycle<R: Runtime>(
 
 fn publish_background_window<R: Runtime>(app: &AppHandle<R>, mode: WindowLifecycleMode) {
     app.state::<MicTestState>().stop();
+    if matches!(
+        mode,
+        WindowLifecycleMode::Destroying | WindowLifecycleMode::Destroyed
+    ) {
+        app.state::<crate::library::ClipboardExportState>().cancel();
+    }
     publish_window_lifecycle(app, mode);
 }
 
@@ -2047,6 +2053,7 @@ fn request_webview_memory_target<R: Runtime>(
 fn quit_app<R: Runtime>(app: &AppHandle<R>) {
     log_diagnostic("quit app requested");
     app.state::<MicTestState>().stop();
+    app.state::<crate::library::ClipboardExportState>().cancel();
     app.state::<RuntimeState>()
         .send(Cmd::Stop { announce: false });
     app.exit(0);
@@ -2854,6 +2861,7 @@ pub fn run() {
         .manage(crate::memory::MemorySampler::default())
         .manage(NativeMediaFolderAuthorization::default())
         .manage(crate::library::StorageSettings::new(quota_bytes, media_dir))
+        .manage(crate::library::ClipboardExportState::default())
         .plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
             let launched_by_autostart = args.iter().any(|arg| arg == "--autostart");
             log_diagnostic(format!(
@@ -3167,6 +3175,7 @@ pub fn run() {
             tauri::RunEvent::Exit => {
                 log_diagnostic("run event: exit");
                 app.state::<MicTestState>().stop();
+                app.state::<crate::library::ClipboardExportState>().cancel();
                 app.state::<RuntimeState>()
                     .send(Cmd::Stop { announce: false });
             }

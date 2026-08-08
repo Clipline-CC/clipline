@@ -299,6 +299,16 @@ $("clip-menu-export-play").addEventListener("click", () => {
     });
   }
 });
+$("clip-menu-copy").addEventListener("click", () => {
+  const clip = clipContextTarget;
+  hideClipContextMenu();
+  if (clip) copyClipToClipboard(null, clip, true);
+});
+$("clip-menu-copy-shareable").addEventListener("click", () => {
+  const clip = clipContextTarget;
+  hideClipContextMenu();
+  if (clip) copyClipToClipboard(null, clip, false);
+});
 $("clip-menu-upload").addEventListener("click", () => {
   const clip = clipContextTarget;
   const record = clipContextRecord();

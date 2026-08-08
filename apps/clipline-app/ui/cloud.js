@@ -710,6 +710,7 @@ async function uploadClipToCloud(clip, request = {}) {
     return;
   }
   setDeckStatus("uploading to cloud...");
+  setNotice("cloud upload started", { transient: true });
   $("error").textContent = "";
   try {
     const result = await invoke("upload_clip_to_cloud", {
@@ -738,11 +739,15 @@ async function uploadClipToCloud(clip, request = {}) {
         setDeckStatus("cloud upload processing");
       }
     }
+    const uploadFinished = result && result.record
+      && result.record.upload_status !== "failed";
     const refreshCompleted = await refresh();
     finishPostRefreshFeedback(refreshCompleted, {
       error: result && result.record ? result.record.error : "",
-      notice: result && result.local_deleted
-        ? "cloud upload ready · local copy deleted"
+      notice: uploadFinished
+        ? result.local_deleted
+          ? "cloud upload finished · local copy deleted"
+          : "cloud upload finished"
         : "",
     });
     loadCloudClips({ force: true });

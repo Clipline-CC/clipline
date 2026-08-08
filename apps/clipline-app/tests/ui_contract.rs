@@ -874,6 +874,8 @@ fn review_player_owns_all_controls() {
         "id=\"clip-menu-play\"",
         "id=\"clip-menu-open-cloud-page\"",
         "id=\"clip-menu-copy-cloud-link\"",
+        "id=\"clip-menu-copy\"",
+        "id=\"clip-menu-copy-shareable\"",
         "id=\"clip-menu-upload\"",
         "id=\"clip-menu-rename\"",
         "id=\"clip-menu-delete\"",
@@ -1670,6 +1672,14 @@ fn cloud_upload_completion_preserves_equivalent_paths_and_reports_local_deletion
     let upload = js_function_body(&cloud, "uploadClipToCloud");
 
     assert!(
+        upload.contains("setNotice(\"cloud upload started\", { transient: true });")
+            && upload.contains("const uploadFinished = result && result.record")
+            && upload.contains("? \"cloud upload finished · local copy deleted\"")
+            && upload.contains(": \"cloud upload finished\""),
+        "cloud uploads must announce both their start and successful completion app-wide"
+    );
+
+    assert!(
         refresh_clips
             .contains("PlayerCore.sameClipPath(clip.path, currentPath)"),
         "post-upload Library refreshes must preserve reviews across equivalent Windows path spellings"
@@ -1692,10 +1702,25 @@ fn cloud_upload_completion_preserves_equivalent_paths_and_reports_local_deletion
     assert!(
         refresh < feedback
             && upload.contains("error: result && result.record ? result.record.error : \"\",")
-            && upload.contains(
-                "notice: result && result.local_deleted\n        ? \"cloud upload ready · local copy deleted\""
-            ),
+            && upload.contains("notice: uploadFinished"),
         "intentional deletion and upload errors must be delivered only after the authoritative refresh settles"
+    );
+}
+
+#[test]
+fn local_library_cards_show_cloud_upload_activity() {
+    let library = read_ui_js("library.js");
+    let css = styles_css();
+    let card = js_function_body(&library, "clipCard");
+
+    assert!(
+        card.contains("const uploadBusy = cloudRecord")
+            && card.contains("[\"queued\", \"uploading\", \"processing\", \"retrying\"]")
+            && card.contains("spinner.className = \"clip-upload-spinner\";")
+            && card.contains("spinner.title = \"Uploading clip\";")
+            && css.contains(".clip-upload-spinner")
+            && css.contains("@keyframes clip-upload-spin"),
+        "busy local cloud uploads should render a labelled spinner beside the clip title"
     );
 }
 
@@ -3148,6 +3173,8 @@ fn no_native_browser_dialogs() {
             && js.contains("$(\"clip-menu-play\").addEventListener(\"click\"")
             && js.contains("$(\"clip-menu-open-cloud-page\").addEventListener(\"click\"")
             && js.contains("$(\"clip-menu-copy-cloud-link\").addEventListener(\"click\"")
+            && js.contains("$(\"clip-menu-copy\").addEventListener(\"click\"")
+            && js.contains("$(\"clip-menu-copy-shareable\").addEventListener(\"click\"")
             && js.contains("$(\"clip-menu-upload\").addEventListener(\"click\"")
             && js.contains("$(\"clip-menu-rename\").addEventListener(\"click\"")
             && js.contains("$(\"clip-menu-rename-file\").addEventListener(\"click\"")
@@ -4068,6 +4095,8 @@ fn clipboard_copy_distinguishes_shareable_and_original_paths() {
     assert!(
         library.contains("pub struct CopyClipToClipboardRequest")
             && library.contains("pub original: bool")
+            && library.contains("pub struct ClipboardExportState")
+            && library.contains("fn is_cancelled(&self) -> bool")
             && library.contains("request: CopyClipToClipboardRequest")
             && library.contains("window: tauri::WebviewWindow")
             && library.contains(".hwnd()")
@@ -4082,15 +4111,15 @@ fn clipboard_copy_distinguishes_shareable_and_original_paths() {
     assert!(
         js.contains("await invoke(\"copy_clip_to_clipboard\", {")
             && js.contains("request: {")
-            && js.contains("path: currentClip.path")
+            && js.contains("path: clip.path")
             && js.contains("audioTrackIds: original")
-            && js.contains(": clipAudioTracks(currentClip).length")
-            && js.contains("selectedAudioTrackIdsForClip(currentClip)"),
+            && js.contains(": clipAudioTracks(clip).length")
+            && js.contains("selectedAudioTrackIdsForClip(clip)"),
         "normal copy should send selected audio while original copy should bypass audio selection"
     );
     assert!(
-        js.contains("async function copyClipToClipboard(event)")
-            && js.contains("const original = Boolean(event?.shiftKey);")
+        js.contains("async function copyClipToClipboard(event, clip = currentClip, originalOverride = null)")
+            && js.contains("Boolean(event?.shiftKey) || Number(clip.duration_s) > 5 * 60")
             && js.contains("original,")
             && js.contains("setDeckStatus(\"preparing shareable clip...\")")
             && js.contains(
@@ -4099,11 +4128,19 @@ fn clipboard_copy_distinguishes_shareable_and_original_paths() {
             && js.contains(
                 "$(\"copy-clip\").addEventListener(\"click\", (event) => copyClipToClipboard(event));"
             ),
-        "copy interaction should reserve Shift+click for the untouched original"
+        "toolbar copy should use the original for Shift+click and videos longer than five minutes"
     );
     assert!(
-        html.contains("title=\"Copy shareable clip to clipboard (Shift+click for original)\""),
-        "the otherwise-hidden Shift+click behavior must be documented in the tooltip"
+        html.contains("id=\"clip-menu-copy\"")
+            && html.contains("id=\"clip-menu-copy-shareable\"")
+            && html.contains("Shift+click copies the original"),
+        "the explicit context actions and adaptive toolbar behavior must be discoverable"
+    );
+    assert!(
+        app.contains(".manage(crate::library::ClipboardExportState::default())")
+            && app.contains("state::<crate::library::ClipboardExportState>().cancel()")
+            && library.contains("run_share_ffmpeg(&mut command, remaining, || job.is_cancelled())"),
+        "closing Clipline must cancel the active backend export and its FFmpeg child"
     );
     assert!(
         library.contains("\"share-export-v3-aac-h264-cbr8m\""),

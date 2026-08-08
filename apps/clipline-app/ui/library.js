@@ -1100,6 +1100,8 @@ function clipCard(c) {
   el.dataset.clipPath = c.path;
   el.title = clipDisplayTitle(c) || c.name;
   const cloudRecord = clipCloudRecord(c);
+  const uploadBusy = cloudRecord
+    && ["queued", "uploading", "processing", "retrying"].includes(cloudRecord.upload_status);
 
   const kind = clipKind(c);
   const when = new Date(c.modified_unix * 1000);
@@ -1170,6 +1172,12 @@ function clipCard(c) {
   meta.className = "card-meta";
   const nameRow = document.createElement("div");
   nameRow.className = "card-name";
+  if (uploadBusy) {
+    const spinner = document.createElement("span");
+    spinner.className = "clip-upload-spinner";
+    spinner.title = "Uploading clip";
+    nameRow.appendChild(spinner);
+  }
   const previewIcon = cardPreview.icon && cardPreview.icon.url ? cardPreview.icon : null;
   const game = clipGameIcon(c);
   const cardIcon = previewIcon || (game ? { type: "game", url: game.url, label: game.label } : null);
@@ -1676,6 +1684,8 @@ function showClipContextMenu(ev, clip) {
   $("clip-menu-open-cloud-page").hidden = true;
   $("clip-menu-copy-cloud-link").hidden = true;
   $("clip-menu-export-play").hidden = true;
+  $("clip-menu-copy").hidden = false;
+  $("clip-menu-copy-shareable").hidden = false;
   const upload = $("clip-menu-upload");
   upload.hidden = false;
   upload.textContent = shareable ? "Copy cloud link" : uploaded ? "Open cloud page" : "Upload";
@@ -1702,6 +1712,8 @@ function showCloudClipContextMenu(ev, entry) {
   $("clip-menu-copy-cloud-link").hidden = !cloudShareUrl(entry);
   $("clip-menu-copy-cloud-link").disabled = !cloudShareUrl(entry);
   $("clip-menu-export-play").hidden = true;
+  $("clip-menu-copy").hidden = true;
+  $("clip-menu-copy-shareable").hidden = true;
   $("clip-menu-upload").hidden = true;
   $("clip-menu-rename").hidden = true;
   $("clip-menu-rename-file").hidden = true;
@@ -1725,6 +1737,8 @@ function showGamePlayContextMenu(ev, play) {
   exportPlay.hidden = false;
   exportPlay.disabled = !play || !play.range;
   exportPlay.textContent = "Export play as clip";
+  $("clip-menu-copy").hidden = true;
+  $("clip-menu-copy-shareable").hidden = true;
   $("clip-menu-upload").hidden = true;
   $("clip-menu-rename").hidden = true;
   $("clip-menu-rename-file").hidden = true;

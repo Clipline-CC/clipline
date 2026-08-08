@@ -4,6 +4,37 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-07): cancellable clipboard export and library feedback
+
+Plan: `docs/superpowers/plans/2026-08-07-clipboard-library-qol.md` (`02758a4`).
+
+Clipboard share exports now have a process-owned generation token. Starting another copy cancels
+the prior job; closing the main WebView to the tray or quitting Clipline also cancels the active
+job. The FFmpeg polling loop observes cancellation every 25 ms, kills and reaps the child, and
+returns through the existing temporary-file cleanup. Cancellation is rechecked before Windows
+clipboard ownership changes, so a completed-but-abandoned export cannot replace clipboard data.
+
+The Review copy button remains shareable by default through five minutes. Longer clips now copy
+the original media file immediately, and Shift-click still explicitly copies the original. Local
+Library cards expose both `Copy to clipboard` (original) and `Copy shareable clip` (forced
+compatible export) in their right-click menu; cloud-only and game-play menus hide both actions.
+Library share exports use the clip's default audio-track selection when the clip is not already
+open in Review.
+
+Cloud uploads now publish app-wide start and completion notices. While a local clip's cloud record
+is queued, uploading, processing, or retrying, a spinner appears at the left of its Library title;
+the existing byte progress, deck status, refresh arbitration, retry state, and local-delete
+feedback remain intact.
+
+The cancellation generation, five-minute rule, context-menu ownership, upload notices, and busy
+indicator are contract-tested. Full workspace tests, fresh-cache warning-denied workspace Clippy,
+JavaScript syntax checks, and diff checks are green. Manual retest: right-click a local clip and
+try both copy actions; open a clip over five minutes and confirm normal toolbar Copy reports the
+original; force a shareable export and close Clipline while it runs; upload a clip and confirm the
+start notice, title spinner, and completion notice.
+
+---
+
 ## Checkpoint (2026-08-07): one-click recommended setup
 
 Plan: `docs/superpowers/plans/2026-08-07-smart-configuration.md` (`abbfbba8`).
