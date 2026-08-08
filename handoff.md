@@ -23,6 +23,27 @@ The release commit advances only Clipline/Tauri version metadata, the WebView2 r
 handoff, and the release plan from the CI-green merge. Publication and downloaded-asset hashes are
 recorded here after all signed assets are independently verified.
 
+**Published** on the rolling `nightly` prerelease from `develop` commit `9961ebe`. The `nightly`
+tag and release both resolve to full commit `9961ebe19eac9044e120ce66b0a1d2bc0abbdc6e`. All seven
+public assets were downloaded again and matched both the staged SHA-256 digest and GitHub's
+reported digest.
+
+| asset | bytes | sha256 |
+| --- | ---: | --- |
+| `Clipline_0.1.46_x64-setup.exe` | 9,825,253 | `1f95ffd8219d79cdc086c37711cd8b33f250a1aedc47641327c37ff9bc86024f` |
+| `Clipline_0.1.46_x64-setup.exe.sig` | 420 | `08407689729aba00cad2e01aa5f3c4ee37f0062eb93aa6cf1db16bf25e9f8014` |
+| `Clipline_0.1.46_x64-standalone-setup.exe` | 282,740,821 | `01c896d306b2adde338cf898ac7142a934d910947ec4548696e67443f8b924e8` |
+| `Clipline_0.1.46_x64-standalone-setup.exe.sig` | 436 | `048b26fa2b7e87ee4a4062313352fc2e763d35395829c3a35ecb4ad9eb6c44da` |
+| `latest.json` | 1,470 | `bc08c755f6ceb05f2f064e5e6b8053de70ba1c6d46b0cdf3752ca475bfe9c5bd` |
+| `latest-standalone.json` | 1,497 | `af45c6cd9d17349c5431ba14601c8a50a3376ad05efc4327b6088c3649547d5a` |
+| `release-notes-0.1.46.md` | 2,914 | `776b66a98428c55e175221c6b86c9e37dfa00f4b76660f7edfe0bd530cbb6e0c` |
+
+Both downloaded manifests parse as version 0.1.46, point at their expected rolling release URLs,
+and contain the exact downloaded sidecar signatures. Both downloaded installers verify under the
+updater public key compiled into Clipline; both crossed installer/signature pairs are rejected.
+The regular installer passes the ≤25 MiB slim-core gate with no `avcodec` marker, while archive
+inspection confirms that the standalone contains its pinned FFmpeg and WebView2 payloads.
+
 ---
 
 ## Checkpoint (2026-08-07): saved-media quotas are non-destructive
