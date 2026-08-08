@@ -209,6 +209,11 @@ fn app_rs() -> String {
     fs::read_to_string(path).expect("read src/app.rs")
 }
 
+fn service_rs() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/service.rs");
+    fs::read_to_string(path).expect("read src/service.rs")
+}
+
 fn tauri_config() -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json");
     fs::read_to_string(path).expect("read tauri.conf.json")
@@ -480,7 +485,7 @@ fn manual_recorder_start_rechecks_waiting_state_before_emit() {
 }
 
 #[test]
-fn active_recording_status_identifies_the_selected_encoder() {
+fn active_replay_buffer_status_identifies_the_selected_encoder() {
     let js = main_js();
     let update_status = js_function_body(&js, "updateCaptureStatus");
 
@@ -489,12 +494,12 @@ fn active_recording_status_identifies_the_selected_encoder() {
         "the frontend must retain the backend's active encoder label and clear it when recording stops"
     );
     assert!(
-        update_status.contains("Stop recording · ${activeEncoderLabel}")
-            && update_status.contains("$(\"rail-status\").title = storageQuotaBlocked")
+        update_status.contains("Replay buffer ready · ${activeEncoderLabel}")
+            && update_status.contains("$(\"rail-buffer\").title = storageQuotaBlocked")
             && update_status.contains(": recordingActive")
-            && update_status.contains("? recordingTitle")
-            && update_status.contains(": `Start ${source} recording`;"),
-        "the active recorder status must assign the concrete encoder selected by Automatic mode to the visible tooltip"
+            && update_status.contains("? bufferReadyTitle")
+            && update_status.contains(": `Start ${source} replay buffer`;"),
+        "replay-buffer readiness must assign the concrete encoder selected by Automatic mode to the visible tooltip"
     );
 }
 
@@ -627,7 +632,8 @@ fn quality_of_life_features_are_wired_through_the_app_shell() {
     assert!(
         js.contains("waiting_for_game")
             && js.contains("recorderWaitingForGame")
-            && js.contains("\"Waiting\""),
+            && js.contains("rail-buffer-dot")
+            && js.contains("? \" waiting\""),
         "recorder status must distinguish policy waiting from a manual stop"
     );
     assert!(
@@ -815,7 +821,9 @@ fn review_player_owns_all_controls() {
         "id=\"rail-dot\"",
         "id=\"rail-status-text\"",
         "id=\"rail-status\"",
-        "id=\"rail-status\" title=\"Stop recording\" aria-pressed=\"true\"",
+        "id=\"rail-status\" title=\"Start recording\" aria-pressed=\"false\"",
+        "id=\"rail-buffer\"",
+        "id=\"rail-buffer-dot\"",
         "id=\"rail-save\"",
         "id=\"rail-library-status\"",
         "id=\"rail-clips-count\"",
@@ -2191,6 +2199,53 @@ fn rail_shows_save_hotkey() {
     assert!(
         css.contains(".rail-hotkey"),
         "rail hotkey needs stable compact styling"
+    );
+}
+
+#[test]
+fn recording_hotkey_and_rail_control_a_real_full_session() {
+    let html = index_html();
+    let js = main_js();
+    let app = app_rs();
+    let service = service_rs();
+
+    for required in [
+        "id=\"set-recording-hotkey\"",
+        "Start / Stop recording",
+        "id=\"rail-buffer\"",
+        "id=\"rail-buffer-dot\"",
+    ] {
+        assert!(
+            html.contains(required),
+            "recording controls need `{required}`"
+        );
+    }
+    for required in [
+        "recording_hotkey: $(\"set-recording-hotkey\").value.trim() || null",
+        "$(\"set-recording-hotkey\").value = s.recording_hotkey || \"\"",
+        "const HOTKEY_FIELD_IDS = [\"set-hotkey\", \"set-hotkey-2\", \"set-recording-hotkey\"]",
+        "$(\"rail-status\").addEventListener(\"click\", toggleSessionRecording)",
+        "$(\"rail-buffer\").addEventListener(\"click\", toggleRecording)",
+        "invoke(\"set_session_recording\"",
+        "fullSessionRecordingActive",
+    ] {
+        assert!(
+            js.contains(required),
+            "recording UI must include `{required}`"
+        );
+    }
+    assert!(
+        app.contains("fn set_session_recording<R: Runtime>")
+            && app.contains("toggle_session_recording_from_hotkey")
+            && app.contains("HookAction::ToggleRecording"),
+        "native shell must route UI and global hotkey recording actions through RuntimeState"
+    );
+    assert!(
+        service.contains("StartFullSession")
+            && service.contains("StopFullSession")
+            && service.contains("begin_full_session_recording(")
+            && service.contains("finish_full_session_recording("),
+        "the recorder loop must attach and finalize the existing full-session sink"
     );
 }
 

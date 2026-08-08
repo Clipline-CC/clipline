@@ -94,6 +94,9 @@ pub struct AppSettings {
     /// Optional second keybind for Save Replay; `None` disables it.
     #[serde(default)]
     pub hotkey_secondary: Option<String>,
+    /// Optional system-wide keybind for starting or stopping a full-session recording.
+    #[serde(default)]
+    pub recording_hotkey: Option<String>,
     #[serde(default)]
     pub open_on_startup: bool,
     #[serde(default = "default_enabled")]
@@ -142,6 +145,7 @@ impl Default for AppSettings {
             replay_storage: ReplayStorageSettings::default(),
             hotkey: "F6".into(),
             hotkey_secondary: None,
+            recording_hotkey: None,
             open_on_startup: false,
             close_to_tray: true,
             minimize_to_tray: false,
@@ -169,6 +173,12 @@ impl AppSettings {
             }
         }
         hotkeys
+    }
+
+    pub fn recording_hotkey(&self) -> Option<&str> {
+        self.recording_hotkey
+            .as_deref()
+            .filter(|hotkey| !hotkey.trim().is_empty())
     }
 
     pub fn to_service_options(&self, lol_url: Option<String>) -> Result<ServiceOptions, String> {

@@ -220,6 +220,7 @@ function fillSettings(s) {
   $("set-replay-disk-ack").checked = !!replayStorage.disk_acknowledged;
   $("set-hotkey").value = s.hotkey;
   $("set-hotkey-2").value = s.hotkey_secondary || "";
+  $("set-recording-hotkey").value = s.recording_hotkey || "";
   updateHotkeyLabels(s.hotkey, s.hotkey_secondary || "");
   $("set-open-on-startup").checked = !!s.open_on_startup;
   $("set-close-to-tray").checked = s.close_to_tray !== false;
@@ -313,10 +314,13 @@ function readSettings() {
 // Either field may be cleared with Esc, so the first non-empty keybind is
 // promoted to the primary slot; the backend rejects an empty primary.
 function readHotkeySettings() {
-  const keybinds = HOTKEY_FIELD_IDS.map((fieldId) => $(fieldId).value.trim()).filter(Boolean);
+  const keybinds = ["set-hotkey", "set-hotkey-2"]
+    .map((fieldId) => $(fieldId).value.trim())
+    .filter(Boolean);
   return {
     hotkey: keybinds[0] || "",
     hotkey_secondary: keybinds[1] || null,
+    recording_hotkey: $("set-recording-hotkey").value.trim() || null,
   };
 }
 
@@ -1629,28 +1633,38 @@ function updateCaptureStatus() {
     activeDetectedGame && activeDetectedGame.active
       ? `Game: ${activeDetectedGame.name}`
       : fallbackCaptureSourceLabel(currentSettings || { capture_mode: "primary_monitor" });
-  const recordingTitle = activeEncoderLabel
-    ? `Stop recording · ${activeEncoderLabel}`
-    : "Stop recording";
-  $("rail-status").classList.toggle("stopped", !recordingRequested || storageQuotaBlocked);
-  $("rail-status").classList.toggle("waiting", recorderWaitingForGame);
+  const bufferReadyTitle = activeEncoderLabel
+    ? `Replay buffer ready · ${activeEncoderLabel}`
+    : "Replay buffer ready";
+  $("rail-status").classList.toggle("stopped", !fullSessionRecordingActive || storageQuotaBlocked);
   $("rail-status").classList.toggle("blocked", storageQuotaBlocked);
-  $("rail-status").setAttribute("aria-pressed", String(recordingRequested));
+  $("rail-status").setAttribute("aria-pressed", String(fullSessionRecordingActive));
   $("rail-status").setAttribute("aria-disabled", String(storageQuotaBlocked));
   $("rail-status").title = storageQuotaBlocked
     ? "Recording disabled — storage quota full"
-    : recordingActive
-    ? recordingTitle
-    : recorderWaitingForGame
-      ? "Stop waiting for a game"
+    : fullSessionRecordingActive
+      ? "Stop recording"
       : `Start ${source} recording`;
   $("rail-status-text").textContent = storageQuotaBlocked
     ? "Full"
+    : fullSessionRecordingActive
+      ? "Rec"
+      : "Record";
+  $("rail-dot").className = `dot${fullSessionRecordingActive ? " on" : ""}`;
+
+  $("rail-buffer").classList.toggle("stopped", !recordingRequested || storageQuotaBlocked);
+  $("rail-buffer").classList.toggle("waiting", recorderWaitingForGame);
+  $("rail-buffer").classList.toggle("blocked", storageQuotaBlocked);
+  $("rail-buffer").setAttribute("aria-pressed", String(recordingRequested));
+  $("rail-buffer").setAttribute("aria-disabled", String(storageQuotaBlocked));
+  $("rail-buffer").title = storageQuotaBlocked
+    ? "Replay buffer disabled — storage quota full"
     : recordingActive
-    ? "Rec"
-    : recorderWaitingForGame
-      ? "Waiting"
-      : "Off";
+      ? bufferReadyTitle
+      : recorderWaitingForGame
+        ? "Stop waiting for a game"
+        : `Start ${source} replay buffer`;
+  $("rail-buffer-dot").className = `dot${recordingActive ? " ready" : recorderWaitingForGame ? " waiting" : ""}`;
   $("rail-save").disabled = storageQuotaBlocked || !recordingActive;
   renderRailGame();
 }
@@ -1687,7 +1701,7 @@ async function toggleRecording() {
     return;
   }
   const next = !recordingRequested;
-  $("rail-status").disabled = true;
+  $("rail-buffer").disabled = true;
   try {
     recordingRequested = await invoke("set_recording", { recording: next });
     if (!recordingRequested) {
@@ -1698,18 +1712,32 @@ async function toggleRecording() {
   } catch (e) {
     $("error").textContent = e;
   } finally {
+    $("rail-buffer").disabled = false;
+  }
+}
+
+async function toggleSessionRecording() {
+  if (storageQuotaBlocked) {
+    showStorageQuotaFull(storageQuotaState);
+    return;
+  }
+  const next = !fullSessionRecordingActive;
+  $("rail-status").disabled = true;
+  try {
+    const requested = await invoke("set_session_recording", { recording: next });
+    if (!requested) fullSessionRecordingActive = false;
+    updateCaptureStatus();
+  } catch (e) {
+    $("error").textContent = e;
+  } finally {
     $("rail-status").disabled = false;
   }
 }
 
-// The two Save Replay keybind fields sit side by side and share one status
-// line. Esc while recording clears a field; at least one keybind must remain.
-const HOTKEY_FIELD_IDS = ["set-hotkey", "set-hotkey-2"];
+// All shortcut fields share capture and conflict handling. Esc clears a field;
+// at least one Save Replay keybind must remain, while recording is optional.
+const HOTKEY_FIELD_IDS = ["set-hotkey", "set-hotkey-2", "set-recording-hotkey"];
 const HOTKEY_IDLE_MESSAGE = "Click a field to record a shortcut. Esc clears it.";
-
-function otherHotkeyFieldId(fieldId) {
-  return fieldId === "set-hotkey" ? "set-hotkey-2" : "set-hotkey";
-}
 
 function setHotkeyStatus(message, state = "") {
   const status = $("hotkey-status");
@@ -1756,8 +1784,8 @@ function recordMouseHotkey(fieldId, ev) {
 function applyHotkeyCaptureResult(fieldId, result) {
   switch (result.kind) {
     case "captured":
-      if ($(otherHotkeyFieldId(fieldId)).value === result.value) {
-        setHotkeyStatus("Already used by the other Save Replay keybind.", "error");
+      if (HOTKEY_FIELD_IDS.some((other) => other !== fieldId && $(other).value === result.value)) {
+        setHotkeyStatus("Already used by another Clipline action.", "error");
         break;
       }
       $(fieldId).value = result.value;

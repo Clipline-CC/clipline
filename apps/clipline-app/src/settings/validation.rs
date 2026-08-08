@@ -102,11 +102,20 @@ impl AppSettings {
         self.media_dir_path()?;
         self.validate_replay_storage()?;
         let primary = super::hotkey::normalize_hotkey(&self.hotkey)?;
-        if let Some(secondary) = self.hotkey_secondary.as_deref() {
-            if !secondary.trim().is_empty() {
-                let secondary = super::hotkey::normalize_hotkey(secondary)?;
-                if secondary == primary {
-                    return Err("secondary hotkey matches the primary hotkey".into());
+        let secondary = self
+            .hotkey_secondary
+            .as_deref()
+            .filter(|secondary| !secondary.trim().is_empty())
+            .map(super::hotkey::normalize_hotkey)
+            .transpose()?;
+        if secondary.as_deref() == Some(primary.as_str()) {
+            return Err("secondary hotkey matches the primary hotkey".into());
+        }
+        if let Some(recording) = self.recording_hotkey.as_deref() {
+            if !recording.trim().is_empty() {
+                let recording = super::hotkey::normalize_hotkey(recording)?;
+                if recording == primary || secondary.as_deref() == Some(recording.as_str()) {
+                    return Err("recording hotkey matches a Save Replay hotkey".into());
                 }
             }
         }

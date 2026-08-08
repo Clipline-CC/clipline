@@ -749,6 +749,34 @@ fn validation_rejects_secondary_hotkey_matching_primary() {
 }
 
 #[test]
+fn recording_hotkey_is_optional_normalized_and_distinct_from_save_replay() {
+    assert_eq!(AppSettings::default().recording_hotkey, None);
+
+    let dir = TestDir::new("clipline-settings", "recording-hotkey-round-trip");
+    let path = dir.path().join("settings.json");
+    let settings = AppSettings {
+        recording_hotkey: Some("ctrl+shift+r".into()),
+        ..AppSettings::default()
+    };
+    settings.save_to(&path).unwrap();
+    let loaded = AppSettings::load_from(&path).unwrap();
+    assert_eq!(loaded.recording_hotkey.as_deref(), Some("Ctrl+Shift+R"));
+
+    let primary_conflict = AppSettings {
+        recording_hotkey: Some("f6".into()),
+        ..AppSettings::default()
+    };
+    assert!(primary_conflict.validate().is_err());
+
+    let secondary_conflict = AppSettings {
+        hotkey_secondary: Some("Ctrl+R".into()),
+        recording_hotkey: Some("ctrl+r".into()),
+        ..AppSettings::default()
+    };
+    assert!(secondary_conflict.validate().is_err());
+}
+
+#[test]
 fn load_tolerates_unknown_video_encoder_without_resetting_settings() {
     let dir = TestDir::new("clipline-settings", "unknown-encoder");
     let path = dir.path().join("settings.json");

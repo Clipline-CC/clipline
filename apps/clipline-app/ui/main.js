@@ -19,8 +19,6 @@ listen("status", (e) => {
   recordingRequested = recordingActive || recorderWaitingForGame;
   activeEncoderLabel = s.recording ? String(s.encoder || "") : "";
   fullSessionRecordingActive = Boolean(s.full_session);
-  $("rail-dot").className = "dot"
-    + (s.recording ? " on" : recorderWaitingForGame ? " waiting" : "");
   updateCaptureStatus();
 });
 
@@ -54,6 +52,7 @@ function showStorageQuotaFull(payload) {
   updateStorageQuotaUsage(payload);
   recordingActive = false;
   recorderWaitingForGame = false;
+  fullSessionRecordingActive = false;
   updateCaptureStatus();
   if (!$("storage-quota-dialog").open) $("storage-quota-dialog").showModal();
 }
@@ -193,7 +192,8 @@ $("gallery-filter").addEventListener("click", (ev) => {
   for (const c of $("gallery-filter").querySelectorAll(".g-chip")) c.classList.toggle("on", c === chip);
   renderClips();
 });
-$("rail-status").addEventListener("click", toggleRecording);
+$("rail-status").addEventListener("click", toggleSessionRecording);
+$("rail-buffer").addEventListener("click", toggleRecording);
 $("set-capture").addEventListener("change", () => {
   captureTargetDirty = true;
   syncCaptureFields();

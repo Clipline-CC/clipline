@@ -52,6 +52,8 @@ const AMBIGUOUS_REPLAY_CACHE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 6
 mod media_root;
 pub enum Cmd {
     Save,
+    StartFullSession,
+    StopFullSession,
     Stop { announce: bool },
 }
 
@@ -1265,6 +1267,79 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                         }
                     }
                 }
+                Ok(Cmd::StartFullSession) => {
+                    if full_session.is_none() {
+                        if let Some(event) = storage_quota_full_event(
+                            &clips_dir,
+                            opts.disk_quota_bytes,
+                            FULL_SESSION_QUOTA_RESERVE_BYTES,
+                        ) {
+                            let _ = events.send(event);
+                            let _ = shutdown_recorder(
+                                &mut rec,
+                                &mut full_session,
+                                RecorderFinishContext {
+                                    marker_log: &marker_log,
+                                    player_summary: player_summary.full_session_summary(),
+                                    audio_tracks: &audio_track_metadata,
+                                    clips_dir: &clips_dir,
+                                    opts: &opts,
+                                    events,
+                                },
+                            );
+                            send_stopped(events);
+                            return Ok(());
+                        }
+                        full_session = begin_full_session_recording(
+                            &mut rec,
+                            &clips_dir,
+                            session.current(),
+                            RecordingMode::FullSession,
+                            opts.active_game.as_ref(),
+                            events,
+                        );
+                        if let Some(recording_dir) = full_session
+                            .as_ref()
+                            .and_then(|recording| recording.final_path.parent())
+                        {
+                            write_session_game_meta(
+                                recording_dir,
+                                opts.active_game.as_ref(),
+                                league_queue.as_ref(),
+                            );
+                        }
+                    }
+                    send_recording_status(
+                        events,
+                        &rec,
+                        &full_session,
+                        &encoder_status,
+                        capture_backend_status,
+                    );
+                }
+                Ok(Cmd::StopFullSession) => {
+                    if let Some(status) = finish_full_session_recording(
+                        &mut rec,
+                        &mut full_session,
+                        &RecorderFinishContext {
+                            marker_log: &marker_log,
+                            player_summary: player_summary.full_session_summary(),
+                            audio_tracks: &audio_track_metadata,
+                            clips_dir: &clips_dir,
+                            opts: &opts,
+                            events,
+                        },
+                    ) {
+                        saved_media_baseline_bytes = Some(status.total_bytes);
+                    }
+                    send_recording_status(
+                        events,
+                        &rec,
+                        &full_session,
+                        &encoder_status,
+                        capture_backend_status,
+                    );
+                }
                 Ok(Cmd::Stop { announce }) => {
                     let _ = shutdown_recorder(
                         &mut rec,
@@ -2073,7 +2148,7 @@ fn shutdown_recorder(
 ) -> Option<String> {
     match rec.finish_stream() {
         Ok(()) => {
-            finish_full_session_recording(rec, full_session, &ctx);
+            let _ = finish_full_session_recording(rec, full_session, &ctx);
             None
         }
         Err(e) => {
@@ -2180,10 +2255,8 @@ fn finish_full_session_recording(
     rec: &mut LiveRecorder,
     recording: &mut Option<FullSessionRecording>,
     ctx: &RecorderFinishContext<'_>,
-) {
-    let Some(recording) = recording.take() else {
-        return;
-    };
+) -> Option<StorageStatus> {
+    let recording = recording.take()?;
     match rec.finish_full_session() {
         Ok(Some(summary)) if summary.duration_s.is_finite() && summary.duration_s <= 0.0 => {
             handle_full_session_finish_error(
@@ -2191,6 +2264,7 @@ fn finish_full_session_recording(
                 ctx.events,
                 "full session ended before any footage was written",
             );
+            None
         }
         Ok(Some(summary)) => {
             let seconds = if summary.duration_s.is_finite() {
@@ -2204,7 +2278,7 @@ fn finish_full_session_recording(
                 0.0
             };
             if !rename_finalized_session(&recording, ctx.events) {
-                return;
+                return None;
             }
             let markers = write_marker_sidecar(
                 ctx.events,
@@ -2215,7 +2289,7 @@ fn finish_full_session_recording(
                 ctx.player_summary,
                 ctx.audio_tracks,
             );
-            emit_saved_clip(
+            Some(emit_saved_clip(
                 ctx.events,
                 ctx.clips_dir,
                 &recording.final_path,
@@ -2227,7 +2301,7 @@ fn finish_full_session_recording(
                     recording_end_unix: Some(unix_now_i64()),
                 },
                 ctx.opts,
-            );
+            ))
         }
         Ok(None) => {
             handle_full_session_finish_error(
@@ -2235,9 +2309,11 @@ fn finish_full_session_recording(
                 ctx.events,
                 "full session ended before any footage was written",
             );
+            None
         }
         Err(error) => {
             handle_full_session_finish_error(&recording.temp_path, ctx.events, &error.to_string());
+            None
         }
     }
 }

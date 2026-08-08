@@ -41,9 +41,13 @@
       </div>
 
       <div class="sidebar-rail">
-        <button id="rail-status" title="Stop recording" aria-pressed="true">
+        <button id="rail-status" title="Start recording" aria-pressed="false">
           <span class="rail-status-dot"><span id="rail-dot" class="dot"></span></span>
-          <span id="rail-status-text" class="rail-label">Rec</span>
+          <span id="rail-status-text" class="rail-label">Record</span>
+        </button>
+        <button id="rail-buffer" title="Stop replay buffer" aria-pressed="true">
+          <span class="rail-status-dot"><span id="rail-buffer-dot" class="dot ready"></span></span>
+          <span class="rail-label">Buffer</span>
         </button>
         <button id="rail-save" title="Save Replay (F6)">
           <svg viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 2a8 8 0 1 1 0 16 8 8 0 0 1 0-16z"/><circle cx="12" cy="12" r="4.5"/></svg>
@@ -829,6 +833,17 @@
                 <span id="hotkey-status" class="hint">Click a field, then press F1-F11/F13-F24, middle mouse, Mouse4, Mouse5, or a modified keyboard key. Esc clears the keybind.</span>
               </div>
             </div>
+            <div class="setting-row" data-settings-key="recording_hotkey">
+              <div class="setting-info">
+                <strong>Start / Stop recording</strong>
+                <span>Optional global shortcut for starting or finalizing a full-session recording. The replay buffer stays on when recording stops.</span>
+              </div>
+              <div class="hotkey-recorder">
+                <div class="hotkey-recorder-row single">
+                  <input id="set-recording-hotkey" spellcheck="false" readonly inputmode="none" placeholder="Not set" aria-describedby="hotkey-status" />
+                </div>
+              </div>
+            </div>
           </div>
 
           <div class="settings-section" id="settings-panel-misc" data-section="misc" role="tabpanel" aria-labelledby="settings-tab-misc" hidden>
@@ -1181,8 +1196,8 @@
 
   <dialog id="elevation-dialog">
     <div class="confirm-body">
-      <strong>Administrator game blocks replay hotkeys</strong>
-      <span><span id="elevation-game-name">This game</span> is running as administrator. Windows prevents Clipline from receiving Save Replay hotkeys while the game is focused.</span>
+      <strong>Administrator game blocks Clipline hotkeys</strong>
+      <span><span id="elevation-game-name">This game</span> is running as administrator. Windows prevents Clipline from receiving its replay and recording hotkeys while the game is focused.</span>
       <span class="hint">Restarting Clipline as administrator fixes the hotkey, but resets the current rolling replay buffer. Clipline will continue to start normally in the future.</span>
     </div>
     <div class="confirm-actions">

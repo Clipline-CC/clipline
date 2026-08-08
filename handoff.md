@@ -4,6 +4,30 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-08): Manual recording control and honest rail state
+
+Plans: `docs/superpowers/plans/2026-08-08-recording-toggle-hotkey.md` (`89645d5`, refined by
+`32b4ab5`).
+
+Settings > Hotkeys now offers an optional system-wide Start / Stop recording shortcut. It accepts
+the same function, modified keyboard, and mouse inputs as Save Replay, rejects cross-action
+collisions, and remains unset by default for existing and new users. The shared low-level hook
+dispatches the two actions distinctly, including while Clipline is tray-hidden.
+
+Record now means a real saved full-session recording. Starting it attaches Clipline's existing
+full-session writer to the live encoded stream—or wakes capture when games-only mode is waiting—so
+it does not create a second encoder. Stopping finalizes the session while the rolling replay buffer
+continues. The left rail exposes these independently: Record changes to red `Rec` only while a
+full-session writer is active, while Buffer reports the replay service as Off, Waiting, or Ready.
+Both paths retain the existing non-destructive storage-quota lock.
+
+The settings persistence/validation, hotkey action routing, manual games-only bypass, recorder
+commands, and UI shell are covered by focused Rust and UI-contract tests. JavaScript syntax checks,
+the full workspace suite, warning-denied workspace Clippy, fresh-cache Clipline Clippy, and the
+post-clean Clipline test suite are green. The rebuilt app was relaunched for manual verification.
+
+---
+
 ## Checkpoint (2026-08-08): Adaptive clip size display
 
 Plan: `docs/superpowers/plans/2026-08-08-adaptive-clip-size-display.md` (`361b4d8`).

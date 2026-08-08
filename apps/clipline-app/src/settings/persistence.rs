@@ -186,6 +186,8 @@ impl AppSettings {
             // failing or resetting the whole file.
             hotkey_secondary: string_field(object, "hotkey_secondary")
                 .and_then(|raw| normalize_hotkey(&raw).ok()),
+            recording_hotkey: string_field(object, "recording_hotkey")
+                .and_then(|raw| normalize_hotkey(&raw).ok()),
             open_on_startup: bool_field(object, "open_on_startup")
                 .unwrap_or(defaults.open_on_startup),
             close_to_tray: bool_field(object, "close_to_tray").unwrap_or(defaults.close_to_tray),
@@ -207,6 +209,16 @@ impl AppSettings {
         if settings.hotkey_secondary.as_deref() == Some(settings.hotkey.as_str()) {
             settings.hotkey_secondary = None;
         }
+        if settings
+            .recording_hotkey
+            .as_deref()
+            .is_some_and(|recording| {
+                recording == settings.hotkey
+                    || settings.hotkey_secondary.as_deref() == Some(recording)
+            })
+        {
+            settings.recording_hotkey = None;
+        }
         settings.buffer_seconds = super::compatibility_buffer_seconds(&settings);
         settings.bitrate_mbps = settings.effective_bitrate_mbps();
         if matches!(settings.capture_mode, CaptureMode::WindowTitle)
@@ -221,6 +233,10 @@ impl AppSettings {
         let mut settings = self.clone();
         settings.hotkey = normalize_hotkey(&settings.hotkey)?;
         settings.hotkey_secondary = match settings.hotkey_secondary.as_deref() {
+            Some(raw) if !raw.trim().is_empty() => Some(normalize_hotkey(raw)?),
+            _ => None,
+        };
+        settings.recording_hotkey = match settings.recording_hotkey.as_deref() {
             Some(raw) if !raw.trim().is_empty() => Some(normalize_hotkey(raw)?),
             _ => None,
         };

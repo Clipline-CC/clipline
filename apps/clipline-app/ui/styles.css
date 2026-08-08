@@ -1253,19 +1253,22 @@ label span { white-space: nowrap; }
   fill: currentColor;
 }
 
-#rail-status {
+#rail-status,
+#rail-buffer {
   color: var(--text);
 }
 
-#rail-status.stopped {
+#rail-status.stopped,
+#rail-buffer.stopped {
   color: var(--muted);
 }
 
-#rail-status.waiting {
+#rail-buffer.waiting {
   color: var(--accent);
 }
 
-#rail-status.blocked {
+#rail-status.blocked,
+#rail-buffer.blocked {
   color: var(--danger);
 }
 
@@ -1370,6 +1373,10 @@ label span { white-space: nowrap; }
 .dot.waiting {
   background: var(--accent);
   box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.18);
+}
+.dot.ready {
+  background: var(--ok);
+  box-shadow: 0 0 0 2px rgba(var(--ok-rgb), 0.18);
 }
 
 #notice { color: var(--ok); font-size: 12px; min-height: 17px; margin-top: 6px; }
@@ -1864,15 +1871,21 @@ button.primary.settings-save-glow {
   min-width: 0;
 }
 
+.hotkey-recorder-row.single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 #set-hotkey,
-#set-hotkey-2 {
+#set-hotkey-2,
+#set-recording-hotkey {
   cursor: pointer;
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
 }
 
 #set-hotkey.recording,
-#set-hotkey-2.recording {
+#set-hotkey-2.recording,
+#set-recording-hotkey.recording {
   border-color: var(--accent);
   background: var(--hotkey-rec-bg);
   box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.18);
