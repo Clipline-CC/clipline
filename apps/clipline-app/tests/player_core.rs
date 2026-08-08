@@ -348,6 +348,15 @@ fn fmt_bytes_switches_units_at_a_gigabyte() {
 }
 
 #[test]
+fn clip_size_switches_from_megabytes_to_gigabytes() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.fmtMegabytes(1559.7)"),
+        "1.5 GB"
+    );
+}
+
+#[test]
 fn library_storage_usage_formats_used_bytes_and_quota() {
     let mut ctx = player_core_context();
     assert_eq!(

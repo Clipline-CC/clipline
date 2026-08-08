@@ -4,6 +4,19 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-08): Adaptive clip size display
+
+Plan: `docs/superpowers/plans/2026-08-08-adaptive-clip-size-display.md` (`361b4d8`).
+
+Library cards and Review metadata now switch from MB to GB at 1 GB using the existing shared size
+formatter. Values round to the nearest tenth, so a `1559.7 MB` clip displays as `1.5 GB`. Rename
+and loaded-metadata refreshes use the same formatter, preventing the label from reverting.
+
+The reported-case formatter test, JavaScript syntax checks, full workspace suite, and
+warning-denied workspace Clippy pass are green.
+
+---
+
 ## Checkpoint (2026-08-08): Cloud upload completion handoff
 
 Plan: `docs/superpowers/plans/2026-08-08-cloud-upload-completion-handoff.md` (`f57eb87`).

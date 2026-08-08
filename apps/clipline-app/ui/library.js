@@ -1216,7 +1216,7 @@ function clipCard(c) {
   const infoParts = [];
   if (c.game && c.game.queue && c.game.queue.label) infoParts.push(c.game.queue.label);
   if (Number.isFinite(c.duration_s)) infoParts.push(fmtDur(c.duration_s));
-  infoParts.push(`${c.size_mb.toFixed(1)} MB`);
+  infoParts.push(fmtMegabytes(c.size_mb));
   infoParts.push(fmtAgo(Date.now() / 1000, c.modified_unix));
   if (!cardPreview.summary && digest) infoParts.push(digest);
   info.textContent = infoParts.join(" · ");

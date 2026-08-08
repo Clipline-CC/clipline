@@ -106,7 +106,7 @@ function applyRenamedClip(oldClip, result) {
     $("pname").textContent = clipDisplayTitle(renamed) || renamed.name;
     const shownDuration = clipDuration();
     $("pmeta").textContent =
-      `${shownDuration > 0 ? `${fmtDur(shownDuration)} · ` : ""}${renamed.size_mb.toFixed(1)} MB · ${renamed.path}`;
+      `${shownDuration > 0 ? `${fmtDur(shownDuration)} · ` : ""}${fmtMegabytes(renamed.size_mb)} · ${renamed.path}`;
   }
   return renamed;
 }
@@ -751,7 +751,7 @@ function openClip(clip) {
   $("stage-note").textContent = "loading…";
   setClipTitleEditing(false);
   $("pname").textContent = clipDisplayTitle(clip) || clip.name;
-  $("pmeta").textContent = `${clip.size_mb.toFixed(1)} MB · ${clip.path}`;
+  $("pmeta").textContent = `${fmtMegabytes(clip.size_mb)} · ${clip.path}`;
   syncReviewLocalActions();
   syncUploadClipButton();
   updateViews();

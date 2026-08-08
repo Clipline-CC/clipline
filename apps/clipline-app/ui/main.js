@@ -422,7 +422,7 @@ video.addEventListener("loadedmetadata", () => {
   $("stage-note").textContent = `${video.videoWidth}x${video.videoHeight} · ${fmtDur(video.duration)}`;
   updateStageFrame();
   if (currentClip) {
-    $("pmeta").textContent = `${fmtDur(video.duration)} · ${currentClip.size_mb.toFixed(1)} MB · ${currentClip.path}`;
+    $("pmeta").textContent = `${fmtDur(video.duration)} · ${fmtMegabytes(currentClip.size_mb)} · ${currentClip.path}`;
     setTrim(0, video.duration);
     // Duration is now exact: rebuild the whole-clip navigator and re-render.
     renderOverviewMarkers();

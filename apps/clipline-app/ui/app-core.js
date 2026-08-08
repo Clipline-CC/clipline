@@ -27,6 +27,7 @@ var afterNextPaint = () => new Promise((resolve) => {
 
 var {
   fmtBytes,
+  fmtMegabytes,
   fmtLibraryStorageUsage,
   fmtDur,
   fmtTenths,
