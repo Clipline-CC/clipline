@@ -764,7 +764,7 @@
   --accent: #a970ff;
   --accent-hover: #c092ff;
   --marker: #edc66d;
-  --session: #d19aff;
+  --session: var(--marker);
   --rec: #ff5c68;
   --ok: #62d6c7;
   --mc-info: #b8abc5;

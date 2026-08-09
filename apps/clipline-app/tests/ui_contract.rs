@@ -89,6 +89,11 @@ fn purple_theme_is_selectable_and_covers_the_theme_palette() {
         css_decl_value(classic, "--accent-rgb"),
         "Purple needs its own accent palette"
     );
+    assert_eq!(
+        css_decl_value(purple, "--session"),
+        Some("var(--marker)"),
+        "Purple sessions must use the warm marker color to stay distinct from violet replays"
+    );
 }
 
 #[test]

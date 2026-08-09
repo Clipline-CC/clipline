@@ -4027,7 +4027,8 @@ instant preview and save/discard transaction as the existing themes, persists as
 parallel stylesheet. Booth remains the default. The UI contract compares alternate palette token
 coverage, so future theme-token additions cannot silently leave Purple incomplete. A shared
 `--logo-filter` also tints every in-app Clipline SVG to the active palette without duplicating the
-asset; the installed Windows icon remains unchanged.
+asset; the installed Windows icon remains unchanged. Purple clip-kind labels deliberately split
+into violet Replay, warm-gold Session, and teal Trim instead of using two adjacent violet shades.
 
 ## What's next (rough value order; each gets its own plan)
 
