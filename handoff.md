@@ -4019,6 +4019,43 @@ escaping, CSP, opaque downloads, notes/status, and immediate deletion. Clipline 
 untouched. The desktop uses the exact official HTTPS intake route in debug and release builds;
 production health and readiness must remain green before shipping a client release.
 
+## Checkpoint (2026-08-09): Purple theme
+
+Settings > General now offers Purple (deep violet) alongside Booth and Classic. It uses the same
+instant preview and save/discard transaction as the existing themes, persists as the `purple`
+`UiTheme` value, and supplies the full alternate-theme CSS token set rather than maintaining a
+parallel stylesheet. Booth remains the default. The UI contract compares alternate palette token
+coverage, so future theme-token additions cannot silently leave Purple incomplete. A shared
+`--logo-filter` also tints every in-app Clipline SVG to the active palette without duplicating the
+asset; the installed Windows icon remains unchanged. Purple clip-kind labels deliberately split
+into violet Replay, warm-gold Session, and teal Trim instead of using two adjacent violet shades.
+
+## Checkpoint (2026-08-09): OLED theme
+
+Settings > General now also offers OLED (true black). Its canvas is `#000000`, with only near-black
+neutral panel elevation and restrained blue controls to minimize large illuminated areas. Clip
+kinds stay blue Replay, warm-gold Session, and teal Trim; status/error colors and the in-app logo
+remain theme-aware. The theme persists as the `oled` `UiTheme` value and overrides the same complete
+token set as Classic and Purple.
+
+## Checkpoint (2026-08-09): neutral Dark and Light themes
+
+Settings > General now includes conventional neutral Dark and Light palettes. Dark uses charcoal
+surfaces and familiar blue controls without the hue of Classic or the pure black of OLED. Light
+uses soft-gray/white surfaces, dark text, blue controls, and `color-scheme: light` so native selects,
+checkboxes, and scrollbars follow the palette too. Both persist through `UiTheme`, cover the full
+alternate-theme token set, keep clip kinds distinct, and tint the in-app logo.
+
+## Checkpoint (2026-08-09): PR #144 theme review hardening
+
+Theme-sensitive controls no longer carry dark-surface-only color literals: destructive actions,
+trim controls, hover fills, settings/game cards, Cloud errors, and common hairlines now reuse the
+existing semantic palette tokens, keeping them legible in Light. The active capture glow follows
+`--accent-rgb` and the stopped shade follows the theme scrim. One shared palette assertion now
+checks token parity, clip-kind separation, and logo tinting for every alternate theme; all six
+`UiTheme` values share one persistence round-trip test. PR #144 is based directly on the current
+`origin/develop`, which already contains PR #143.
+
 ## What's next (rough value order; each gets its own plan)
 
 1. **Auto-clip on importance** (ddoc §5): `importance ≥ threshold` → auto-save; marker kinds

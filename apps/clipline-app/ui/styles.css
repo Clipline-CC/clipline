@@ -26,8 +26,8 @@
   --mc-objective: #cdb2ff;
   --mc-structure: #f0cd7a;
   --mc-info: #c0b4aa;
-  /* Theme tokens (Booth defaults). [data-theme="classic"] below restores the
-     original midnight-blue palette; keep both blocks in sync when adding one. */
+  /* Theme tokens (Booth defaults). Alternate [data-theme] palettes below
+     override the same token set; keep those blocks in sync when adding one. */
   --btn-primary: #ffb224;
   --btn-primary-hover: #ffc65a;
   --btn-primary-text: #171310;
@@ -79,6 +79,7 @@
   --bright2-rgb: 243, 237, 225;
   --accent-rgb: 255, 178, 36;
   --ok-rgb: 86, 200, 189;
+  --logo-filter: none;
 
 }
 
@@ -748,8 +749,293 @@
   --bright2-rgb: 240, 242, 246;
   --accent-rgb: 61, 123, 253;
   --ok-rgb: 122, 184, 255;
+  --logo-filter: hue-rotate(182deg) saturate(1.05);
 }
 
+/* Purple — a deep-violet palette, Settings > General > Theme. */
+:root[data-theme="purple"] {
+  --bg: #100c18;
+  --panel: #171121;
+  --panel-2: #20172d;
+  --line: #30233f;
+  --line-strong: #49345f;
+  --text: #eee8f6;
+  --muted: #a99bb8;
+  --accent: #a970ff;
+  --accent-hover: #c092ff;
+  --marker: #edc66d;
+  --session: var(--marker);
+  --rec: #ff5c68;
+  --ok: #62d6c7;
+  --mc-info: #b8abc5;
+  --btn-primary: #8b4fdb;
+  --btn-primary-hover: #a563ec;
+  --btn-primary-text: #f7f1ff;
+  --baseline: #b66fff;
+  --baseline-rgb: 182, 111, 255;
+  --overlay-rgb: 10, 6, 17;
+  --slider-thumb: #eedcff;
+  --slider-thumb-border: #a970df;
+  --slider-thumb-hover: #c092ff;
+  --clip-active-bg: #251936;
+  --hotkey-rec-bg: #25163b;
+  --tile-active-bg: #2b1c40;
+  --tile-primary-line: #74539a;
+  --seg-on-bg: #2d1b48;
+  --seg-on-line: #7448ad;
+  --region-line: #c39aff;
+  --region-text: #faf4ff;
+  --region-grip: #ead8ff;
+  --team-rgb: 98, 214, 199;
+  --team-deep-rgb: 58, 174, 162;
+  --team-hi-rgb: 132, 229, 216;
+  --shade-d: #1d1428;
+  --well: #0d0914;
+  --field: #130e1b;
+  --hover: #291f35;
+  --text-soft: #c6b9d1;
+  --text-strong: #f5f0f9;
+  --text-max: #fbf8fd;
+  --scrollbar: #4b3b58;
+  --scrollbar-hover: #625070;
+  --faint: #6d6078;
+  --shade-a: #130d1c;
+  --shade-b: #1c1427;
+  --shade-c: #150f1e;
+  --shade-e: #584a63;
+  --shade-f: #1b1325;
+  --shade-g: #2c2237;
+  --shade-h: #4c3d59;
+  --shade-i: #0f0a16;
+  --scrim-a-rgb: 8, 3, 16;
+  --scrim-b-rgb: 6, 4, 9;
+  --scrim-c-rgb: 10, 7, 14;
+  --scrim-d-rgb: 24, 17, 34;
+  --scrim-e-rgb: 28, 18, 41;
+  --scrim-f-rgb: 22, 14, 33;
+  --soft-rgb: 169, 155, 184;
+  --soft2-rgb: 190, 171, 205;
+  --bright-rgb: 247, 241, 252;
+  --bright2-rgb: 244, 237, 250;
+  --accent-rgb: 169, 112, 255;
+  --ok-rgb: 98, 214, 199;
+  --logo-filter: hue-rotate(227deg) saturate(.8) brightness(1.05);
+}
+
+/* OLED — true-black surfaces with restrained high-contrast accents. */
+:root[data-theme="oled"] {
+  --bg: #000000;
+  --panel: #050505;
+  --panel-2: #0a0a0a;
+  --line: #202020;
+  --line-strong: #333333;
+  --text: #e8e8e8;
+  --muted: #8d8d8d;
+  --accent: #5b8cff;
+  --accent-hover: #79a2ff;
+  --marker: #e5b45a;
+  --session: var(--marker);
+  --rec: #ff555f;
+  --ok: #4dd6bd;
+  --mc-info: #a0a0a0;
+  --btn-primary: #3f6fd4;
+  --btn-primary-hover: #5282e8;
+  --btn-primary-text: #ffffff;
+  --baseline: #5b8cff;
+  --baseline-rgb: 91, 140, 255;
+  --overlay-rgb: 0, 0, 0;
+  --slider-thumb: #e0e8ff;
+  --slider-thumb-border: #7898e8;
+  --slider-thumb-hover: #9db4ff;
+  --clip-active-bg: #0a1428;
+  --hotkey-rec-bg: #08172e;
+  --tile-active-bg: #0d1d35;
+  --tile-primary-line: #3f5f94;
+  --seg-on-bg: #0a1a32;
+  --seg-on-line: #31548d;
+  --region-line: #77a7ff;
+  --region-text: #f4f8ff;
+  --region-grip: #d9e5ff;
+  --team-rgb: 77, 214, 189;
+  --team-deep-rgb: 50, 174, 153;
+  --team-hi-rgb: 119, 229, 211;
+  --shade-d: #080808;
+  --well: #000000;
+  --field: #060606;
+  --hover: #111111;
+  --text-soft: #b8b8b8;
+  --text-strong: #f0f0f0;
+  --text-max: #fafafa;
+  --scrollbar: #2d2d2d;
+  --scrollbar-hover: #424242;
+  --faint: #5a5a5a;
+  --shade-a: #030303;
+  --shade-b: #0c0c0c;
+  --shade-c: #050505;
+  --shade-e: #4a4a4a;
+  --shade-f: #090909;
+  --shade-g: #181818;
+  --shade-h: #383838;
+  --shade-i: #020202;
+  --scrim-a-rgb: 0, 0, 0;
+  --scrim-b-rgb: 0, 0, 0;
+  --scrim-c-rgb: 2, 2, 2;
+  --scrim-d-rgb: 8, 8, 8;
+  --scrim-e-rgb: 12, 12, 12;
+  --scrim-f-rgb: 6, 6, 6;
+  --soft-rgb: 141, 141, 141;
+  --soft2-rgb: 174, 174, 174;
+  --bright-rgb: 250, 250, 250;
+  --bright2-rgb: 240, 240, 240;
+  --accent-rgb: 91, 140, 255;
+  --ok-rgb: 77, 214, 189;
+  --logo-filter: hue-rotate(182deg) saturate(.8) brightness(1.05);
+}
+
+/* Dark — neutral charcoal surfaces with familiar blue controls. */
+:root[data-theme="dark"] {
+  --bg: #111315;
+  --panel: #181b1f;
+  --panel-2: #20242a;
+  --line: #2d333b;
+  --line-strong: #424a55;
+  --text: #e7e9ed;
+  --muted: #9299a3;
+  --accent: #4f83e8;
+  --accent-hover: #6b98ee;
+  --marker: #d9a441;
+  --session: var(--marker);
+  --rec: #e6555e;
+  --ok: #4fc1ac;
+  --mc-info: #a2a8b0;
+  --btn-primary: #396ac7;
+  --btn-primary-hover: #477bdc;
+  --btn-primary-text: #ffffff;
+  --baseline: #4f83e8;
+  --baseline-rgb: 79, 131, 232;
+  --overlay-rgb: 10, 12, 15;
+  --slider-thumb: #e2e9f8;
+  --slider-thumb-border: #7395d8;
+  --slider-thumb-hover: #9bb7ed;
+  --clip-active-bg: #19243a;
+  --hotkey-rec-bg: #16243d;
+  --tile-active-bg: #1b2c49;
+  --tile-primary-line: #526d9d;
+  --seg-on-bg: #192a47;
+  --seg-on-line: #3c6098;
+  --region-line: #77a7ff;
+  --region-text: #f2f6ff;
+  --region-grip: #dbe6ff;
+  --team-rgb: 79, 193, 172;
+  --team-deep-rgb: 53, 157, 139;
+  --team-hi-rgb: 121, 211, 194;
+  --shade-d: #15181c;
+  --well: #0e1013;
+  --field: #13161a;
+  --hover: #272c33;
+  --text-soft: #b9bec6;
+  --text-strong: #f2f3f5;
+  --text-max: #f8f9fa;
+  --scrollbar: #3b424b;
+  --scrollbar-hover: #505963;
+  --faint: #626a74;
+  --shade-a: #121519;
+  --shade-b: #1a1e23;
+  --shade-c: #15181c;
+  --shade-e: #515862;
+  --shade-f: #181c21;
+  --shade-g: #272c33;
+  --shade-h: #424a54;
+  --shade-i: #101215;
+  --scrim-a-rgb: 5, 7, 10;
+  --scrim-b-rgb: 7, 9, 12;
+  --scrim-c-rgb: 13, 16, 20;
+  --scrim-d-rgb: 24, 28, 34;
+  --scrim-e-rgb: 30, 35, 42;
+  --scrim-f-rgb: 23, 27, 33;
+  --soft-rgb: 146, 153, 163;
+  --soft2-rgb: 169, 178, 190;
+  --bright-rgb: 248, 249, 250;
+  --bright2-rgb: 242, 243, 245;
+  --accent-rgb: 79, 131, 232;
+  --ok-rgb: 79, 193, 172;
+  --logo-filter: hue-rotate(182deg) saturate(.85) brightness(1.02);
+}
+
+/* Light — neutral daylight surfaces and native light browser controls. */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f4f6f8;
+  --panel: #ffffff;
+  --panel-2: #eef1f4;
+  --line: #d7dce2;
+  --line-strong: #b9c1ca;
+  --text: #24282e;
+  --muted: #66707c;
+  --accent: #2f66cf;
+  --accent-hover: #2458bb;
+  --marker: #b87416;
+  --session: var(--marker);
+  --rec: #c83f49;
+  --ok: #168f7b;
+  --mc-info: #68717c;
+  --btn-primary: #2f66cf;
+  --btn-primary-hover: #2458bb;
+  --btn-primary-text: #ffffff;
+  --baseline: #2f66cf;
+  --baseline-rgb: 47, 102, 207;
+  --overlay-rgb: 25, 28, 32;
+  --slider-thumb: #ffffff;
+  --slider-thumb-border: #4f83e8;
+  --slider-thumb-hover: #dbe7ff;
+  --clip-active-bg: #e6edfa;
+  --hotkey-rec-bg: #e3ecfb;
+  --tile-active-bg: #dce8fa;
+  --tile-primary-line: #8aa7db;
+  --seg-on-bg: #dce8fa;
+  --seg-on-line: #789bd7;
+  --region-line: #2f66cf;
+  --region-text: #14223b;
+  --region-grip: #ffffff;
+  --team-rgb: 22, 143, 123;
+  --team-deep-rgb: 16, 116, 99;
+  --team-hi-rgb: 50, 164, 142;
+  --shade-d: #edf0f3;
+  --well: #e3e7eb;
+  --field: #ffffff;
+  --hover: #e6e9ed;
+  --text-soft: #505964;
+  --text-strong: #161a1f;
+  --text-max: #0f1216;
+  --scrollbar: #b6bdc6;
+  --scrollbar-hover: #929ca8;
+  --faint: #9aa2ac;
+  --shade-a: #f0f2f5;
+  --shade-b: #e7ebef;
+  --shade-c: #f7f8fa;
+  --shade-e: #9ca5af;
+  --shade-f: #e9edf1;
+  --shade-g: #dce1e6;
+  --shade-h: #aeb6bf;
+  --shade-i: #f8f9fa;
+  --scrim-a-rgb: 25, 28, 32;
+  --scrim-b-rgb: 10, 12, 15;
+  --scrim-c-rgb: 230, 234, 239;
+  --scrim-d-rgb: 255, 255, 255;
+  --scrim-e-rgb: 240, 243, 247;
+  --scrim-f-rgb: 232, 236, 241;
+  --soft-rgb: 102, 112, 124;
+  --soft2-rgb: 120, 132, 145;
+  --bright-rgb: 25, 29, 34;
+  --bright2-rgb: 35, 40, 46;
+  --accent-rgb: 47, 102, 207;
+  --ok-rgb: 22, 143, 123;
+  --logo-filter: hue-rotate(182deg) saturate(.85) brightness(1.02);
+}
+
+img[src="assets/clipline-icon.svg"] {
+  filter: var(--logo-filter);
+}
 
 * {
   box-sizing: border-box;
@@ -845,8 +1131,11 @@ button:active { transform: translateY(1px); }
 button:disabled { opacity: 0.45; cursor: default; transform: none; }
 button.primary { border-color: var(--btn-primary); background: var(--btn-primary); color: var(--btn-primary-text); font-weight: 600; }
 button.primary:hover { background: var(--btn-primary-hover); border-color: var(--btn-primary-hover); }
-button.danger { border-color: #6d3034; color: #ffc9c9; }
-button.danger:hover { background: #3c2326; }
+button.danger {
+  border-color: color-mix(in srgb, var(--rec) 55%, var(--line));
+  color: var(--rec);
+}
+button.danger:hover { background: color-mix(in srgb, var(--rec) 14%, var(--panel-2)); }
 button.wide { min-width: 72px; }
 
 input, select, textarea {
@@ -923,7 +1212,7 @@ input[type="range"]::-webkit-slider-runnable-track {
       var(--range-track) var(--range-progress),
       var(--range-track) 100%
     );
-  box-shadow: inset 0 0 0 1px var(--line), inset 0 0 0 2px rgba(255, 255, 255, 0.02);
+  box-shadow: inset 0 0 0 1px var(--line), inset 0 0 0 2px rgba(var(--bright-rgb), 0.02);
 }
 
 input[type="range"]::-webkit-slider-thumb {
@@ -1110,8 +1399,8 @@ label span { white-space: nowrap; }
 .rail-game.active > img,
 .rail-game.active > .placeholder {
   filter:
-    drop-shadow(0 0 1px rgba(50, 116, 255, 0.95))
-    drop-shadow(0 0 7px rgba(50, 116, 255, 0.72));
+    drop-shadow(0 0 1px rgba(var(--accent-rgb), 0.95))
+    drop-shadow(0 0 7px rgba(var(--accent-rgb), 0.72));
 }
 .rail-game.waiting {
   border-color: rgba(var(--accent-rgb), 0.45);
@@ -1123,7 +1412,7 @@ label span { white-space: nowrap; }
   position: absolute;
   inset: 0;
   z-index: 1;
-  background: rgba(3, 7, 14, 0.58);
+  background: rgba(var(--scrim-a-rgb), 0.58);
   pointer-events: none;
 }
 .rail-game.blocked {
@@ -1318,7 +1607,7 @@ label span { white-space: nowrap; }
   width: 30px;
   height: 30px;
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.04);
+  background: rgba(var(--bright-rgb), 0.04);
 }
 
 .sidebar-rail .dot {
@@ -1538,7 +1827,7 @@ label span { white-space: nowrap; }
   margin-left: 6px;
   padding: 0 7px;
   border-radius: 8px;
-  background: #3a3013;
+  background: color-mix(in srgb, var(--marker) 16%, var(--panel-2));
   color: var(--marker);
   font-size: 11px;
 }
@@ -1553,7 +1842,7 @@ label span { white-space: nowrap; }
   padding: 0;
   border: 0;
   background: transparent;
-  color: #ffc9c9;
+  color: var(--rec);
   opacity: 0;
   pointer-events: none;
   transform: translateY(-50%);
@@ -1567,8 +1856,8 @@ label span { white-space: nowrap; }
   pointer-events: auto;
 }
 .clip .del:hover {
-  background: rgba(255, 121, 130, 0.12);
-  color: #ffdfe1;
+  background: color-mix(in srgb, var(--rec) 14%, transparent);
+  color: var(--rec);
 }
 .clip .del:active {
   transform: translateY(-50%);
@@ -1748,7 +2037,7 @@ label span { white-space: nowrap; }
 
 .settings-discard-warning {
   min-width: 0;
-  color: #ff7b86;
+  color: var(--rec);
   font-size: 13px;
   font-weight: 650;
   line-height: 1.35;
@@ -2047,7 +2336,7 @@ button.primary.settings-save-glow {
 
 .segmented-control label:hover span {
   color: var(--text);
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--hover);
 }
 
 .segmented-control input:checked + span {
@@ -2299,9 +2588,9 @@ button.primary.settings-save-glow {
 .game-review-master-card {
   min-height: 34px;
   padding: 7px 10px;
-  border: 1px solid rgba(255, 255, 255, 0.07);
+  border: 1px solid var(--line);
   border-radius: 7px;
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--panel-2);
 }
 
 .game-review-group {
@@ -2328,7 +2617,7 @@ button.primary.settings-save-glow {
   align-content: start;
   min-width: 0;
   padding-left: 10px;
-  border-left: 1px solid rgba(255, 255, 255, 0.08);
+  border-left: 1px solid var(--line);
 }
 
 .game-review-option-group > strong {
@@ -2370,9 +2659,9 @@ button.primary.settings-save-glow {
   height: 26px;
   display: inline-grid;
   place-items: center;
-  border: 1px solid rgba(255, 255, 255, 0.13);
+  border: 1px solid var(--line-strong);
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--panel-2);
   color: var(--text);
   font-size: 13px;
   font-weight: 700;
@@ -2422,9 +2711,9 @@ button.primary.settings-save-glow {
 
 .osu-play-settings-list div {
   padding: 8px 10px;
-  border: 1px solid rgba(255, 255, 255, 0.07);
+  border: 1px solid var(--line);
   border-radius: 7px;
-  background: rgba(255, 255, 255, 0.025);
+  background: var(--panel-2);
   color: var(--muted);
   font-size: 12px;
   line-height: 1.35;
@@ -2790,8 +3079,10 @@ button.primary.settings-save-glow {
   color: var(--muted);
   opacity: 0.55;
 }
-.context-menu button.danger-text { color: #ffc9c9; }
-.context-menu button.danger-text:hover { background: rgba(255, 121, 130, 0.12); }
+.context-menu button.danger-text { color: var(--rec); }
+.context-menu button.danger-text:hover {
+  background: color-mix(in srgb, var(--rec) 14%, transparent);
+}
 
 .settings-actions {
   display: flex;
@@ -2934,8 +3225,13 @@ button.primary.settings-save-glow {
 }
 .gallery-bulk-bar button:hover { color: var(--text); border-color: var(--line-strong); background: var(--panel-2); }
 .gallery-bulk-bar button:disabled { opacity: .45; cursor: not-allowed; }
-.gallery-bulk-bar button.danger-text { color: var(--rec); border-color: rgba(229,72,77,.4); }
-.gallery-bulk-bar button.danger-text:hover { background: rgba(229,72,77,.15); }
+.gallery-bulk-bar button.danger-text {
+  color: var(--rec);
+  border-color: color-mix(in srgb, var(--rec) 45%, var(--line));
+}
+.gallery-bulk-bar button.danger-text:hover {
+  background: color-mix(in srgb, var(--rec) 15%, transparent);
+}
 
 .gallery-grid,
 .cloud-gallery-grid {
@@ -3000,10 +3296,10 @@ button.primary.settings-save-glow {
 .gallery-empty.cloud-error {
   padding: 12px 14px;
   text-align: left;
-  border: 1px solid rgba(251, 113, 133, 0.26);
+  border: 1px solid color-mix(in srgb, var(--rec) 45%, var(--line));
   border-radius: 8px;
-  color: #fecdd3;
-  background: rgba(127, 29, 29, 0.18);
+  color: var(--rec);
+  background: color-mix(in srgb, var(--rec) 10%, var(--panel));
 }
 
 .cloud-card { cursor: default; }
@@ -3080,7 +3376,7 @@ button.primary.settings-save-glow {
   position: absolute; top: 8px; right: 8px; z-index: 3;
   width: 28px; height: 28px; min-width: 0; padding: 0;
   display: grid; place-items: center; border: 0; border-radius: 6px;
-  background: rgba(var(--scrim-c-rgb),.7); color: #ffc9c9; opacity: 0; pointer-events: none; transition: opacity 0.12s ease;
+  background: rgba(var(--scrim-c-rgb),.7); color: var(--rec); opacity: 0; pointer-events: none; transition: opacity 0.12s ease;
 }
 .card:hover .card-del, .card:focus-within .card-del { opacity: 1; pointer-events: auto; }
 .card-del:hover { background: rgba(229,72,77,.85); color: #fff; }
@@ -3484,7 +3780,7 @@ button.primary.settings-save-glow {
   padding: 7px 8px;
   border: 1px solid var(--line);
   border-radius: 6px;
-  background: rgba(255, 255, 255, 0.035);
+  background: var(--panel-2);
   color: var(--text);
   text-align: left;
 }
@@ -3512,11 +3808,11 @@ button.primary.settings-save-glow {
 }
 .game-event-rail ol button.game-event-row-friendly {
   border-color: rgba(var(--team-rgb), 0.42);
-  background: linear-gradient(90deg, rgba(var(--team-deep-rgb), 0.16), rgba(255, 255, 255, 0.035));
+  background: linear-gradient(90deg, rgba(var(--team-deep-rgb), 0.16), var(--panel-2));
 }
 .game-event-rail ol button.game-event-row-enemy {
   border-color: rgba(248, 113, 113, 0.42);
-  background: linear-gradient(90deg, rgba(185, 28, 28, 0.16), rgba(255, 255, 255, 0.035));
+  background: linear-gradient(90deg, rgba(185, 28, 28, 0.16), var(--panel-2));
 }
 .game-event-rail ol button.game-event-row-neutral {
   border-color: rgba(var(--soft2-rgb), 0.24);
@@ -3632,10 +3928,10 @@ button.primary.settings-save-glow {
   place-items: center;
   width: 52px;
   height: 52px;
-  border: 1px solid rgba(255, 255, 255, 0.13);
+  border: 1px solid var(--line-strong);
   border-radius: 6px;
   background: linear-gradient(135deg, rgba(255, 102, 171, 0.28), rgba(var(--ok-rgb), 0.16));
-  color: rgba(255, 255, 255, 0.78);
+  color: var(--text-strong);
   font-size: 11px;
   font-weight: 800;
   overflow: hidden;
@@ -4240,7 +4536,7 @@ button.primary.settings-save-glow {
   background: transparent;
   color: var(--text);
 }
-.timeline-tools button:hover { background: rgba(255, 255, 255, 0.1); }
+.timeline-tools button:hover { background: var(--hover); }
 .timeline-tools button svg { display: block; width: 100%; height: 100%; }
 .timeline-footer-row {
   display: flex;
@@ -4265,19 +4561,19 @@ button.primary.settings-save-glow {
   align-items: center;
   justify-content: center;
   z-index: 8;
-  color: #ffffff;
+  color: var(--text);
   width: 30px;
   height: 26px;
   min-width: 0;
   padding: 6px;
-  border: 1px solid rgba(255, 255, 255, 0.28);
+  border: 1px solid var(--line-strong);
   border-radius: 5px;
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--panel-2);
 }
 #trim-mode-toggle[hidden] { display: none; }
 #trim-mode-toggle:hover {
-  background: rgba(255, 255, 255, 0.16);
-  border-color: rgba(255, 255, 255, 0.46);
+  background: var(--hover);
+  border-color: var(--accent);
 }
 #trim-mode-toggle svg {
   display: block;
@@ -4291,9 +4587,9 @@ button.primary.settings-save-glow {
   background: rgba(var(--accent-rgb), 0.12);
 }
 #trim-mode-toggle.active {
-  color: #ffffff;
-  border-color: rgba(255, 255, 255, 0.62);
-  background: rgba(var(--accent-rgb), 0.26);
+  color: var(--btn-primary-text);
+  border-color: var(--accent);
+  background: var(--accent);
 }
 .deck.simple-timeline .nav-row { display: none; }
 .deck.simple-timeline #overview,
@@ -4425,7 +4721,7 @@ button.primary.settings-save-glow {
   background: transparent;
   color: var(--text-strong);
 }
-.transport button:hover { background: rgba(255, 255, 255, 0.14); }
+.transport button:hover { background: var(--hover); }
 .transport button:disabled { opacity: 0.35; }
 .transport svg {
   display: block;
@@ -4485,7 +4781,7 @@ button.primary.settings-save-glow {
   --range-fill: rgba(var(--bright2-rgb), 0.86);
   --range-thumb: var(--text-strong);
   --range-thumb-border: rgba(var(--bright2-rgb), 0.92);
-  --range-thumb-hover: #ffffff;
+  --range-thumb-hover: var(--slider-thumb-hover);
   --range-focus-ring: rgba(var(--bright2-rgb), 0.28);
   --range-track: rgba(var(--bright2-rgb), 0.16);
   width: 0;
@@ -4568,7 +4864,7 @@ button.primary.settings-save-glow {
   color: var(--muted);
   cursor: pointer;
 }
-#keys-close:hover { background: rgba(255, 255, 255, 0.1); color: var(--text); }
+#keys-close:hover { background: var(--hover); color: var(--text); }
 #keys-close svg { display: block; width: 100%; height: 100%; }
 .keys-grid {
   display: grid;

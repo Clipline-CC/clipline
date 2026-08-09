@@ -49,14 +49,18 @@ pub use types::{
 
 const DEFAULT_REPLAY_CACHE_QUOTA_GB: f64 = 2.0;
 
-/// UI color theme. Booth is the warm amber default; Classic restores the
-/// original midnight-blue palette via the [data-theme] override in styles.css.
+/// UI color theme. Booth is the warm amber default; alternate palettes use
+/// [data-theme] overrides in styles.css.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum UiTheme {
     #[default]
     Booth,
     Classic,
+    Purple,
+    Oled,
+    Dark,
+    Light,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
