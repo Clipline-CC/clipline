@@ -33,59 +33,58 @@ Each variant has its own updater manifest (`latest.json` /
 its baked-in `webviewInstallMode` (see `is_standalone_install` in `app.rs`),
 so standalone installs never update into the Evergreen installer.
 
-For now, publish Nightly manually from a Windows checkout:
+### Agent runbook: “make a new Nightly release”
+
+When the user asks for a new Nightly, carry out this entire sequence:
+
+1. Confirm the intended feature PRs are merged into `develop` with green Ubuntu and Windows CI.
+2. Read the current rolling `nightly/latest.json`, choose the next patch version, and create the
+   usual unticked release plan in `docs/superpowers/plans/`.
+3. Update `apps/clipline-app/Cargo.toml`, the `clipline-app` entry in `Cargo.lock`, and
+   `apps/clipline-app/tauri.conf.json` to that exact version.
+4. Re-review the current Microsoft WebView2 Fixed Version release even when the pinned version is
+   unchanged. Refresh `reviewed_on` / `review_due_on`; when the runtime changes, update its exact
+   CAB URL, size, SHA-256, and both paths in `tauri.standalone.conf.json` together.
+5. Run `scripts/verify-webview2-runtime.ps1`, `cargo test --workspace`, and
+   `cargo clippy --workspace --all-targets -- -D warnings`. Confirm the release-only diff contains
+   no accidental product changes.
+6. Commit and push the release metadata to `develop`. Do not tag a feature branch or a commit that
+   is not yet contained in remote `develop`.
+7. Create and push the immutable `nightly-v<version>` tag at that exact release commit.
+8. Watch the **Nightly Release** GitHub Action until it finishes. Do not manually replace the
+   rolling `nightly` tag or upload assets while the action is running.
+9. Confirm `gh release view nightly` targets the release commit and exposes exactly seven assets.
+   The action already redownloads and hashes every public asset; treat a failed verification as a
+   failed release even if GitHub shows a prerelease.
+10. Record the published commit, release URL, version, and verification result in `handoff.md`, then
+    report the outcome to the user.
+
+For a transient Actions failure, rerun the same tag workflow. If the release inputs or code need a
+new commit, bump to the next patch version and create a new tag; never force-move an existing
+`nightly-v<version>` tag. If a failure happens during final promotion, inspect the rolling
+`nightly` release before retrying so an already-published release is not replaced unnecessarily.
+
+Nightly publication is automatic from the version tag. After the release commit is on `develop`,
+the final trigger is:
 
 ```powershell
-# For every standalone release, review Microsoft's current WebView2 Fixed
-# Version release even when the pinned version does not change. Update
-# webview2-fixed-runtime.json (reviewed_on/review_due_on and version when
-# needed), then download the reviewed x64 .cab from the official Fixed Version
-# section:
-# https://developer.microsoft.com/en-us/microsoft-edge/webview2/
-#   expand.exe -F:* <runtime>.cab apps\clipline-app\webview2-fixed
-# Keep the folder name (with version) in sync with tauri.standalone.conf.json
-# — both the resources glob and the webviewInstallMode path. The preflight
-# rejects a review older than 30 days, config drift, and a missing runtime
-# executable in the staged payload.
-.\scripts\verify-webview2-runtime.ps1 -RequirePayload
-
-$env:TAURI_SIGNING_PRIVATE_KEY = Get-Content .local-secrets\clipline-updater.key -Raw
-
-# 1. Regular build (from apps/clipline-app so config discovery works).
-#    Do NOT stage FFmpeg first — the regular SKU embeds no ffmpeg/ resources.
-Set-Location apps/clipline-app
-cargo tauri build
-# stage target/release/bundle/nsis/Clipline_<ver>_x64-setup.exe + .sig
-
-# 2. Standalone build (overlay merges over tauri.conf.json).
-#    Stage/verify the pinned LGPL FFmpeg archive first; standalone still bundles ffmpeg/.
-#    Both builds write the SAME bundle path, so stage step 1's exe and .sig
-#    before starting this one or the regular installer is overwritten.
-Set-Location ../..
-$ffmpegManifest = Get-Content apps\clipline-app\ffmpeg-runtime.json -Raw | ConvertFrom-Json
-$ffmpegInputs = Join-Path $env:LOCALAPPDATA "Clipline\release-inputs"
-New-Item -ItemType Directory -Path $ffmpegInputs -Force | Out-Null
-$ffmpegArchive = Join-Path $ffmpegInputs $ffmpegManifest.archive_name
-Invoke-WebRequest -Uri $ffmpegManifest.archive_url -OutFile $ffmpegArchive
-.\scripts\stage-ffmpeg-resource.ps1 -ArchivePath $ffmpegArchive
-.\scripts\verify-ffmpeg-resource.ps1
-Set-Location apps/clipline-app
-cargo tauri build --config tauri.standalone.conf.json
-# stage and rename to Clipline_<ver>_x64-standalone-setup.exe, then RE-SIGN it
-# under the new name — do not rename the .sig. A minisign trusted comment
-# embeds `file:<name>` and is covered by the signature, so a renamed .sig still
-# claims the regular installer's filename:
-#   cargo tauri signer sign -f ..\..\.local-secrets\clipline-updater.key -p ""
-#     <staged standalone exe>
-# The build's own key prompt dies in a non-interactive shell; pass -p "".
-
-# 3. Author latest.json and latest-standalone.json (version, pub_date,
-#    platforms.windows-x86_64.{signature,url}); the url in each must point at
-#    the corresponding renamed release asset.
-
-gh release delete nightly --cleanup-tag --yes
-gh release create nightly <bundle assets> --prerelease --title "Clipline Nightly"
+git switch develop
+git pull --ff-only origin develop
+git tag nightly-v0.1.48
+git push origin nightly-v0.1.48
 ```
+
+`.github/workflows/nightly.yml` rejects tags whose version does not exactly match Cargo,
+Cargo.lock, and Tauri, tags outside `develop`, and version regressions. It runs workspace tests and
+Clippy, builds and preserves the regular installer, downloads and verifies the hash-pinned
+WebView2 and FFmpeg inputs, builds and re-signs the renamed standalone installer, and generates
+both updater manifests plus release notes. All seven assets are uploaded to a draft staging
+release before the action replaces the rolling `nightly` release. The published assets are then
+downloaded again and compared byte-for-byte with the staged build.
+
+The workflow needs only the existing `TAURI_SIGNING_PRIVATE_KEY` repository secret; the key has no
+password, so `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` may remain unset. The version tag remains as an
+immutable audit marker while the separate `nightly` tag continues moving for installed clients.
 
 The release must include both updater metadata assets (`latest.json`,
 `latest-standalone.json`). A WebView2 Fixed Version review is required for
@@ -111,8 +110,7 @@ For that build only: stage with `scripts/stage-ffmpeg-resource.ps1`, then run
 `cargo tauri build --config tauri.standalone.conf.json`; its standalone-only
 `beforeBundleCommand` runs `scripts/verify-ffmpeg-resource.ps1` automatically.
 The regular `tauri.conf.json` no longer runs `beforeBundleCommand` verify-ffmpeg.
-A GitHub Actions workflow can automate this later, but pushing workflow files
-requires a token with GitHub's `workflow` scope.
+The active tag-triggered GitHub Actions workflow performs this ordering automatically.
 
 Two environment traps cost time on 0.1.42 and are worth expecting:
 
