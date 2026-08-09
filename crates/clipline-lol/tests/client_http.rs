@@ -76,6 +76,26 @@ async fn lcu_gameflow_session_returns_authenticated_queue_tag() {
     assert_eq!(queue.label, "Ranked Solo/Duo");
 }
 
+#[tokio::test]
+async fn lcu_negative_queue_id_maps_to_custom_instead_of_rejecting_the_session() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(GET).path("/lol-gameflow/v1/session");
+        then.status(200).json_body(json!({
+            "gameData": { "queue": { "id": -1 } }
+        }));
+    });
+
+    let queue = LcuClient::new(server.base_url(), "token")
+        .unwrap()
+        .current_queue()
+        .await
+        .unwrap();
+
+    assert_eq!(queue, LeagueQueue::from_id(0));
+    assert_eq!(queue.category, LeagueQueueCategory::Custom);
+}
+
 #[test]
 fn common_queue_ids_map_to_stable_user_categories() {
     let cases = [

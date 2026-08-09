@@ -51,7 +51,7 @@ struct GameData {
 
 #[derive(Deserialize)]
 struct QueueData {
-    id: u32,
+    id: i64,
 }
 
 impl LcuClient {
@@ -132,7 +132,8 @@ impl LcuClient {
             body.extend_from_slice(&chunk);
         }
         let session: GameflowSession = serde_json::from_slice(&body)?;
-        Ok(LeagueQueue::from_id(session.game_data.queue.id))
+        let queue_id = u32::try_from(session.game_data.queue.id).unwrap_or(0);
+        Ok(LeagueQueue::from_id(queue_id))
     }
 }
 

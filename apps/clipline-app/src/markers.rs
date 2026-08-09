@@ -13,6 +13,7 @@ use clipline_lol::{poll_once_with_continuity, EventTracker, LcuClient, LeagueQue
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const MATCH_ABSENCE_FAILURES: u32 = 6;
+const MAX_QUEUE_LOOKUP_ATTEMPTS: u8 = 5;
 
 /// What the poller tells the service: anchored events, match boundaries, and
 /// a non-semantic heartbeat used only to detect a departed consumer.
@@ -42,6 +43,43 @@ struct MatchLifecycle {
     observed_match: bool,
     match_active: bool,
     consecutive_failures: u32,
+}
+
+#[derive(Debug, Default)]
+struct QueueLookupState {
+    generation: u64,
+    attempts: u8,
+    in_flight: bool,
+    resolved: bool,
+}
+
+impl QueueLookupState {
+    fn reset(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.attempts = 0;
+        self.in_flight = false;
+        self.resolved = false;
+    }
+
+    fn begin(&mut self) -> Option<u64> {
+        if self.resolved || self.in_flight || self.attempts >= MAX_QUEUE_LOOKUP_ATTEMPTS {
+            return None;
+        }
+        self.attempts += 1;
+        self.in_flight = true;
+        Some(self.generation)
+    }
+
+    fn complete(&mut self, generation: u64, success: bool) -> bool {
+        if generation != self.generation || !self.in_flight {
+            return false;
+        }
+        self.in_flight = false;
+        if success {
+            self.resolved = true;
+        }
+        success
+    }
 }
 
 impl MatchLifecycle {
@@ -141,9 +179,31 @@ pub fn spawn(
                 let mut tracker = EventTracker::default();
                 let mut lifecycle = MatchLifecycle::default();
                 let mut local_player = None;
-                let mut queue_attempted = false;
+                let mut queue_lookup = QueueLookupState::default();
+                let (queue_result_tx, queue_result_rx) =
+                    mpsc::channel::<(u64, Result<LeagueQueue, String>)>();
 
                 loop {
+                    while let Ok((generation, result)) = queue_result_rx.try_recv() {
+                        match result {
+                            Ok(queue)
+                                if queue_lookup.complete(generation, true)
+                                    && lifecycle.is_active() =>
+                            {
+                                if tx.send(PollerMsg::Queue(queue)).is_err() {
+                                    return;
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                queue_lookup.complete(generation, false);
+                                tracing::debug!(
+                                    event = "lol_queue_lookup_failed",
+                                    error = %error,
+                                );
+                            }
+                        }
+                    }
                     // Outside a game, the endpoint normally refuses requests.
                     if local_player.is_none() {
                         match client.active_player_name().await {
@@ -177,7 +237,7 @@ pub fn spawn(
                                 .any(|event| event.kind == EventKind::GameEnd);
                             let decision = lifecycle.poll_succeeded(batch.new_match, has_game_end);
                             if decision.before_events.contains(&MatchBoundary::Started) {
-                                queue_attempted = false;
+                                queue_lookup.reset();
                             }
                             for boundary in decision.before_events {
                                 if !send_boundary(&tx, boundary) {
@@ -194,23 +254,21 @@ pub fn spawn(
                                     return;
                                 }
                             }
-                            if !queue_attempted && lifecycle.is_active() {
-                                queue_attempted = true;
-                                if let Some(executable) = game_executable.as_deref() {
-                                    let queue = match LcuClient::from_game_executable(executable) {
-                                        Ok(client) => client.current_queue().await,
-                                        Err(error) => Err(error),
-                                    };
-                                    match queue {
-                                        Ok(queue) => {
-                                            if tx.send(PollerMsg::Queue(queue)).is_err() {
-                                                return;
-                                            }
-                                        }
-                                        Err(error) => tracing::debug!(
-                                            event = "lol_queue_lookup_failed",
-                                            error = %error,
-                                        ),
+                            if lifecycle.is_active() {
+                                if let Some(executable) = game_executable.clone() {
+                                    if let Some(generation) = queue_lookup.begin() {
+                                        let queue_result_tx = queue_result_tx.clone();
+                                        tokio::spawn(async move {
+                                            let result =
+                                                match LcuClient::from_game_executable(&executable) {
+                                                    Ok(client) => client
+                                                        .current_queue()
+                                                        .await
+                                                        .map_err(|error| error.to_string()),
+                                                    Err(error) => Err(error.to_string()),
+                                                };
+                                            let _ = queue_result_tx.send((generation, result));
+                                        });
                                     }
                                 }
                             }
@@ -328,5 +386,27 @@ mod tests {
         assert_eq!(failure_backoff(2), Duration::from_secs(2));
         assert_eq!(failure_backoff(3), Duration::from_secs(4));
         assert_eq!(failure_backoff(20), RETRY_INTERVAL);
+    }
+
+    #[test]
+    fn queue_lookup_retries_failure_and_stops_after_success() {
+        let mut lookup = QueueLookupState::default();
+        let generation = lookup.begin().expect("first lookup starts");
+
+        assert!(!lookup.complete(generation, false));
+        let retry = lookup.begin().expect("failure permits a retry");
+        assert_eq!(retry, generation);
+        assert!(lookup.complete(retry, true));
+        assert!(lookup.begin().is_none(), "success resolves this match");
+    }
+
+    #[test]
+    fn queue_lookup_ignores_a_completion_from_the_previous_match() {
+        let mut lookup = QueueLookupState::default();
+        let old_generation = lookup.begin().unwrap();
+        lookup.reset();
+
+        assert!(!lookup.complete(old_generation, true));
+        assert!(lookup.begin().is_some());
     }
 }
