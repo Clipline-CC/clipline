@@ -3256,6 +3256,7 @@ pub fn run() {
             crate::library::prepare_clip_audio_sidecars,
             crate::library::reveal_clip,
             crate::library::copy_clip_to_clipboard,
+            crate::library::copy_text_to_clipboard,
             crate::library::open_media_folder,
             crate::library::storage_status
         ])

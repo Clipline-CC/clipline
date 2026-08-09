@@ -1721,6 +1721,8 @@ fn local_library_refresh_rejects_stale_snapshots_and_reports_event_errors() {
 fn cloud_upload_completion_preserves_equivalent_paths_and_reports_local_deletion() {
     let library = read_ui_js("library.js");
     let cloud = read_ui_js("cloud.js");
+    let native_library = library_rs();
+    let app = app_rs();
     let refresh_clips = js_function_body(&library, "refreshClips");
     let upload = js_function_body(&cloud, "uploadClipToCloud");
 
@@ -1758,31 +1760,36 @@ fn cloud_upload_completion_preserves_equivalent_paths_and_reports_local_deletion
         .expect("cloud upload completion settles feedback against the refresh result");
     assert!(
         refresh < feedback
-            && upload.contains(
-                "error: [result?.record?.error, clipboardError].filter(Boolean).join(\" · \"),"
-            )
+            && upload.contains("error: result?.record?.error || \"\",")
             && upload.contains("notice: uploadStatus === \"uploaded_processing\""),
-        "intentional deletion and upload errors must be delivered only after the authoritative refresh settles"
+        "upload errors must be delivered only after the authoritative refresh settles"
     );
 
     assert!(
         upload.contains(
             "const shareUrl = uploadFinished ? cloudShareUrl(result?.record) : \"\";"
-        ) && upload.contains("await navigator.clipboard.writeText(shareUrl);")
+        ) && upload.contains("await invoke(\"copy_text_to_clipboard\", { text: shareUrl });")
             && upload.contains("completionParts.push(\"link copied\");"),
-        "completed public and unlisted uploads should copy their canonical share URL"
+        "completed public and unlisted uploads should copy their canonical share URL through the native clipboard"
+    );
+    assert!(
+        native_library.contains("pub async fn copy_text_to_clipboard(")
+            && app.contains("crate::library::copy_text_to_clipboard,"),
+        "background upload completion needs a registered native text-clipboard command"
     );
     let redirect = upload
-        .find("if (uploadFinished && result.local_deleted) {")
-        .expect("confirmed local deletion redirects to the Cloud Library");
+        .find("if (handoffDeletedReview) {")
+        .expect("the uploaded Review clip redirects to the Cloud Library");
     let cloud_reload = upload
         .rfind("loadCloudClips({ force: true });")
         .expect("upload completion reloads the Cloud Library");
     assert!(
-        upload[redirect..cloud_reload].contains("if (currentClip) closeReview();")
+        upload.contains("PlayerCore.sameClipPath(currentClip.path, clip.path)")
+            && upload[redirect..cloud_reload]
+                .contains("if (currentClip && PlayerCore.sameClipPath(currentClip.path, clip.path)) closeReview();")
             && upload[redirect..cloud_reload].contains("gallerySource = \"cloud\";")
             && upload[redirect..cloud_reload].contains("exitSelectMode();"),
-        "only a completed upload with confirmed local deletion should close Review and select Cloud"
+        "only the uploaded Review clip should close and hand off to Cloud after confirmed deletion"
     );
 }
 
@@ -4255,9 +4262,13 @@ fn clipboard_copy_distinguishes_shareable_and_original_paths() {
             && library.contains("request: CopyClipToClipboardRequest")
             && library.contains("window: tauri::WebviewWindow")
             && library.contains(".hwnd()")
-            && library.contains("SetClipboardData(CF_HDROP as u32")
-            && !library.contains("EmptyClipboard()"),
-        "clipboard command should accept selected audio while native clipboard ownership comes from the invoking Clipline window",
+            && library.contains(
+                "copy_payload_to_clipboard(&payload, CF_HDROP as u32, owner, false)"
+            )
+            && library.contains(
+                "copy_payload_to_clipboard(&payload, CF_UNICODETEXT as u32, owner, true)"
+            ),
+        "file copy should preserve other clipboard formats while native text copy takes clipboard ownership",
     );
     assert!(
         app.contains("crate::library::copy_clip_to_clipboard"),

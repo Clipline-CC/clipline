@@ -743,29 +743,35 @@ async function uploadClipToCloud(clip, request = {}) {
     const uploadFinished = ["uploaded_private", "uploaded_public"].includes(uploadStatus);
     const shareUrl = uploadFinished ? cloudShareUrl(result?.record) : "";
     let linkCopied = false;
-    let clipboardError = "";
+    let clipboardNotice = "";
     if (shareUrl) {
       try {
-        await navigator.clipboard.writeText(shareUrl);
+        await invoke("copy_text_to_clipboard", { text: shareUrl });
         linkCopied = true;
       } catch (error) {
-        clipboardError = `cloud link could not be copied: ${error}`;
+        clipboardNotice = "link not copied";
+        console.warn("cloud link could not be copied:", error);
       }
     }
     const completionParts = ["cloud upload finished"];
     if (linkCopied) completionParts.push("link copied");
+    if (clipboardNotice) completionParts.push(clipboardNotice);
     if (result?.local_deleted) completionParts.push("local copy deleted");
+    const handoffDeletedReview = uploadFinished
+      && result.local_deleted
+      && currentClip
+      && PlayerCore.sameClipPath(currentClip.path, clip.path);
     const refreshCompleted = await refresh();
     finishPostRefreshFeedback(refreshCompleted, {
-      error: [result?.record?.error, clipboardError].filter(Boolean).join(" · "),
+      error: result?.record?.error || "",
       notice: uploadStatus === "uploaded_processing"
         ? "cloud upload processing"
         : uploadFinished
           ? completionParts.join(" · ")
           : "",
     });
-    if (uploadFinished && result.local_deleted) {
-      if (currentClip) closeReview();
+    if (handoffDeletedReview) {
+      if (currentClip && PlayerCore.sameClipPath(currentClip.path, clip.path)) closeReview();
       gallerySource = "cloud";
       exitSelectMode();
     }
