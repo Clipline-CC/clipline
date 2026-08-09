@@ -4038,6 +4038,14 @@ kinds stay blue Replay, warm-gold Session, and teal Trim; status/error colors an
 remain theme-aware. The theme persists as the `oled` `UiTheme` value and overrides the same complete
 token set as Classic and Purple.
 
+## Checkpoint (2026-08-09): neutral Dark and Light themes
+
+Settings > General now includes conventional neutral Dark and Light palettes. Dark uses charcoal
+surfaces and familiar blue controls without the hue of Classic or the pure black of OLED. Light
+uses soft-gray/white surfaces, dark text, blue controls, and `color-scheme: light` so native selects,
+checkboxes, and scrollbars follow the palette too. Both persist through `UiTheme`, cover the full
+alternate-theme token set, keep clip kinds distinct, and tint the in-app logo.
+
 ## What's next (rough value order; each gets its own plan)
 
 1. **Auto-clip on importance** (ddoc §5): `importance ≥ threshold` → auto-save; marker kinds

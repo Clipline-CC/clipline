@@ -64,15 +64,6 @@ fn purple_theme_is_selectable_and_covers_the_theme_palette() {
     let classic = css_rule_body(&css, ":root[data-theme=\"classic\"]");
     let purple = css_rule_body(&css, ":root[data-theme=\"purple\"]");
 
-    let theme_properties = |rule: &str| {
-        rule.split(';')
-            .filter_map(|declaration| declaration.trim().split_once(':'))
-            .map(|(name, _)| name.trim())
-            .filter(|name| name.starts_with("--"))
-            .map(str::to_owned)
-            .collect::<std::collections::BTreeSet<_>>()
-    };
-
     assert!(
         html.contains("<option value=\"purple\">Purple")
             && settings.contains("if (theme === \"booth\")")
@@ -80,8 +71,8 @@ fn purple_theme_is_selectable_and_covers_the_theme_palette() {
         "Purple must use the existing instant-preview theme selector"
     );
     assert_eq!(
-        theme_properties(purple),
-        theme_properties(classic),
+        css_custom_properties(purple),
+        css_custom_properties(classic),
         "Purple must override every token covered by the existing alternate theme"
     );
     assert_ne!(
@@ -103,19 +94,10 @@ fn oled_theme_is_true_black_and_covers_the_theme_palette() {
     let classic = css_rule_body(&css, ":root[data-theme=\"classic\"]");
     let oled = css_rule_body(&css, ":root[data-theme=\"oled\"]");
 
-    let theme_properties = |rule: &str| {
-        rule.split(';')
-            .filter_map(|declaration| declaration.trim().split_once(':'))
-            .map(|(name, _)| name.trim())
-            .filter(|name| name.starts_with("--"))
-            .map(str::to_owned)
-            .collect::<std::collections::BTreeSet<_>>()
-    };
-
     assert!(html.contains("<option value=\"oled\">OLED (true black)</option>"));
     assert_eq!(
-        theme_properties(oled),
-        theme_properties(classic),
+        css_custom_properties(oled),
+        css_custom_properties(classic),
         "OLED must override every token covered by the existing alternate themes"
     );
     assert_eq!(css_decl_value(oled, "--bg"), Some("#000000"));
@@ -123,6 +105,29 @@ fn oled_theme_is_true_black_and_covers_the_theme_palette() {
     assert_ne!(css_decl_value(oled, "--accent"), css_decl_value(oled, "--ok"));
     assert_ne!(css_decl_value(oled, "--accent"), css_decl_value(oled, "--marker"));
     assert_ne!(css_decl_value(oled, "--logo-filter"), Some("none"));
+}
+
+#[test]
+fn neutral_dark_and_light_themes_are_complete_and_selectable() {
+    let html = index_html();
+    let css = styles_css();
+    let classic = css_rule_body(&css, ":root[data-theme=\"classic\"]");
+    let dark = css_rule_body(&css, ":root[data-theme=\"dark\"]");
+    let light = css_rule_body(&css, ":root[data-theme=\"light\"]");
+
+    assert!(html.contains("<option value=\"dark\">Dark (neutral)</option>"));
+    assert!(html.contains("<option value=\"light\">Light (neutral)</option>"));
+    assert_eq!(css_custom_properties(dark), css_custom_properties(classic));
+    assert_eq!(css_custom_properties(light), css_custom_properties(classic));
+    assert_eq!(css_decl_value(dark, "--bg"), Some("#111315"));
+    assert_eq!(css_decl_value(light, "color-scheme"), Some("light"));
+    assert_eq!(css_decl_value(light, "--bg"), Some("#f4f6f8"));
+    for palette in [dark, light] {
+        assert_eq!(css_decl_value(palette, "--session"), Some("var(--marker)"));
+        assert_ne!(css_decl_value(palette, "--accent"), css_decl_value(palette, "--ok"));
+        assert_ne!(css_decl_value(palette, "--accent"), css_decl_value(palette, "--marker"));
+        assert_ne!(css_decl_value(palette, "--logo-filter"), Some("none"));
+    }
 }
 
 #[test]
@@ -191,6 +196,16 @@ fn css_decl_value<'a>(rule_body: &'a str, property: &str) -> Option<&'a str> {
         let (name, value) = declaration.trim().split_once(':')?;
         (name.trim() == property).then(|| value.trim())
     })
+}
+
+fn css_custom_properties(rule_body: &str) -> std::collections::BTreeSet<String> {
+    rule_body
+        .split(';')
+        .filter_map(|declaration| declaration.trim().split_once(':'))
+        .map(|(name, _)| name.trim())
+        .filter(|name| name.starts_with("--"))
+        .map(str::to_owned)
+        .collect()
 }
 
 fn marker_png_alpha_bounds(asset_dir: &str, name: &str) -> ((u32, u32), (u32, u32)) {
