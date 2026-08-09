@@ -1731,7 +1731,7 @@ async function toggleSessionRecording() {
   $("rail-status").disabled = true;
   try {
     const requested = await invoke("set_session_recording", { recording: next });
-    if (!requested) fullSessionRecordingActive = false;
+    fullSessionRecordingActive = Boolean(requested);
     updateCaptureStatus();
   } catch (e) {
     $("error").textContent = e;

@@ -2264,6 +2264,7 @@ fn recording_hotkey_and_rail_control_a_real_full_session() {
         "$(\"rail-status\").addEventListener(\"click\", toggleSessionRecording)",
         "$(\"rail-game\").addEventListener(\"click\", toggleRecording)",
         "invoke(\"set_session_recording\"",
+        "fullSessionRecordingActive = Boolean(requested);",
         "fullSessionRecordingActive",
     ] {
         assert!(

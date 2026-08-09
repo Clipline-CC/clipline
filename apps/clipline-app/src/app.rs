@@ -1331,6 +1331,32 @@ impl RuntimeState {
         })
     }
 
+    fn arm_manual_session_unless_blocked(inner: &mut RuntimeInner) -> Option<Event> {
+        if let Some(event) = inner.quota_blocked.clone() {
+            return Some(event);
+        }
+        inner.manual_full_session_desired = true;
+        inner.recording_desired = true;
+        inner.last_save_request = None;
+        None
+    }
+
+    fn prepare_manual_session_stop(
+        inner: &mut RuntimeInner,
+    ) -> Result<(Option<Sender<Cmd>>, Option<PreparedServiceRestart>), String> {
+        inner.manual_full_session_desired = false;
+        if inner.recording_desired
+            && inner.quota_blocked.is_none()
+            && !recorder_should_run(&inner.settings, inner.active_game.as_ref())
+        {
+            let restart = Self::prepare_service_restart(inner)?;
+            let session_tx = restart.old_tx.clone();
+            Ok((session_tx, Some(restart)))
+        } else {
+            Ok((inner.tx.clone(), None))
+        }
+    }
+
     fn install_prepared_service_restart(
         inner: &mut RuntimeInner,
         generation: u64,
@@ -1344,6 +1370,38 @@ impl RuntimeState {
             return Err(tx);
         }
         Ok(Self::install_recording_sender(inner, tx))
+    }
+
+    fn finish_service_restart<R: Runtime>(
+        &self,
+        app: AppHandle<R>,
+        prepared: PreparedServiceRestart,
+    ) -> Result<(), String> {
+        let waiting_for_game = prepared.waiting_for_game;
+        let waiting_generation = prepared.waiting_generation;
+        if let Some(tx) = prepared.old_tx {
+            let _ = tx.send(Cmd::Stop { announce: false });
+        }
+        if let Some((options, restart_generation)) = prepared.replacement {
+            let (tx, rx) = service::spawn(options);
+            let installed = {
+                let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+                Self::install_prepared_service_restart(&mut inner, restart_generation, tx)
+            };
+            match installed {
+                Ok(generation) => pump_events(app.clone(), rx, generation),
+                Err(tx) => {
+                    let _ = tx.send(Cmd::Stop { announce: false });
+                }
+            }
+        }
+        if waiting_for_game
+            && waiting_generation
+                .is_some_and(|generation| self.waiting_generation_is_current(generation))
+        {
+            emit_waiting_for_game(&app);
+        }
+        Ok(())
     }
 
     fn prepare_settings_restart(
@@ -1742,24 +1800,25 @@ impl RuntimeState {
         recording: bool,
     ) -> Result<bool, String> {
         if !recording {
-            let tx = {
+            let (tx, restart) = {
                 let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-                inner.manual_full_session_desired = false;
-                inner.tx.clone()
+                Self::prepare_manual_session_stop(&mut inner)?
             };
-            if let Some(tx) = tx {
-                tx.send(Cmd::StopFullSession)
-                    .map_err(|_| "recorder stopped before the session could be finalized")?;
+            let session_stopped = tx
+                .map(|tx| tx.send(Cmd::StopFullSession).is_ok())
+                .unwrap_or(true);
+            if let Some(prepared) = restart {
+                self.finish_service_restart(app, prepared)?;
+            }
+            if !session_stopped {
+                return Err("recorder stopped before the session could be finalized".into());
             }
             return Ok(false);
         }
 
         let (started, existing, blocked) = {
             let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-            inner.manual_full_session_desired = true;
-            inner.recording_desired = true;
-            inner.last_save_request = None;
-            if let Some(event) = inner.quota_blocked.clone() {
+            if let Some(event) = Self::arm_manual_session_unless_blocked(&mut inner) {
                 (None, None, Some(event))
             } else if let Some(tx) = inner.tx.clone() {
                 (None, Some(tx), None)
@@ -1834,30 +1893,7 @@ impl RuntimeState {
             }
         };
         if let Some(prepared) = prepared_restart {
-            let waiting_for_game = prepared.waiting_for_game;
-            let waiting_generation = prepared.waiting_generation;
-            if let Some(tx) = prepared.old_tx {
-                let _ = tx.send(Cmd::Stop { announce: false });
-            }
-            if let Some((options, restart_generation)) = prepared.replacement {
-                let (tx, rx) = service::spawn(options);
-                let installed = {
-                    let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-                    Self::install_prepared_service_restart(&mut inner, restart_generation, tx)
-                };
-                match installed {
-                    Ok(generation) => pump_events(app.clone(), rx, generation),
-                    Err(tx) => {
-                        let _ = tx.send(Cmd::Stop { announce: false });
-                    }
-                }
-            }
-            if waiting_for_game
-                && waiting_generation
-                    .is_some_and(|generation| self.waiting_generation_is_current(generation))
-            {
-                emit_waiting_for_game(&app);
-            }
+            self.finish_service_restart(app.clone(), prepared)?;
         }
         if emit_event {
             let _ = app.emit("game-detection", event);
@@ -4561,6 +4597,55 @@ mod tests {
 
         assert_eq!(options.recording_mode, service::RecordingMode::FullSession);
         assert!(!prepared.waiting_for_game);
+    }
+
+    #[test]
+    fn quota_blocked_manual_session_request_does_not_arm_a_future_recording() {
+        let state = RuntimeState::new(AppSettings::default(), None);
+        let mut inner = state.0.lock().unwrap();
+        inner.quota_blocked = Some(Event::StorageQuotaFull {
+            total_bytes: 10,
+            quota_bytes: 10,
+            required_bytes: 1,
+        });
+
+        let blocked = RuntimeState::arm_manual_session_unless_blocked(&mut inner);
+
+        assert!(blocked.is_some());
+        assert!(!inner.manual_full_session_desired);
+        assert!(!inner.recording_desired);
+    }
+
+    #[test]
+    fn stopping_manual_session_returns_games_only_capture_to_waiting() {
+        let (tx, _rx) = mpsc::channel();
+        let mut settings = AppSettings::default();
+        settings.games.pause_when_no_game = true;
+        let mut inner = RuntimeInner {
+            tx: Some(tx),
+            recording_generation: 1,
+            recording_desired: true,
+            manual_full_session_desired: true,
+            settings,
+            lol_url: None,
+            active_game: None,
+            osu_title_events: Vec::new(),
+            last_save_request: None,
+            decodable_codecs: vec![service::Codec::H264],
+            last_recorder_status: None,
+            last_storage_status: None,
+            recent_recorder_error: false,
+            quota_blocked: None,
+        };
+
+        let (_, restart) = RuntimeState::prepare_manual_session_stop(&mut inner).unwrap();
+        let restart = restart.expect("games-only capture must return to waiting");
+
+        assert!(!inner.manual_full_session_desired);
+        assert!(inner.recording_desired);
+        assert!(restart.old_tx.is_some());
+        assert!(restart.replacement.is_none());
+        assert!(restart.waiting_for_game);
     }
 
     #[test]
