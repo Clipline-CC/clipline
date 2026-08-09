@@ -788,3 +788,62 @@ fn nightly_tags_publish_both_verified_updater_variants_transactionally() {
         );
     }
 }
+
+
+#[test]
+fn nightly_release_notes_fallback_clears_native_exit_code() {
+    let root = workspace_root();
+    let workflow = fs::read_to_string(root.join(".github/workflows/nightly.yml"))
+        .expect("read active Nightly workflow");
+    let runbook = fs::read_to_string(root.join("docs/release-updates.md"))
+        .expect("read Nightly release runbook");
+
+    let jobs = workflow
+        .split_once("jobs:")
+        .expect("Nightly jobs")
+        .1;
+    let build_job = jobs
+        .split_once("\n  publish:")
+        .map(|(build, _)| build)
+        .unwrap_or(jobs);
+    assert!(
+        !build_job.contains("contents: write"),
+        "Nightly build job must stay read-only"
+    );
+    assert!(
+        workflow.contains("permissions:\n  contents: read")
+            || build_job.contains("contents: read"),
+        "Nightly build remains contents: read; do not grant write just for generate-notes"
+    );
+
+    let notes_step = workflow
+        .find("Generate release notes and updater manifests")
+        .expect("release notes step");
+    let prepare = workflow[notes_step..]
+        .find("scripts\\prepare-nightly-assets.ps1")
+        .expect("prepare assets after release notes")
+        + notes_step;
+    let notes_block = &workflow[notes_step..prepare];
+    assert!(
+        notes_block.contains("releases/generate-notes"),
+        "release notes step must attempt generate-notes"
+    );
+    assert!(
+        notes_block.contains("Automated Nightly build from the latest develop changes."),
+        "release notes step must keep the generate-notes fallback"
+    );
+    assert!(
+        notes_block.contains("$global:LASTEXITCODE = 0"),
+        "optional generate-notes failures must clear the native exit status before prepare-nightly-assets.ps1"
+    );
+
+    assert!(
+        !runbook.contains("nightly-v0.1.48"),
+        "release runbook must not hardcode a stale nightly tag example"
+    );
+    assert!(
+        runbook.contains("apps/clipline-app/tauri.conf.json")
+            && runbook.contains("nightly-v$version"),
+        "release runbook tag example must be parameterized from the Tauri version"
+    );
+}

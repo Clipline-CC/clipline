@@ -70,8 +70,9 @@ the final trigger is:
 ```powershell
 git switch develop
 git pull --ff-only origin develop
-git tag nightly-v0.1.48
-git push origin nightly-v0.1.48
+$version = (Get-Content apps/clipline-app/tauri.conf.json -Raw | ConvertFrom-Json).version
+git tag "nightly-v$version"
+git push origin "nightly-v$version"
 ```
 
 `.github/workflows/nightly.yml` rejects tags whose version does not exactly match Cargo,
