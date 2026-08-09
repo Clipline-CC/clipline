@@ -4,6 +4,36 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-08): PR #143 review hardening
+
+Plan: `docs/superpowers/plans/2026-08-08-pr-143-review-fixes.md` (`e237ddd`).
+
+The manual full-session controls now preserve the games-only capture policy: stopping a session
+returns an otherwise-idle recorder to Waiting, quota-blocked starts do not arm a future surprise
+session, and the UI updates optimistically so a quick second click cannot stop a start that still
+looks inactive. The established quota-full policy remains deliberate: Clipline disables recording
+and replay capture together until storage is freed or the quota is raised.
+
+The unified capture-target rail now glows only while frames are actually being captured. Waiting
+has a distinct neutral treatment, and unchanged monitor, region, or game icons are no longer
+rebuilt every recorder-status tick. League game-type filter options are likewise rebuilt only when
+the available categories change.
+
+Custom-game normalization now removes only exact match-rule duplicates, preserving intentional
+same-executable rules with different paths or title filters. A disabled built-in game may still be
+captured through an explicit custom rule, without the repeated plugin scan in the detection loop.
+
+League queue enrichment now runs outside the one-second event poller, retries transient startup
+failures, ignores stale results from earlier matches, and accepts negative LCU queue IDs as Custom.
+Cloud upload completion uses Clipline's native clipboard path so background uploads can copy their
+share URL without WebView focus. Clipboard failure is notice-level, and local-file deletion closes
+Review or switches to Cloud only when the uploaded clip is still the one being reviewed.
+
+The full workspace suite, warning-denied workspace Clippy, JavaScript syntax checks, focused UI
+contracts, and repository security tests are green.
+
+---
+
 ## Checkpoint (2026-08-08): Unified capture-target rail control
 
 Plan: `docs/superpowers/plans/2026-08-08-capture-target-rail-control.md` (`bbd0d54`).
