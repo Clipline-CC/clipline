@@ -193,7 +193,7 @@ $("gallery-filter").addEventListener("click", (ev) => {
   renderClips();
 });
 $("rail-status").addEventListener("click", toggleSessionRecording);
-$("rail-buffer").addEventListener("click", toggleRecording);
+$("rail-game").addEventListener("click", toggleRecording);
 $("set-capture").addEventListener("change", () => {
   captureTargetDirty = true;
   syncCaptureFields();

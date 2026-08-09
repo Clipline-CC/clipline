@@ -37,17 +37,16 @@
         <div id="memory-usage" class="memory-usage">Using -- RAM</div>
         <div id="memory-children" class="memory-children" hidden></div>
         <div id="rail-hotkey" class="rail-hotkey" title="Save Replay: F6">F6</div>
-        <div id="rail-game" class="rail-game" hidden></div>
+        <button id="rail-game" class="rail-game stopped" type="button"
+          title="Start Desktop replay buffer" aria-label="Start Desktop replay buffer" aria-pressed="false">
+          <span class="placeholder source-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="12" rx="1.5"/><path d="M9 20h6M10.5 16.5 10 20M13.5 16.5 14 20"/></svg></span>
+        </button>
       </div>
 
       <div class="sidebar-rail">
         <button id="rail-status" title="Start recording" aria-pressed="false">
           <span class="rail-status-dot"><span id="rail-dot" class="dot"></span></span>
           <span id="rail-status-text" class="rail-label">Record</span>
-        </button>
-        <button id="rail-buffer" title="Stop replay buffer" aria-pressed="true">
-          <span class="rail-status-dot"><span id="rail-buffer-dot" class="dot ready"></span></span>
-          <span class="rail-label">Buffer</span>
         </button>
         <button id="rail-save" title="Save Replay (F6)">
           <svg viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 2a8 8 0 1 1 0 16 8 8 0 0 1 0-16z"/><circle cx="12" cy="12" r="4.5"/></svg>

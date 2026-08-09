@@ -4,6 +4,21 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-08): Unified capture-target rail control
+
+Plan: `docs/superpowers/plans/2026-08-08-capture-target-rail-control.md` (`bbd0d54`).
+
+The separate captured-game icon and replay-buffer rail row are now one 40px source control. It
+shows the active supported/custom game's icon, or a compact monitor/selected-region fallback for
+the saved capture target. The existing buffer action now lives on that icon: an active buffer gets
+a blue ring/glow, while an off or quota-blocked buffer is darkened. Existing tooltips, encoder
+readiness detail, waiting state, quota recovery, and accessible pressed/disabled labels remain on
+the unified button.
+
+The focused UI contract and JavaScript syntax checks are green.
+
+---
+
 ## Checkpoint (2026-08-08): Active game icon state replay
 
 Plan: `docs/superpowers/plans/2026-08-08-active-game-state-replay.md` (`6d95526`).

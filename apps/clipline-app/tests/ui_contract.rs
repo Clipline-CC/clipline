@@ -495,11 +495,39 @@ fn active_replay_buffer_status_identifies_the_selected_encoder() {
     );
     assert!(
         update_status.contains("Replay buffer ready · ${activeEncoderLabel}")
-            && update_status.contains("$(\"rail-buffer\").title = storageQuotaBlocked")
+            && update_status.contains("$(\"rail-game\").title = storageQuotaBlocked")
             && update_status.contains(": recordingActive")
             && update_status.contains("? bufferReadyTitle")
             && update_status.contains(": `Start ${source} replay buffer`;"),
         "replay-buffer readiness must assign the concrete encoder selected by Automatic mode to the visible tooltip"
+    );
+}
+
+#[test]
+fn capture_target_icon_is_the_replay_buffer_control() {
+    let html = index_html();
+    let js = main_js();
+    let css = styles_css();
+
+    assert!(
+        html.contains("<button id=\"rail-game\"") && !html.contains("id=\"rail-buffer\""),
+        "the capture target icon must replace the redundant buffer rail row"
+    );
+    for required in [
+        "const CAPTURE_MONITOR_ICON",
+        "const CAPTURE_REGION_ICON",
+        "function captureTargetIcon()",
+        "$(\"rail-game\").addEventListener(\"click\", toggleRecording)",
+        "$(\"rail-game\").classList.toggle(\"active\"",
+        "$(\"rail-game\").classList.toggle(\"stopped\"",
+    ] {
+        assert!(js.contains(required), "capture control needs `{required}`");
+    }
+    assert!(
+        css.contains(".rail-game.active")
+            && css.contains(".rail-game.stopped::after")
+            && css.contains("box-shadow:"),
+        "the unified icon must glow while active and darken while stopped"
     );
 }
 
@@ -632,8 +660,8 @@ fn quality_of_life_features_are_wired_through_the_app_shell() {
     assert!(
         js.contains("waiting_for_game")
             && js.contains("recorderWaitingForGame")
-            && js.contains("rail-buffer-dot")
-            && js.contains("? \" waiting\""),
+            && js.contains("classList.toggle(\"waiting\", recorderWaitingForGame)")
+            && js.contains("? \"Stop waiting for a game\""),
         "recorder status must distinguish policy waiting from a manual stop"
     );
     assert!(
@@ -822,8 +850,7 @@ fn review_player_owns_all_controls() {
         "id=\"rail-status-text\"",
         "id=\"rail-status\"",
         "id=\"rail-status\" title=\"Start recording\" aria-pressed=\"false\"",
-        "id=\"rail-buffer\"",
-        "id=\"rail-buffer-dot\"",
+        "id=\"rail-game\"",
         "id=\"rail-save\"",
         "id=\"rail-library-status\"",
         "id=\"rail-clips-count\"",
@@ -2215,8 +2242,7 @@ fn recording_hotkey_and_rail_control_a_real_full_session() {
         "id=\"recording-hotkey-status\"",
         "aria-describedby=\"recording-hotkey-status\"",
         "Start / Stop recording",
-        "id=\"rail-buffer\"",
-        "id=\"rail-buffer-dot\"",
+        "id=\"rail-game\"",
     ] {
         assert!(
             html.contains(required),
@@ -2233,7 +2259,7 @@ fn recording_hotkey_and_rail_control_a_real_full_session() {
         "function hotkeyStatusId(fieldId)",
         "return fieldId.startsWith(\"set-recording-hotkey\") ? \"recording-hotkey-status\" : \"hotkey-status\";",
         "$(\"rail-status\").addEventListener(\"click\", toggleSessionRecording)",
-        "$(\"rail-buffer\").addEventListener(\"click\", toggleRecording)",
+        "$(\"rail-game\").addEventListener(\"click\", toggleRecording)",
         "invoke(\"set_session_recording\"",
         "fullSessionRecordingActive",
     ] {

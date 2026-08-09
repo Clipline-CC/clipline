@@ -1081,21 +1081,44 @@ label span { white-space: nowrap; }
 }
 
 .rail-game {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 30px;
-  height: 30px;
+  width: 40px;
+  height: 40px;
   flex: none;
   /* A little extra breathing room above the captured-game icon, on top of the
      rail's 10px rhythm, to set it apart from the RAM readout. */
   margin-top: 8px;
-  border-radius: 7px;
+  padding: 0;
+  border-radius: 10px;
   background: var(--well);
   border: 1px solid var(--line);
+  color: var(--muted);
+  cursor: pointer;
   overflow: hidden;
+  transition: border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
 }
-.rail-game[hidden] { display: none; }
+.rail-game:hover { transform: translateY(-1px); }
+.rail-game.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(50, 116, 255, 0.28), 0 0 14px rgba(50, 116, 255, 0.55);
+  color: var(--text);
+}
+.rail-game.stopped::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background: rgba(3, 7, 14, 0.58);
+  pointer-events: none;
+}
+.rail-game.blocked {
+  border-color: var(--danger);
+  box-shadow: none;
+}
+.rail-game:disabled { cursor: wait; transform: none; }
 .rail-game img { width: 100%; height: 100%; object-fit: contain; }
 .rail-game .placeholder {
   display: flex;
@@ -1105,7 +1128,8 @@ label span { white-space: nowrap; }
   height: 100%;
   color: var(--muted);
 }
-.rail-game .placeholder svg { width: 20px; height: 20px; fill: currentColor; }
+.rail-game .placeholder svg { width: 23px; height: 23px; fill: currentColor; }
+.rail-game .source-icon svg { width: 27px; height: 27px; fill: none; }
 
 /* App-wide notices/errors as a bottom-center toast (relocated out of the
    retired expanded sidebar). Hidden when empty. */
@@ -1253,22 +1277,15 @@ label span { white-space: nowrap; }
   fill: currentColor;
 }
 
-#rail-status,
-#rail-buffer {
+#rail-status {
   color: var(--text);
 }
 
-#rail-status.stopped,
-#rail-buffer.stopped {
+#rail-status.stopped {
   color: var(--muted);
 }
 
-#rail-buffer.waiting {
-  color: var(--accent);
-}
-
-#rail-status.blocked,
-#rail-buffer.blocked {
+#rail-status.blocked {
   color: var(--danger);
 }
 

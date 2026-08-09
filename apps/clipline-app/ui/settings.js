@@ -1641,6 +1641,7 @@ function updateCaptureStatus() {
   const bufferReadyTitle = activeEncoderLabel
     ? `Replay buffer ready · ${activeEncoderLabel}`
     : "Replay buffer ready";
+  renderRailGame();
   $("rail-status").classList.toggle("stopped", !fullSessionRecordingActive || storageQuotaBlocked);
   $("rail-status").classList.toggle("blocked", storageQuotaBlocked);
   $("rail-status").setAttribute("aria-pressed", String(fullSessionRecordingActive));
@@ -1657,21 +1658,21 @@ function updateCaptureStatus() {
       : "Record";
   $("rail-dot").className = `dot${fullSessionRecordingActive ? " on" : ""}`;
 
-  $("rail-buffer").classList.toggle("stopped", !recordingRequested || storageQuotaBlocked);
-  $("rail-buffer").classList.toggle("waiting", recorderWaitingForGame);
-  $("rail-buffer").classList.toggle("blocked", storageQuotaBlocked);
-  $("rail-buffer").setAttribute("aria-pressed", String(recordingRequested));
-  $("rail-buffer").setAttribute("aria-disabled", String(storageQuotaBlocked));
-  $("rail-buffer").title = storageQuotaBlocked
+  $("rail-game").classList.toggle("active", recordingRequested && !storageQuotaBlocked);
+  $("rail-game").classList.toggle("stopped", !recordingRequested || storageQuotaBlocked);
+  $("rail-game").classList.toggle("waiting", recorderWaitingForGame);
+  $("rail-game").classList.toggle("blocked", storageQuotaBlocked);
+  $("rail-game").setAttribute("aria-pressed", String(recordingRequested));
+  $("rail-game").setAttribute("aria-disabled", String(storageQuotaBlocked));
+  $("rail-game").title = storageQuotaBlocked
     ? "Replay buffer disabled — storage quota full"
     : recordingActive
       ? bufferReadyTitle
       : recorderWaitingForGame
         ? "Stop waiting for a game"
         : `Start ${source} replay buffer`;
-  $("rail-buffer-dot").className = `dot${recordingActive ? " ready" : recorderWaitingForGame ? " waiting" : ""}`;
+  $("rail-game").setAttribute("aria-label", $("rail-game").title);
   $("rail-save").disabled = storageQuotaBlocked || !recordingActive;
-  renderRailGame();
 }
 
 function saveHotkeyLabel() {
@@ -1706,7 +1707,7 @@ async function toggleRecording() {
     return;
   }
   const next = !recordingRequested;
-  $("rail-buffer").disabled = true;
+  $("rail-game").disabled = true;
   try {
     recordingRequested = await invoke("set_recording", { recording: next });
     if (!recordingRequested) {
@@ -1717,7 +1718,7 @@ async function toggleRecording() {
   } catch (e) {
     $("error").textContent = e;
   } finally {
-    $("rail-buffer").disabled = false;
+    $("rail-game").disabled = false;
   }
 }
 
