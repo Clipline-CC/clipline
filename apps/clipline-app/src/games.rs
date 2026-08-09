@@ -138,9 +138,16 @@ fn best_window_for_game<'a>(
 ) -> Option<&'a CapturableWindow> {
     windows
         .iter()
+        .filter(|window| !matches_supported_game(window))
         .filter_map(|window| match_score(game, window).map(|score| (score, window)))
         .max_by_key(|(score, window)| (*score, window.title.len()))
         .map(|(_, window)| window)
+}
+
+fn matches_supported_game(window: &CapturableWindow) -> bool {
+    game_plugins::all()
+        .iter()
+        .any(|plugin| plugin.match_window(std::slice::from_ref(window)).is_some())
 }
 
 fn has_enabled_games(settings: &GameSettings) -> bool {
@@ -601,6 +608,32 @@ mod tests {
         .expect("custom game should still match");
 
         assert_eq!(detected.identity.id(), "custom-test");
+    }
+
+    #[test]
+    fn disabled_built_in_game_cannot_be_recaptured_by_a_duplicate_custom_rule() {
+        let mut settings = settings_with_all_plugins_disabled();
+        settings.custom_games.push(CustomGameSettings {
+            id: "custom-league-duplicate".into(),
+            name: "League of Legends".into(),
+            exe_name: "League of Legends.exe".into(),
+            process_path: Some(
+                r"C:\Riot Games\League of Legends\Game\League of Legends.exe".into(),
+            ),
+            window_title: "League of Legends (TM) Client".into(),
+            ..game()
+        });
+
+        assert!(detect_active_game_from_windows(
+            &settings,
+            vec![window(
+                7,
+                "League of Legends (TM) Client",
+                "League of Legends.exe",
+                Some(r"C:\Riot Games\League of Legends\Game\League of Legends.exe"),
+            )],
+        )
+        .is_none());
     }
 
     #[test]

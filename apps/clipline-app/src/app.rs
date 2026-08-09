@@ -1804,23 +1804,33 @@ impl RuntimeState {
         app: AppHandle<R>,
         detected: Option<DetectedGame>,
     ) -> Result<(), String> {
-        let event = GameDetectionEvent::from_detected(detected.as_ref());
-        let (prepared_restart, emit_event) = {
+        let (prepared_restart, emit_event, event) = {
             let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+            let detected =
+                detected.filter(|game| active_game_still_configured(&inner.settings, Some(game)));
+            let event = GameDetectionEvent::from_detected(detected.as_ref());
             record_osu_title_event(&mut inner, detected.as_ref(), unix_now_i64());
             if same_game_window(inner.active_game.as_ref(), detected.as_ref()) {
                 if game_recording_mode_changed(inner.active_game.as_ref(), detected.as_ref()) {
                     inner.active_game = detected;
-                    (Some(Self::prepare_service_restart(&mut inner)?), true)
+                    (
+                        Some(Self::prepare_service_restart(&mut inner)?),
+                        true,
+                        event,
+                    )
                 } else if inner.active_game != detected {
                     inner.active_game = detected;
-                    (None, true)
+                    (None, true, event)
                 } else {
-                    (None, false)
+                    (None, false, event)
                 }
             } else {
                 inner.active_game = detected;
-                (Some(Self::prepare_service_restart(&mut inner)?), true)
+                (
+                    Some(Self::prepare_service_restart(&mut inner)?),
+                    true,
+                    event,
+                )
             }
         };
         if let Some(prepared) = prepared_restart {
