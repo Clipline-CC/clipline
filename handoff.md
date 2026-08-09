@@ -4046,6 +4046,16 @@ uses soft-gray/white surfaces, dark text, blue controls, and `color-scheme: ligh
 checkboxes, and scrollbars follow the palette too. Both persist through `UiTheme`, cover the full
 alternate-theme token set, keep clip kinds distinct, and tint the in-app logo.
 
+## Checkpoint (2026-08-09): PR #144 theme review hardening
+
+Theme-sensitive controls no longer carry dark-surface-only color literals: destructive actions,
+trim controls, hover fills, settings/game cards, Cloud errors, and common hairlines now reuse the
+existing semantic palette tokens, keeping them legible in Light. The active capture glow follows
+`--accent-rgb` and the stopped shade follows the theme scrim. One shared palette assertion now
+checks token parity, clip-kind separation, and logo tinting for every alternate theme; all six
+`UiTheme` values share one persistence round-trip test. PR #144 is based directly on the current
+`origin/develop`, which already contains PR #143.
+
 ## What's next (rough value order; each gets its own plan)
 
 1. **Auto-clip on importance** (ddoc §5): `importance ≥ threshold` → auto-save; marker kinds

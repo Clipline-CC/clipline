@@ -70,20 +70,11 @@ fn purple_theme_is_selectable_and_covers_the_theme_palette() {
             && settings.contains("document.documentElement.dataset.theme = theme;"),
         "Purple must use the existing instant-preview theme selector"
     );
-    assert_eq!(
-        css_custom_properties(purple),
-        css_custom_properties(classic),
-        "Purple must override every token covered by the existing alternate theme"
-    );
+    assert_theme_palette(&css, "purple");
     assert_ne!(
         css_decl_value(purple, "--accent-rgb"),
         css_decl_value(classic, "--accent-rgb"),
         "Purple needs its own accent palette"
-    );
-    assert_eq!(
-        css_decl_value(purple, "--session"),
-        Some("var(--marker)"),
-        "Purple sessions must use the warm marker color to stay distinct from violet replays"
     );
 }
 
@@ -91,42 +82,74 @@ fn purple_theme_is_selectable_and_covers_the_theme_palette() {
 fn oled_theme_is_true_black_and_covers_the_theme_palette() {
     let html = index_html();
     let css = styles_css();
-    let classic = css_rule_body(&css, ":root[data-theme=\"classic\"]");
     let oled = css_rule_body(&css, ":root[data-theme=\"oled\"]");
 
     assert!(html.contains("<option value=\"oled\">OLED (true black)</option>"));
-    assert_eq!(
-        css_custom_properties(oled),
-        css_custom_properties(classic),
-        "OLED must override every token covered by the existing alternate themes"
-    );
+    assert_theme_palette(&css, "oled");
     assert_eq!(css_decl_value(oled, "--bg"), Some("#000000"));
-    assert_eq!(css_decl_value(oled, "--session"), Some("var(--marker)"));
-    assert_ne!(css_decl_value(oled, "--accent"), css_decl_value(oled, "--ok"));
-    assert_ne!(css_decl_value(oled, "--accent"), css_decl_value(oled, "--marker"));
-    assert_ne!(css_decl_value(oled, "--logo-filter"), Some("none"));
 }
 
 #[test]
 fn neutral_dark_and_light_themes_are_complete_and_selectable() {
     let html = index_html();
     let css = styles_css();
-    let classic = css_rule_body(&css, ":root[data-theme=\"classic\"]");
     let dark = css_rule_body(&css, ":root[data-theme=\"dark\"]");
     let light = css_rule_body(&css, ":root[data-theme=\"light\"]");
 
     assert!(html.contains("<option value=\"dark\">Dark (neutral)</option>"));
     assert!(html.contains("<option value=\"light\">Light (neutral)</option>"));
-    assert_eq!(css_custom_properties(dark), css_custom_properties(classic));
-    assert_eq!(css_custom_properties(light), css_custom_properties(classic));
+    assert_theme_palette(&css, "dark");
+    assert_theme_palette(&css, "light");
     assert_eq!(css_decl_value(dark, "--bg"), Some("#111315"));
     assert_eq!(css_decl_value(light, "color-scheme"), Some("light"));
     assert_eq!(css_decl_value(light, "--bg"), Some("#f4f6f8"));
-    for palette in [dark, light] {
-        assert_eq!(css_decl_value(palette, "--session"), Some("var(--marker)"));
-        assert_ne!(css_decl_value(palette, "--accent"), css_decl_value(palette, "--ok"));
-        assert_ne!(css_decl_value(palette, "--accent"), css_decl_value(palette, "--marker"));
-        assert_ne!(css_decl_value(palette, "--logo-filter"), Some("none"));
+}
+
+#[test]
+fn themed_controls_do_not_assume_dark_surfaces() {
+    let css = styles_css();
+    let danger = css_rule_body(&css, "button.danger");
+    let danger_hover = css_rule_body(&css, "button.danger:hover");
+    let menu_danger = css_rule_body(&css, ".context-menu button.danger-text");
+    let trim = css_rule_body(&css, "#trim-mode-toggle");
+    let trim_active = css_rule_body(&css, "#trim-mode-toggle.active");
+    let capture_glow = css_rule_body(&css, ".rail-game.active > img");
+    let stopped_overlay = css_rule_body(&css, ".rail-game.stopped::after");
+
+    assert_eq!(css_decl_value(danger, "color"), Some("var(--rec)"));
+    assert!(
+        css_decl_value(danger, "border-color").is_some_and(|value| value.contains("var(--rec)"))
+    );
+    assert!(css_decl_value(danger_hover, "background")
+        .is_some_and(|value| value.contains("var(--rec)")));
+    assert_eq!(css_decl_value(menu_danger, "color"), Some("var(--rec)"));
+    assert_eq!(css_decl_value(trim, "color"), Some("var(--text)"));
+    assert_eq!(
+        css_decl_value(trim, "border"),
+        Some("1px solid var(--line-strong)")
+    );
+    assert_eq!(css_decl_value(trim, "background"), Some("var(--panel-2)"));
+    assert_eq!(
+        css_decl_value(trim_active, "color"),
+        Some("var(--btn-primary-text)")
+    );
+    assert_eq!(
+        css_decl_value(trim_active, "border-color"),
+        Some("var(--accent)")
+    );
+    assert_eq!(
+        css_decl_value(trim_active, "background"),
+        Some("var(--accent)")
+    );
+    assert!(css_decl_value(capture_glow, "filter")
+        .is_some_and(|value| value.contains("rgba(var(--accent-rgb)")));
+    assert!(css_decl_value(stopped_overlay, "background")
+        .is_some_and(|value| value.contains("rgba(var(--scrim-a-rgb)")));
+    for dark_only_color in ["#ffc9c9", "#ffdfe1", "#ff7b86", "#fecdd3"] {
+        assert!(
+            !css.contains(dark_only_color),
+            "{dark_only_color} must be replaced by a palette token"
+        );
     }
 }
 
@@ -192,20 +215,45 @@ fn css_rule_body<'a>(source: &'a str, selector: &str) -> &'a str {
 }
 
 fn css_decl_value<'a>(rule_body: &'a str, property: &str) -> Option<&'a str> {
-    rule_body.split(';').find_map(|declaration| {
-        let (name, value) = declaration.trim().split_once(':')?;
-        (name.trim() == property).then(|| value.trim())
-    })
+    css_declarations(rule_body)
+        .find_map(|(name, value)| (name.trim() == property).then(|| value.trim()))
 }
 
 fn css_custom_properties(rule_body: &str) -> std::collections::BTreeSet<String> {
-    rule_body
-        .split(';')
-        .filter_map(|declaration| declaration.trim().split_once(':'))
+    css_declarations(rule_body)
         .map(|(name, _)| name.trim())
         .filter(|name| name.starts_with("--"))
         .map(str::to_owned)
         .collect()
+}
+
+fn css_declarations(rule_body: &str) -> impl Iterator<Item = (&str, &str)> {
+    rule_body
+        .split(';')
+        .filter_map(|declaration| declaration.trim().split_once(':'))
+}
+
+fn assert_theme_palette(css: &str, theme: &str) {
+    // Classic is the reference alternate palette; add new themed tokens there first so this
+    // contract requires every other alternate palette to define them too.
+    let classic = css_rule_body(css, ":root[data-theme=\"classic\"]");
+    let selector = format!(":root[data-theme=\"{theme}\"]");
+    let palette = css_rule_body(css, &selector);
+
+    assert_eq!(
+        css_custom_properties(palette),
+        css_custom_properties(classic)
+    );
+    assert_eq!(css_decl_value(palette, "--session"), Some("var(--marker)"));
+    assert_ne!(
+        css_decl_value(palette, "--accent"),
+        css_decl_value(palette, "--ok")
+    );
+    assert_ne!(
+        css_decl_value(palette, "--accent"),
+        css_decl_value(palette, "--marker")
+    );
+    assert_ne!(css_decl_value(palette, "--logo-filter"), Some("none"));
 }
 
 fn marker_png_alpha_bounds(asset_dir: &str, name: &str) -> ((u32, u32), (u32, u32)) {
@@ -3261,12 +3309,14 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
     );
     assert!(
         css_decl_value(css_rule_body(&css, "#trim-mode-toggle"), "display") == Some("inline-flex")
-            && css_decl_value(css_rule_body(&css, "#trim-mode-toggle"), "color") == Some("#ffffff"),
+            && css_decl_value(css_rule_body(&css, "#trim-mode-toggle"), "color")
+                == Some("var(--text)"),
         "the simple scissors trim control must read as a compact below-timeline action"
     );
     assert!(
         css_decl_value(css_rule_body(&css, "#trim-mode-toggle"), "position").is_some()
-            && css_decl_value(css_rule_body(&css, "#trim-mode-toggle"), "color") == Some("#ffffff"),
+            && css_decl_value(css_rule_body(&css, "#trim-mode-toggle"), "color")
+                == Some("var(--text)"),
         "the simple scissors trim control must stay high contrast"
     );
     assert!(

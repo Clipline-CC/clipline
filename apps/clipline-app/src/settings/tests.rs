@@ -51,22 +51,8 @@ fn defaults_match_current_recorder_behavior() {
 }
 
 #[test]
-fn purple_theme_round_trips_through_settings_json() {
-    let theme: UiTheme = serde_json::from_str(r#""purple""#).unwrap();
-
-    assert_eq!(serde_json::to_value(theme).unwrap(), "purple");
-}
-
-#[test]
-fn oled_theme_round_trips_through_settings_json() {
-    let theme: UiTheme = serde_json::from_str(r#""oled""#).unwrap();
-
-    assert_eq!(serde_json::to_value(theme).unwrap(), "oled");
-}
-
-#[test]
-fn neutral_dark_and_light_themes_round_trip_through_settings_json() {
-    for name in ["dark", "light"] {
+fn ui_themes_round_trip_through_settings_json() {
+    for name in ["booth", "classic", "purple", "oled", "dark", "light"] {
         let theme: UiTheme = serde_json::from_value(name.into()).unwrap();
         assert_eq!(serde_json::to_value(theme).unwrap(), name);
     }
