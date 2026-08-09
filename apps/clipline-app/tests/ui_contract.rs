@@ -56,6 +56,41 @@ fn legacy_buffer_setting_mirrors_the_replay_window() {
     );
 }
 
+#[test]
+fn purple_theme_is_selectable_and_covers_the_theme_palette() {
+    let html = index_html();
+    let settings = read_ui_js("settings.js");
+    let css = styles_css();
+    let classic = css_rule_body(&css, ":root[data-theme=\"classic\"]");
+    let purple = css_rule_body(&css, ":root[data-theme=\"purple\"]");
+
+    let theme_properties = |rule: &str| {
+        rule.split(';')
+            .filter_map(|declaration| declaration.trim().split_once(':'))
+            .map(|(name, _)| name.trim())
+            .filter(|name| name.starts_with("--"))
+            .map(str::to_owned)
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+
+    assert!(
+        html.contains("<option value=\"purple\">Purple")
+            && settings.contains("if (theme === \"booth\")")
+            && settings.contains("document.documentElement.dataset.theme = theme;"),
+        "Purple must use the existing instant-preview theme selector"
+    );
+    assert_eq!(
+        theme_properties(purple),
+        theme_properties(classic),
+        "Purple must override every token covered by the existing alternate theme"
+    );
+    assert_ne!(
+        css_decl_value(purple, "--accent-rgb"),
+        css_decl_value(classic, "--accent-rgb"),
+        "Purple needs its own accent palette"
+    );
+}
+
 /// Concatenated app UI scripts (everything except player-core.js).
 fn main_js() -> String {
     APP_UI_JS

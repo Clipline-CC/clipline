@@ -152,11 +152,11 @@ function syncSettingsDraftFromForm({ resetDiscard = true } = {}) {
   return settingsDraft;
 }
 
-// Booth (default) needs no attribute; "classic" flips the [data-theme]
-// override block in styles.css.
+// Booth (default) needs no attribute; alternate palettes use [data-theme]
+// override blocks in styles.css.
 function applyUiTheme(theme) {
-  if (theme === "classic") document.documentElement.dataset.theme = "classic";
-  else delete document.documentElement.dataset.theme;
+  if (theme === "booth") delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = theme;
 }
 
 function fillSettings(s) {

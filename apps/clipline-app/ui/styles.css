@@ -26,8 +26,8 @@
   --mc-objective: #cdb2ff;
   --mc-structure: #f0cd7a;
   --mc-info: #c0b4aa;
-  /* Theme tokens (Booth defaults). [data-theme="classic"] below restores the
-     original midnight-blue palette; keep both blocks in sync when adding one. */
+  /* Theme tokens (Booth defaults). Alternate [data-theme] palettes below
+     override the same token set; keep those blocks in sync when adding one. */
   --btn-primary: #ffb224;
   --btn-primary-hover: #ffc65a;
   --btn-primary-text: #171310;
@@ -748,6 +748,75 @@
   --bright2-rgb: 240, 242, 246;
   --accent-rgb: 61, 123, 253;
   --ok-rgb: 122, 184, 255;
+}
+
+/* Purple — a deep-violet palette, Settings > General > Theme. */
+:root[data-theme="purple"] {
+  --bg: #100c18;
+  --panel: #171121;
+  --panel-2: #20172d;
+  --line: #30233f;
+  --line-strong: #49345f;
+  --text: #eee8f6;
+  --muted: #a99bb8;
+  --accent: #a970ff;
+  --accent-hover: #c092ff;
+  --marker: #edc66d;
+  --session: #d19aff;
+  --rec: #ff5c68;
+  --ok: #62d6c7;
+  --mc-info: #b8abc5;
+  --btn-primary: #8b4fdb;
+  --btn-primary-hover: #a563ec;
+  --btn-primary-text: #f7f1ff;
+  --baseline: #b66fff;
+  --baseline-rgb: 182, 111, 255;
+  --overlay-rgb: 10, 6, 17;
+  --slider-thumb: #eedcff;
+  --slider-thumb-border: #a970df;
+  --slider-thumb-hover: #c092ff;
+  --clip-active-bg: #251936;
+  --hotkey-rec-bg: #25163b;
+  --tile-active-bg: #2b1c40;
+  --tile-primary-line: #74539a;
+  --seg-on-bg: #2d1b48;
+  --seg-on-line: #7448ad;
+  --region-line: #c39aff;
+  --region-text: #faf4ff;
+  --region-grip: #ead8ff;
+  --team-rgb: 98, 214, 199;
+  --team-deep-rgb: 58, 174, 162;
+  --team-hi-rgb: 132, 229, 216;
+  --shade-d: #1d1428;
+  --well: #0d0914;
+  --field: #130e1b;
+  --hover: #291f35;
+  --text-soft: #c6b9d1;
+  --text-strong: #f5f0f9;
+  --text-max: #fbf8fd;
+  --scrollbar: #4b3b58;
+  --scrollbar-hover: #625070;
+  --faint: #6d6078;
+  --shade-a: #130d1c;
+  --shade-b: #1c1427;
+  --shade-c: #150f1e;
+  --shade-e: #584a63;
+  --shade-f: #1b1325;
+  --shade-g: #2c2237;
+  --shade-h: #4c3d59;
+  --shade-i: #0f0a16;
+  --scrim-a-rgb: 8, 3, 16;
+  --scrim-b-rgb: 6, 4, 9;
+  --scrim-c-rgb: 10, 7, 14;
+  --scrim-d-rgb: 24, 17, 34;
+  --scrim-e-rgb: 28, 18, 41;
+  --scrim-f-rgb: 22, 14, 33;
+  --soft-rgb: 169, 155, 184;
+  --soft2-rgb: 190, 171, 205;
+  --bright-rgb: 247, 241, 252;
+  --bright2-rgb: 244, 237, 250;
+  --accent-rgb: 169, 112, 255;
+  --ok-rgb: 98, 214, 199;
 }
 
 

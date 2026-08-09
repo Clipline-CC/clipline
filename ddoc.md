@@ -51,6 +51,11 @@
 
 **Target users:** competitive PC players (League, VALORANT, CS2, Apex) who want ShadowPlay-style replay without NVIDIA lock-in; privacy-conscious users who reject Overwolf/ads; content creators wanting fast local clips with event context; AMD/Intel GPU owners underserved by ShadowPlay.
 
+**Visual customization.** Settings > General previews and persists three first-party color
+palettes: Booth (warm amber, default), Classic (midnight blue), and Purple (deep violet). Alternate
+themes override the same semantic CSS token set so recording states and accessibility behavior stay
+consistent across palettes.
+
 ### 2. Competitive Analysis Matrix
 
 | Tool | Platform | Overhead | Ads/Model | Replay buffer | Event detection | Editor | Anti-cheat safe | Open source |

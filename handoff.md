@@ -4019,6 +4019,14 @@ escaping, CSP, opaque downloads, notes/status, and immediate deletion. Clipline 
 untouched. The desktop uses the exact official HTTPS intake route in debug and release builds;
 production health and readiness must remain green before shipping a client release.
 
+## Checkpoint (2026-08-09): Purple theme
+
+Settings > General now offers Purple (deep violet) alongside Booth and Classic. It uses the same
+instant preview and save/discard transaction as the existing themes, persists as the `purple`
+`UiTheme` value, and supplies the full alternate-theme CSS token set rather than maintaining a
+parallel stylesheet. Booth remains the default. The UI contract compares alternate palette token
+coverage, so future theme-token additions cannot silently leave Purple incomplete.
+
 ## What's next (rough value order; each gets its own plan)
 
 1. **Auto-clip on importance** (ddoc §5): `importance ≥ threshold` → auto-save; marker kinds

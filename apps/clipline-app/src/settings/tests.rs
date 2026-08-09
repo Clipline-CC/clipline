@@ -51,6 +51,13 @@ fn defaults_match_current_recorder_behavior() {
 }
 
 #[test]
+fn purple_theme_round_trips_through_settings_json() {
+    let theme: UiTheme = serde_json::from_str(r#""purple""#).unwrap();
+
+    assert_eq!(serde_json::to_value(theme).unwrap(), "purple");
+}
+
+#[test]
 fn legacy_games_default_no_game_pause_off() {
     let settings: GameSettings = serde_json::from_str(
         r#"{
