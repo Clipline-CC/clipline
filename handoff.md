@@ -4,6 +4,51 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-09): Nightly 0.1.50
+
+Plans: `docs/superpowers/plans/2026-08-09-nightly-0.1.49-recovery.md`,
+`docs/superpowers/plans/2026-08-09-nightly-0.1.50-recovery.md`, and
+`docs/superpowers/plans/2026-08-09-nightly-publish-gh-repo.md`.
+
+The first tag-triggered Nightly attempts failed safely and never replaced rolling `nightly`
+0.1.47:
+
+- `nightly-v0.1.48` failed in Tauri's legacy Windows PowerShell process because
+  `Get-FileHash` was unavailable. PR #147 replaced those verifier calls with a local .NET
+  SHA-256 helper.
+- `nightly-v0.1.49` built and signed both installers, but optional
+  `gh api .../releases/generate-notes` returned HTTP 403 under the read-only build job and left
+  `$LASTEXITCODE = 1`, so the otherwise-successful prepare step exited failed. PR #148 clears
+  that native status after the fallback notes path and parameterizes the runbook tag example.
+- `nightly-v0.1.50` proved both prior fixes: the build job completed and uploaded the seven-asset
+  transaction. Publish then failed immediately because the artifact-only publish job has no
+  checkout, so `gh release create` probed `.git` and exited with `not a git repository`. Rolling
+  `nightly` still pointed at 0.1.47.
+
+Recovery kept the immutable `nightly-v0.1.48`, `nightly-v0.1.49`, and `nightly-v0.1.50` tags in
+place. The verified CI artifact from run
+[31337524736](https://github.com/dain98/clipline/actions/runs/31337524736) was published through
+the same draft-then-promote transaction, and the publish job now sets `GH_REPO` so future
+automated runs do not need a checkout just to satisfy `gh`.
+
+**Published** on the rolling `nightly` prerelease from `develop` commit `9c97ed92`. The `nightly`
+tag and release both resolve to full commit `9c97ed92769a42709e8d6f1f3d9d9a77520a2b83`. All seven
+public assets were downloaded again and matched the staged SHA-256 digests.
+
+| asset | bytes | sha256 |
+| --- | ---: | --- |
+| `Clipline_0.1.50_x64-setup.exe` | 9,835,029 | `93da100b7ee592aa2e8ad65da99d01d12e10589e30acd0d7be3506f3a7fc5001` |
+| `Clipline_0.1.50_x64-setup.exe.sig` | 420 | `4a25bdd760606b57617342729efcdac120e2f310b1685370884b66d6e3367d21` |
+| `Clipline_0.1.50_x64-standalone-setup.exe` | 282,795,355 | `5a5cb5558a722a923992a012cc03437470301b6c55526e59d4a4671f50e4b097` |
+| `Clipline_0.1.50_x64-standalone-setup.exe.sig` | 436 | `d52d8aa6fbd9b6cb90724b1b690f0422cfd9ce7e40951b5d3e0e18252a8b11ac` |
+| `latest.json` | 916 | `2f83d29bbc51dc3ce0a2fb6e9cd1365faef19f5f6e5602204afb0defaf59d198` |
+| `latest-standalone.json` | 943 | `8b39e8931c39fb075f2874b671da27b9c5c54e48190afe7b45577f03a7d8027b` |
+| `release-notes-0.1.50.md` | 222 | `bfb6e9f0b657c983a5b5dd0ac21e6d640ed8e306c1a63a14090ce2761175ee8d` |
+
+Both downloaded manifests parse as version 0.1.50 and point at the rolling `nightly` asset URLs.
+
+---
+
 ## Checkpoint (2026-08-09): Tag-triggered Nightly releases
 
 Plan: `docs/superpowers/plans/2026-08-09-tag-triggered-nightly-releases.md`.
