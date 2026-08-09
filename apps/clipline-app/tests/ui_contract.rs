@@ -523,11 +523,14 @@ fn capture_target_icon_is_the_replay_buffer_control() {
     ] {
         assert!(js.contains(required), "capture control needs `{required}`");
     }
+    let active_control = css_rule_body(&css, ".rail-game.active");
+    let active_icon = css_rule_body(&css, ".rail-game.active > img,");
     assert!(
-        css.contains(".rail-game.active")
-            && css.contains(".rail-game.stopped::after")
-            && css.contains("box-shadow:"),
-        "the unified icon must glow while active and darken while stopped"
+        css.contains(".rail-game.stopped::after")
+            && css_decl_value(active_control, "box-shadow") == Some("none")
+            && css_decl_value(active_icon, "filter")
+                .is_some_and(|value| value.contains("drop-shadow")),
+        "the unified control must darken while stopped and shape its active glow to the rendered icon"
     );
 }
 

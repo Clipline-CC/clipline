@@ -1102,9 +1102,16 @@ label span { white-space: nowrap; }
 }
 .rail-game:hover { transform: translateY(-1px); }
 .rail-game.active {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 2px rgba(50, 116, 255, 0.28), 0 0 14px rgba(50, 116, 255, 0.55);
+  border-color: var(--line);
+  box-shadow: none;
   color: var(--text);
+  overflow: visible;
+}
+.rail-game.active > img,
+.rail-game.active > .placeholder {
+  filter:
+    drop-shadow(0 0 1px rgba(50, 116, 255, 0.95))
+    drop-shadow(0 0 7px rgba(50, 116, 255, 0.72));
 }
 .rail-game.stopped::after {
   content: "";
