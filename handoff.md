@@ -4,6 +4,26 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-09): Nightly 0.1.47
+
+Plan: `docs/superpowers/plans/2026-08-09-nightly-0.1.47.md` (`a45891b`).
+
+Nightly 0.1.47 adds saved full-session recording controls with two optional global hotkeys, an
+honest unified capture-target rail, League game-type labels and Library filtering, automatic Cloud
+share-link copying and matching Review-to-Cloud handoff, adaptive GB clip sizes, exact custom-game
+deduplication, and correct audio timing for recordings started mid-stream.
+
+PR #143 merged to `develop` at `d68643c5` after green Ubuntu and Windows checks. Microsoft's
+current WebView2 release documentation still lists Runtime 151 as the current line and
+151.0.4126.0 as its compatibility floor. The pinned standalone payload remains the later
+151.0.4129.59 x64 Fixed Version runtime and was re-reviewed for this release on 2026-08-09.
+
+The release commit advances only Clipline/Tauri version metadata, WebView2 review dates, this
+handoff, and the release plan from the CI-green merge. Publication and downloaded-asset hashes are
+recorded here after all signed assets are independently verified.
+
+---
+
 ## Checkpoint (2026-08-08): PR #143 review hardening
 
 Plan: `docs/superpowers/plans/2026-08-08-pr-143-review-fixes.md` (`e237ddd`).
