@@ -3937,6 +3937,12 @@ fn games_ui_wires_detection_commands() {
             "{function} must reject a completion from before a background transition"
         );
     }
+    let manual_add = js_function_body(&js, "addCustomGameFromWindow");
+    assert!(
+        manual_add.contains("customGameMatchesCandidate")
+            && manual_add.contains("game is already added"),
+        "manual game selection must reject an executable already present in custom games"
+    );
     let background_settings = js_function_body(&js, "releaseBackgroundSettingsUi");
     for required in [
         "gameWindowsScanId += 1;",

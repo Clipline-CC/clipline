@@ -206,6 +206,44 @@ fn legacy_custom_games_default_to_replays_only() {
 }
 
 #[test]
+fn custom_game_normalization_deduplicates_match_identity_and_keeps_last() {
+    let mut games = GameSettings {
+        custom_games: vec![
+            CustomGameSettings {
+                id: "custom-ffxiv-old".into(),
+                legacy_ids: Vec::new(),
+                name: "ffxiv_dx11".into(),
+                enabled: true,
+                exe_name: "ffxiv_dx11.exe".into(),
+                process_path: Some(r"D:\Games\FFXIV\ffxiv_dx11.exe".into()),
+                window_title: "FINAL FANTASY XIV".into(),
+                recording_mode: GameRecordingMode::ReplaysOnly,
+                icon: None,
+            },
+            CustomGameSettings {
+                id: "custom-ffxiv-new".into(),
+                legacy_ids: Vec::new(),
+                name: "ffxiv_dx11".into(),
+                enabled: false,
+                exe_name: "FFXIV_DX11.EXE".into(),
+                process_path: Some("d:/games/ffxiv/ffxiv_dx11.exe/".into()),
+                window_title: "FINAL FANTASY XIV".into(),
+                recording_mode: GameRecordingMode::ReplaysOnly,
+                icon: None,
+            },
+        ],
+        ..GameSettings::default()
+    };
+
+    games.normalize();
+
+    assert_eq!(games.custom_games.len(), 1);
+    assert_eq!(games.custom_games[0].id, "custom-ffxiv-new");
+    assert!(!games.custom_games[0].enabled);
+    assert_eq!(games.custom_games[0].legacy_ids, ["custom-ffxiv-old"]);
+}
+
+#[test]
 fn legacy_global_game_recording_mode_migrates_to_custom_games() {
     let json = r#"{
             "capture_mode": "primary_monitor",

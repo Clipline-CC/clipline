@@ -2471,6 +2471,15 @@ async function addCustomGameFromWindow(win) {
   if (!lifecycleWork) return;
   const scanId = gameWindowsScanId;
   const name = gameNameFromWindow(win);
+  if (customGames.some((game) => customGameMatchesCandidate(game, {
+    name,
+    exe_name: win.exe_name || "",
+    process_path: win.exe_path || null,
+  }))) {
+    hideGameWindowPicker();
+    $("settings-status").textContent = "game is already added";
+    return;
+  }
   // Pull the executable's icon now, while we still have its path. Best-effort:
   // a missing path or icon just leaves the game with the placeholder glyph.
   let icon = null;
