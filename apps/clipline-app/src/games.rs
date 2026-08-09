@@ -138,16 +138,9 @@ fn best_window_for_game<'a>(
 ) -> Option<&'a CapturableWindow> {
     windows
         .iter()
-        .filter(|window| !matches_supported_game(window))
         .filter_map(|window| match_score(game, window).map(|score| (score, window)))
         .max_by_key(|(score, window)| (*score, window.title.len()))
         .map(|(_, window)| window)
-}
-
-fn matches_supported_game(window: &CapturableWindow) -> bool {
-    game_plugins::all()
-        .iter()
-        .any(|plugin| plugin.match_window(std::slice::from_ref(window)).is_some())
 }
 
 fn has_enabled_games(settings: &GameSettings) -> bool {
@@ -201,8 +194,12 @@ fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
         .contains(&needle.trim().to_ascii_lowercase())
 }
 
-fn path_key(path: &str) -> String {
-    path.trim().replace('/', "\\").to_ascii_lowercase()
+pub(crate) fn path_key(path: &str) -> String {
+    let mut normalized = path.trim().replace('/', "\\").to_ascii_lowercase();
+    while normalized.ends_with('\\') && !normalized.ends_with(":\\") {
+        normalized.pop();
+    }
+    normalized
 }
 
 fn is_browser_process(window: &CapturableWindow) -> bool {
@@ -611,7 +608,7 @@ mod tests {
     }
 
     #[test]
-    fn disabled_built_in_game_cannot_be_recaptured_by_a_duplicate_custom_rule() {
+    fn disabled_built_in_game_can_be_captured_by_an_intentional_custom_rule() {
         let mut settings = settings_with_all_plugins_disabled();
         settings.custom_games.push(CustomGameSettings {
             id: "custom-league-duplicate".into(),
@@ -624,7 +621,7 @@ mod tests {
             ..game()
         });
 
-        assert!(detect_active_game_from_windows(
+        let detected = detect_active_game_from_windows(
             &settings,
             vec![window(
                 7,
@@ -633,7 +630,9 @@ mod tests {
                 Some(r"C:\Riot Games\League of Legends\Game\League of Legends.exe"),
             )],
         )
-        .is_none());
+        .expect("disabled built-in game should defer to the custom rule");
+
+        assert_eq!(detected.identity.id(), "custom-league-duplicate");
     }
 
     #[test]

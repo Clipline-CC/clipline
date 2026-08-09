@@ -3957,9 +3957,10 @@ fn games_ui_wires_detection_commands() {
     }
     let manual_add = js_function_body(&js, "addCustomGameFromWindow");
     assert!(
-        manual_add.contains("customGameMatchesCandidate")
+        js.contains("function customGameMatchKey")
+            && manual_add.contains("customGameRuleMatchesCandidate")
             && manual_add.contains("game is already added"),
-        "manual game selection must reject an executable already present in custom games"
+        "manual game selection must reject an exact custom-game rule already present"
     );
     let background_settings = js_function_body(&js, "releaseBackgroundSettingsUi");
     for required in [

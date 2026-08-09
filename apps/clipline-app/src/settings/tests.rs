@@ -244,6 +244,39 @@ fn custom_game_normalization_deduplicates_match_identity_and_keeps_last() {
 }
 
 #[test]
+fn custom_game_normalization_preserves_distinct_window_rules_for_one_executable() {
+    let base = CustomGameSettings {
+        id: "custom-launcher".into(),
+        legacy_ids: Vec::new(),
+        name: "Game launcher".into(),
+        enabled: true,
+        exe_name: "game.exe".into(),
+        process_path: Some(r"C:\Games\Game\game.exe".into()),
+        window_title: "Launcher".into(),
+        recording_mode: GameRecordingMode::ReplaysOnly,
+        icon: None,
+    };
+    let mut games = GameSettings {
+        custom_games: vec![
+            base.clone(),
+            CustomGameSettings {
+                id: "custom-match".into(),
+                name: "Game match".into(),
+                window_title: "In game".into(),
+                ..base
+            },
+        ],
+        ..GameSettings::default()
+    };
+
+    games.normalize();
+
+    assert_eq!(games.custom_games.len(), 2);
+    assert_eq!(games.custom_games[0].window_title, "Launcher");
+    assert_eq!(games.custom_games[1].window_title, "In game");
+}
+
+#[test]
 fn legacy_global_game_recording_mode_migrates_to_custom_games() {
     let json = r#"{
             "capture_mode": "primary_monitor",

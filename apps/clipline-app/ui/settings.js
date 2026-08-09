@@ -2159,6 +2159,22 @@ function detectedGameMeta(candidate) {
   return parts.join(" · ");
 }
 
+function customGameMatchKey(game) {
+  const path = String(game.process_path || "")
+    .trim()
+    .replaceAll("/", "\\")
+    .replace(/\\+$/, "")
+    .toLowerCase();
+  const exe = String(game.exe_name || "").trim().toLowerCase();
+  const title = String(game.window_title || "").trim().toLowerCase();
+  return path || exe || title ? JSON.stringify([path, exe, title]) : "";
+}
+
+function customGameRuleMatchesCandidate(game, candidate) {
+  const gameKey = customGameMatchKey(game);
+  return !!gameKey && gameKey === customGameMatchKey(candidate);
+}
+
 function customGameMatchesCandidate(game, candidate) {
   const gamePath = String(game.process_path || "").toLowerCase();
   const candidatePath = String(candidate.process_path || "").toLowerCase();
@@ -2471,10 +2487,11 @@ async function addCustomGameFromWindow(win) {
   if (!lifecycleWork) return;
   const scanId = gameWindowsScanId;
   const name = gameNameFromWindow(win);
-  if (customGames.some((game) => customGameMatchesCandidate(game, {
+  if (customGames.some((game) => customGameRuleMatchesCandidate(game, {
     name,
     exe_name: win.exe_name || "",
     process_path: win.exe_path || null,
+    window_title: win.title || "",
   }))) {
     hideGameWindowPicker();
     $("settings-status").textContent = "game is already added";
