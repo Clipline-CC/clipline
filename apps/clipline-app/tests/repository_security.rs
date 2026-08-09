@@ -517,7 +517,8 @@ fn ffmpeg_release_staging_is_pinned_allowlisted_and_attributed() {
         "allowed_files",
         "PROVENANCE.json",
         "manifest_sha256",
-        "Get-FileHash",
+        "[System.Security.Cryptography.SHA256]::Create()",
+        "[System.IO.File]::OpenRead",
         "version_line",
         "required_configuration",
         "forbidden_configuration",
@@ -529,6 +530,10 @@ fn ffmpeg_release_staging_is_pinned_allowlisted_and_attributed() {
             "offline FFmpeg resource verification must enforce {contract}"
         );
     }
+    assert!(
+        !verifier.contains("Get-FileHash"),
+        "the legacy Windows PowerShell preflight must not depend on module-provided Get-FileHash"
+    );
     assert!(
         !verifier.contains("Invoke-WebRequest"),
         "the release-bundle preflight must stay offline"

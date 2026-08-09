@@ -41,6 +41,23 @@ function Get-RegularFile {
   return $item
 }
 
+function Get-Sha256 {
+  param([string]$Path)
+
+  $stream = [System.IO.File]::OpenRead($Path)
+  try {
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+      $hash = $sha256.ComputeHash($stream)
+    } finally {
+      $sha256.Dispose()
+    }
+  } finally {
+    $stream.Dispose()
+  }
+  return ([System.BitConverter]::ToString($hash)).Replace("-", "").ToLowerInvariant()
+}
+
 $resourceInfo = Get-Item -LiteralPath $resourceRoot -Force -ErrorAction Stop
 if (
   -not $resourceInfo.PSIsContainer -or
@@ -102,7 +119,7 @@ foreach ($file in $manifestFiles) {
   if ($item.Length -ne $expectedSize) {
     throw "FFmpeg resource $name size mismatch: expected $expectedSize, got $($item.Length)"
   }
-  $actualHash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+  $actualHash = Get-Sha256 -Path $path
   $expectedHash = ([string]$file.sha256).ToLowerInvariant()
   if ($actualHash -cne $expectedHash) {
     throw "FFmpeg resource $name SHA-256 mismatch: expected $expectedHash, got $actualHash"
@@ -127,7 +144,7 @@ foreach ($field in @(
   Assert-ExactText $provenance.$field $manifest.$field "provenance $field"
 }
 
-$manifestHash = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$manifestHash = Get-Sha256 -Path $manifestPath
 Assert-ExactText $provenance.manifest_sha256 $manifestHash "provenance manifest_sha256"
 Assert-ExactText $provenance.ffmpeg_version $manifest.version_line "provenance ffmpeg_version"
 
