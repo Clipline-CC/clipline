@@ -58,6 +58,7 @@ pub enum UiTheme {
     Booth,
     Classic,
     Purple,
+    Oled,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

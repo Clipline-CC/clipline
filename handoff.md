@@ -4030,6 +4030,14 @@ coverage, so future theme-token additions cannot silently leave Purple incomplet
 asset; the installed Windows icon remains unchanged. Purple clip-kind labels deliberately split
 into violet Replay, warm-gold Session, and teal Trim instead of using two adjacent violet shades.
 
+## Checkpoint (2026-08-09): OLED theme
+
+Settings > General now also offers OLED (true black). Its canvas is `#000000`, with only near-black
+neutral panel elevation and restrained blue controls to minimize large illuminated areas. Clip
+kinds stay blue Replay, warm-gold Session, and teal Trim; status/error colors and the in-app logo
+remain theme-aware. The theme persists as the `oled` `UiTheme` value and overrides the same complete
+token set as Classic and Purple.
+
 ## What's next (rough value order; each gets its own plan)
 
 1. **Auto-clip on importance** (ddoc §5): `importance ≥ threshold` → auto-save; marker kinds

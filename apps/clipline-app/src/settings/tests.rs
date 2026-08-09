@@ -58,6 +58,13 @@ fn purple_theme_round_trips_through_settings_json() {
 }
 
 #[test]
+fn oled_theme_round_trips_through_settings_json() {
+    let theme: UiTheme = serde_json::from_str(r#""oled""#).unwrap();
+
+    assert_eq!(serde_json::to_value(theme).unwrap(), "oled");
+}
+
+#[test]
 fn legacy_games_default_no_game_pause_off() {
     let settings: GameSettings = serde_json::from_str(
         r#"{

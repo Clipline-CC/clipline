@@ -822,6 +822,76 @@
   --logo-filter: hue-rotate(227deg) saturate(.8) brightness(1.05);
 }
 
+/* OLED — true-black surfaces with restrained high-contrast accents. */
+:root[data-theme="oled"] {
+  --bg: #000000;
+  --panel: #050505;
+  --panel-2: #0a0a0a;
+  --line: #202020;
+  --line-strong: #333333;
+  --text: #e8e8e8;
+  --muted: #8d8d8d;
+  --accent: #5b8cff;
+  --accent-hover: #79a2ff;
+  --marker: #e5b45a;
+  --session: var(--marker);
+  --rec: #ff555f;
+  --ok: #4dd6bd;
+  --mc-info: #a0a0a0;
+  --btn-primary: #3f6fd4;
+  --btn-primary-hover: #5282e8;
+  --btn-primary-text: #ffffff;
+  --baseline: #5b8cff;
+  --baseline-rgb: 91, 140, 255;
+  --overlay-rgb: 0, 0, 0;
+  --slider-thumb: #e0e8ff;
+  --slider-thumb-border: #7898e8;
+  --slider-thumb-hover: #9db4ff;
+  --clip-active-bg: #0a1428;
+  --hotkey-rec-bg: #08172e;
+  --tile-active-bg: #0d1d35;
+  --tile-primary-line: #3f5f94;
+  --seg-on-bg: #0a1a32;
+  --seg-on-line: #31548d;
+  --region-line: #77a7ff;
+  --region-text: #f4f8ff;
+  --region-grip: #d9e5ff;
+  --team-rgb: 77, 214, 189;
+  --team-deep-rgb: 50, 174, 153;
+  --team-hi-rgb: 119, 229, 211;
+  --shade-d: #080808;
+  --well: #000000;
+  --field: #060606;
+  --hover: #111111;
+  --text-soft: #b8b8b8;
+  --text-strong: #f0f0f0;
+  --text-max: #fafafa;
+  --scrollbar: #2d2d2d;
+  --scrollbar-hover: #424242;
+  --faint: #5a5a5a;
+  --shade-a: #030303;
+  --shade-b: #0c0c0c;
+  --shade-c: #050505;
+  --shade-e: #4a4a4a;
+  --shade-f: #090909;
+  --shade-g: #181818;
+  --shade-h: #383838;
+  --shade-i: #020202;
+  --scrim-a-rgb: 0, 0, 0;
+  --scrim-b-rgb: 0, 0, 0;
+  --scrim-c-rgb: 2, 2, 2;
+  --scrim-d-rgb: 8, 8, 8;
+  --scrim-e-rgb: 12, 12, 12;
+  --scrim-f-rgb: 6, 6, 6;
+  --soft-rgb: 141, 141, 141;
+  --soft2-rgb: 174, 174, 174;
+  --bright-rgb: 250, 250, 250;
+  --bright2-rgb: 240, 240, 240;
+  --accent-rgb: 91, 140, 255;
+  --ok-rgb: 77, 214, 189;
+  --logo-filter: hue-rotate(182deg) saturate(.8) brightness(1.05);
+}
+
 img[src="assets/clipline-icon.svg"] {
   filter: var(--logo-filter);
 }

@@ -97,6 +97,35 @@ fn purple_theme_is_selectable_and_covers_the_theme_palette() {
 }
 
 #[test]
+fn oled_theme_is_true_black_and_covers_the_theme_palette() {
+    let html = index_html();
+    let css = styles_css();
+    let classic = css_rule_body(&css, ":root[data-theme=\"classic\"]");
+    let oled = css_rule_body(&css, ":root[data-theme=\"oled\"]");
+
+    let theme_properties = |rule: &str| {
+        rule.split(';')
+            .filter_map(|declaration| declaration.trim().split_once(':'))
+            .map(|(name, _)| name.trim())
+            .filter(|name| name.starts_with("--"))
+            .map(str::to_owned)
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+
+    assert!(html.contains("<option value=\"oled\">OLED (true black)</option>"));
+    assert_eq!(
+        theme_properties(oled),
+        theme_properties(classic),
+        "OLED must override every token covered by the existing alternate themes"
+    );
+    assert_eq!(css_decl_value(oled, "--bg"), Some("#000000"));
+    assert_eq!(css_decl_value(oled, "--session"), Some("var(--marker)"));
+    assert_ne!(css_decl_value(oled, "--accent"), css_decl_value(oled, "--ok"));
+    assert_ne!(css_decl_value(oled, "--accent"), css_decl_value(oled, "--marker"));
+    assert_ne!(css_decl_value(oled, "--logo-filter"), Some("none"));
+}
+
+#[test]
 fn clipline_logo_follows_the_selected_theme() {
     let css = styles_css();
     let booth = css_rule_body(&css, ":root");
