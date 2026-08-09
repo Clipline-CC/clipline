@@ -188,6 +188,8 @@ jobs:
       contents: write
     env:
       GH_TOKEN: ${{ github.token }}
+      # Artifact-only job has no checkout; tell gh which repository to target.
+      GH_REPO: ${{ github.repository }}
       STAGING_TAG: nightly-staging-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0

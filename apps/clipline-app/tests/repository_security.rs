@@ -847,3 +847,36 @@ fn nightly_release_notes_fallback_clears_native_exit_code() {
         "release runbook tag example must be parameterized from the Tauri version"
     );
 }
+
+
+#[test]
+fn nightly_publish_job_sets_gh_repo_without_checkout() {
+    let root = workspace_root();
+    let workflow = fs::read_to_string(root.join(".github/workflows/nightly.yml"))
+        .expect("read active Nightly workflow");
+
+    let publish_job = workflow
+        .split_once("\n  publish:")
+        .map(|(_, rest)| rest)
+        .expect("Nightly publish job");
+    let publish_header = publish_job
+        .split("steps:")
+        .next()
+        .expect("publish job header");
+
+    assert!(
+        !publish_header.contains("actions/checkout@"),
+        "publish remains artifact-only; do not require a checkout just to satisfy gh"
+    );
+    assert!(
+        publish_header.contains("GH_REPO: ${{ github.repository }}")
+            || publish_job.contains("GH_REPO: ${{ github.repository }}"),
+        "publish job must set GH_REPO so gh release commands work without a local .git directory"
+    );
+    assert!(
+        publish_job.contains("gh release create")
+            && publish_job.contains("gh release edit")
+            && publish_job.contains("gh release download nightly"),
+        "publish job must retain the draft-create, promote, and public-verify transaction"
+    );
+}
