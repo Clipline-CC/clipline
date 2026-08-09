@@ -1658,7 +1658,7 @@ function updateCaptureStatus() {
       : "Record";
   $("rail-dot").className = `dot${fullSessionRecordingActive ? " on" : ""}`;
 
-  $("rail-game").classList.toggle("active", recordingRequested && !storageQuotaBlocked);
+  $("rail-game").classList.toggle("active", recordingActive && !storageQuotaBlocked);
   $("rail-game").classList.toggle("stopped", !recordingRequested || storageQuotaBlocked);
   $("rail-game").classList.toggle("waiting", recorderWaitingForGame);
   $("rail-game").classList.toggle("blocked", storageQuotaBlocked);

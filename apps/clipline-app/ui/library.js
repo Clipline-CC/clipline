@@ -48,6 +48,9 @@ function renderRailGame() {
   const host = $("rail-game");
   if (!host) return;
   const icon = captureTargetIcon();
+  const iconKey = icon.url ? `url:${icon.url}` : `markup:${icon.markup || "game"}`;
+  if (railCaptureTargetIconKey === iconKey && host.childElementCount) return;
+  railCaptureTargetIconKey = iconKey;
   host.replaceChildren();
   if (icon.url) {
     const img = document.createElement("img");
@@ -1378,21 +1381,26 @@ function syncLeagueGameTypeFilter() {
   select.hidden = !hasCategorizedLeagueClip;
   if (!hasCategorizedLeagueClip) {
     galleryGameType = "all";
+    leagueGameTypeOptionsKey = "";
     return;
   }
 
   const previous = galleryGameType;
-  select.replaceChildren();
-  const all = document.createElement("option");
-  all.value = "all";
-  all.textContent = "Game type: All";
-  select.appendChild(all);
-  for (const [value, label] of LEAGUE_GAME_TYPE_OPTIONS) {
-    if (!present.has(value)) continue;
-    const option = document.createElement("option");
-    option.value = value;
-    option.textContent = `Game type: ${label}`;
-    select.appendChild(option);
+  const optionsKey = [...present].sort().join("|");
+  if (leagueGameTypeOptionsKey !== optionsKey) {
+    leagueGameTypeOptionsKey = optionsKey;
+    select.replaceChildren();
+    const all = document.createElement("option");
+    all.value = "all";
+    all.textContent = "Game type: All";
+    select.appendChild(all);
+    for (const [value, label] of LEAGUE_GAME_TYPE_OPTIONS) {
+      if (!present.has(value)) continue;
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = `Game type: ${label}`;
+      select.appendChild(option);
+    }
   }
   galleryGameType = present.has(previous) ? previous : "all";
   select.value = galleryGameType;

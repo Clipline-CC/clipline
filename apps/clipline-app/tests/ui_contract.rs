@@ -517,21 +517,35 @@ fn capture_target_icon_is_the_replay_buffer_control() {
         "const CAPTURE_MONITOR_ICON",
         "const CAPTURE_REGION_ICON",
         "function captureTargetIcon()",
+        "railCaptureTargetIconKey",
         "$(\"rail-game\").addEventListener(\"click\", toggleRecording)",
-        "$(\"rail-game\").classList.toggle(\"active\"",
+        "$(\"rail-game\").classList.toggle(\"active\", recordingActive && !storageQuotaBlocked)",
         "$(\"rail-game\").classList.toggle(\"stopped\"",
     ] {
         assert!(js.contains(required), "capture control needs `{required}`");
     }
     let active_control = css_rule_body(&css, ".rail-game.active");
     let active_icon = css_rule_body(&css, ".rail-game.active > img,");
+    let waiting_control = css_rule_body(&css, ".rail-game.waiting");
     assert!(
         css.contains(".rail-game.stopped::after")
             && css_decl_value(active_control, "box-shadow") == Some("none")
             && css_decl_value(active_icon, "filter")
-                .is_some_and(|value| value.contains("drop-shadow")),
-        "the unified control must darken while stopped and shape its active glow to the rendered icon"
+                .is_some_and(|value| value.contains("drop-shadow"))
+            && css_decl_value(waiting_control, "box-shadow") == Some("none")
+            && !css.contains(".dot.waiting")
+            && !css.contains(".dot.ready"),
+        "the unified control must glow only while capturing, stay neutral while waiting, and darken while stopped"
     );
+
+    let render = js_function_body(&js, "renderRailGame");
+    let key_check = render
+        .find("railCaptureTargetIconKey === iconKey")
+        .expect("rail capture icon should memoize its rendered target");
+    let rebuild = render
+        .find("host.replaceChildren()")
+        .expect("rail capture icon renders through replaceChildren");
+    assert!(key_check < rebuild, "unchanged capture icons must not be rebuilt");
 }
 
 #[test]
@@ -5346,7 +5360,9 @@ fn league_game_type_metadata_filters_the_local_library() {
     );
     assert!(
         library.contains("function syncLeagueGameTypeFilter")
+            && app_core.contains("leagueGameTypeOptionsKey")
             && library.contains("c.game.queue.category")
+            && library.contains("leagueGameTypeOptionsKey !== optionsKey")
             && library.contains("galleryGameType !== \"all\"")
             && library.contains("c.game.queue.label")
             && library.contains("galleryGameType}"),

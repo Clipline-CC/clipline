@@ -1113,6 +1113,11 @@ label span { white-space: nowrap; }
     drop-shadow(0 0 1px rgba(50, 116, 255, 0.95))
     drop-shadow(0 0 7px rgba(50, 116, 255, 0.72));
 }
+.rail-game.waiting {
+  border-color: rgba(var(--accent-rgb), 0.45);
+  box-shadow: none;
+  color: var(--muted);
+}
 .rail-game.stopped::after {
   content: "";
   position: absolute;
@@ -1394,15 +1399,6 @@ label span { white-space: nowrap; }
   background: var(--rec);
   box-shadow: 0 0 0 2px rgba(229, 72, 77, 0.18);
 }
-.dot.waiting {
-  background: var(--accent);
-  box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.18);
-}
-.dot.ready {
-  background: var(--ok);
-  box-shadow: 0 0 0 2px rgba(var(--ok-rgb), 0.18);
-}
-
 #notice { color: var(--ok); font-size: 12px; min-height: 17px; margin-top: 6px; }
 #error { color: var(--warn); font-size: 12px; min-height: 17px; }
 
