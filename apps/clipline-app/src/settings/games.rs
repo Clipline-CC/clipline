@@ -2,7 +2,7 @@
 //! Owns the legacy `recording_mode` migration (a top-level field on `games`
 //! that applied to every custom game) via a custom `Deserialize`.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -234,7 +234,50 @@ impl GameSettings {
                 game.normalize();
             }
         }
+        dedupe_custom_games(&mut self.custom_games);
     }
+}
+
+fn dedupe_custom_games(games: &mut Vec<CustomGameSettings>) {
+    let mut kept = Vec::with_capacity(games.len());
+    let mut indexes = HashMap::new();
+    for game in std::mem::take(games).into_iter().rev() {
+        let Some(key) = custom_game_match_key(&game) else {
+            kept.push(game);
+            continue;
+        };
+        if let Some(index) = indexes.get(&key).copied() {
+            let keeper: &mut CustomGameSettings = &mut kept[index];
+            if game.id != keeper.id {
+                keeper.legacy_ids.push(game.id);
+            }
+            keeper.legacy_ids.extend(game.legacy_ids);
+            keeper.normalize();
+        } else {
+            indexes.insert(key, kept.len());
+            kept.push(game);
+        }
+    }
+    kept.reverse();
+    *games = kept;
+}
+
+fn custom_game_match_key(game: &CustomGameSettings) -> Option<(String, String, String)> {
+    let path = game
+        .process_path
+        .as_deref()
+        .map(crate::games::path_key)
+        .unwrap_or_default();
+    let exe = game.exe_name.trim();
+    let title = game.window_title.trim();
+    if path.is_empty() && exe.is_empty() && title.is_empty() {
+        return None;
+    }
+    Some((
+        path,
+        exe.to_ascii_lowercase(),
+        title.to_ascii_lowercase(),
+    ))
 }
 
 fn normalize_game_plugin_id(raw: &str) -> String {

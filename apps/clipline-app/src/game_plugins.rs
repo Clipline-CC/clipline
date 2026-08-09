@@ -6,6 +6,7 @@
 //! anti-cheat-safe: no injection, no memory reads, no game-process hooks. Event
 //! ingestion stays behind built-in capability names.
 
+use std::path::PathBuf;
 use std::sync::{mpsc::Receiver, OnceLock};
 use std::time::Instant;
 
@@ -28,6 +29,7 @@ pub type EventSourceSpawner = fn(GameEventSourceContext) -> Receiver<PollerMsg>;
 pub struct GameEventSourceContext {
     pub lol_url: Option<String>,
     pub recording_t0: Instant,
+    pub league_game_executable: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -749,7 +751,11 @@ mod league_of_legends {
     use crate::markers::PollerMsg;
 
     pub fn spawn_event_source(context: GameEventSourceContext) -> Receiver<PollerMsg> {
-        crate::markers::spawn(context.lol_url, context.recording_t0)
+        crate::markers::spawn(
+            context.lol_url,
+            context.recording_t0,
+            context.league_game_executable,
+        )
     }
 }
 

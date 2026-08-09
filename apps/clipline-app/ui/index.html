@@ -37,13 +37,16 @@
         <div id="memory-usage" class="memory-usage">Using -- RAM</div>
         <div id="memory-children" class="memory-children" hidden></div>
         <div id="rail-hotkey" class="rail-hotkey" title="Save Replay: F6">F6</div>
-        <div id="rail-game" class="rail-game" hidden></div>
+        <button id="rail-game" class="rail-game stopped" type="button"
+          title="Start Desktop replay buffer" aria-label="Start Desktop replay buffer" aria-pressed="false">
+          <span class="placeholder source-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="12" rx="1.5"/><path d="M9 20h6M10.5 16.5 10 20M13.5 16.5 14 20"/></svg></span>
+        </button>
       </div>
 
       <div class="sidebar-rail">
-        <button id="rail-status" title="Stop recording" aria-pressed="true">
+        <button id="rail-status" title="Start recording" aria-pressed="false">
           <span class="rail-status-dot"><span id="rail-dot" class="dot"></span></span>
-          <span id="rail-status-text" class="rail-label">Rec</span>
+          <span id="rail-status-text" class="rail-label">Record</span>
         </button>
         <button id="rail-save" title="Save Replay (F6)">
           <svg viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 2a8 8 0 1 1 0 16 8 8 0 0 1 0-16z"/><circle cx="12" cy="12" r="4.5"/></svg>
@@ -80,6 +83,9 @@
             <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
             <input id="gallery-search" type="text" placeholder="Search clips, champions…" spellcheck="false" />
           </label>
+          <select id="gallery-game-type" class="gallery-select" title="Filter League clips by game type" hidden>
+            <option value="all">Game type: All</option>
+          </select>
           <select id="gallery-group" class="gallery-select" title="Group clips by">
             <option value="smart">Group: Recent</option>
             <option value="day">Group: Day</option>
@@ -826,6 +832,19 @@
                 <span id="hotkey-status" class="hint">Click a field, then press F1-F11/F13-F24, middle mouse, Mouse4, Mouse5, or a modified keyboard key. Esc clears the keybind.</span>
               </div>
             </div>
+            <div class="setting-row" data-settings-key="recording_hotkey recording_hotkey_secondary">
+              <div class="setting-info">
+                <strong>Start / Stop recording</strong>
+                <span>Optional global shortcuts for starting or finalizing a full-session recording. Either keybind toggles recording; the replay buffer stays on when recording stops.</span>
+              </div>
+              <div class="hotkey-recorder">
+                <div class="hotkey-recorder-row">
+                  <input id="set-recording-hotkey" spellcheck="false" readonly inputmode="none" placeholder="Not set" aria-describedby="recording-hotkey-status" />
+                  <input id="set-recording-hotkey-2" spellcheck="false" readonly inputmode="none" placeholder="Not set" aria-describedby="recording-hotkey-status" />
+                </div>
+                <span id="recording-hotkey-status" class="hint">Click a field, then press F1-F11/F13-F24, middle mouse, Mouse4, Mouse5, or a modified keyboard key. Esc clears the keybind.</span>
+              </div>
+            </div>
           </div>
 
           <div class="settings-section" id="settings-panel-misc" data-section="misc" role="tabpanel" aria-labelledby="settings-tab-misc" hidden>
@@ -1178,8 +1197,8 @@
 
   <dialog id="elevation-dialog">
     <div class="confirm-body">
-      <strong>Administrator game blocks replay hotkeys</strong>
-      <span><span id="elevation-game-name">This game</span> is running as administrator. Windows prevents Clipline from receiving Save Replay hotkeys while the game is focused.</span>
+      <strong>Administrator game blocks Clipline hotkeys</strong>
+      <span><span id="elevation-game-name">This game</span> is running as administrator. Windows prevents Clipline from receiving its replay and recording hotkeys while the game is focused.</span>
       <span class="hint">Restarting Clipline as administrator fixes the hotkey, but resets the current rolling replay buffer. Clipline will continue to start normally in the future.</span>
     </div>
     <div class="confirm-actions">

@@ -1,4 +1,9 @@
 // Local/cloud gallery, clip cards, multi-select.
+const CAPTURE_MONITOR_ICON =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="12" rx="1.5"/><path d="M9 20h6M10.5 16.5 10 20M13.5 16.5 14 20"/></svg>';
+const CAPTURE_REGION_ICON =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H4a1 1 0 0 0-1 1v4M16 3h4a1 1 0 0 1 1 1v4M3 16v4a1 1 0 0 0 1 1h4"/><rect x="7" y="7" width="10" height="10" rx="1" stroke-dasharray="2.2 2.2"/><path d="m15 14 5.5 2.2-2.2.9 1.2 2.8-1.7.7-1.2-2.8-1.8 1.7z" fill="currentColor" stroke="none"/></svg>';
+
 // Resolve the icon for the game currently being captured. The detected-game
 // payload carries no plugin id, so match a custom game by exe/window/name, then
 // fall back to a plugin by name; { url: null } means "known game, no icon".
@@ -23,26 +28,41 @@ function railGamePlaceholder() {
   return ph;
 }
 
-// Show the captured game's icon in the rail; hidden when no game is active
-// (e.g. capturing a display/region).
+function captureTargetIcon() {
+  const game = activeGameIcon();
+  if (game) return game;
+  const settings = currentSettings || { capture_mode: "primary_monitor" };
+  const fullDisplay = settings.capture_mode === "display_region"
+    && displays.some((display) => isFullDisplayRegion(settings.capture_region, display));
+  const region = settings.capture_mode === "display_region" && !fullDisplay;
+  return {
+    url: null,
+    label: fallbackCaptureSourceLabel(settings),
+    markup: region ? CAPTURE_REGION_ICON : CAPTURE_MONITOR_ICON,
+  };
+}
+
+// Show what the replay buffer is capturing. The surrounding button owns the
+// active/off state and toggles the existing recorder action.
 function renderRailGame() {
   const host = $("rail-game");
   if (!host) return;
-  const icon = activeGameIcon();
+  const icon = captureTargetIcon();
+  const iconKey = icon.url ? `url:${icon.url}` : `markup:${icon.markup || "game"}`;
+  if (railCaptureTargetIconKey === iconKey && host.childElementCount) return;
+  railCaptureTargetIconKey = iconKey;
   host.replaceChildren();
-  if (!icon) {
-    host.hidden = true;
-    host.removeAttribute("title");
-    return;
-  }
-  host.hidden = false;
-  host.title = icon.label;
   if (icon.url) {
     const img = document.createElement("img");
     img.src = icon.url;
     img.alt = "";
     img.addEventListener("error", () => img.replaceWith(railGamePlaceholder()));
     host.appendChild(img);
+  } else if (icon.markup) {
+    const fallback = document.createElement("span");
+    fallback.className = "placeholder source-icon";
+    fallback.innerHTML = icon.markup; // static markup, safe
+    host.appendChild(fallback);
   } else {
     host.appendChild(railGamePlaceholder());
   }
@@ -1214,8 +1234,9 @@ function clipCard(c) {
   info.className = "card-sub";
   const digest = markerDigest(markers, presentation);
   const infoParts = [];
+  if (c.game && c.game.queue && c.game.queue.label) infoParts.push(c.game.queue.label);
   if (Number.isFinite(c.duration_s)) infoParts.push(fmtDur(c.duration_s));
-  infoParts.push(`${c.size_mb.toFixed(1)} MB`);
+  infoParts.push(fmtMegabytes(c.size_mb));
   infoParts.push(fmtAgo(Date.now() / 1000, c.modified_unix));
   if (!cardPreview.summary && digest) infoParts.push(digest);
   info.textContent = infoParts.join(" · ");
@@ -1331,6 +1352,60 @@ function syncBulkBar() {
 
 /* ---- gallery: filter / sort / group ---- */
 
+const LEAGUE_GAME_TYPE_OPTIONS = [
+  ["ranked-solo-duo", "Ranked Solo/Duo"],
+  ["ranked-flex", "Ranked Flex"],
+  ["normal", "Normal"],
+  ["aram", "ARAM"],
+  ["arena", "Arena"],
+  ["custom", "Custom"],
+  ["other", "Other"],
+  ["unknown", "Unknown"],
+];
+
+function syncLeagueGameTypeFilter() {
+  const select = $("gallery-game-type");
+  if (!select) return;
+  const present = new Set();
+  let hasCategorizedLeagueClip = false;
+  for (const c of clipsCache) {
+    if (!c.game || c.game.id !== "league_of_legends") continue;
+    if (c.game.queue && c.game.queue.category) {
+      present.add(c.game.queue.category);
+      hasCategorizedLeagueClip = true;
+    } else {
+      present.add("unknown");
+    }
+  }
+
+  select.hidden = !hasCategorizedLeagueClip;
+  if (!hasCategorizedLeagueClip) {
+    galleryGameType = "all";
+    leagueGameTypeOptionsKey = "";
+    return;
+  }
+
+  const previous = galleryGameType;
+  const optionsKey = [...present].sort().join("|");
+  if (leagueGameTypeOptionsKey !== optionsKey) {
+    leagueGameTypeOptionsKey = optionsKey;
+    select.replaceChildren();
+    const all = document.createElement("option");
+    all.value = "all";
+    all.textContent = "Game type: All";
+    select.appendChild(all);
+    for (const [value, label] of LEAGUE_GAME_TYPE_OPTIONS) {
+      if (!present.has(value)) continue;
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = `Game type: ${label}`;
+      select.appendChild(option);
+    }
+  }
+  galleryGameType = present.has(previous) ? previous : "all";
+  select.value = galleryGameType;
+}
+
 function filterGalleryClips(clips) {
   const items = [];
   let maxModifiedUnix = 0;
@@ -1339,9 +1414,16 @@ function filterGalleryClips(clips) {
     if ((galleryFilter === "replay" || galleryFilter === "session" || galleryFilter === "trim")
       && kind !== galleryFilter) continue;
     if (galleryFilter === "marked" && !clipMarkers(c).length) continue;
+    if (galleryGameType !== "all") {
+      const category = c.game && c.game.id === "league_of_legends"
+        ? (c.game.queue && c.game.queue.category || "unknown")
+        : null;
+      if (category !== galleryGameType) continue;
+    }
     if (gallerySearch) {
       const champ = c.markers && c.markers.player_summary ? c.markers.player_summary.champion_name : "";
-      const hay = `${clipDisplayTitle(c)} ${c.name} ${champ} ${c.session || ""} ${c.game ? c.game.name : ""}`.toLowerCase();
+      const queue = c.game && c.game.queue ? c.game.queue.label : "";
+      const hay = `${clipDisplayTitle(c)} ${c.name} ${champ} ${c.session || ""} ${c.game ? c.game.name : ""} ${queue}`.toLowerCase();
       if (!hay.includes(gallerySearch)) continue;
     }
     items.push(c);
@@ -1517,6 +1599,7 @@ function renderClips() {
   root.hidden = showingCloud;
   if (cloudRoot) cloudRoot.hidden = !showingCloud;
   $("gallery-filter").hidden = showingCloud;
+  $("gallery-game-type").hidden = showingCloud;
   $("gallery-group").hidden = showingCloud;
   $("gallery-sort").hidden = showingCloud;
   syncSelectionControls();
@@ -1528,6 +1611,7 @@ function renderClips() {
     loadCloudClips();
     return;
   }
+  syncLeagueGameTypeFilter();
   beginBoundedGalleryRender();
   pruneLocalPosterCache(clipsCache);
   const filteredResult = filterGalleryClips(clipsCache);
@@ -1539,7 +1623,7 @@ function renderClips() {
   const firstItems = firstGroup && firstGroup.clips || [];
   const lastItems = lastGroup && lastGroup.clips || [];
   const identity = groupedGalleryIdentity(
-    `local|${galleryFilter}|${gallerySort}|${galleryGroup}|${gallerySearch}`,
+    `local|${galleryFilter}|${galleryGameType}|${gallerySort}|${galleryGroup}|${gallerySearch}`,
     filtered.length,
     firstItems[0],
     lastItems[lastItems.length - 1],

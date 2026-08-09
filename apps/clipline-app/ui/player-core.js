@@ -28,6 +28,8 @@ const PlayerCore = (() => {
     return `${mb.toFixed(1)} MB`;
   };
 
+  const fmtMegabytes = (megabytes) => fmtBytes(megabytes * 1024 * 1024);
+
   const fmtQuotaGb = (quotaGb) => {
     const value = Number(quotaGb);
     if (!Number.isFinite(value) || value <= 0) return "no limit";
@@ -2080,6 +2082,7 @@ const PlayerCore = (() => {
     videoDecodeProbes,
     encoderCodecCaveat,
     fmtBytes,
+    fmtMegabytes,
     fmtLibraryStorageUsage,
     sameClipPath,
     cloudLibraryEntries,

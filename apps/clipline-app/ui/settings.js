@@ -220,6 +220,8 @@ function fillSettings(s) {
   $("set-replay-disk-ack").checked = !!replayStorage.disk_acknowledged;
   $("set-hotkey").value = s.hotkey;
   $("set-hotkey-2").value = s.hotkey_secondary || "";
+  $("set-recording-hotkey").value = s.recording_hotkey || "";
+  $("set-recording-hotkey-2").value = s.recording_hotkey_secondary || "";
   updateHotkeyLabels(s.hotkey, s.hotkey_secondary || "");
   $("set-open-on-startup").checked = !!s.open_on_startup;
   $("set-close-to-tray").checked = s.close_to_tray !== false;
@@ -313,10 +315,17 @@ function readSettings() {
 // Either field may be cleared with Esc, so the first non-empty keybind is
 // promoted to the primary slot; the backend rejects an empty primary.
 function readHotkeySettings() {
-  const keybinds = HOTKEY_FIELD_IDS.map((fieldId) => $(fieldId).value.trim()).filter(Boolean);
+  const keybinds = ["set-hotkey", "set-hotkey-2"]
+    .map((fieldId) => $(fieldId).value.trim())
+    .filter(Boolean);
+  const recordingKeybinds = ["set-recording-hotkey", "set-recording-hotkey-2"]
+    .map((fieldId) => $(fieldId).value.trim())
+    .filter(Boolean);
   return {
     hotkey: keybinds[0] || "",
     hotkey_secondary: keybinds[1] || null,
+    recording_hotkey: recordingKeybinds[0] || null,
+    recording_hotkey_secondary: recordingKeybinds[1] || null,
   };
 }
 
@@ -1629,30 +1638,41 @@ function updateCaptureStatus() {
     activeDetectedGame && activeDetectedGame.active
       ? `Game: ${activeDetectedGame.name}`
       : fallbackCaptureSourceLabel(currentSettings || { capture_mode: "primary_monitor" });
-  const recordingTitle = activeEncoderLabel
-    ? `Stop recording · ${activeEncoderLabel}`
-    : "Stop recording";
-  $("rail-status").classList.toggle("stopped", !recordingRequested || storageQuotaBlocked);
-  $("rail-status").classList.toggle("waiting", recorderWaitingForGame);
+  const bufferReadyTitle = activeEncoderLabel
+    ? `Replay buffer ready · ${activeEncoderLabel}`
+    : "Replay buffer ready";
+  renderRailGame();
+  $("rail-status").classList.toggle("stopped", !fullSessionRecordingActive || storageQuotaBlocked);
   $("rail-status").classList.toggle("blocked", storageQuotaBlocked);
-  $("rail-status").setAttribute("aria-pressed", String(recordingRequested));
+  $("rail-status").setAttribute("aria-pressed", String(fullSessionRecordingActive));
   $("rail-status").setAttribute("aria-disabled", String(storageQuotaBlocked));
   $("rail-status").title = storageQuotaBlocked
     ? "Recording disabled — storage quota full"
-    : recordingActive
-    ? recordingTitle
-    : recorderWaitingForGame
-      ? "Stop waiting for a game"
+    : fullSessionRecordingActive
+      ? "Stop recording"
       : `Start ${source} recording`;
   $("rail-status-text").textContent = storageQuotaBlocked
     ? "Full"
+    : fullSessionRecordingActive
+      ? "Rec"
+      : "Record";
+  $("rail-dot").className = `dot${fullSessionRecordingActive ? " on" : ""}`;
+
+  $("rail-game").classList.toggle("active", recordingActive && !storageQuotaBlocked);
+  $("rail-game").classList.toggle("stopped", !recordingRequested || storageQuotaBlocked);
+  $("rail-game").classList.toggle("waiting", recorderWaitingForGame);
+  $("rail-game").classList.toggle("blocked", storageQuotaBlocked);
+  $("rail-game").setAttribute("aria-pressed", String(recordingRequested));
+  $("rail-game").setAttribute("aria-disabled", String(storageQuotaBlocked));
+  $("rail-game").title = storageQuotaBlocked
+    ? "Replay buffer disabled — storage quota full"
     : recordingActive
-    ? "Rec"
-    : recorderWaitingForGame
-      ? "Waiting"
-      : "Off";
+      ? bufferReadyTitle
+      : recorderWaitingForGame
+        ? "Stop waiting for a game"
+        : `Start ${source} replay buffer`;
+  $("rail-game").setAttribute("aria-label", $("rail-game").title);
   $("rail-save").disabled = storageQuotaBlocked || !recordingActive;
-  renderRailGame();
 }
 
 function saveHotkeyLabel() {
@@ -1687,7 +1707,7 @@ async function toggleRecording() {
     return;
   }
   const next = !recordingRequested;
-  $("rail-status").disabled = true;
+  $("rail-game").disabled = true;
   try {
     recordingRequested = await invoke("set_recording", { recording: next });
     if (!recordingRequested) {
@@ -1698,38 +1718,56 @@ async function toggleRecording() {
   } catch (e) {
     $("error").textContent = e;
   } finally {
+    $("rail-game").disabled = false;
+  }
+}
+
+async function toggleSessionRecording() {
+  if (storageQuotaBlocked) {
+    showStorageQuotaFull(storageQuotaState);
+    return;
+  }
+  const next = !fullSessionRecordingActive;
+  $("rail-status").disabled = true;
+  try {
+    const requested = await invoke("set_session_recording", { recording: next });
+    fullSessionRecordingActive = Boolean(requested);
+    updateCaptureStatus();
+  } catch (e) {
+    $("error").textContent = e;
+  } finally {
     $("rail-status").disabled = false;
   }
 }
 
-// The two Save Replay keybind fields sit side by side and share one status
-// line. Esc while recording clears a field; at least one keybind must remain.
-const HOTKEY_FIELD_IDS = ["set-hotkey", "set-hotkey-2"];
+// All shortcut fields share capture and conflict handling. Esc clears a field;
+// at least one Save Replay keybind must remain, while recording is optional.
+const HOTKEY_FIELD_IDS = ["set-hotkey", "set-hotkey-2", "set-recording-hotkey", "set-recording-hotkey-2"];
 const HOTKEY_IDLE_MESSAGE = "Click a field to record a shortcut. Esc clears it.";
 
-function otherHotkeyFieldId(fieldId) {
-  return fieldId === "set-hotkey" ? "set-hotkey-2" : "set-hotkey";
+function hotkeyStatusId(fieldId) {
+  return fieldId.startsWith("set-recording-hotkey") ? "recording-hotkey-status" : "hotkey-status";
 }
 
-function setHotkeyStatus(message, state = "") {
-  const status = $("hotkey-status");
+function setHotkeyStatus(fieldId, message, state = "") {
+  const status = $(hotkeyStatusId(fieldId));
   status.textContent = message;
   status.dataset.state = state;
 }
 
 function beginHotkeyCapture(fieldId) {
   if (activeHotkeyCaptureId && activeHotkeyCaptureId !== fieldId) {
-    $(activeHotkeyCaptureId).classList.remove("recording");
+    endHotkeyCapture(activeHotkeyCaptureId);
   }
   activeHotkeyCaptureId = fieldId;
   $(fieldId).classList.add("recording");
-  setHotkeyStatus("Press an F-key, mouse button, or Ctrl/Alt/Shift plus a keyboard key - or Esc to clear.", "recording");
+  setHotkeyStatus(fieldId, "Press an F-key, mouse button, or Ctrl/Alt/Shift plus a keyboard key - or Esc to clear.", "recording");
 }
 
 function endHotkeyCapture(fieldId, message = HOTKEY_IDLE_MESSAGE, state = "") {
   if (activeHotkeyCaptureId === fieldId) activeHotkeyCaptureId = null;
   $(fieldId).classList.remove("recording");
-  setHotkeyStatus(message, state);
+  setHotkeyStatus(fieldId, message, state);
 }
 
 function endAllHotkeyCaptures() {
@@ -1756,8 +1794,8 @@ function recordMouseHotkey(fieldId, ev) {
 function applyHotkeyCaptureResult(fieldId, result) {
   switch (result.kind) {
     case "captured":
-      if ($(otherHotkeyFieldId(fieldId)).value === result.value) {
-        setHotkeyStatus("Already used by the other Save Replay keybind.", "error");
+      if (HOTKEY_FIELD_IDS.some((other) => other !== fieldId && $(other).value === result.value)) {
+        setHotkeyStatus(fieldId, "Already used by another Clipline action.", "error");
         break;
       }
       $(fieldId).value = result.value;
@@ -1765,7 +1803,7 @@ function applyHotkeyCaptureResult(fieldId, result) {
       syncSettingsDraftFromForm();
       break;
     case "pending":
-      setHotkeyStatus(result.message, "recording");
+      setHotkeyStatus(fieldId, result.message, "recording");
       break;
     case "cancel":
       // Esc clears the keybind; the other field can still hold one.
@@ -1775,7 +1813,7 @@ function applyHotkeyCaptureResult(fieldId, result) {
       $(fieldId).blur();
       break;
     case "invalid":
-      setHotkeyStatus(result.message, "error");
+      setHotkeyStatus(fieldId, result.message, "error");
       break;
   }
 }
@@ -2121,6 +2159,22 @@ function detectedGameMeta(candidate) {
   return parts.join(" · ");
 }
 
+function customGameMatchKey(game) {
+  const path = String(game.process_path || "")
+    .trim()
+    .replaceAll("/", "\\")
+    .replace(/\\+$/, "")
+    .toLowerCase();
+  const exe = String(game.exe_name || "").trim().toLowerCase();
+  const title = String(game.window_title || "").trim().toLowerCase();
+  return path || exe || title ? JSON.stringify([path, exe, title]) : "";
+}
+
+function customGameRuleMatchesCandidate(game, candidate) {
+  const gameKey = customGameMatchKey(game);
+  return !!gameKey && gameKey === customGameMatchKey(candidate);
+}
+
 function customGameMatchesCandidate(game, candidate) {
   const gamePath = String(game.process_path || "").toLowerCase();
   const candidatePath = String(candidate.process_path || "").toLowerCase();
@@ -2433,6 +2487,16 @@ async function addCustomGameFromWindow(win) {
   if (!lifecycleWork) return;
   const scanId = gameWindowsScanId;
   const name = gameNameFromWindow(win);
+  if (customGames.some((game) => customGameRuleMatchesCandidate(game, {
+    name,
+    exe_name: win.exe_name || "",
+    process_path: win.exe_path || null,
+    window_title: win.title || "",
+  }))) {
+    hideGameWindowPicker();
+    $("settings-status").textContent = "game is already added";
+    return;
+  }
   // Pull the executable's icon now, while we still have its path. Best-effort:
   // a missing path or icon just leaves the game with the placeholder glyph.
   let icon = null;

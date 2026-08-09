@@ -28,6 +28,7 @@ use clipline_capture::{
     even_dimensions, PipelineError, Recorder, RelativeClock, ReplayStorageConfig,
 };
 use clipline_events::{is_review_event, ClipAudioTrack, EventKind, MarkerLog, PlayerSummary};
+use clipline_lol::LeagueQueue;
 use clipline_storage::{
     clip_ownership_marker_path, ensure_clip_owned, recover_recording_files,
     remove_clip_ownership_marker, storage_status, StorageStatus,
@@ -51,6 +52,8 @@ const AMBIGUOUS_REPLAY_CACHE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 6
 mod media_root;
 pub enum Cmd {
     Save,
+    StartFullSession,
+    StopFullSession,
     Stop { announce: bool },
 }
 
@@ -544,6 +547,7 @@ pub enum Event {
 pub struct ActiveGame {
     pub identity: crate::game_identity::GameIdentity,
     pub name: String,
+    pub exe_path: Option<PathBuf>,
 }
 
 pub struct ServiceOptions {
@@ -730,6 +734,13 @@ fn spawn_marker_source(opts: &ServiceOptions, recording_t0: Instant) -> Receiver
     let context = crate::game_plugins::GameEventSourceContext {
         lol_url: opts.lol_url.clone(),
         recording_t0,
+        league_game_executable: opts
+            .active_game
+            .as_ref()
+            .filter(|game| {
+                game.identity.plugin_id() == Some(crate::game_plugins::LEAGUE_OF_LEGENDS_ID)
+            })
+            .and_then(|game| game.exe_path.clone()),
     };
     match marker_source_kind(opts) {
         MarkerSourceKind::Plugin => {
@@ -740,9 +751,11 @@ fn spawn_marker_source(opts: &ServiceOptions, recording_t0: Instant) -> Receiver
             crate::game_plugins::spawn_event_source(plugin_id, context)
                 .expect("marker source kind checked plugin event source")
         }
-        MarkerSourceKind::LegacyLeaguePoller => {
-            crate::markers::spawn(context.lol_url, context.recording_t0)
-        }
+        MarkerSourceKind::LegacyLeaguePoller => crate::markers::spawn(
+            context.lol_url,
+            context.recording_t0,
+            context.league_game_executable,
+        ),
     }
 }
 
@@ -917,6 +930,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
     let marker_rx = spawn_marker_source(&opts, recording_t0);
     let mut marker_log = MarkerLog::new();
     let mut player_summary = PlayerSummaryState::default();
+    let mut league_queue: Option<LeagueQueue> = None;
     // Build the capture engine — DXGI Desktop Duplication when the user opted
     // in for a display/region source, else WGC — and pull the first frame,
     // which fixes the capture size. A DXGI failure (multi-GPU, rotated display,
@@ -1035,17 +1049,43 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                     if event.kind == EventKind::GameEnd {
                         player_summary.match_ended();
                         session.match_ended();
+                        league_queue = None;
                     }
                     if is_review_event(&event) {
                         marker_log.push(event);
                     }
                 }
                 PollerMsg::PlayerSummary(summary) => player_summary.update(summary),
+                PollerMsg::Queue(queue) => {
+                    league_queue = Some(queue);
+                    let replay_session_dir = clips_dir.join(session.current());
+                    if replay_session_dir.is_dir() {
+                        write_session_game_meta(
+                            &replay_session_dir,
+                            opts.active_game.as_ref(),
+                            league_queue.as_ref(),
+                        );
+                    }
+                    if let Some(full_session_dir) = full_session
+                        .as_ref()
+                        .and_then(|recording| recording.final_path.parent())
+                    {
+                        if full_session_dir != replay_session_dir {
+                            write_session_game_meta(
+                                full_session_dir,
+                                opts.active_game.as_ref(),
+                                league_queue.as_ref(),
+                            );
+                        }
+                    }
+                }
                 PollerMsg::MatchStarted => {
+                    league_queue = None;
                     player_summary.match_started();
                     session.match_started(local_session_label(true));
                 }
                 PollerMsg::MatchEnded => {
+                    league_queue = None;
                     player_summary.match_ended();
                     session.match_ended();
                 }
@@ -1151,7 +1191,11 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                         });
                         continue;
                     }
-                    write_session_game_meta(&session_dir, opts.active_game.as_ref());
+                    write_session_game_meta(
+                        &session_dir,
+                        opts.active_game.as_ref(),
+                        league_queue.as_ref(),
+                    );
                     let path = unique_media_path(&session_dir, "clip");
                     match save(&rec, &path, opts.replay_window_s) {
                         Ok((end, seconds)) => {
@@ -1222,6 +1266,79 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                             let _ = std::fs::remove_file(&path);
                         }
                     }
+                }
+                Ok(Cmd::StartFullSession) => {
+                    if full_session.is_none() {
+                        if let Some(event) = storage_quota_full_event(
+                            &clips_dir,
+                            opts.disk_quota_bytes,
+                            FULL_SESSION_QUOTA_RESERVE_BYTES,
+                        ) {
+                            let _ = events.send(event);
+                            let _ = shutdown_recorder(
+                                &mut rec,
+                                &mut full_session,
+                                RecorderFinishContext {
+                                    marker_log: &marker_log,
+                                    player_summary: player_summary.full_session_summary(),
+                                    audio_tracks: &audio_track_metadata,
+                                    clips_dir: &clips_dir,
+                                    opts: &opts,
+                                    events,
+                                },
+                            );
+                            send_stopped(events);
+                            return Ok(());
+                        }
+                        full_session = begin_full_session_recording(
+                            &mut rec,
+                            &clips_dir,
+                            session.current(),
+                            RecordingMode::FullSession,
+                            opts.active_game.as_ref(),
+                            events,
+                        );
+                        if let Some(recording_dir) = full_session
+                            .as_ref()
+                            .and_then(|recording| recording.final_path.parent())
+                        {
+                            write_session_game_meta(
+                                recording_dir,
+                                opts.active_game.as_ref(),
+                                league_queue.as_ref(),
+                            );
+                        }
+                    }
+                    send_recording_status(
+                        events,
+                        &rec,
+                        &full_session,
+                        &encoder_status,
+                        capture_backend_status,
+                    );
+                }
+                Ok(Cmd::StopFullSession) => {
+                    if let Some(status) = finish_full_session_recording(
+                        &mut rec,
+                        &mut full_session,
+                        &RecorderFinishContext {
+                            marker_log: &marker_log,
+                            player_summary: player_summary.full_session_summary(),
+                            audio_tracks: &audio_track_metadata,
+                            clips_dir: &clips_dir,
+                            opts: &opts,
+                            events,
+                        },
+                    ) {
+                        saved_media_baseline_bytes = Some(status.total_bytes);
+                    }
+                    send_recording_status(
+                        events,
+                        &rec,
+                        &full_session,
+                        &encoder_status,
+                        capture_backend_status,
+                    );
                 }
                 Ok(Cmd::Stop { announce }) => {
                     let _ = shutdown_recorder(
@@ -2031,7 +2148,7 @@ fn shutdown_recorder(
 ) -> Option<String> {
     match rec.finish_stream() {
         Ok(()) => {
-            finish_full_session_recording(rec, full_session, &ctx);
+            let _ = finish_full_session_recording(rec, full_session, &ctx);
             None
         }
         Err(e) => {
@@ -2060,13 +2177,20 @@ fn finalize_runtime_failure(primary: String, finalize: impl FnOnce() -> Option<S
 /// no markers, so this is their only game link.
 const SESSION_META_FILE: &str = "clipline-session.json";
 
-fn write_session_game_meta(session_dir: &Path, active_game: Option<&ActiveGame>) {
+fn write_session_game_meta(
+    session_dir: &Path,
+    active_game: Option<&ActiveGame>,
+    league_queue: Option<&LeagueQueue>,
+) {
     let Some(game) = active_game else { return };
     let meta_path = session_dir.join(SESSION_META_FILE);
-    if meta_path.exists() {
+    if meta_path.exists() && league_queue.is_none() {
         return;
     }
-    let doc = serde_json::json!({ "id": game.identity.id(), "name": game.name });
+    let mut doc = serde_json::json!({ "id": game.identity.id(), "name": game.name });
+    if let Some(queue) = league_queue {
+        doc["queue"] = serde_json::json!(queue);
+    }
     match serde_json::to_string(&doc) {
         Ok(json) => {
             if let Err(e) = std::fs::write(&meta_path, json) {
@@ -2097,7 +2221,7 @@ fn begin_full_session_recording(
         );
         return None;
     }
-    write_session_game_meta(&session_dir, active_game);
+    write_session_game_meta(&session_dir, active_game, None);
     let stamp = unix_now_u64();
     let (final_path, temp_path, file) =
         match reserve_full_session_path_at(&session_dir, "session", stamp) {
@@ -2131,10 +2255,8 @@ fn finish_full_session_recording(
     rec: &mut LiveRecorder,
     recording: &mut Option<FullSessionRecording>,
     ctx: &RecorderFinishContext<'_>,
-) {
-    let Some(recording) = recording.take() else {
-        return;
-    };
+) -> Option<StorageStatus> {
+    let recording = recording.take()?;
     match rec.finish_full_session() {
         Ok(Some(summary)) if summary.duration_s.is_finite() && summary.duration_s <= 0.0 => {
             handle_full_session_finish_error(
@@ -2142,6 +2264,7 @@ fn finish_full_session_recording(
                 ctx.events,
                 "full session ended before any footage was written",
             );
+            None
         }
         Ok(Some(summary)) => {
             let seconds = if summary.duration_s.is_finite() {
@@ -2155,7 +2278,7 @@ fn finish_full_session_recording(
                 0.0
             };
             if !rename_finalized_session(&recording, ctx.events) {
-                return;
+                return None;
             }
             let markers = write_marker_sidecar(
                 ctx.events,
@@ -2166,7 +2289,7 @@ fn finish_full_session_recording(
                 ctx.player_summary,
                 ctx.audio_tracks,
             );
-            emit_saved_clip(
+            Some(emit_saved_clip(
                 ctx.events,
                 ctx.clips_dir,
                 &recording.final_path,
@@ -2178,7 +2301,7 @@ fn finish_full_session_recording(
                     recording_end_unix: Some(unix_now_i64()),
                 },
                 ctx.opts,
-            );
+            ))
         }
         Ok(None) => {
             handle_full_session_finish_error(
@@ -2186,9 +2309,11 @@ fn finish_full_session_recording(
                 ctx.events,
                 "full session ended before any footage was written",
             );
+            None
         }
         Err(error) => {
             handle_full_session_finish_error(&recording.temp_path, ctx.events, &error.to_string());
+            None
         }
     }
 }
@@ -3152,11 +3277,38 @@ mod tests {
                 )
                 .unwrap(),
                 name: "League of Legends".into(),
+                exe_path: None,
             }),
             ..ServiceOptions::default()
         };
 
         assert_eq!(marker_source_kind(&opts), MarkerSourceKind::Plugin);
+    }
+
+    #[test]
+    fn session_game_metadata_merges_a_late_league_queue() {
+        let dir = TestDir::new("clipline-service", "league-session-queue");
+        let game = ActiveGame {
+            identity: crate::game_identity::GameIdentity::built_in_plugin(
+                crate::game_plugins::LEAGUE_OF_LEGENDS_ID,
+            )
+            .unwrap(),
+            name: "League of Legends".into(),
+            exe_path: None,
+        };
+        let queue = clipline_lol::LeagueQueue::from_id(420);
+
+        write_session_game_meta(dir.path(), Some(&game), None);
+        write_session_game_meta(dir.path(), Some(&game), Some(&queue));
+
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join(SESSION_META_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(value["id"], crate::game_plugins::LEAGUE_OF_LEGENDS_ID);
+        assert_eq!(value["name"], "League of Legends");
+        assert_eq!(value["queue"]["id"], 420);
+        assert_eq!(value["queue"]["category"], "ranked-solo-duo");
+        assert_eq!(value["queue"]["label"], "Ranked Solo/Duo");
     }
 
     #[test]
@@ -3167,6 +3319,7 @@ mod tests {
                     crate::game_plugins::LEAGUE_OF_LEGENDS_ID,
                 ),
                 name: "Community game".into(),
+                exe_path: None,
             }),
             ..ServiceOptions::default()
         };

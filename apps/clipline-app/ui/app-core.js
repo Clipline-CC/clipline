@@ -27,6 +27,7 @@ var afterNextPaint = () => new Promise((resolve) => {
 
 var {
   fmtBytes,
+  fmtMegabytes,
   fmtLibraryStorageUsage,
   fmtDur,
   fmtTenths,
@@ -112,7 +113,10 @@ var localClipsRequestGate = CloudCore.createRequestGate();
 var localLibraryWarning = "";
 var railProfileAvatarKey = "";
 var railProfileAvatarRequest = 0;
+var railCaptureTargetIconKey = "";
 var galleryFilter = "all";
+var galleryGameType = "all";
+var leagueGameTypeOptionsKey = "";
 var gallerySort = "new";
 var galleryGroup = "smart";
 var gallerySearch = "";

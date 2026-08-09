@@ -19,8 +19,6 @@ listen("status", (e) => {
   recordingRequested = recordingActive || recorderWaitingForGame;
   activeEncoderLabel = s.recording ? String(s.encoder || "") : "";
   fullSessionRecordingActive = Boolean(s.full_session);
-  $("rail-dot").className = "dot"
-    + (s.recording ? " on" : recorderWaitingForGame ? " waiting" : "");
   updateCaptureStatus();
 });
 
@@ -54,6 +52,7 @@ function showStorageQuotaFull(payload) {
   updateStorageQuotaUsage(payload);
   recordingActive = false;
   recorderWaitingForGame = false;
+  fullSessionRecordingActive = false;
   updateCaptureStatus();
   if (!$("storage-quota-dialog").open) $("storage-quota-dialog").showModal();
 }
@@ -181,6 +180,10 @@ $("ffmpeg-runtime-cancel").addEventListener("click", () => {
   });
 });
 $("gallery-sort").addEventListener("change", (ev) => { gallerySort = ev.target.value; renderClips(); });
+$("gallery-game-type").addEventListener("change", (ev) => {
+  galleryGameType = ev.target.value;
+  renderClips();
+});
 $("gallery-group").addEventListener("change", (ev) => { galleryGroup = ev.target.value; renderClips(); });
 $("gallery-filter").addEventListener("click", (ev) => {
   const chip = ev.target.closest(".g-chip");
@@ -189,7 +192,8 @@ $("gallery-filter").addEventListener("click", (ev) => {
   for (const c of $("gallery-filter").querySelectorAll(".g-chip")) c.classList.toggle("on", c === chip);
   renderClips();
 });
-$("rail-status").addEventListener("click", toggleRecording);
+$("rail-status").addEventListener("click", toggleSessionRecording);
+$("rail-game").addEventListener("click", toggleRecording);
 $("set-capture").addEventListener("change", () => {
   captureTargetDirty = true;
   syncCaptureFields();
@@ -418,7 +422,7 @@ video.addEventListener("loadedmetadata", () => {
   $("stage-note").textContent = `${video.videoWidth}x${video.videoHeight} · ${fmtDur(video.duration)}`;
   updateStageFrame();
   if (currentClip) {
-    $("pmeta").textContent = `${fmtDur(video.duration)} · ${currentClip.size_mb.toFixed(1)} MB · ${currentClip.path}`;
+    $("pmeta").textContent = `${fmtDur(video.duration)} · ${fmtMegabytes(currentClip.size_mb)} · ${currentClip.path}`;
     setTrim(0, video.duration);
     // Duration is now exact: rebuild the whole-clip navigator and re-render.
     renderOverviewMarkers();

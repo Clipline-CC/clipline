@@ -32,9 +32,11 @@ use clipline_mp4::{
 };
 use clipline_storage::storage_status as read_storage_status;
 use windows_sys::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
-use windows_sys::Win32::System::DataExchange::{CloseClipboard, OpenClipboard, SetClipboardData};
+use windows_sys::Win32::System::DataExchange::{
+    CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+};
 use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
-use windows_sys::Win32::System::Ole::CF_HDROP;
+use windows_sys::Win32::System::Ole::{CF_HDROP, CF_UNICODETEXT};
 use windows_sys::Win32::UI::Shell::DROPFILES;
 
 use tauri::{AppHandle, Manager, Runtime};
@@ -139,6 +141,8 @@ impl StorageSettings {
 pub struct ClipGame {
     pub id: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue: Option<clipline_lol::LeagueQueue>,
 }
 
 #[derive(serde::Serialize)]
@@ -428,6 +432,7 @@ fn game_from_markers(markers: Option<&ClipMarkers>) -> Option<ClipGame> {
     Some(ClipGame {
         id: plugin_id.to_string(),
         name,
+        queue: None,
     })
 }
 
@@ -2176,6 +2181,27 @@ pub async fn copy_clip_to_clipboard(
 }
 
 #[tauri::command]
+pub async fn copy_text_to_clipboard(
+    text: String,
+    window: tauri::WebviewWindow,
+) -> Result<(), String> {
+    const MAX_CLIPBOARD_TEXT_BYTES: usize = 64 * 1024;
+    if text.len() > MAX_CLIPBOARD_TEXT_BYTES {
+        return Err("clipboard text exceeds 64 KiB".into());
+    }
+    if text.contains('\0') {
+        return Err("clipboard text contains a null character".into());
+    }
+    let owner = window
+        .hwnd()
+        .map_err(|error| format!("get Clipline window handle: {error}"))?
+        .0 as isize;
+    tauri::async_runtime::spawn_blocking(move || copy_text_to_clipboard_native(&text, owner as HWND))
+        .await
+        .map_err(|error| format!("copy text task: {error}"))?
+}
+
+#[tauri::command]
 pub fn open_media_folder(settings: tauri::State<StorageSettings>) -> Result<(), String> {
     let dir = settings.clips_dir()?;
     open_folder_path(&dir)
@@ -2311,6 +2337,20 @@ fn update_cloud_record_paths(state: &crate::app::RuntimeState, old_path: &str, n
 
 fn copy_file_to_clipboard(path: &Path, owner: HWND) -> Result<(), String> {
     let payload = dropfiles_payload(path);
+    copy_payload_to_clipboard(&payload, CF_HDROP as u32, owner, false)
+}
+
+fn copy_text_to_clipboard_native(text: &str, owner: HWND) -> Result<(), String> {
+    let payload = clipboard_text_payload(text);
+    copy_payload_to_clipboard(&payload, CF_UNICODETEXT as u32, owner, true)
+}
+
+fn copy_payload_to_clipboard(
+    payload: &[u8],
+    format: u32,
+    owner: HWND,
+    empty_first: bool,
+) -> Result<(), String> {
     let handle = unsafe { GlobalAlloc(GMEM_MOVEABLE, payload.len()) };
     if handle.is_null() {
         return Err(last_os_error("allocate clipboard memory"));
@@ -2343,7 +2383,10 @@ fn copy_file_to_clipboard(path: &Path, owner: HWND) -> Result<(), String> {
             CloseClipboard();
         },
         || {
-            if unsafe { SetClipboardData(CF_HDROP as u32, transfer.handle()) }.is_null() {
+            if empty_first && unsafe { EmptyClipboard() } == 0 {
+                return Err(last_os_error("empty clipboard"));
+            }
+            if unsafe { SetClipboardData(format, transfer.handle()) }.is_null() {
                 Err(last_os_error("set clipboard data"))
             } else {
                 transfer.release();
@@ -2402,6 +2445,13 @@ fn dropfiles_payload(path: &Path) -> Vec<u8> {
         );
     }
     payload
+}
+
+fn clipboard_text_payload(text: &str) -> Vec<u8> {
+    crate::windows::wide_null(std::ffi::OsStr::new(text))
+        .into_iter()
+        .flat_map(u16::to_le_bytes)
+        .collect()
 }
 
 fn shell_clipboard_path_wide(path: &Path) -> Vec<u16> {
@@ -3921,6 +3971,32 @@ mod tests {
     }
 
     #[test]
+    fn list_clips_preserves_optional_league_queue_metadata() {
+        let dir = TestDir::new("clipline-library", "league-queue-metadata");
+        let media = dir.path().join("media");
+        let session = media.join("ranked-match");
+        touch_mp4(&session.join("session_1.mp4"));
+        std::fs::write(
+            session.join("clipline-session.json"),
+            r#"{
+              "id":"league_of_legends",
+              "name":"League of Legends",
+              "queue":{"id":420,"category":"ranked-solo-duo","label":"Ranked Solo/Duo"}
+            }"#,
+        )
+        .unwrap();
+
+        let clips = list_clips_from_dir(media).unwrap().clips;
+        let queue = clips[0]
+            .game
+            .as_ref()
+            .and_then(|game| game.queue.as_ref())
+            .expect("queue metadata should survive the library scan");
+        assert_eq!(queue.id, 420);
+        assert_eq!(queue.label, "Ranked Solo/Duo");
+    }
+
+    #[test]
     fn local_library_scan_keeps_readable_sessions_and_warns_about_denied_children() {
         let dir = TestDir::new("clipline-library", "partial-session-scan");
         let media = dir.path().join("media");
@@ -4979,6 +5055,18 @@ mod tests {
         assert_eq!(&path_units[path_units.len() - 2..], &[0, 0]);
         let decoded = String::from_utf16(&path_units[..path_units.len() - 2]).unwrap();
         assert_eq!(decoded, r"C:\Users\dain\Videos\Clipline\clïp 雪.mp4");
+    }
+
+    #[test]
+    fn clipboard_text_payload_is_null_terminated_utf16() {
+        let payload = clipboard_text_payload("https://clipline.example/雪");
+        let units: Vec<u16> = payload
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes(pair.try_into().unwrap()))
+            .collect();
+
+        assert_eq!(units.last(), Some(&0));
+        assert_eq!(String::from_utf16(&units[..units.len() - 1]).unwrap(), "https://clipline.example/雪");
     }
 
     #[test]

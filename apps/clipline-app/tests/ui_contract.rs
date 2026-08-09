@@ -209,6 +209,11 @@ fn app_rs() -> String {
     fs::read_to_string(path).expect("read src/app.rs")
 }
 
+fn service_rs() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/service.rs");
+    fs::read_to_string(path).expect("read src/service.rs")
+}
+
 fn tauri_config() -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json");
     fs::read_to_string(path).expect("read tauri.conf.json")
@@ -480,7 +485,7 @@ fn manual_recorder_start_rechecks_waiting_state_before_emit() {
 }
 
 #[test]
-fn active_recording_status_identifies_the_selected_encoder() {
+fn active_replay_buffer_status_identifies_the_selected_encoder() {
     let js = main_js();
     let update_status = js_function_body(&js, "updateCaptureStatus");
 
@@ -489,13 +494,58 @@ fn active_recording_status_identifies_the_selected_encoder() {
         "the frontend must retain the backend's active encoder label and clear it when recording stops"
     );
     assert!(
-        update_status.contains("Stop recording · ${activeEncoderLabel}")
-            && update_status.contains("$(\"rail-status\").title = storageQuotaBlocked")
+        update_status.contains("Replay buffer ready · ${activeEncoderLabel}")
+            && update_status.contains("$(\"rail-game\").title = storageQuotaBlocked")
             && update_status.contains(": recordingActive")
-            && update_status.contains("? recordingTitle")
-            && update_status.contains(": `Start ${source} recording`;"),
-        "the active recorder status must assign the concrete encoder selected by Automatic mode to the visible tooltip"
+            && update_status.contains("? bufferReadyTitle")
+            && update_status.contains(": `Start ${source} replay buffer`;"),
+        "replay-buffer readiness must assign the concrete encoder selected by Automatic mode to the visible tooltip"
     );
+}
+
+#[test]
+fn capture_target_icon_is_the_replay_buffer_control() {
+    let html = index_html();
+    let js = main_js();
+    let css = styles_css();
+
+    assert!(
+        html.contains("<button id=\"rail-game\"") && !html.contains("id=\"rail-buffer\""),
+        "the capture target icon must replace the redundant buffer rail row"
+    );
+    for required in [
+        "const CAPTURE_MONITOR_ICON",
+        "const CAPTURE_REGION_ICON",
+        "function captureTargetIcon()",
+        "railCaptureTargetIconKey",
+        "$(\"rail-game\").addEventListener(\"click\", toggleRecording)",
+        "$(\"rail-game\").classList.toggle(\"active\", recordingActive && !storageQuotaBlocked)",
+        "$(\"rail-game\").classList.toggle(\"stopped\"",
+    ] {
+        assert!(js.contains(required), "capture control needs `{required}`");
+    }
+    let active_control = css_rule_body(&css, ".rail-game.active");
+    let active_icon = css_rule_body(&css, ".rail-game.active > img,");
+    let waiting_control = css_rule_body(&css, ".rail-game.waiting");
+    assert!(
+        css.contains(".rail-game.stopped::after")
+            && css_decl_value(active_control, "box-shadow") == Some("none")
+            && css_decl_value(active_icon, "filter")
+                .is_some_and(|value| value.contains("drop-shadow"))
+            && css_decl_value(waiting_control, "box-shadow") == Some("none")
+            && !css.contains(".dot.waiting")
+            && !css.contains(".dot.ready"),
+        "the unified control must glow only while capturing, stay neutral while waiting, and darken while stopped"
+    );
+
+    let render = js_function_body(&js, "renderRailGame");
+    let key_check = render
+        .find("railCaptureTargetIconKey === iconKey")
+        .expect("rail capture icon should memoize its rendered target");
+    let rebuild = render
+        .find("host.replaceChildren()")
+        .expect("rail capture icon renders through replaceChildren");
+    assert!(key_check < rebuild, "unchanged capture icons must not be rebuilt");
 }
 
 #[test]
@@ -627,7 +677,8 @@ fn quality_of_life_features_are_wired_through_the_app_shell() {
     assert!(
         js.contains("waiting_for_game")
             && js.contains("recorderWaitingForGame")
-            && js.contains("\"Waiting\""),
+            && js.contains("classList.toggle(\"waiting\", recorderWaitingForGame)")
+            && js.contains("? \"Stop waiting for a game\""),
         "recorder status must distinguish policy waiting from a manual stop"
     );
     assert!(
@@ -815,7 +866,8 @@ fn review_player_owns_all_controls() {
         "id=\"rail-dot\"",
         "id=\"rail-status-text\"",
         "id=\"rail-status\"",
-        "id=\"rail-status\" title=\"Stop recording\" aria-pressed=\"true\"",
+        "id=\"rail-status\" title=\"Start recording\" aria-pressed=\"false\"",
+        "id=\"rail-game\"",
         "id=\"rail-save\"",
         "id=\"rail-library-status\"",
         "id=\"rail-clips-count\"",
@@ -1669,6 +1721,8 @@ fn local_library_refresh_rejects_stale_snapshots_and_reports_event_errors() {
 fn cloud_upload_completion_preserves_equivalent_paths_and_reports_local_deletion() {
     let library = read_ui_js("library.js");
     let cloud = read_ui_js("cloud.js");
+    let native_library = library_rs();
+    let app = app_rs();
     let refresh_clips = js_function_body(&library, "refreshClips");
     let upload = js_function_body(&cloud, "uploadClipToCloud");
 
@@ -1678,8 +1732,9 @@ fn cloud_upload_completion_preserves_equivalent_paths_and_reports_local_deletion
             && upload
                 .contains("[\"uploaded_private\", \"uploaded_public\"].includes(uploadStatus)")
             && upload.contains("? \"cloud upload processing\"")
-            && upload.contains("? \"cloud upload finished · local copy deleted\"")
-            && upload.contains(": \"cloud upload finished\""),
+            && upload.contains("const completionParts = [\"cloud upload finished\"];")
+            && upload.contains("completionParts.push(\"local copy deleted\");")
+            && upload.contains("? completionParts.join(\" · \")"),
         "cloud uploads must distinguish remote processing from completed uploads"
     );
 
@@ -1705,9 +1760,36 @@ fn cloud_upload_completion_preserves_equivalent_paths_and_reports_local_deletion
         .expect("cloud upload completion settles feedback against the refresh result");
     assert!(
         refresh < feedback
-            && upload.contains("error: result && result.record ? result.record.error : \"\",")
+            && upload.contains("error: result?.record?.error || \"\",")
             && upload.contains("notice: uploadStatus === \"uploaded_processing\""),
-        "intentional deletion and upload errors must be delivered only after the authoritative refresh settles"
+        "upload errors must be delivered only after the authoritative refresh settles"
+    );
+
+    assert!(
+        upload.contains(
+            "const shareUrl = uploadFinished ? cloudShareUrl(result?.record) : \"\";"
+        ) && upload.contains("await invoke(\"copy_text_to_clipboard\", { text: shareUrl });")
+            && upload.contains("completionParts.push(\"link copied\");"),
+        "completed public and unlisted uploads should copy their canonical share URL through the native clipboard"
+    );
+    assert!(
+        native_library.contains("pub async fn copy_text_to_clipboard(")
+            && app.contains("crate::library::copy_text_to_clipboard,"),
+        "background upload completion needs a registered native text-clipboard command"
+    );
+    let redirect = upload
+        .find("if (handoffDeletedReview) {")
+        .expect("the uploaded Review clip redirects to the Cloud Library");
+    let cloud_reload = upload
+        .rfind("loadCloudClips({ force: true });")
+        .expect("upload completion reloads the Cloud Library");
+    assert!(
+        upload.contains("PlayerCore.sameClipPath(currentClip.path, clip.path)")
+            && upload[redirect..cloud_reload]
+                .contains("if (currentClip && PlayerCore.sameClipPath(currentClip.path, clip.path)) closeReview();")
+            && upload[redirect..cloud_reload].contains("gallerySource = \"cloud\";")
+            && upload[redirect..cloud_reload].contains("exitSelectMode();"),
+        "only the uploaded Review clip should close and hand off to Cloud after confirmed deletion"
     );
 }
 
@@ -2168,6 +2250,61 @@ fn rail_shows_save_hotkey() {
     assert!(
         css.contains(".rail-hotkey"),
         "rail hotkey needs stable compact styling"
+    );
+}
+
+#[test]
+fn recording_hotkey_and_rail_control_a_real_full_session() {
+    let html = index_html();
+    let js = main_js();
+    let app = app_rs();
+    let service = service_rs();
+
+    for required in [
+        "id=\"set-recording-hotkey\"",
+        "id=\"set-recording-hotkey-2\"",
+        "id=\"recording-hotkey-status\"",
+        "aria-describedby=\"recording-hotkey-status\"",
+        "Start / Stop recording",
+        "id=\"rail-game\"",
+    ] {
+        assert!(
+            html.contains(required),
+            "recording controls need `{required}`"
+        );
+    }
+    for required in [
+        "const recordingKeybinds = [\"set-recording-hotkey\", \"set-recording-hotkey-2\"]",
+        "recording_hotkey: recordingKeybinds[0] || null",
+        "recording_hotkey_secondary: recordingKeybinds[1] || null",
+        "$(\"set-recording-hotkey\").value = s.recording_hotkey || \"\"",
+        "$(\"set-recording-hotkey-2\").value = s.recording_hotkey_secondary || \"\"",
+        "const HOTKEY_FIELD_IDS = [\"set-hotkey\", \"set-hotkey-2\", \"set-recording-hotkey\", \"set-recording-hotkey-2\"]",
+        "function hotkeyStatusId(fieldId)",
+        "return fieldId.startsWith(\"set-recording-hotkey\") ? \"recording-hotkey-status\" : \"hotkey-status\";",
+        "$(\"rail-status\").addEventListener(\"click\", toggleSessionRecording)",
+        "$(\"rail-game\").addEventListener(\"click\", toggleRecording)",
+        "invoke(\"set_session_recording\"",
+        "fullSessionRecordingActive = Boolean(requested);",
+        "fullSessionRecordingActive",
+    ] {
+        assert!(
+            js.contains(required),
+            "recording UI must include `{required}`"
+        );
+    }
+    assert!(
+        app.contains("fn set_session_recording<R: Runtime>")
+            && app.contains("toggle_session_recording_from_hotkey")
+            && app.contains("HookAction::ToggleRecording"),
+        "native shell must route UI and global hotkey recording actions through RuntimeState"
+    );
+    assert!(
+        service.contains("StartFullSession")
+            && service.contains("StopFullSession")
+            && service.contains("begin_full_session_recording(")
+            && service.contains("finish_full_session_recording("),
+        "the recorder loop must attach and finalize the existing full-session sink"
     );
 }
 
@@ -3825,6 +3962,13 @@ fn games_ui_wires_detection_commands() {
             "{function} must reject a completion from before a background transition"
         );
     }
+    let manual_add = js_function_body(&js, "addCustomGameFromWindow");
+    assert!(
+        js.contains("function customGameMatchKey")
+            && manual_add.contains("customGameRuleMatchesCandidate")
+            && manual_add.contains("game is already added"),
+        "manual game selection must reject an exact custom-game rule already present"
+    );
     let background_settings = js_function_body(&js, "releaseBackgroundSettingsUi");
     for required in [
         "gameWindowsScanId += 1;",
@@ -4118,9 +4262,13 @@ fn clipboard_copy_distinguishes_shareable_and_original_paths() {
             && library.contains("request: CopyClipToClipboardRequest")
             && library.contains("window: tauri::WebviewWindow")
             && library.contains(".hwnd()")
-            && library.contains("SetClipboardData(CF_HDROP as u32")
-            && !library.contains("EmptyClipboard()"),
-        "clipboard command should accept selected audio while native clipboard ownership comes from the invoking Clipline window",
+            && library.contains(
+                "copy_payload_to_clipboard(&payload, CF_HDROP as u32, owner, false)"
+            )
+            && library.contains(
+                "copy_payload_to_clipboard(&payload, CF_UNICODETEXT as u32, owner, true)"
+            ),
+        "file copy should preserve other clipboard formats while native text copy takes clipboard ownership",
     );
     assert!(
         app.contains("crate::library::copy_clip_to_clipboard"),
@@ -5203,5 +5351,33 @@ fn quota_full_is_a_durable_non_destructive_recording_lock() {
         settings.contains("storageQuotaBlocked")
             && settings.contains("Recording disabled — storage quota full"),
         "recording and replay controls must render disabled while quota is blocked"
+    );
+}
+
+#[test]
+fn league_game_type_metadata_filters_the_local_library() {
+    let html = index_html();
+    let main = read_ui_js("main.js");
+    let app_core = read_ui_js("app-core.js");
+    let library = read_ui_js("library.js");
+
+    assert!(
+        html.contains(r#"id="gallery-game-type""#) && html.contains(">Game type: All<"),
+        "the local library must expose an independent League game-type selector"
+    );
+    assert!(
+        app_core.contains("galleryGameType")
+            && main.contains(r#"$("gallery-game-type").addEventListener("change""#),
+        "the selector must own stable state and rerender when changed"
+    );
+    assert!(
+        library.contains("function syncLeagueGameTypeFilter")
+            && app_core.contains("leagueGameTypeOptionsKey")
+            && library.contains("c.game.queue.category")
+            && library.contains("leagueGameTypeOptionsKey !== optionsKey")
+            && library.contains("galleryGameType !== \"all\"")
+            && library.contains("c.game.queue.label")
+            && library.contains("galleryGameType}"),
+        "queue metadata must drive visibility, filtering, card labels, search, and pagination identity"
     );
 }

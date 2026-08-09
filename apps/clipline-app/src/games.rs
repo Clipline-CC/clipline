@@ -23,6 +23,7 @@ pub struct DetectedGame {
     pub window_title: String,
     pub process_id: u32,
     pub exe_name: String,
+    pub exe_path: Option<String>,
     pub recording_mode: GameRecordingMode,
 }
 
@@ -81,6 +82,7 @@ pub fn detect_active_game_from_windows(
                 window_title: window.title.clone(),
                 process_id: window.process_id,
                 exe_name: window.exe_name.clone(),
+                exe_path: window.exe_path.clone(),
                 recording_mode: game.recording_mode,
             });
         }
@@ -122,6 +124,7 @@ fn detect_built_in_game_from_windows(
                 window_title: window.title.clone(),
                 process_id: window.process_id,
                 exe_name: window.exe_name.clone(),
+                exe_path: window.exe_path.clone(),
                 recording_mode: plugin_settings.recording_mode,
             });
         }
@@ -191,8 +194,12 @@ fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
         .contains(&needle.trim().to_ascii_lowercase())
 }
 
-fn path_key(path: &str) -> String {
-    path.trim().replace('/', "\\").to_ascii_lowercase()
+pub(crate) fn path_key(path: &str) -> String {
+    let mut normalized = path.trim().replace('/', "\\").to_ascii_lowercase();
+    while normalized.ends_with('\\') && !normalized.ends_with(":\\") {
+        normalized.pop();
+    }
+    normalized
 }
 
 fn is_browser_process(window: &CapturableWindow) -> bool {
@@ -451,6 +458,10 @@ mod tests {
         );
         assert_eq!(detected.name, "League of Legends");
         assert_eq!(detected.hwnd, 2);
+        assert_eq!(
+            detected.exe_path.as_deref(),
+            Some(r"C:\Riot Games\League of Legends\Game\League of Legends.exe")
+        );
         assert_eq!(detected.recording_mode, GameRecordingMode::FullSession);
     }
 
@@ -594,6 +605,34 @@ mod tests {
         .expect("custom game should still match");
 
         assert_eq!(detected.identity.id(), "custom-test");
+    }
+
+    #[test]
+    fn disabled_built_in_game_can_be_captured_by_an_intentional_custom_rule() {
+        let mut settings = settings_with_all_plugins_disabled();
+        settings.custom_games.push(CustomGameSettings {
+            id: "custom-league-duplicate".into(),
+            name: "League of Legends".into(),
+            exe_name: "League of Legends.exe".into(),
+            process_path: Some(
+                r"C:\Riot Games\League of Legends\Game\League of Legends.exe".into(),
+            ),
+            window_title: "League of Legends (TM) Client".into(),
+            ..game()
+        });
+
+        let detected = detect_active_game_from_windows(
+            &settings,
+            vec![window(
+                7,
+                "League of Legends (TM) Client",
+                "League of Legends.exe",
+                Some(r"C:\Riot Games\League of Legends\Game\League of Legends.exe"),
+            )],
+        )
+        .expect("disabled built-in game should defer to the custom rule");
+
+        assert_eq!(detected.identity.id(), "custom-league-duplicate");
     }
 
     #[test]

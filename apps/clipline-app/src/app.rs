@@ -758,6 +758,9 @@ fn frontend_ready<R: Runtime>(
     if let Some(status) = runtime.durable_recorder_status_for_replay() {
         let _ = app.emit("status", status);
     }
+    if let Some(game) = runtime.current_game_detection_for_replay() {
+        let _ = app.emit("game-detection", game);
+    }
     if let Some(event) = runtime.durable_quota_event_for_replay() {
         let _ = app.emit("storage-quota-full", event);
     }
@@ -976,6 +979,7 @@ struct RuntimeInner {
     tx: Option<Sender<Cmd>>,
     recording_generation: u64,
     recording_desired: bool,
+    manual_full_session_desired: bool,
     settings: AppSettings,
     lol_url: Option<String>,
     active_game: Option<DetectedGame>,
@@ -1065,6 +1069,7 @@ impl RuntimeState {
             tx: None,
             recording_generation: 0,
             recording_desired: false,
+            manual_full_session_desired: false,
             settings,
             lol_url,
             active_game: None,
@@ -1101,6 +1106,7 @@ impl RuntimeState {
             inner.tx = None;
             if inner.quota_blocked.is_none() {
                 inner.recording_desired = false;
+                inner.manual_full_session_desired = false;
             }
             inner.recording_generation = inner.recording_generation.wrapping_add(1);
             inner.last_save_request = None;
@@ -1184,6 +1190,7 @@ impl RuntimeState {
         (inner.recording_desired
             && inner.tx.is_none()
             && inner.quota_blocked.is_none()
+            && !inner.manual_full_session_desired
             && !recorder_should_run(&inner.settings, inner.active_game.as_ref()))
         .then(waiting_for_game_status)
     }
@@ -1209,6 +1216,11 @@ impl RuntimeState {
         })
     }
 
+    fn current_game_detection_for_replay(&self) -> Option<GameDetectionEvent> {
+        let detected = self.0.lock().ok()?.active_game.clone();
+        Some(GameDetectionEvent::from_detected(detected.as_ref()))
+    }
+
     fn durable_quota_event_for_replay(&self) -> Option<Event> {
         self.0.lock().ok()?.quota_blocked.clone()
     }
@@ -1218,6 +1230,7 @@ impl RuntimeState {
             inner.recording_generation == generation
                 && inner.recording_desired
                 && inner.tx.is_none()
+                && !inner.manual_full_session_desired
                 && !recorder_should_run(&inner.settings, inner.active_game.as_ref())
         })
     }
@@ -1259,24 +1272,30 @@ impl RuntimeState {
             opts.active_game = Some(service::ActiveGame {
                 identity: game.identity.clone(),
                 name: game.name.clone(),
+                exe_path: game.exe_path.as_deref().map(PathBuf::from),
             });
         }
         Ok(opts)
     }
 
     fn options(inner: &RuntimeInner) -> Result<service::ServiceOptions, String> {
-        Self::options_for(
+        let mut options = Self::options_for(
             &inner.settings,
             inner.lol_url.clone(),
             inner.active_game.as_ref(),
             &inner.decodable_codecs,
-        )
+        )?;
+        if inner.manual_full_session_desired {
+            options.recording_mode = service::RecordingMode::FullSession;
+        }
+        Ok(options)
     }
 
     fn prepare_service_restart(inner: &mut RuntimeInner) -> Result<PreparedServiceRestart, String> {
         let should_run = inner.recording_desired
             && inner.quota_blocked.is_none()
-            && recorder_should_run(&inner.settings, inner.active_game.as_ref());
+            && (inner.manual_full_session_desired
+                || recorder_should_run(&inner.settings, inner.active_game.as_ref()));
         let next_options = if should_run {
             let mut options = match Self::options(inner) {
                 Ok(options) => options,
@@ -1312,6 +1331,32 @@ impl RuntimeState {
         })
     }
 
+    fn arm_manual_session_unless_blocked(inner: &mut RuntimeInner) -> Option<Event> {
+        if let Some(event) = inner.quota_blocked.clone() {
+            return Some(event);
+        }
+        inner.manual_full_session_desired = true;
+        inner.recording_desired = true;
+        inner.last_save_request = None;
+        None
+    }
+
+    fn prepare_manual_session_stop(
+        inner: &mut RuntimeInner,
+    ) -> Result<(Option<Sender<Cmd>>, Option<PreparedServiceRestart>), String> {
+        inner.manual_full_session_desired = false;
+        if inner.recording_desired
+            && inner.quota_blocked.is_none()
+            && !recorder_should_run(&inner.settings, inner.active_game.as_ref())
+        {
+            let restart = Self::prepare_service_restart(inner)?;
+            let session_tx = restart.old_tx.clone();
+            Ok((session_tx, Some(restart)))
+        } else {
+            Ok((inner.tx.clone(), None))
+        }
+    }
+
     fn install_prepared_service_restart(
         inner: &mut RuntimeInner,
         generation: u64,
@@ -1325,6 +1370,38 @@ impl RuntimeState {
             return Err(tx);
         }
         Ok(Self::install_recording_sender(inner, tx))
+    }
+
+    fn finish_service_restart<R: Runtime>(
+        &self,
+        app: AppHandle<R>,
+        prepared: PreparedServiceRestart,
+    ) -> Result<(), String> {
+        let waiting_for_game = prepared.waiting_for_game;
+        let waiting_generation = prepared.waiting_generation;
+        if let Some(tx) = prepared.old_tx {
+            let _ = tx.send(Cmd::Stop { announce: false });
+        }
+        if let Some((options, restart_generation)) = prepared.replacement {
+            let (tx, rx) = service::spawn(options);
+            let installed = {
+                let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+                Self::install_prepared_service_restart(&mut inner, restart_generation, tx)
+            };
+            match installed {
+                Ok(generation) => pump_events(app.clone(), rx, generation),
+                Err(tx) => {
+                    let _ = tx.send(Cmd::Stop { announce: false });
+                }
+            }
+        }
+        if waiting_for_game
+            && waiting_generation
+                .is_some_and(|generation| self.waiting_generation_is_current(generation))
+        {
+            emit_waiting_for_game(&app);
+        }
+        Ok(())
     }
 
     fn prepare_settings_restart(
@@ -1341,7 +1418,7 @@ impl RuntimeState {
         };
         if inner.recording_desired
             && inner.quota_blocked.is_none()
-            && recorder_should_run(&settings, active_game)
+            && (inner.manual_full_session_desired || recorder_should_run(&settings, active_game))
         {
             Self::options_for(
                 &settings,
@@ -1371,7 +1448,7 @@ impl RuntimeState {
         };
         let should_run = inner.recording_desired
             && inner.quota_blocked.is_none()
-            && recorder_should_run(&settings, active_game);
+            && (inner.manual_full_session_desired || recorder_should_run(&settings, active_game));
         let next_options = if should_run {
             let mut options = Self::options_for(
                 &settings,
@@ -1379,6 +1456,9 @@ impl RuntimeState {
                 active_game,
                 &inner.decodable_codecs,
             )?;
+            if inner.manual_full_session_desired {
+                options.recording_mode = service::RecordingMode::FullSession;
+            }
             options.recover_abandoned_recordings = false;
             Some(options)
         } else {
@@ -1676,7 +1756,9 @@ impl RuntimeState {
             inner.last_save_request = None;
             if let Some(event) = inner.quota_blocked.clone() {
                 (None, Some(event))
-            } else if recorder_should_run(&inner.settings, inner.active_game.as_ref()) {
+            } else if inner.manual_full_session_desired
+                || recorder_should_run(&inner.settings, inner.active_game.as_ref())
+            {
                 let (tx, rx) = service::spawn(Self::options(&inner)?);
                 let generation = Self::install_recording_sender(&mut inner, tx);
                 (Some((rx, generation)), None)
@@ -1700,6 +1782,7 @@ impl RuntimeState {
         let tx = {
             let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
             inner.recording_desired = false;
+            inner.manual_full_session_desired = false;
             inner.recording_generation = inner.recording_generation.wrapping_add(1);
             let tx = inner.tx.take();
             inner.last_save_request = None;
@@ -1711,55 +1794,106 @@ impl RuntimeState {
         Ok(false)
     }
 
+    fn set_session_recording<R: Runtime>(
+        &self,
+        app: AppHandle<R>,
+        recording: bool,
+    ) -> Result<bool, String> {
+        if !recording {
+            let (tx, restart) = {
+                let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+                Self::prepare_manual_session_stop(&mut inner)?
+            };
+            let session_stopped = tx
+                .map(|tx| tx.send(Cmd::StopFullSession).is_ok())
+                .unwrap_or(true);
+            if let Some(prepared) = restart {
+                self.finish_service_restart(app, prepared)?;
+            }
+            if !session_stopped {
+                return Err("recorder stopped before the session could be finalized".into());
+            }
+            return Ok(false);
+        }
+
+        let (started, existing, blocked) = {
+            let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+            if let Some(event) = Self::arm_manual_session_unless_blocked(&mut inner) {
+                (None, None, Some(event))
+            } else if let Some(tx) = inner.tx.clone() {
+                (None, Some(tx), None)
+            } else {
+                let (tx, rx) = service::spawn(Self::options(&inner)?);
+                let generation = Self::install_recording_sender(&mut inner, tx);
+                (Some((rx, generation)), None, None)
+            }
+        };
+        if let Some(event) = blocked {
+            let _ = app.emit("storage-quota-full", event);
+            return Ok(false);
+        }
+        if let Some(tx) = existing {
+            tx.send(Cmd::StartFullSession)
+                .map_err(|_| "recorder stopped before the session could start")?;
+        }
+        if let Some((rx, generation)) = started {
+            pump_events(app, rx, generation);
+        }
+        Ok(true)
+    }
+
+    fn toggle_session_recording_from_hotkey<R: Runtime>(
+        &self,
+        app: AppHandle<R>,
+    ) -> Result<bool, String> {
+        let recording = {
+            let inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+            inner.manual_full_session_desired
+                || (inner.tx.is_some()
+                    && inner
+                        .last_recorder_status
+                        .as_ref()
+                        .is_some_and(|status| status.full_session))
+        };
+        self.set_session_recording(app, !recording)
+    }
+
     fn set_detected_game<R: Runtime>(
         &self,
         app: AppHandle<R>,
         detected: Option<DetectedGame>,
     ) -> Result<(), String> {
-        let event = GameDetectionEvent::from_detected(detected.as_ref());
-        let (prepared_restart, emit_event) = {
+        let (prepared_restart, emit_event, event) = {
             let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+            let detected =
+                detected.filter(|game| active_game_still_configured(&inner.settings, Some(game)));
+            let event = GameDetectionEvent::from_detected(detected.as_ref());
             record_osu_title_event(&mut inner, detected.as_ref(), unix_now_i64());
             if same_game_window(inner.active_game.as_ref(), detected.as_ref()) {
                 if game_recording_mode_changed(inner.active_game.as_ref(), detected.as_ref()) {
                     inner.active_game = detected;
-                    (Some(Self::prepare_service_restart(&mut inner)?), true)
+                    (
+                        Some(Self::prepare_service_restart(&mut inner)?),
+                        true,
+                        event,
+                    )
                 } else if inner.active_game != detected {
                     inner.active_game = detected;
-                    (None, true)
+                    (None, true, event)
                 } else {
-                    (None, false)
+                    (None, false, event)
                 }
             } else {
                 inner.active_game = detected;
-                (Some(Self::prepare_service_restart(&mut inner)?), true)
+                (
+                    Some(Self::prepare_service_restart(&mut inner)?),
+                    true,
+                    event,
+                )
             }
         };
         if let Some(prepared) = prepared_restart {
-            let waiting_for_game = prepared.waiting_for_game;
-            let waiting_generation = prepared.waiting_generation;
-            if let Some(tx) = prepared.old_tx {
-                let _ = tx.send(Cmd::Stop { announce: false });
-            }
-            if let Some((options, restart_generation)) = prepared.replacement {
-                let (tx, rx) = service::spawn(options);
-                let installed = {
-                    let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-                    Self::install_prepared_service_restart(&mut inner, restart_generation, tx)
-                };
-                match installed {
-                    Ok(generation) => pump_events(app.clone(), rx, generation),
-                    Err(tx) => {
-                        let _ = tx.send(Cmd::Stop { announce: false });
-                    }
-                }
-            }
-            if waiting_for_game
-                && waiting_generation
-                    .is_some_and(|generation| self.waiting_generation_is_current(generation))
-            {
-                emit_waiting_for_game(&app);
-            }
+            self.finish_service_restart(app.clone(), prepared)?;
         }
         if emit_event {
             let _ = app.emit("game-detection", event);
@@ -2344,6 +2478,15 @@ fn set_recording<R: Runtime>(
     state.set_recording(app, recording)
 }
 
+#[tauri::command]
+fn set_session_recording<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<RuntimeState>,
+    recording: bool,
+) -> Result<bool, String> {
+    state.set_session_recording(app, recording)
+}
+
 /// Whether this build bundles a fixed WebView2 runtime (the "standalone"
 /// installer variant). The install mode comes from the Tauri config baked in
 /// at compile time, so the answer is a property of the installed binary, not
@@ -2748,8 +2891,10 @@ fn rollback_settings_side_effects<R: Runtime>(
         }
     }
     if applied.hook_hotkeys {
-        if let Err(error) = crate::hotkeys::set_save_hotkeys(&old.hotkeys()) {
-            errors.push(format!("restore low-level save hotkeys: {error}"));
+        if let Err(error) =
+            crate::hotkeys::set_hotkeys(&old.hotkeys(), &old.recording_hotkeys())
+        {
+            errors.push(format!("restore low-level hotkeys: {error}"));
         }
     }
     if applied.global_hotkeys {
@@ -2793,6 +2938,14 @@ fn save_settings<R: Runtime>(
         Some(raw) if !raw.trim().is_empty() => Some(crate::settings::normalize_hotkey(raw)?),
         _ => None,
     };
+    settings.recording_hotkey = match settings.recording_hotkey.as_deref() {
+        Some(raw) if !raw.trim().is_empty() => Some(crate::settings::normalize_hotkey(raw)?),
+        _ => None,
+    };
+    settings.recording_hotkey_secondary = match settings.recording_hotkey_secondary.as_deref() {
+        Some(raw) if !raw.trim().is_empty() => Some(crate::settings::normalize_hotkey(raw)?),
+        _ => None,
+    };
     settings.games.normalize();
     settings.validate()?;
     let media_dir = settings.media_dir_path()?;
@@ -2825,7 +2978,10 @@ fn save_settings<R: Runtime>(
         |shortcut| shortcuts.unregister(shortcut),
     )?;
     applied.global_hotkeys = true;
-    if let Err(primary) = crate::hotkeys::set_save_hotkeys(&settings.hotkeys()) {
+    if let Err(primary) = crate::hotkeys::set_hotkeys(
+        &settings.hotkeys(),
+        &settings.recording_hotkeys(),
+    ) {
         let rollback = rollback_settings_side_effects(
             &app,
             &tray_items,
@@ -3040,6 +3196,7 @@ pub fn run() {
             recheck_storage_quota,
             restart_as_administrator,
             set_recording,
+            set_session_recording,
             get_settings,
             needs_first_run_setup,
             minimize_main_window,
@@ -3099,6 +3256,7 @@ pub fn run() {
             crate::library::prepare_clip_audio_sidecars,
             crate::library::reveal_clip,
             crate::library::copy_clip_to_clipboard,
+            crate::library::copy_text_to_clipboard,
             crate::library::open_media_folder,
             crate::library::storage_status
         ])
@@ -3120,14 +3278,28 @@ pub fn run() {
                     let _ = app.handle().emit("error", message);
                 }
             }
-            if let Err(e) = crate::hotkeys::install_save_hook(&settings.hotkeys(), {
+            if let Err(e) = crate::hotkeys::install_hotkey_hook(
+                &settings.hotkeys(),
+                &settings.recording_hotkeys(),
+                {
                 let app = app.handle().clone();
-                move || {
-                    app.state::<RuntimeState>().request_save_or_show_quota(&app);
+                move |action| match action {
+                    crate::hotkeys::HookAction::SaveReplay => {
+                        app.state::<RuntimeState>().request_save_or_show_quota(&app);
+                    }
+                    crate::hotkeys::HookAction::ToggleRecording => {
+                        if let Err(error) = app
+                            .state::<RuntimeState>()
+                            .toggle_session_recording_from_hotkey(app.clone())
+                        {
+                            let _ = app.emit("error", error);
+                        }
+                    }
                 }
-            }) {
-                let message = format!("low-level save hotkey unavailable: {e}");
-                tracing::warn!(event = "save_hook_install_failed", message = %message);
+            },
+            ) {
+                let message = format!("low-level hotkey unavailable: {e}");
+                tracing::warn!(event = "hotkey_hook_install_failed", message = %message);
                 let _ = app.handle().emit("error", message);
             }
             if let Err(e) = crate::library::prune_audio_preview_cache_on_startup() {
@@ -3785,6 +3957,18 @@ mod tests {
     }
 
     #[test]
+    fn current_game_detection_is_available_for_frontend_replay() {
+        let state = RuntimeState::new(AppSettings::default(), None);
+        state.0.lock().unwrap().active_game = Some(detected_game("game", "Game", 42));
+
+        let event = state.current_game_detection_for_replay().unwrap();
+
+        assert!(event.active);
+        assert_eq!(event.name.as_deref(), Some("Game"));
+        assert_eq!(event.window_title.as_deref(), Some("Game Window"));
+    }
+
+    #[test]
     fn microphone_test_stop_channel_treats_disconnect_as_shutdown() {
         let (sender, receiver) = mpsc::channel();
         assert!(!mic_test_should_stop(&receiver));
@@ -4306,6 +4490,7 @@ mod tests {
             window_title: format!("{name} Window"),
             process_id: hwnd as u32,
             exe_name: format!("{name}.exe"),
+            exe_path: None,
             recording_mode: GameRecordingMode::FullSession,
         }
     }
@@ -4319,6 +4504,7 @@ mod tests {
             window_title: format!("{name} Window"),
             process_id: hwnd as u32,
             exe_name: format!("{name}.exe"),
+            exe_path: None,
             recording_mode: GameRecordingMode::FullSession,
         }
     }
@@ -4399,6 +4585,71 @@ mod tests {
     }
 
     #[test]
+    fn manual_session_bypasses_games_only_waiting_with_full_session_mode() {
+        let mut settings = AppSettings::default();
+        settings.games.pause_when_no_game = true;
+        let state = RuntimeState::new(settings, None);
+        let mut inner = state.0.lock().unwrap();
+        inner.recording_desired = true;
+        inner.manual_full_session_desired = true;
+
+        let prepared = RuntimeState::prepare_service_restart(&mut inner).unwrap();
+        let (options, _) = prepared.replacement.expect("manual recording starts capture");
+
+        assert_eq!(options.recording_mode, service::RecordingMode::FullSession);
+        assert!(!prepared.waiting_for_game);
+    }
+
+    #[test]
+    fn quota_blocked_manual_session_request_does_not_arm_a_future_recording() {
+        let state = RuntimeState::new(AppSettings::default(), None);
+        let mut inner = state.0.lock().unwrap();
+        inner.quota_blocked = Some(Event::StorageQuotaFull {
+            total_bytes: 10,
+            quota_bytes: 10,
+            required_bytes: 1,
+        });
+
+        let blocked = RuntimeState::arm_manual_session_unless_blocked(&mut inner);
+
+        assert!(blocked.is_some());
+        assert!(!inner.manual_full_session_desired);
+        assert!(!inner.recording_desired);
+    }
+
+    #[test]
+    fn stopping_manual_session_returns_games_only_capture_to_waiting() {
+        let (tx, _rx) = mpsc::channel();
+        let mut settings = AppSettings::default();
+        settings.games.pause_when_no_game = true;
+        let mut inner = RuntimeInner {
+            tx: Some(tx),
+            recording_generation: 1,
+            recording_desired: true,
+            manual_full_session_desired: true,
+            settings,
+            lol_url: None,
+            active_game: None,
+            osu_title_events: Vec::new(),
+            last_save_request: None,
+            decodable_codecs: vec![service::Codec::H264],
+            last_recorder_status: None,
+            last_storage_status: None,
+            recent_recorder_error: false,
+            quota_blocked: None,
+        };
+
+        let (_, restart) = RuntimeState::prepare_manual_session_stop(&mut inner).unwrap();
+        let restart = restart.expect("games-only capture must return to waiting");
+
+        assert!(!inner.manual_full_session_desired);
+        assert!(inner.recording_desired);
+        assert!(restart.old_tx.is_some());
+        assert!(restart.replacement.is_none());
+        assert!(restart.waiting_for_game);
+    }
+
+    #[test]
     fn game_restart_pauses_service_but_keeps_recorder_armed() {
         let (tx, _rx) = mpsc::channel();
         let mut settings = AppSettings::default();
@@ -4407,6 +4658,7 @@ mod tests {
             tx: Some(tx),
             recording_generation: 1,
             recording_desired: true,
+            manual_full_session_desired: false,
             settings,
             lol_url: None,
             active_game: None,
@@ -4436,6 +4688,7 @@ mod tests {
             tx: None,
             recording_generation: 4,
             recording_desired: true,
+            manual_full_session_desired: false,
             settings,
             lol_url: None,
             active_game: Some(detected_game("custom-game", "Game", 42)),
@@ -4692,6 +4945,7 @@ mod tests {
             tx: Some(tx),
             recording_generation: 1,
             recording_desired: true,
+            manual_full_session_desired: false,
             settings: invalid_disk_replay_settings(),
             lol_url: None,
             active_game: None,
@@ -4726,6 +4980,7 @@ mod tests {
             tx: Some(tx),
             recording_generation: 1,
             recording_desired: true,
+            manual_full_session_desired: false,
             settings: AppSettings::default(),
             lol_url: None,
             active_game: None,
@@ -4861,6 +5116,7 @@ mod tests {
             tx: Some(tx),
             recording_generation: 1,
             recording_desired: true,
+            manual_full_session_desired: false,
             settings: invalid_disk_replay_settings(),
             lol_url: None,
             active_game: Some(DetectedGame {
@@ -4870,6 +5126,7 @@ mod tests {
                 window_title: "Game".into(),
                 process_id: 7,
                 exe_name: "game.exe".into(),
+                exe_path: None,
                 recording_mode: GameRecordingMode::FullSession,
             }),
             osu_title_events: Vec::new(),
@@ -4900,6 +5157,7 @@ mod tests {
             tx: None,
             recording_generation: 7,
             recording_desired: true,
+            manual_full_session_desired: false,
             settings: invalid_disk_replay_settings(),
             lol_url: None,
             active_game: None,
@@ -5012,6 +5270,7 @@ mod tests {
             window_title: "Loading".into(),
             process_id: 7,
             exe_name: "game.exe".into(),
+            exe_path: None,
             recording_mode: GameRecordingMode::ReplaysOnly,
         };
         let updated_title = DetectedGame {
@@ -5048,6 +5307,7 @@ mod tests {
             window_title: "Game".into(),
             process_id: 7,
             exe_name: "game.exe".into(),
+            exe_path: None,
             recording_mode: GameRecordingMode::ReplaysOnly,
         };
         let updated_mode = DetectedGame {
@@ -5076,6 +5336,7 @@ mod tests {
             tx: None,
             recording_generation: 0,
             recording_desired: false,
+            manual_full_session_desired: false,
             settings: AppSettings::default(),
             lol_url: None,
             active_game: None,
@@ -5097,6 +5358,7 @@ mod tests {
             window_title: "osu! - xi - Blue Zenith [FOUR DIMENSIONS]".into(),
             process_id: 7,
             exe_name: "osu!.exe".into(),
+            exe_path: None,
             recording_mode: GameRecordingMode::FullSession,
         };
         let league = DetectedGame {
@@ -5194,6 +5456,7 @@ mod tests {
             window_title: "League of Legends (TM) Client".into(),
             process_id: 7,
             exe_name: "League of Legends.exe".into(),
+            exe_path: None,
             recording_mode: GameRecordingMode::FullSession,
         };
         let mut settings = AppSettings::default();
@@ -5914,6 +6177,7 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
             tx: None,
             recording_generation: 0,
             recording_desired: false,
+            manual_full_session_desired: false,
             settings: AppSettings::default(),
             lol_url: None,
             active_game: Some(DetectedGame {
@@ -5925,6 +6189,7 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
                 window_title: "Game Window".into(),
                 process_id: 7,
                 exe_name: "game.exe".into(),
+                exe_path: None,
                 recording_mode: GameRecordingMode::FullSession,
             }),
             osu_title_events: Vec::new(),
@@ -5960,6 +6225,7 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
             tx: None,
             recording_generation: 0,
             recording_desired: false,
+            manual_full_session_desired: false,
             settings: AppSettings::default(),
             lol_url: Some("http://mock".into()),
             active_game: Some(DetectedGame {
@@ -5972,6 +6238,9 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
                 window_title: "League".into(),
                 process_id: 7,
                 exe_name: "League of Legends.exe".into(),
+                exe_path: Some(
+                    r"C:\Riot Games\League of Legends\Game\League of Legends.exe".into(),
+                ),
                 recording_mode: GameRecordingMode::FullSession,
             }),
             osu_title_events: Vec::new(),
@@ -5992,6 +6261,12 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
             Some(crate::game_plugins::LEAGUE_OF_LEGENDS_ID)
         );
         assert_eq!(opts.lol_url.as_deref(), Some("http://mock"));
+        assert_eq!(
+            opts.active_game.as_ref().and_then(|game| game.exe_path.as_deref()),
+            Some(Path::new(
+                r"C:\Riot Games\League of Legends\Game\League of Legends.exe"
+            ))
+        );
     }
 
     #[test]

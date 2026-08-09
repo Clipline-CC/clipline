@@ -4,6 +4,157 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-08): PR #143 review hardening
+
+Plan: `docs/superpowers/plans/2026-08-08-pr-143-review-fixes.md` (`e237ddd`).
+
+The manual full-session controls now preserve the games-only capture policy: stopping a session
+returns an otherwise-idle recorder to Waiting, quota-blocked starts do not arm a future surprise
+session, and the UI updates optimistically so a quick second click cannot stop a start that still
+looks inactive. The established quota-full policy remains deliberate: Clipline disables recording
+and replay capture together until storage is freed or the quota is raised.
+
+The unified capture-target rail now glows only while frames are actually being captured. Waiting
+has a distinct neutral treatment, and unchanged monitor, region, or game icons are no longer
+rebuilt every recorder-status tick. League game-type filter options are likewise rebuilt only when
+the available categories change.
+
+Custom-game normalization now removes only exact match-rule duplicates, preserving intentional
+same-executable rules with different paths or title filters. A disabled built-in game may still be
+captured through an explicit custom rule, without the repeated plugin scan in the detection loop.
+
+League queue enrichment now runs outside the one-second event poller, retries transient startup
+failures, ignores stale results from earlier matches, and accepts negative LCU queue IDs as Custom.
+Cloud upload completion uses Clipline's native clipboard path so background uploads can copy their
+share URL without WebView focus. Clipboard failure is notice-level, and local-file deletion closes
+Review or switches to Cloud only when the uploaded clip is still the one being reviewed.
+
+The full workspace suite, warning-denied workspace Clippy, JavaScript syntax checks, focused UI
+contracts, and repository security tests are green.
+
+---
+
+## Checkpoint (2026-08-08): Unified capture-target rail control
+
+Plan: `docs/superpowers/plans/2026-08-08-capture-target-rail-control.md` (`bbd0d54`).
+
+The separate captured-game icon and replay-buffer rail row are now one 40px source control. It
+shows the active supported/custom game's icon, or a compact monitor/selected-region fallback for
+the saved capture target. The existing buffer action now lives on that icon: an active buffer gets
+a blue ring/glow, while an off or quota-blocked buffer is darkened. Existing tooltips, encoder
+readiness detail, waiting state, quota recovery, and accessible pressed/disabled labels remain on
+the unified button.
+
+The focused UI contract and JavaScript syntax checks are green.
+
+---
+
+## Checkpoint (2026-08-08): Active game icon state replay
+
+Plan: `docs/superpowers/plans/2026-08-08-active-game-state-replay.md` (`6d95526`).
+
+When the main WebView was recreated while the same game remained active, the replacement UI could
+miss the unchanged game-detection event and hide the captured-game icon. `frontend_ready` now
+replays the current game-detection snapshot beside the existing durable recorder and quota state.
+A focused runtime-state regression covers reconstruction of the active game's frontend payload.
+
+---
+
+## Checkpoint (2026-08-08): Mid-stream manual recording origin
+
+Plan: `docs/superpowers/plans/2026-08-08-manual-full-session-origin.md` (`3d93050`).
+
+Starting a manual full-session recording while the replay buffer was already inside a GOP could
+retain an Opus packet beginning just before the new file's first video keyframe. Finalization then
+rejected that packet with `media sample timestamp precedes recording origin` and preserved a
+recoverable `.mp4.recording` file instead of producing the finished session.
+
+The full-session writer now reuses the replay exporter's origin-aware audio selection. It discards
+only samples before the first recorded GOP origin and preserves all later audio/video. A focused
+fixture starts recording midway through an active, audio-straddled GOP and verifies the session
+summary and finalized MP4. The full workspace suite, warning-denied workspace Clippy, fresh-cache
+capture-crate Clippy, and post-clean focused regression are green.
+
+---
+
+## Checkpoint (2026-08-08): Manual recording control and honest rail state
+
+Plans: `docs/superpowers/plans/2026-08-08-recording-toggle-hotkey.md` (`89645d5`, refined by
+`32b4ab5` and `00e0593`).
+
+Settings > Hotkeys now offers two optional system-wide Start / Stop recording shortcuts. They
+accept the same function, modified keyboard, and mouse inputs as Save Replay, reject duplicate and
+cross-action bindings, and remain unset by default for existing and new users. Save Replay and
+recording each own their capture-status message, so feedback stays beneath the field being edited.
+The shared low-level hook dispatches the two actions distinctly, including while Clipline is
+tray-hidden.
+
+Record now means a real saved full-session recording. Starting it attaches Clipline's existing
+full-session writer to the live encoded stream—or wakes capture when games-only mode is waiting—so
+it does not create a second encoder. Stopping finalizes the session while the rolling replay buffer
+continues. The left rail exposes these independently: Record changes to red `Rec` only while a
+full-session writer is active, while Buffer reports the replay service as Off, Waiting, or Ready.
+Both paths retain the existing non-destructive storage-quota lock.
+
+The settings persistence/validation, hotkey action routing, manual games-only bypass, recorder
+commands, and UI shell are covered by focused Rust and UI-contract tests. JavaScript syntax checks,
+the full workspace suite, warning-denied workspace Clippy, fresh-cache Clipline Clippy, and the
+post-clean Clipline test suite are green. The rebuilt app was relaunched for manual verification.
+
+---
+
+## Checkpoint (2026-08-08): Adaptive clip size display
+
+Plan: `docs/superpowers/plans/2026-08-08-adaptive-clip-size-display.md` (`361b4d8`).
+
+Library cards and Review metadata now switch from MB to GB at 1 GB using the existing shared size
+formatter. Values round to the nearest tenth, so a `1559.7 MB` clip displays as `1.5 GB`. Rename
+and loaded-metadata refreshes use the same formatter, preventing the label from reverting.
+
+The reported-case formatter test, JavaScript syntax checks, full workspace suite, and
+warning-denied workspace Clippy pass are green.
+
+---
+
+## Checkpoint (2026-08-08): Cloud upload completion handoff
+
+Plan: `docs/superpowers/plans/2026-08-08-cloud-upload-completion-handoff.md` (`f57eb87`).
+
+Completed public and unlisted Cloud uploads now copy the server-issued canonical share URL to the
+clipboard automatically. Private uploads continue to expose no share URL. Clipboard permission or
+ownership failures are reported separately and never change a successful upload into a failure.
+
+When `Delete local after upload` succeeds and the backend confirms the local file is gone, the UI
+closes Review and switches the Library to Cloud before reloading it. Requested-but-failed cleanup
+does not redirect or close the preserved local clip.
+
+The focused UI contract, JavaScript syntax check, full workspace suite, and warning-denied workspace
+Clippy pass are green.
+
+---
+
+## Checkpoint (2026-08-08): League game type filtering
+
+Plan: `docs/superpowers/plans/2026-08-08-league-game-type-filter.md` (`2b4714e`).
+
+New League recordings are enriched once per match with the queue reported by the local League
+Client. Clipline derives the client lockfile from the already-detected game executable and makes a
+short, authenticated loopback-only request; it needs no Riot login, developer key, remote service,
+or game-process access. Queue failures are best-effort and never stop recording.
+
+The raw queue ID, a stable category, and a friendly label are merged into the existing
+`clipline-session.json` sidecar. Late results update both replay match folders and full-session
+folders created before League's APIs were ready. Existing sidecars remain backward-compatible.
+
+The local Library shows the friendly mode on League cards and reveals a Game type selector when
+categorized League recordings exist. Ranked Solo/Duo, Ranked Flex, Normal, ARAM, Arena, Custom,
+Other, and legacy Unknown compose with the existing clip-kind filter and search/sort/group controls.
+
+Focused LCU, sidecar, library, and UI-contract tests pass. The full workspace suite and a fresh-cache,
+warning-denied workspace Clippy pass are also green.
+
+---
+
 ## Checkpoint (2026-08-07): Nightly 0.1.46
 
 Plan: `docs/superpowers/plans/2026-08-07-nightly-0.1.46.md` (`dfac393`).

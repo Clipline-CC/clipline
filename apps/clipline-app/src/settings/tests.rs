@@ -206,6 +206,77 @@ fn legacy_custom_games_default_to_replays_only() {
 }
 
 #[test]
+fn custom_game_normalization_deduplicates_match_identity_and_keeps_last() {
+    let mut games = GameSettings {
+        custom_games: vec![
+            CustomGameSettings {
+                id: "custom-ffxiv-old".into(),
+                legacy_ids: Vec::new(),
+                name: "ffxiv_dx11".into(),
+                enabled: true,
+                exe_name: "ffxiv_dx11.exe".into(),
+                process_path: Some(r"D:\Games\FFXIV\ffxiv_dx11.exe".into()),
+                window_title: "FINAL FANTASY XIV".into(),
+                recording_mode: GameRecordingMode::ReplaysOnly,
+                icon: None,
+            },
+            CustomGameSettings {
+                id: "custom-ffxiv-new".into(),
+                legacy_ids: Vec::new(),
+                name: "ffxiv_dx11".into(),
+                enabled: false,
+                exe_name: "FFXIV_DX11.EXE".into(),
+                process_path: Some("d:/games/ffxiv/ffxiv_dx11.exe/".into()),
+                window_title: "FINAL FANTASY XIV".into(),
+                recording_mode: GameRecordingMode::ReplaysOnly,
+                icon: None,
+            },
+        ],
+        ..GameSettings::default()
+    };
+
+    games.normalize();
+
+    assert_eq!(games.custom_games.len(), 1);
+    assert_eq!(games.custom_games[0].id, "custom-ffxiv-new");
+    assert!(!games.custom_games[0].enabled);
+    assert_eq!(games.custom_games[0].legacy_ids, ["custom-ffxiv-old"]);
+}
+
+#[test]
+fn custom_game_normalization_preserves_distinct_window_rules_for_one_executable() {
+    let base = CustomGameSettings {
+        id: "custom-launcher".into(),
+        legacy_ids: Vec::new(),
+        name: "Game launcher".into(),
+        enabled: true,
+        exe_name: "game.exe".into(),
+        process_path: Some(r"C:\Games\Game\game.exe".into()),
+        window_title: "Launcher".into(),
+        recording_mode: GameRecordingMode::ReplaysOnly,
+        icon: None,
+    };
+    let mut games = GameSettings {
+        custom_games: vec![
+            base.clone(),
+            CustomGameSettings {
+                id: "custom-match".into(),
+                name: "Game match".into(),
+                window_title: "In game".into(),
+                ..base
+            },
+        ],
+        ..GameSettings::default()
+    };
+
+    games.normalize();
+
+    assert_eq!(games.custom_games.len(), 2);
+    assert_eq!(games.custom_games[0].window_title, "Launcher");
+    assert_eq!(games.custom_games[1].window_title, "In game");
+}
+
+#[test]
 fn legacy_global_game_recording_mode_migrates_to_custom_games() {
     let json = r#"{
             "capture_mode": "primary_monitor",
@@ -746,6 +817,44 @@ fn validation_rejects_secondary_hotkey_matching_primary() {
     };
     assert!(blank.validate().is_ok());
     assert_eq!(blank.hotkeys(), vec!["F6"]);
+}
+
+#[test]
+fn recording_hotkeys_are_optional_normalized_and_distinct_from_each_other_and_save_replay() {
+    assert_eq!(AppSettings::default().recording_hotkey, None);
+    assert_eq!(AppSettings::default().recording_hotkey_secondary, None);
+
+    let dir = TestDir::new("clipline-settings", "recording-hotkey-round-trip");
+    let path = dir.path().join("settings.json");
+    let settings = AppSettings {
+        recording_hotkey: Some("ctrl+shift+r".into()),
+        recording_hotkey_secondary: Some("alt+mouse4".into()),
+        ..AppSettings::default()
+    };
+    settings.save_to(&path).unwrap();
+    let loaded = AppSettings::load_from(&path).unwrap();
+    assert_eq!(loaded.recording_hotkey.as_deref(), Some("Ctrl+Shift+R"));
+    assert_eq!(loaded.recording_hotkey_secondary.as_deref(), Some("Alt+Mouse4"));
+
+    let primary_conflict = AppSettings {
+        recording_hotkey: Some("f6".into()),
+        ..AppSettings::default()
+    };
+    assert!(primary_conflict.validate().is_err());
+
+    let secondary_conflict = AppSettings {
+        hotkey_secondary: Some("Ctrl+R".into()),
+        recording_hotkey: Some("ctrl+r".into()),
+        ..AppSettings::default()
+    };
+    assert!(secondary_conflict.validate().is_err());
+
+    let recording_conflict = AppSettings {
+        recording_hotkey: Some("Alt+R".into()),
+        recording_hotkey_secondary: Some("alt+r".into()),
+        ..AppSettings::default()
+    };
+    assert!(recording_conflict.validate().is_err());
 }
 
 #[test]
