@@ -79,6 +79,7 @@
   --bright2-rgb: 243, 237, 225;
   --accent-rgb: 255, 178, 36;
   --ok-rgb: 86, 200, 189;
+  --logo-filter: none;
 
 }
 
@@ -748,6 +749,7 @@
   --bright2-rgb: 240, 242, 246;
   --accent-rgb: 61, 123, 253;
   --ok-rgb: 122, 184, 255;
+  --logo-filter: hue-rotate(182deg) saturate(1.05);
 }
 
 /* Purple — a deep-violet palette, Settings > General > Theme. */
@@ -817,8 +819,12 @@
   --bright2-rgb: 244, 237, 250;
   --accent-rgb: 169, 112, 255;
   --ok-rgb: 98, 214, 199;
+  --logo-filter: hue-rotate(227deg) saturate(.8) brightness(1.05);
 }
 
+img[src="assets/clipline-icon.svg"] {
+  filter: var(--logo-filter);
+}
 
 * {
   box-sizing: border-box;

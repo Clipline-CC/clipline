@@ -54,7 +54,8 @@
 **Visual customization.** Settings > General previews and persists three first-party color
 palettes: Booth (warm amber, default), Classic (midnight blue), and Purple (deep violet). Alternate
 themes override the same semantic CSS token set so recording states and accessibility behavior stay
-consistent across palettes.
+consistent across palettes. The in-app Clipline logo uses the same theme selection while the
+packaged Windows icon remains the fixed product mark.
 
 ### 2. Competitive Analysis Matrix
 

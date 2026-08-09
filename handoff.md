@@ -4025,7 +4025,9 @@ Settings > General now offers Purple (deep violet) alongside Booth and Classic. 
 instant preview and save/discard transaction as the existing themes, persists as the `purple`
 `UiTheme` value, and supplies the full alternate-theme CSS token set rather than maintaining a
 parallel stylesheet. Booth remains the default. The UI contract compares alternate palette token
-coverage, so future theme-token additions cannot silently leave Purple incomplete.
+coverage, so future theme-token additions cannot silently leave Purple incomplete. A shared
+`--logo-filter` also tints every in-app Clipline SVG to the active palette without duplicating the
+asset; the installed Windows icon remains unchanged.
 
 ## What's next (rough value order; each gets its own plan)
 

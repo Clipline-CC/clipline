@@ -91,6 +91,24 @@ fn purple_theme_is_selectable_and_covers_the_theme_palette() {
     );
 }
 
+#[test]
+fn clipline_logo_follows_the_selected_theme() {
+    let css = styles_css();
+    let booth = css_rule_body(&css, ":root");
+    let classic = css_rule_body(&css, ":root[data-theme=\"classic\"]");
+    let purple = css_rule_body(&css, ":root[data-theme=\"purple\"]");
+    let logos = css_rule_body(&css, "img[src=\"assets/clipline-icon.svg\"]");
+
+    assert_eq!(css_decl_value(booth, "--logo-filter"), Some("none"));
+    assert_ne!(css_decl_value(classic, "--logo-filter"), Some("none"));
+    assert_ne!(css_decl_value(purple, "--logo-filter"), Some("none"));
+    assert_eq!(
+        css_decl_value(logos, "filter"),
+        Some("var(--logo-filter)"),
+        "every in-app Clipline logo must use the selected theme's tint"
+    );
+}
+
 /// Concatenated app UI scripts (everything except player-core.js).
 fn main_js() -> String {
     APP_UI_JS
