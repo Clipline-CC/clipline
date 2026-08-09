@@ -1,7 +1,12 @@
 {
+  "schema_version": 1,
   "product": "Microsoft Edge WebView2 Fixed Version Runtime",
   "version": "151.0.4129.59",
   "architecture": "x64",
+  "archive_name": "Microsoft.WebView2.FixedVersionRuntime.151.0.4129.59.x64.cab",
+  "archive_url": "https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/3cb717d2-b86d-4160-a13e-f3860141dc7f/Microsoft.WebView2.FixedVersionRuntime.151.0.4129.59.x64.cab",
+  "archive_size": 304114944,
+  "archive_sha256": "056858a027a7bf29893b6013c0eb0c6ea7e29755a20c9d043be469d9d78657dc",
   "reviewed_on": "2026-08-09",
   "review_due_on": "2026-09-08",
   "max_review_age_days": 30,

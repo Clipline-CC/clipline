@@ -10,6 +10,7 @@
 | Test + lint in one shot | `cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings` |
 | Fast test (skip device tests) | `cargo test --workspace` (device tests self-skip under `CI` env or no hardware) |
 | Test with fresh clippy cache | `cargo clean -p <crate> && cargo clippy -p <crate> --all-targets -- -D warnings` |
+| Publish a new Nightly | Follow `docs/release-updates.md` → **Agent runbook**; push `nightly-v<version>` only after the release commit is on `develop` |
 
 ## Quick reference — project structure
 
@@ -43,6 +44,19 @@
 4. Open the Clipline app for the user to test (`cargo run -p clipline-app`).
 5. Give the user a concise list of specific things to test for the change.
 6. Update `handoff.md` if the change is significant.
+
+## When the user says “make a new Nightly release”
+
+Treat that phrase as authorization to prepare and publish the next rolling GitHub Nightly. Follow
+the agent runbook in `docs/release-updates.md` from start to finish. In particular:
+
+- Do not build or upload release assets manually; `.github/workflows/nightly.yml` owns that work.
+- Bump Cargo, Cargo.lock, and Tauri to the same new version, refresh the reviewed WebView2 metadata,
+  run the quality gates, and get that release commit onto `develop` before tagging.
+- Push a new immutable `nightly-v<version>` tag at the exact `develop` release commit. Never
+  force-move a version tag or move the rolling `nightly` tag yourself.
+- Watch the **Nightly Release** action through its public-download verification, verify the rolling
+  release target and seven assets, then record the publication in `handoff.md`.
 
 ## Sharp edges that cost real time
 

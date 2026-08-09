@@ -724,3 +724,62 @@ fn private_reports_have_one_immutable_official_destination() {
         "release builds must not redirect private reports through a mutable repository variable"
     );
 }
+
+#[test]
+fn nightly_tags_publish_both_verified_updater_variants_transactionally() {
+    let root = workspace_root();
+    let workflow = fs::read_to_string(root.join(".github/workflows/nightly.yml"))
+        .expect("read active Nightly workflow");
+    let webview_manifest =
+        fs::read_to_string(root.join("apps/clipline-app/webview2-fixed-runtime.json"))
+            .expect("read WebView2 release-input manifest");
+
+    for contract in [
+        "nightly-v*",
+        "contents: read",
+        "contents: write",
+        "cancel-in-progress: false",
+        "cargo test --workspace",
+        "cargo clippy --workspace --all-targets -- -D warnings",
+        "scripts\\stage-webview2-runtime.ps1",
+        "scripts\\stage-ffmpeg-resource.ps1",
+        "cargo tauri build --config tauri.standalone.conf.json",
+        "scripts\\prepare-nightly-assets.ps1",
+        "TAURI_SIGNING_PRIVATE_KEY",
+        "nightly-staging-",
+        "gh release edit",
+        "--tag nightly",
+        "gh release download nightly",
+    ] {
+        assert!(
+            workflow.contains(contract),
+            "Nightly workflow is missing contract: {contract}"
+        );
+    }
+
+    let regular_build = workflow
+        .find("cargo tauri build\n")
+        .expect("regular Tauri build");
+    let ffmpeg_stage = workflow
+        .find("scripts\\stage-ffmpeg-resource.ps1")
+        .expect("standalone FFmpeg stage");
+    let standalone_build = workflow
+        .find("cargo tauri build --config tauri.standalone.conf.json")
+        .expect("standalone Tauri build");
+    assert!(
+        regular_build < ffmpeg_stage && ffmpeg_stage < standalone_build,
+        "standalone-only FFmpeg must be staged after preserving the regular installer"
+    );
+
+    for field in [
+        "archive_name",
+        "archive_url",
+        "archive_size",
+        "archive_sha256",
+    ] {
+        assert!(
+            webview_manifest.contains(&format!("\"{field}\"")),
+            "WebView2 release input must pin {field}"
+        );
+    }
+}

@@ -4,6 +4,28 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-09): Tag-triggered Nightly releases
+
+Plan: `docs/superpowers/plans/2026-08-09-tag-triggered-nightly-releases.md`.
+
+Pushing an immutable `nightly-v<version>` tag now triggers `.github/workflows/nightly.yml`. The
+workflow requires the tag, Cargo package, lockfile, and Tauri versions to agree and requires the
+tagged commit to belong to `develop`. It rejects version regressions, then runs the full workspace
+suite and warning-denied Clippy before building anything for publication.
+
+The regular installer is preserved before the workflow stages standalone-only inputs. WebView2
+151.0.4129.59's exact official CAB URL, size, and SHA-256 now live in the reviewed runtime
+manifest, with a transactional staging script matching the existing FFmpeg trust boundary. The
+standalone installer is renamed and re-signed under its final filename, and one helper produces
+the two rolling updater manifests and generated release notes.
+
+Publication uses a draft `nightly-staging-<run>-<attempt>` release as the complete seven-asset
+transaction. Only after its asset set is confirmed does the workflow replace the rolling
+`nightly` release and tag. It then redownloads every public asset and compares its SHA-256 with the
+staged bytes. The existing updater URL and updater signing key remain unchanged.
+
+---
+
 ## Checkpoint (2026-08-09): Nightly 0.1.47
 
 Plan: `docs/superpowers/plans/2026-08-09-nightly-0.1.47.md` (`a45891b`).
