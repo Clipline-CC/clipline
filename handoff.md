@@ -4,6 +4,17 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-08): Active game icon state replay
+
+Plan: `docs/superpowers/plans/2026-08-08-active-game-state-replay.md` (`6d95526`).
+
+When the main WebView was recreated while the same game remained active, the replacement UI could
+miss the unchanged game-detection event and hide the captured-game icon. `frontend_ready` now
+replays the current game-detection snapshot beside the existing durable recorder and quota state.
+A focused runtime-state regression covers reconstruction of the active game's frontend payload.
+
+---
+
 ## Checkpoint (2026-08-08): Mid-stream manual recording origin
 
 Plan: `docs/superpowers/plans/2026-08-08-manual-full-session-origin.md` (`3d93050`).

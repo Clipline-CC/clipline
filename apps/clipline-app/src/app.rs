@@ -758,6 +758,9 @@ fn frontend_ready<R: Runtime>(
     if let Some(status) = runtime.durable_recorder_status_for_replay() {
         let _ = app.emit("status", status);
     }
+    if let Some(game) = runtime.current_game_detection_for_replay() {
+        let _ = app.emit("game-detection", game);
+    }
     if let Some(event) = runtime.durable_quota_event_for_replay() {
         let _ = app.emit("storage-quota-full", event);
     }
@@ -1211,6 +1214,11 @@ impl RuntimeState {
             encoder: status.encoder.clone(),
             capture_backend: status.capture_backend.clone(),
         })
+    }
+
+    fn current_game_detection_for_replay(&self) -> Option<GameDetectionEvent> {
+        let detected = self.0.lock().ok()?.active_game.clone();
+        Some(GameDetectionEvent::from_detected(detected.as_ref()))
     }
 
     fn durable_quota_event_for_replay(&self) -> Option<Event> {
@@ -3899,6 +3907,18 @@ mod tests {
                 ..
             }) if encoder == "mft-h264"
         ));
+    }
+
+    #[test]
+    fn current_game_detection_is_available_for_frontend_replay() {
+        let state = RuntimeState::new(AppSettings::default(), None);
+        state.0.lock().unwrap().active_game = Some(detected_game("game", "Game", 42));
+
+        let event = state.current_game_detection_for_replay().unwrap();
+
+        assert!(event.active);
+        assert_eq!(event.name.as_deref(), Some("Game"));
+        assert_eq!(event.window_title.as_deref(), Some("Game Window"));
     }
 
     #[test]
