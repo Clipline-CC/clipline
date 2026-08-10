@@ -1153,12 +1153,24 @@ const PlayerCore = (() => {
     return Array.isArray(summary[key]) ? summary[key] : [];
   };
 
+  // Hextech Flashtraption replaces Flash and has no Data Dragon spell art, so
+  // map Hexflash names/keys onto SummonerFlash for both fresh and legacy sidecars.
+  const summonerSpellAssetKey = (name, assetKey) => {
+    const key = String(assetKey || "").trim();
+    if (key.startsWith("SummonerFlash")) return "SummonerFlash";
+    const lookup = dataDragonLookupKey(name);
+    if (lookup === "flash" || lookup === "hexflash" || lookup === "hextechflashtraption") {
+      return "SummonerFlash";
+    }
+    return key;
+  };
+
   const summaryIconItem = (entry, type, field, options) => {
     if (!entry || typeof entry !== "object") return null;
     const provider = String(field.asset_provider || "").trim();
     if (type === "summoner_spells") {
       const value = String(entry.name || entry.display_name || "").trim();
-      const assetKey = String(entry.asset_key || "").trim();
+      const assetKey = summonerSpellAssetKey(value, entry.asset_key);
       if (!value && !assetKey) return null;
       const item = { value: value || assetKey, assetKey };
       if (provider === "riot_data_dragon_summoner_spell") {

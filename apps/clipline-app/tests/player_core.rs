@@ -2345,6 +2345,42 @@ fn player_summary_fields_format_rich_league_metadata() {
 }
 
 #[test]
+fn player_summary_fields_maps_hexflash_sidecar_to_flash_asset() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        r#"
+        const SUMMARY = {
+          summoner_spells: [
+            { name: 'Ignite', asset_key: 'SummonerDot' },
+            {
+              name: 'Hexflash',
+              asset_key: 'SummonerFlashPerksHextechFlashtraptionV2'
+            }
+          ]
+        };
+        const FIELDS = [
+          {
+            type: 'summoner_spells',
+            source: 'player_summary.summoner_spells',
+            label: 'Summoner spells',
+            asset_provider: 'riot_data_dragon_summoner_spell'
+          }
+        ];
+        const OPTIONS = { data_dragon: { version: '16.13.1' } };
+        "#,
+    ))
+    .expect("define hexflash summary fields");
+
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.playerSummaryFields(SUMMARY, FIELDS, OPTIONS)"
+        ),
+        r#"[{"type":"summoner_spells","label":"Summoner spells","items":[{"value":"Ignite","assetKey":"SummonerDot","asset":"https://ddragon.leagueoflegends.com/cdn/16.13.1/img/spell/SummonerDot.png"},{"value":"Hexflash","assetKey":"SummonerFlash","asset":"https://ddragon.leagueoflegends.com/cdn/16.13.1/img/spell/SummonerFlash.png"}]}]"#
+    );
+}
+
+#[test]
 fn gallery_card_preview_uses_declarative_title_and_icon() {
     let mut ctx = player_core_context();
     ctx.eval(Source::from_bytes(
@@ -2626,6 +2662,46 @@ fn game_event_rail_item_formats_actor_objectives_with_portrait_and_icon() {
             "PlayerCore.gameEventRailItem({ kind: 'TurretKilled', actor: 'Jinmee', t_s: 445 }, OBJECTIVE_SUMMARY, OBJECTIVE_PRESENTATION, OBJECTIVE_OPTIONS)"
         ),
         r#"{"layout":"actor_event","kind":"TurretKilled","category":"structure","allegiance":"friendly","label":"Turret Killed","text":"Turret Killed · Jinmee","icon":"data:image/png;base64,turret-icon","actor":{"name":"Jinmee","champion":"Ezreal","team":"ORDER","assetKey":"Ezreal","asset":"https://ddragon.leagueoflegends.com/cdn/16.13.1/img/champion/Ezreal.png","initials":"JI","local":false}}"#
+    );
+}
+
+#[test]
+fn game_event_rail_item_formats_herald_with_event_rail_icon() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        r#"
+        const HERALD_SUMMARY = {
+          player_name: 'dain',
+          team: 'ORDER',
+          participants: [
+            { player_name: 'dain', champion_name: 'Nautilus', team: 'ORDER' },
+            { player_name: 'Jinmee', champion_name: 'Ezreal', team: 'ORDER' }
+          ]
+        };
+        const HERALD_PRESENTATION = {
+          marker_kinds: {
+            HeraldKill: {
+              category: 'objective',
+              rail: { layout: 'actor_event', allegiance: 'actor_team' }
+            }
+          },
+          event_rail: {
+            icons: {
+              HeraldKill: 'data:image/png;base64,herald-icon'
+            }
+          }
+        };
+        const HERALD_OPTIONS = { data_dragon: { version: '16.13.1' } };
+        "#,
+    ))
+    .expect("define herald rail inputs");
+
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.gameEventRailItem({ kind: 'HeraldKill', actor: 'Jinmee', t_s: 812 }, HERALD_SUMMARY, HERALD_PRESENTATION, HERALD_OPTIONS)"
+        ),
+        r#"{"layout":"actor_event","kind":"HeraldKill","category":"objective","allegiance":"friendly","label":"Herald Kill","text":"Herald Kill · Jinmee","icon":"data:image/png;base64,herald-icon","actor":{"name":"Jinmee","champion":"Ezreal","team":"ORDER","assetKey":"Ezreal","asset":"https://ddragon.leagueoflegends.com/cdn/16.13.1/img/champion/Ezreal.png","initials":"JI","local":false}}"#
     );
 }
 
