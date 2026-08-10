@@ -37,6 +37,10 @@ listen("saved", (e) => {
   requestRefresh();
 });
 
+listen("library-changed", () => {
+  requestRefresh();
+});
+
 function updateStorageQuotaUsage(payload) {
   storageQuotaState = { ...(storageQuotaState || {}), ...(payload || {}) };
   const used = Number(storageQuotaState.total_bytes) || 0;

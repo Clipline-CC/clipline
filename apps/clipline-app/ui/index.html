@@ -723,9 +723,19 @@
             <div class="setting-row" data-settings-key="disk_quota_gb">
               <div class="setting-info">
                 <strong>Disk quota (GiB)</strong>
-                <span>Budget for saved clips. Clipline stops recording when this limit is reached; clips are never removed automatically. Set to 0 for unlimited.</span>
+                <span>Budget for saved clips. When full, Clipline stops recording unless auto-delete is enabled. Set to 0 for unlimited.</span>
               </div>
               <input id="set-quota" type="number" min="0" step="0.5" />
+            </div>
+            <div class="setting-row" data-settings-key="auto_delete_when_over_quota">
+              <div class="setting-info">
+                <strong>Auto-delete oldest clips</strong>
+                <span>When the disk quota is full, delete the oldest saved clips to make room before stopping recording. Off by default.</span>
+              </div>
+              <label class="check-line">
+                <input id="set-auto-delete-when-over-quota" type="checkbox" />
+                <span>Auto-delete oldest clips when over quota</span>
+              </label>
             </div>
             <div class="advanced-box" data-settings-key="replay_storage.mode replay_storage.disk_dir replay_storage.disk_quota_gb replay_storage.disk_acknowledged">
               <div class="setting-info">
@@ -990,7 +1000,7 @@
               </div>
             </div>
             <div class="first-run-row">
-              <label for="first-run-quota"><strong>Disk quota</strong><span>Clipline stops recording when this limit is reached. Your clips are never removed automatically.</span></label>
+              <label for="first-run-quota"><strong>Disk quota</strong><span>Clipline stops recording when this limit is reached unless Settings enables auto-delete of oldest clips.</span></label>
               <div class="first-run-number-control">
                 <input id="first-run-quota" type="number" min="1" max="1000" value="10" />
                 <span>GB</span>

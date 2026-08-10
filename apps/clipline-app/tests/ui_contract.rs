@@ -1122,6 +1122,7 @@ fn review_player_owns_all_controls() {
         "id=\"set-media-dir\"",
         "id=\"choose-media-folder\"",
         "id=\"set-quota\"",
+        "id=\"set-auto-delete-when-over-quota\"",
         "id=\"set-replay-disk-enabled\"",
         "id=\"replay-disk-fields\"",
         "id=\"set-replay-disk-dir\"",
@@ -5469,7 +5470,7 @@ fn frontend_failures_are_forwarded_to_bounded_native_diagnostics() {
 }
 
 #[test]
-fn quota_full_is_a_durable_non_destructive_recording_lock() {
+fn quota_full_is_a_durable_recording_lock_with_optional_auto_delete() {
     let html = index_html();
     let main = main_js();
     let app_core = read_ui_js("app-core.js");
@@ -5483,6 +5484,8 @@ fn quota_full_is_a_durable_non_destructive_recording_lock() {
         r#"id="storage-quota-recheck""#,
         "Your clips were not deleted",
         "Clipline stops recording when this limit is reached",
+        r#"id="set-auto-delete-when-over-quota""#,
+        "Auto-delete oldest clips",
     ] {
         assert!(
             html.contains(required),
@@ -5492,6 +5495,7 @@ fn quota_full_is_a_durable_non_destructive_recording_lock() {
     assert!(
         main.contains(r#"listen("storage-quota-full""#)
             && main.contains(r#"listen("storage-quota-resolved""#)
+            && main.contains(r#"listen("library-changed""#)
             && main.contains(r#"invoke("recheck_storage_quota", { announce: true })"#)
             && main.contains("recordingRequested = true;")
             && app_core.contains(r#"invoke("recheck_storage_quota", { announce: false })"#)
