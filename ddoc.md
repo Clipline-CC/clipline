@@ -51,9 +51,10 @@
 
 **Target users:** competitive PC players (League, VALORANT, CS2, Apex) who want ShadowPlay-style replay without NVIDIA lock-in; privacy-conscious users who reject Overwolf/ads; content creators wanting fast local clips with event context; AMD/Intel GPU owners underserved by ShadowPlay.
 
-**Visual customization.** Settings > General previews and persists six first-party color
+**Visual customization.** Settings > General previews and persists seven first-party color
 palettes: Booth (warm amber, default), neutral Dark and Light, Classic (midnight blue), Purple
-(deep violet), and OLED (true black). Alternate themes override the same semantic CSS token set so
+(deep violet), Pink (deep rose), and OLED (true black). Alternate themes override the same semantic
+CSS token set so
 recording states and accessibility behavior stay consistent across palettes. Light also switches
 native browser controls to their light color scheme. The in-app Clipline logo uses the same theme
 selection while the packaged Windows icon remains the fixed product mark.

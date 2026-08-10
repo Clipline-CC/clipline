@@ -79,6 +79,21 @@ fn purple_theme_is_selectable_and_covers_the_theme_palette() {
 }
 
 #[test]
+fn pink_theme_is_selectable_and_covers_the_theme_palette() {
+    let html = index_html();
+    let css = styles_css();
+    let pink = css_rule_body(&css, ":root[data-theme=\"pink\"]");
+
+    assert!(html.contains("<option value=\"pink\">Pink (deep rose)</option>"));
+    assert_theme_palette(&css, "pink");
+    assert_ne!(
+        css_decl_value(pink, "--accent"),
+        css_decl_value(pink, "--rec"),
+        "Pink controls must stay distinct from recording state"
+    );
+}
+
+#[test]
 fn oled_theme_is_true_black_and_covers_the_theme_palette() {
     let html = index_html();
     let css = styles_css();
