@@ -58,6 +58,7 @@ pub enum UiTheme {
     Booth,
     Classic,
     Purple,
+    Pink,
     Oled,
     Dark,
     Light,

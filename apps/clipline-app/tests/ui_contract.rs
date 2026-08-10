@@ -79,6 +79,21 @@ fn purple_theme_is_selectable_and_covers_the_theme_palette() {
 }
 
 #[test]
+fn pink_theme_is_selectable_and_covers_the_theme_palette() {
+    let html = index_html();
+    let css = styles_css();
+    let pink = css_rule_body(&css, ":root[data-theme=\"pink\"]");
+
+    assert!(html.contains("<option value=\"pink\">Pink (deep rose)</option>"));
+    assert_theme_palette(&css, "pink");
+    assert_ne!(
+        css_decl_value(pink, "--accent"),
+        css_decl_value(pink, "--rec"),
+        "Pink controls must stay distinct from recording state"
+    );
+}
+
+#[test]
 fn oled_theme_is_true_black_and_covers_the_theme_palette() {
     let html = index_html();
     let css = styles_css();
@@ -111,6 +126,10 @@ fn themed_controls_do_not_assume_dark_surfaces() {
     let danger = css_rule_body(&css, "button.danger");
     let danger_hover = css_rule_body(&css, "button.danger:hover");
     let menu_danger = css_rule_body(&css, ".context-menu button.danger-text");
+    let first_run_step = css_rule_body(
+        &css,
+        ".first-run-steps li.active span,\n.first-run-steps li.complete span",
+    );
     let trim = css_rule_body(&css, "#trim-mode-toggle");
     let trim_active = css_rule_body(&css, "#trim-mode-toggle.active");
     let capture_glow = css_rule_body(&css, ".rail-game.active > img");
@@ -123,6 +142,10 @@ fn themed_controls_do_not_assume_dark_surfaces() {
     assert!(css_decl_value(danger_hover, "background")
         .is_some_and(|value| value.contains("var(--rec)")));
     assert_eq!(css_decl_value(menu_danger, "color"), Some("var(--rec)"));
+    assert_eq!(
+        css_decl_value(first_run_step, "color"),
+        Some("var(--accent-text)")
+    );
     assert_eq!(css_decl_value(trim, "color"), Some("var(--text)"));
     assert_eq!(
         css_decl_value(trim, "border"),
@@ -131,7 +154,7 @@ fn themed_controls_do_not_assume_dark_surfaces() {
     assert_eq!(css_decl_value(trim, "background"), Some("var(--panel-2)"));
     assert_eq!(
         css_decl_value(trim_active, "color"),
-        Some("var(--btn-primary-text)")
+        Some("var(--accent-text)")
     );
     assert_eq!(
         css_decl_value(trim_active, "border-color"),

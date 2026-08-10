@@ -53,7 +53,7 @@ fn defaults_match_current_recorder_behavior() {
 
 #[test]
 fn ui_themes_round_trip_through_settings_json() {
-    for name in ["booth", "classic", "purple", "oled", "dark", "light"] {
+    for name in ["booth", "classic", "purple", "pink", "oled", "dark", "light"] {
         let theme: UiTheme = serde_json::from_value(name.into()).unwrap();
         assert_eq!(serde_json::to_value(theme).unwrap(), name);
     }

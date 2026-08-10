@@ -4142,9 +4142,16 @@ Theme-sensitive controls no longer carry dark-surface-only color literals: destr
 trim controls, hover fills, settings/game cards, Cloud errors, and common hairlines now reuse the
 existing semantic palette tokens, keeping them legible in Light. The active capture glow follows
 `--accent-rgb` and the stopped shade follows the theme scrim. One shared palette assertion now
-checks token parity, clip-kind separation, and logo tinting for every alternate theme; all six
+checks token parity, clip-kind separation, and logo tinting for every alternate theme; all
 `UiTheme` values share one persistence round-trip test. PR #144 is based directly on the current
 `origin/develop`, which already contains PR #143.
+
+## Checkpoint (2026-08-09): Pink theme
+
+Settings > General now offers Pink (deep rose). It persists as the `pink` `UiTheme` value and uses
+the existing instant preview, save/discard transaction, shared logo tint, and complete alternate
+palette contract. Burgundy surfaces and rose controls keep recording red, success teal, and
+warm-gold Session markers visually distinct without adding theme-specific component logic.
 
 ## What's next (rough value order; each gets its own plan)
 

@@ -9,6 +9,7 @@
   --muted: #a2937e;
   --accent: #ffb224;
   --accent-hover: #ffc65a;
+  --accent-text: #171310;
   --marker: #e8c56a;
   --session: #b98aff;
   --rec: #ff4b4b;
@@ -288,7 +289,7 @@
 .first-run-steps li.active span,
 .first-run-steps li.complete span {
   border-color: var(--accent);
-  color: var(--btn-primary-text);
+  color: var(--accent-text);
   background: var(--accent);
 }
 
@@ -693,6 +694,7 @@
   --muted: #8b93a3;
   --accent: #3d7bfd;
   --accent-hover: #5a8efd;
+  --accent-text: #0f1115;
   --marker: #e8b341;
   --session: #b06bf2;
   --rec: #e5484d;
@@ -763,6 +765,7 @@
   --muted: #a99bb8;
   --accent: #a970ff;
   --accent-hover: #c092ff;
+  --accent-text: #100c18;
   --marker: #edc66d;
   --session: var(--marker);
   --rec: #ff5c68;
@@ -822,6 +825,77 @@
   --logo-filter: hue-rotate(227deg) saturate(.8) brightness(1.05);
 }
 
+/* Pink — deep-rose surfaces with bright pink controls. */
+:root[data-theme="pink"] {
+  --bg: #160c12;
+  --panel: #201019;
+  --panel-2: #2b1721;
+  --line: #422435;
+  --line-strong: #5f344d;
+  --text: #f6e8ef;
+  --muted: #b79baa;
+  --accent: #f06aab;
+  --accent-hover: #ff8bc2;
+  --accent-text: #160c12;
+  --marker: #e7bc5f;
+  --session: var(--marker);
+  --rec: #ff555f;
+  --ok: #58d0b5;
+  --mc-info: #c1aab6;
+  --btn-primary: #b92f6d;
+  --btn-primary-hover: #c93a7b;
+  --btn-primary-text: #fff7fb;
+  --baseline: #f06aab;
+  --baseline-rgb: 240, 106, 171;
+  --overlay-rgb: 15, 6, 11;
+  --slider-thumb: #ffe0ef;
+  --slider-thumb-border: #d75a98;
+  --slider-thumb-hover: #ff9ac9;
+  --clip-active-bg: #35162a;
+  --hotkey-rec-bg: #391329;
+  --tile-active-bg: #421932;
+  --tile-primary-line: #9a5276;
+  --seg-on-bg: #42152f;
+  --seg-on-line: #9d3f70;
+  --region-line: #ff91c5;
+  --region-text: #fff5fa;
+  --region-grip: #ffdbea;
+  --team-rgb: 88, 208, 181;
+  --team-deep-rgb: 56, 169, 146;
+  --team-hi-rgb: 131, 224, 204;
+  --shade-d: #28131e;
+  --well: #11080d;
+  --field: #1a0d14;
+  --hover: #38202d;
+  --text-soft: #d1b8c5;
+  --text-strong: #faeff5;
+  --text-max: #fff8fb;
+  --scrollbar: #604052;
+  --scrollbar-hover: #7b5268;
+  --faint: #806475;
+  --shade-a: #1c0d15;
+  --shade-b: #29131f;
+  --shade-c: #1f0f17;
+  --shade-e: #6d5060;
+  --shade-f: #28111d;
+  --shade-g: #3c2230;
+  --shade-h: #654555;
+  --shade-i: #14090f;
+  --scrim-a-rgb: 12, 3, 9;
+  --scrim-b-rgb: 8, 3, 6;
+  --scrim-c-rgb: 15, 7, 11;
+  --scrim-d-rgb: 34, 15, 25;
+  --scrim-e-rgb: 42, 17, 30;
+  --scrim-f-rgb: 32, 12, 22;
+  --soft-rgb: 183, 155, 170;
+  --soft2-rgb: 207, 176, 191;
+  --bright-rgb: 255, 248, 251;
+  --bright2-rgb: 250, 239, 245;
+  --accent-rgb: 240, 106, 171;
+  --ok-rgb: 88, 208, 181;
+  --logo-filter: hue-rotate(292deg) saturate(.9) brightness(1.03);
+}
+
 /* OLED — true-black surfaces with restrained high-contrast accents. */
 :root[data-theme="oled"] {
   --bg: #000000;
@@ -833,6 +907,7 @@
   --muted: #8d8d8d;
   --accent: #5b8cff;
   --accent-hover: #79a2ff;
+  --accent-text: #000000;
   --marker: #e5b45a;
   --session: var(--marker);
   --rec: #ff555f;
@@ -903,6 +978,7 @@
   --muted: #9299a3;
   --accent: #4f83e8;
   --accent-hover: #6b98ee;
+  --accent-text: #111315;
   --marker: #d9a441;
   --session: var(--marker);
   --rec: #e6555e;
@@ -974,6 +1050,7 @@
   --muted: #66707c;
   --accent: #2f66cf;
   --accent-hover: #2458bb;
+  --accent-text: #ffffff;
   --marker: #b87416;
   --session: var(--marker);
   --rec: #c83f49;
@@ -4587,7 +4664,7 @@ button.primary.settings-save-glow {
   background: rgba(var(--accent-rgb), 0.12);
 }
 #trim-mode-toggle.active {
-  color: var(--btn-primary-text);
+  color: var(--accent-text);
   border-color: var(--accent);
   background: var(--accent);
 }
