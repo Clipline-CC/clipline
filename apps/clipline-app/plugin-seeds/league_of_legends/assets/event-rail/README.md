@@ -3,7 +3,7 @@
 `kill.png` and `death.png` are first-party generated Clipline silhouettes used
 only in the right-side League event rail.
 
-`dragon.png`, `baron.png`, `turret.png`, `minion-100.png`, and
+`dragon.png`, `baron.png`, `herald.png`, `turret.png`, `minion-100.png`, and
 `minion-200.png` are League client match-history assets mirrored by
 CommunityDragon for the right-side League event rail. Riot Games owns the
 underlying League of Legends artwork and trademarks; Clipline does not claim

@@ -189,6 +189,10 @@ fn summoner_spell_asset_key(spell: &PlayerSummonerSpellEntry) -> String {
             && key.len() > "Summoner".len()
             && key.chars().all(|ch| ch.is_ascii_alphanumeric())
         {
+            // Hextech Flashtraption replaces Flash and has no Data Dragon spell art.
+            if key.starts_with("SummonerFlash") {
+                return "SummonerFlash".to_string();
+            }
             return key.to_string();
         }
     }
@@ -205,7 +209,7 @@ fn summoner_spell_asset_key(spell: &PlayerSummonerSpellEntry) -> String {
         "cleanse" => "SummonerBoost",
         "dash" => "SummonerSnowball",
         "exhaust" => "SummonerExhaust",
-        "flash" => "SummonerFlash",
+        "flash" | "hexflash" | "hextechflashtraption" => "SummonerFlash",
         "ghost" => "SummonerHaste",
         "heal" => "SummonerHeal",
         "ignite" => "SummonerDot",
@@ -571,6 +575,38 @@ mod tests {
         assert_eq!(value["items"][0]["name"], "Doran's Ring");
         assert_eq!(value["items"][0]["slot"], 0);
         assert_eq!(value["items"][2]["id"], 6655);
+    }
+
+    #[test]
+    fn player_summary_maps_hexflash_to_flash_asset() {
+        let players: Vec<PlayerListEntry> = serde_json::from_str(
+            r#"[
+              {
+                "summonerName": "dain",
+                "riotId": "Dain#NA1",
+                "championName": "Pyke",
+                "team": "ORDER",
+                "summonerSpells": {
+                  "summonerSpellOne": {
+                    "displayName": "Ignite",
+                    "rawDisplayName": "GeneratedTip_SummonerSpell_SummonerDot_DisplayName"
+                  },
+                  "summonerSpellTwo": {
+                    "displayName": "Hexflash",
+                    "rawDisplayName": "GeneratedTip_SummonerSpell_SummonerFlashPerksHextechFlashtraptionV2_DisplayName"
+                  }
+                },
+                "scores": { "kills": 1, "deaths": 0, "assists": 2, "creepScore": 12 }
+              }
+            ]"#,
+        )
+        .unwrap();
+
+        let summary = player_summary_from_list_with_game_time(&players, "dain#NA1", None).unwrap();
+        let value = serde_json::to_value(summary).unwrap();
+
+        assert_eq!(value["summoner_spells"][1]["name"], "Hexflash");
+        assert_eq!(value["summoner_spells"][1]["asset_key"], "SummonerFlash");
     }
 
     #[test]

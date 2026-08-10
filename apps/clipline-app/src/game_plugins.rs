@@ -526,6 +526,9 @@ fn first_party_asset_data_url(path: &str) -> Option<String> {
         "assets/event-rail/baron.png" => {
             include_bytes!("../plugin-seeds/league_of_legends/assets/event-rail/baron.png")
         }
+        "assets/event-rail/herald.png" => {
+            include_bytes!("../plugin-seeds/league_of_legends/assets/event-rail/herald.png")
+        }
         "assets/event-rail/turret.png" => {
             include_bytes!("../plugin-seeds/league_of_legends/assets/event-rail/turret.png")
         }
@@ -657,6 +660,7 @@ const LEAGUE_PROFILE_MANIFEST_JSON: &str = r#"{
         "ChampionDeath": "assets/event-rail/death.png",
         "DragonKill": "assets/event-rail/dragon.png",
         "BaronKill": "assets/event-rail/baron.png",
+        "HeraldKill": "assets/event-rail/herald.png",
         "TurretKilled": "assets/event-rail/turret.png"
       },
       "actor_icons": [
@@ -877,6 +881,10 @@ mod tests {
             .is_some_and(|icon| icon.starts_with("data:image/png;base64,")));
         assert!(presentation
             .pointer("/event_rail/icons/ChampionKill")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|icon| icon.starts_with("data:image/png;base64,")));
+        assert!(presentation
+            .pointer("/event_rail/icons/HeraldKill")
             .and_then(serde_json::Value::as_str)
             .is_some_and(|icon| icon.starts_with("data:image/png;base64,")));
         assert!(presentation
