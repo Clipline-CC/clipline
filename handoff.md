@@ -4,6 +4,19 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-10): quota-full dialog ReferenceError fix
+
+User hit `ReferenceError: updateStorageQuotaUsage is not defined` after the "storage quota
+full" dialog appeared. Root cause: `bootstrap.mjs` imports `main.js` as an ES module, so its
+top-level functions are module-scoped; classic scripts `app-core.js` and `settings.js` called
+`updateStorageQuotaUsage`/`showStorageQuotaFull` as globals — which only breaks on the
+quota-full path (`refreshStorage` while blocked, rail toggles while blocked). Fix: moved both
+functions into `app-core.js` (classic global scope, next to the `storageQuotaBlocked`/
+`storageQuotaState` vars they mutate); `main.js` keeps the `storage-quota-*` listeners and
+dialog DOM wiring. `tests/ui_contract.rs` now asserts the mutators live in `app-core.js` and
+not `main.js` so this class of bug can't return. Note: `main_js()` in the tests concatenates
+all UI scripts — negative file-scope checks must use `read_ui_js("main.js")`.
+
 ## Checkpoint (2026-08-10): Nightly 0.1.51
 
 Plan: `docs/superpowers/plans/2026-08-10-nightly-0.1.51.md`.

@@ -5496,6 +5496,7 @@ fn frontend_failures_are_forwarded_to_bounded_native_diagnostics() {
 fn quota_full_is_a_durable_recording_lock_with_optional_auto_delete() {
     let html = index_html();
     let main = main_js();
+    let main_file = read_ui_js("main.js");
     let app_core = read_ui_js("app-core.js");
     let settings = read_ui_js("settings.js");
 
@@ -5523,8 +5524,12 @@ fn quota_full_is_a_durable_recording_lock_with_optional_auto_delete() {
             && main.contains("recordingRequested = true;")
             && app_core.contains(r#"invoke("recheck_storage_quota", { announce: false })"#)
             && app_core.contains("updateStorageQuotaUsage(s);")
+            && app_core.contains("function updateStorageQuotaUsage(payload)")
+            && app_core.contains("function showStorageQuotaFull(payload)")
+            && !main_file.contains("function updateStorageQuotaUsage(payload)")
+            && !main_file.contains("function showStorageQuotaFull(payload)")
             && !main.contains("cleaned up ${s.gc_deleted}"),
-        "background quota recovery must stay silent while manual checks may reopen the dialog"
+        "quota handlers stay wired in main.js; the quota mutators live in app-core (global classic scope, not main.js module scope) so refreshStorage and rail controls can call them; background quota recovery must stay silent while manual checks may reopen the dialog"
     );
     assert!(
         settings.contains("storageQuotaBlocked")
