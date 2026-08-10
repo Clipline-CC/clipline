@@ -657,6 +657,7 @@ fn safe_settings(settings: &AppSettings) -> serde_json::Value {
         "video_encoder": settings.video_encoder,
         "output_resolution": settings.output_resolution,
         "disk_quota_gb": settings.disk_quota_gb,
+        "auto_delete_when_over_quota": settings.auto_delete_when_over_quota,
         "replay_storage": {
             "mode": settings.replay_storage.mode,
             "disk_quota_gb": settings.replay_storage.disk_quota_gb,

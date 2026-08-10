@@ -30,8 +30,8 @@ use clipline_capture::{
 use clipline_events::{is_review_event, ClipAudioTrack, EventKind, MarkerLog, PlayerSummary};
 use clipline_lol::LeagueQueue;
 use clipline_storage::{
-    clip_ownership_marker_path, ensure_clip_owned, recover_recording_files,
-    remove_clip_ownership_marker, storage_status, StorageStatus,
+    clip_ownership_marker_path, enforce_quota_with_protection, ensure_clip_owned,
+    recover_recording_files, remove_clip_ownership_marker, storage_status, StorageStatus,
 };
 use clipline_storage::{session_label, SessionTracker};
 
@@ -572,6 +572,9 @@ pub struct ServiceOptions {
     pub replay_storage: ReplayStorageOptions,
     /// Saved-media quota. None disables quota blocking.
     pub disk_quota_bytes: Option<u64>,
+    /// When the disk quota is full, delete the oldest saved clips to make room
+    /// before stopping recording. Off by default.
+    pub auto_delete_when_over_quota: bool,
     pub recording_mode: RecordingMode,
     pub fps: u32,
     pub bitrate_bps: u32,
@@ -625,12 +628,51 @@ fn storage_status_or_warn(clips_dir: &Path, quota_bytes: Option<u64>) -> Option<
     }
 }
 
+/// Deletes oldest managed clips until `required_bytes` fit under the quota.
+/// Active recordings and upload sources are never removed.
+fn make_room_for_quota(
+    clips_dir: &Path,
+    quota_bytes: Option<u64>,
+    required_bytes: u64,
+    protect: Option<&Path>,
+) -> Option<StorageStatus> {
+    let Some(quota) = quota_bytes else {
+        return storage_status_or_warn(clips_dir, None);
+    };
+    let target = quota.saturating_sub(required_bytes);
+    if let Err(error) = enforce_quota_with_protection(
+        clips_dir,
+        Some(target),
+        protect,
+        crate::cloud_upload::is_active_upload_source,
+    ) {
+        tracing::warn!(
+            event = "storage_quota_auto_delete_failed",
+            path = ?clips_dir,
+            error = %error,
+        );
+    }
+    storage_status_or_warn(clips_dir, quota_bytes)
+}
+
 fn storage_quota_full_event(
     clips_dir: &Path,
     quota_bytes: Option<u64>,
     required_bytes: u64,
+    auto_delete: bool,
 ) -> Option<Event> {
-    let status = storage_status_or_warn(clips_dir, quota_bytes)?;
+    let mut status = storage_status_or_warn(clips_dir, quota_bytes)?;
+    if !quota_would_be_exceeded(status.total_bytes, quota_bytes, required_bytes) {
+        return None;
+    }
+    if auto_delete {
+        if let Some(cleaned) = make_room_for_quota(clips_dir, quota_bytes, required_bytes, None) {
+            status = cleaned;
+        }
+        if !quota_would_be_exceeded(status.total_bytes, quota_bytes, required_bytes) {
+            return None;
+        }
+    }
     storage_quota_event_for_usage(status.total_bytes, quota_bytes, required_bytes)
 }
 
@@ -648,6 +690,7 @@ impl Default for ServiceOptions {
             buffer_bytes: 180_000_000,
             replay_storage: ReplayStorageOptions::Memory,
             disk_quota_bytes: Some(DEFAULT_DISK_QUOTA_BYTES),
+            auto_delete_when_over_quota: false,
             recording_mode: RecordingMode::ReplaysOnly,
             fps: 60,
             bitrate_bps: 12_000_000,
@@ -911,15 +954,18 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
     } else {
         1
     };
-    let startup_storage = storage_status_or_warn(&clips_dir, opts.disk_quota_bytes);
-    if let Some(event) = startup_storage.as_ref().and_then(|status| {
-        storage_quota_event_for_usage(status.total_bytes, opts.disk_quota_bytes, startup_reserve)
-    }) {
+    if let Some(event) = storage_quota_full_event(
+        &clips_dir,
+        opts.disk_quota_bytes,
+        startup_reserve,
+        opts.auto_delete_when_over_quota,
+    ) {
         let _ = events.send(event);
         send_stopped(events);
         return Ok(());
     }
-    let mut saved_media_baseline_bytes = startup_storage.map(|status| status.total_bytes);
+    let mut saved_media_baseline_bytes =
+        storage_status_or_warn(&clips_dir, opts.disk_quota_bytes).map(|status| status.total_bytes);
 
     let init = |e: &dyn std::fmt::Display| format!("init: {e}");
     let (device, _ctx) = d3d11::create_device().map_err(|e| init(&e))?;
@@ -1097,10 +1143,12 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
             last_status = Instant::now();
             if let Some(recording) = full_session.as_ref() {
                 if let Some(event) = full_session_quota_full_event(
+                    &clips_dir,
                     recording,
                     saved_media_baseline_bytes,
                     opts.disk_quota_bytes,
                     FULL_SESSION_QUOTA_RESERVE_BYTES,
+                    opts.auto_delete_when_over_quota,
                 ) {
                     let _ = events.send(event);
                     let _ = shutdown_recorder(
@@ -1166,6 +1214,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                             &clips_dir,
                             opts.disk_quota_bytes,
                             required_bytes,
+                            opts.auto_delete_when_over_quota,
                         ) {
                             let _ = events.send(event);
                             let _ = shutdown_recorder(
@@ -1240,9 +1289,12 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                                 }
                             }
                             if status.is_over_quota() {
-                                if let Some(event) =
-                                    storage_quota_full_event(&clips_dir, opts.disk_quota_bytes, 0)
-                                {
+                                if let Some(event) = storage_quota_full_event(
+                                    &clips_dir,
+                                    opts.disk_quota_bytes,
+                                    0,
+                                    opts.auto_delete_when_over_quota,
+                                ) {
                                     let _ = events.send(event);
                                 }
                                 let _ = shutdown_recorder(
@@ -1273,6 +1325,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                             &clips_dir,
                             opts.disk_quota_bytes,
                             FULL_SESSION_QUOTA_RESERVE_BYTES,
+                            opts.auto_delete_when_over_quota,
                         ) {
                             let _ = events.send(event);
                             let _ = shutdown_recorder(
@@ -2392,10 +2445,12 @@ struct FullSessionRecording {
 }
 
 fn full_session_quota_full_event(
+    clips_dir: &Path,
     recording: &FullSessionRecording,
     saved_media_baseline_bytes: Option<u64>,
     quota_bytes: Option<u64>,
     required_bytes: u64,
+    auto_delete: bool,
 ) -> Option<Event> {
     let baseline = saved_media_baseline_bytes?;
     let active_bytes = match std::fs::metadata(&recording.temp_path) {
@@ -2409,11 +2464,16 @@ fn full_session_quota_full_event(
             return None;
         }
     };
-    storage_quota_event_for_usage(
-        baseline.saturating_add(active_bytes),
-        quota_bytes,
-        required_bytes,
-    )
+    let total_bytes = baseline.saturating_add(active_bytes);
+    if !quota_would_be_exceeded(total_bytes, quota_bytes, required_bytes) {
+        return None;
+    }
+    if auto_delete {
+        // Inventory after cleanup includes the active recording, which
+        // enforce_quota never deletes.
+        return storage_quota_full_event(clips_dir, quota_bytes, required_bytes, true);
+    }
+    storage_quota_event_for_usage(total_bytes, quota_bytes, required_bytes)
 }
 
 fn unique_media_path(session_dir: &Path, prefix: &str) -> PathBuf {
@@ -2580,14 +2640,36 @@ fn emit_saved_clip(
     meta: SavedClipMeta,
     opts: &ServiceOptions,
 ) -> StorageStatus {
-    let status = match storage_status(clips_dir, opts.disk_quota_bytes) {
-        Ok(status) => status,
-        Err(e) => {
-            warn_user(events, format!("storage status: {e}"));
-            StorageStatus {
-                clip_count: 0,
-                total_bytes: 0,
-                quota_bytes: opts.disk_quota_bytes,
+    let fallback_status = || StorageStatus {
+        clip_count: 0,
+        total_bytes: 0,
+        quota_bytes: opts.disk_quota_bytes,
+    };
+    let status = if opts.auto_delete_when_over_quota {
+        match enforce_quota_with_protection(
+            clips_dir,
+            opts.disk_quota_bytes,
+            Some(path),
+            crate::cloud_upload::is_active_upload_source,
+        ) {
+            Ok(report) => report.status,
+            Err(e) => {
+                warn_user(events, format!("storage cleanup: {e}"));
+                match storage_status(clips_dir, opts.disk_quota_bytes) {
+                    Ok(status) => status,
+                    Err(status_error) => {
+                        warn_user(events, format!("storage status: {status_error}"));
+                        fallback_status()
+                    }
+                }
+            }
+        }
+    } else {
+        match storage_status(clips_dir, opts.disk_quota_bytes) {
+            Ok(status) => status,
+            Err(e) => {
+                warn_user(events, format!("storage status: {e}"));
+                fallback_status()
             }
         }
     };
@@ -2862,7 +2944,31 @@ mod tests {
         let file = dir.path().join("not-a-media-directory");
         std::fs::write(&file, b"file").unwrap();
 
-        assert!(storage_quota_full_event(&file, Some(100), 1).is_none());
+        assert!(storage_quota_full_event(&file, Some(100), 1, false).is_none());
+        assert!(storage_quota_full_event(&file, Some(100), 1, true).is_none());
+    }
+
+    #[test]
+    fn auto_delete_makes_room_before_emitting_quota_full() {
+        let dir = clipline_test_utils::TestDir::new("clipline-service", "quota-auto-delete");
+        let old = dir.path().join("old.mp4");
+        let keep = dir.path().join("keep.mp4");
+        std::fs::write(&old, [0; 80]).unwrap();
+        clipline_storage::ensure_clip_owned(&old).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&keep, [0; 10]).unwrap();
+        clipline_storage::ensure_clip_owned(&keep).unwrap();
+
+        assert!(
+            storage_quota_full_event(dir.path(), Some(100), 30, false).is_some(),
+            "without auto-delete the requested write must still be blocked"
+        );
+        assert!(
+            storage_quota_full_event(dir.path(), Some(100), 30, true).is_none(),
+            "auto-delete should free the oldest clip and allow the write"
+        );
+        assert!(!old.exists());
+        assert!(keep.exists());
     }
 
     #[test]
@@ -2876,7 +2982,15 @@ mod tests {
             wall_start_unix: 0,
         };
 
-        let event = full_session_quota_full_event(&recording, Some(80), Some(100), 6).unwrap();
+        let event = full_session_quota_full_event(
+            dir.path(),
+            &recording,
+            Some(80),
+            Some(100),
+            6,
+            false,
+        )
+        .unwrap();
         assert!(matches!(
             event,
             Event::StorageQuotaFull {

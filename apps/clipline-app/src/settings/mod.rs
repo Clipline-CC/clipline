@@ -90,6 +90,8 @@ pub struct AppSettings {
     #[serde(default)]
     pub output_resolution: OutputResolution,
     pub disk_quota_gb: f64,
+    #[serde(default)]
+    pub auto_delete_when_over_quota: bool,
     #[serde(default = "default_media_dir")]
     pub media_dir: String,
     #[serde(default)]
@@ -148,6 +150,7 @@ impl Default for AppSettings {
             video_encoder: crate::service::VideoEncoder::Auto,
             output_resolution: OutputResolution::Source,
             disk_quota_gb: 10.0,
+            auto_delete_when_over_quota: false,
             media_dir: default_media_dir(),
             replay_storage: ReplayStorageSettings::default(),
             hotkey: "F6".into(),
@@ -218,6 +221,7 @@ impl AppSettings {
             ),
             replay_storage: self.replay_storage.to_service_options()?,
             disk_quota_bytes: quota_bytes_from_gb(self.disk_quota_gb)?,
+            auto_delete_when_over_quota: self.auto_delete_when_over_quota,
             recording_mode: RecordingMode::ReplaysOnly,
             fps: self.effective_fps(),
             bitrate_bps: (self.effective_bitrate_mbps() * 1_000_000.0).round() as u32,

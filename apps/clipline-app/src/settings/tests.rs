@@ -39,6 +39,7 @@ fn defaults_match_current_recorder_behavior() {
     assert_eq!(settings.video_encoder, VideoEncoder::Auto);
     assert_eq!(settings.output_resolution, OutputResolution::Source);
     assert_eq!(settings.disk_quota_gb, 10.0);
+    assert!(!settings.auto_delete_when_over_quota);
     assert_eq!(settings.media_dir, default_media_dir());
     assert_eq!(settings.replay_storage, ReplayStorageSettings::default());
     assert_eq!(settings.hotkey, "F6");

@@ -174,6 +174,8 @@ impl AppSettings {
             disk_quota_gb: f64_field(object, "disk_quota_gb")
                 .map(repair_disk_quota_gb)
                 .unwrap_or(defaults.disk_quota_gb),
+            auto_delete_when_over_quota: bool_field(object, "auto_delete_when_over_quota")
+                .unwrap_or(defaults.auto_delete_when_over_quota),
             media_dir: string_field(object, "media_dir")
                 .and_then(|raw| normalize_media_dir(&raw).ok())
                 .map(|path| path.display().to_string())

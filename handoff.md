@@ -49,6 +49,21 @@ Both downloaded manifests parse as version 0.1.50 and point at the rolling `nigh
 
 ---
 
+## Checkpoint (2026-08-10): optional auto-delete when over quota
+
+Saved-media quota remains non-destructive by default. Settings → Storage now exposes
+`auto_delete_when_over_quota` (off by default). When enabled, Clipline restores oldest-first
+managed-clip cleanup before locking recording: replay saves, full-session reserves, and
+quota rechecks call `clipline-storage::enforce_quota(_with_protection)` to free room, while
+active recordings and in-progress uploads stay protected. If cleanup still cannot make room,
+the existing durable quota-full lock still applies. First-run / Storage copy and `ddoc.md`
+describe the opt-in instead of claiming clips are never removed automatically.
+
+Validation: focused quota/settings/UI-contract tests pass; Settings toggle confirmed in the
+local debug build.
+
+---
+
 ## Checkpoint (2026-08-09): Tag-triggered Nightly releases
 
 Plan: `docs/superpowers/plans/2026-08-09-tag-triggered-nightly-releases.md`.

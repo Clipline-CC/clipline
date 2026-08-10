@@ -24,6 +24,13 @@ impl StorageStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GcReport {
+    pub deleted_clips: usize,
+    pub freed_bytes: u64,
+    pub status: StorageStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordingRecoveryReport {
     pub recovered: Vec<PathBuf>,
     pub deleted_empty: usize,
@@ -146,16 +153,123 @@ pub fn recover_recording_files(dir: &Path) -> io::Result<RecordingRecoveryReport
     Ok(report)
 }
 
+pub fn enforce_quota(
+    dir: &Path,
+    quota_bytes: Option<u64>,
+    protect: Option<&Path>,
+) -> io::Result<GcReport> {
+    enforce_quota_with_protection(dir, quota_bytes, protect, |_| false)
+}
+
+/// Enforces the clip quota while allowing the caller to protect additional
+/// managed files that are temporarily immutable, such as active upload
+/// sources. Protected bytes still count toward the quota; collection skips
+/// them and continues with the next-oldest deletable clip.
+pub fn enforce_quota_with_protection(
+    dir: &Path,
+    quota_bytes: Option<u64>,
+    protect: Option<&Path>,
+    additionally_protected: impl Fn(&Path) -> bool,
+) -> io::Result<GcReport> {
+    let Some(quota) = quota_bytes else {
+        return Ok(GcReport {
+            deleted_clips: 0,
+            freed_bytes: 0,
+            status: storage_status(dir, quota_bytes)?,
+        });
+    };
+
+    let mut clips = inventory(dir, protect)?;
+    let mut total_bytes = clips.iter().map(ClipFile::total_bytes).sum::<u64>();
+    let mut deleted_clips = 0usize;
+    let mut freed_bytes = 0u64;
+
+    let undeletable_bytes = clips
+        .iter()
+        .filter(|clip| !clip.can_delete(protect, &additionally_protected))
+        .map(ClipFile::total_bytes)
+        .sum::<u64>();
+    if undeletable_bytes > quota {
+        return Ok(GcReport {
+            deleted_clips,
+            freed_bytes,
+            status: status_from_clips(&clips, quota_bytes),
+        });
+    }
+
+    clips.sort_by(|a, b| {
+        a.modified
+            .cmp(&b.modified)
+            .then_with(|| a.path.file_name().cmp(&b.path.file_name()))
+    });
+
+    for clip in clips {
+        if total_bytes <= quota {
+            break;
+        }
+        if !clip.can_delete(protect, &additionally_protected) {
+            continue;
+        }
+
+        let clip_bytes = clip.total_bytes();
+        if let Err(error) = remove_file_if_exists(&clip.path) {
+            // A lease can begin after the pre-delete protection check. If it
+            // now owns the file, keep collecting other clips instead of
+            // surfacing the kernel's sharing-violation text to the user.
+            if additionally_protected(&clip.path) {
+                continue;
+            }
+            return Err(error);
+        }
+        for sidecar in &clip.sidecars {
+            remove_file_if_exists(sidecar)?;
+        }
+        // Session folders disappear with their last clip; remove_dir refuses
+        // non-empty directories, so a leftover sidecar/export keeps it alive.
+        if let Some(parent) = clip.path.parent() {
+            if parent != dir {
+                let _ = fs::remove_dir(parent);
+            }
+        }
+        total_bytes = total_bytes.saturating_sub(clip_bytes);
+        freed_bytes += clip_bytes;
+        deleted_clips += 1;
+    }
+
+    Ok(GcReport {
+        deleted_clips,
+        freed_bytes,
+        status: status_from_clips(&inventory(dir, protect)?, quota_bytes),
+    })
+}
+
 #[derive(Debug, Clone)]
 struct ClipFile {
+    path: PathBuf,
+    /// Files that live and die with the clip: markers, clip metadata, pending
+    /// osu! enrichment, and the cached poster frame. Each is removed alongside
+    /// the clip during quota GC so a leftover never keeps an emptied session
+    /// folder alive.
+    sidecars: Vec<PathBuf>,
     mp4_bytes: u64,
     sidecar_bytes: u64,
+    modified: SystemTime,
     recording: bool,
 }
 
 impl ClipFile {
     fn total_bytes(&self) -> u64 {
         self.mp4_bytes + self.sidecar_bytes
+    }
+
+    fn can_delete(
+        &self,
+        protect: Option<&Path>,
+        additionally_protected: &impl Fn(&Path) -> bool,
+    ) -> bool {
+        !self.recording
+            && !protect.is_some_and(|protected| same_path(&self.path, protected))
+            && !additionally_protected(&self.path)
     }
 }
 
@@ -184,14 +298,17 @@ fn collect_clips(dir: &Path, include: Option<&Path>, clips: &mut Vec<ClipFile>) 
         if !meta.is_file() {
             continue;
         }
-        let (_, sidecar_bytes) = if recording {
+        let (sidecars, sidecar_bytes) = if recording {
             (Vec::new(), 0)
         } else {
             clip_sidecars(&path)?
         };
         clips.push(ClipFile {
+            path,
+            sidecars,
             mp4_bytes: meta.len(),
             sidecar_bytes,
+            modified: meta.modified().unwrap_or(UNIX_EPOCH),
             recording,
         });
     }
@@ -395,6 +512,11 @@ fn visit_media_dirs(dir: &Path, mut f: impl FnMut(&Path) -> io::Result<()>) -> i
 mod tests {
     use super::*;
     use clipline_test_utils::TestDir;
+    use std::time::Duration;
+
+    fn tick_mtime() {
+        std::thread::sleep(Duration::from_millis(20));
+    }
 
     fn mark_owned(path: &Path) {
         std::fs::write(clip_ownership_marker_path(path).unwrap(), b"").unwrap();
@@ -488,6 +610,206 @@ mod tests {
 
         assert_eq!(status.clip_count, 2);
         assert_eq!(status.total_bytes, 22);
+    }
+
+    #[test]
+    fn enforce_quota_never_deletes_unmarked_mp4_files() {
+        let dir = TestDir::new("clipline-storage", "preserve-unowned-mp4");
+        let unrelated = dir.write("unrelated.mp4", 90);
+        let nested_unrelated = dir.write("Movies/also-unrelated.mp4", 80);
+        let owned = dir.write("2026-07-18 12-00/owned.mp4", 10);
+        let owned_marker = dir.write("2026-07-18 12-00/owned.clipline.json", 2);
+
+        let report = enforce_quota(dir.path(), Some(0), None).unwrap();
+
+        assert_eq!(report.deleted_clips, 1);
+        assert!(unrelated.exists());
+        assert!(nested_unrelated.exists());
+        assert!(!owned.exists());
+        assert!(!owned_marker.exists());
+        assert_eq!(report.status.total_bytes, 0);
+    }
+
+    #[test]
+    fn enforce_quota_deletes_unmarked_legacy_clipline_filenames() {
+        let dir = TestDir::new("clipline-storage", "legacy-generated-quota");
+        let legacy = dir.write("clip_1784525638.mp4", 10);
+        let unrelated = dir.write("ordinary.mp4", 90);
+
+        let report = enforce_quota(dir.path(), Some(0), None).unwrap();
+
+        assert_eq!(report.deleted_clips, 1);
+        assert!(!legacy.exists());
+        assert!(unrelated.exists());
+    }
+
+    #[test]
+    fn enforce_quota_counts_an_explicitly_protected_new_clip() {
+        let dir = TestDir::new("clipline-storage", "protect-new-unmarked");
+        dir.write("unrelated.mp4", 90);
+        let fresh = dir.write("2026-07-18 12-00/fresh.mp4", 10);
+
+        let report = enforce_quota(dir.path(), Some(5), Some(&fresh)).unwrap();
+
+        assert_eq!(report.deleted_clips, 0);
+        assert_eq!(report.status.clip_count, 1);
+        assert_eq!(report.status.total_bytes, 10);
+        assert!(report.status.is_over_quota());
+        assert!(fresh.exists());
+    }
+
+    #[test]
+    fn enforce_quota_deletes_oldest_until_under_budget() {
+        let dir = TestDir::new("clipline-storage", "oldest-first");
+        let a = write_owned(&dir, "a.mp4", 10);
+        tick_mtime();
+        let b = write_owned(&dir, "b.mp4", 10);
+        tick_mtime();
+        let c = write_owned(&dir, "c.mp4", 10);
+
+        let report = enforce_quota(dir.path(), Some(15), None).unwrap();
+
+        assert_eq!(report.deleted_clips, 2);
+        assert_eq!(report.freed_bytes, 20);
+        assert!(!a.exists());
+        assert!(!b.exists());
+        assert!(c.exists());
+        assert_eq!(report.status.total_bytes, 10);
+    }
+
+    #[test]
+    fn enforce_quota_skips_additionally_protected_uploads_and_keeps_collecting() {
+        let dir = TestDir::new("clipline-storage", "protect-active-upload");
+        let uploading = write_owned(&dir, "uploading.mp4", 10);
+        tick_mtime();
+        let next_oldest = write_owned(&dir, "next-oldest.mp4", 10);
+        tick_mtime();
+        let newest = write_owned(&dir, "newest.mp4", 10);
+
+        let report = enforce_quota_with_protection(dir.path(), Some(20), None, |path| {
+            same_path(path, &uploading)
+        })
+        .unwrap();
+
+        assert_eq!(report.deleted_clips, 1);
+        assert!(uploading.exists(), "an active upload is immutable");
+        assert!(
+            !next_oldest.exists(),
+            "GC must continue to the next deletable clip"
+        );
+        assert!(newest.exists());
+        assert_eq!(report.status.total_bytes, 20);
+    }
+
+    #[test]
+    fn enforce_quota_deletes_marker_sidecar_with_clip() {
+        let dir = TestDir::new("clipline-storage", "sidecar-delete");
+        let old = dir.write("old.mp4", 10);
+        let sidecar = dir.write("old.markers.json", 2);
+        tick_mtime();
+        let keep = write_owned(&dir, "keep.mp4", 10);
+
+        let report = enforce_quota(dir.path(), Some(10), None).unwrap();
+
+        assert_eq!(report.deleted_clips, 1);
+        assert_eq!(report.freed_bytes, 12);
+        assert!(!old.exists());
+        assert!(!sidecar.exists());
+        assert!(keep.exists());
+        assert_eq!(report.status.total_bytes, 10);
+    }
+
+    #[test]
+    fn enforce_quota_deletes_poster_sidecar_with_clip() {
+        let dir = TestDir::new("clipline-storage", "poster-delete");
+        let old = dir.write("old.mp4", 10);
+        let markers = dir.write("old.markers.json", 2);
+        let poster = dir.write("old.poster.jpg", 4);
+        tick_mtime();
+        let keep = write_owned(&dir, "keep.mp4", 10);
+
+        let report = enforce_quota(dir.path(), Some(10), None).unwrap();
+
+        assert_eq!(report.deleted_clips, 1);
+        assert_eq!(report.freed_bytes, 16);
+        assert!(!old.exists());
+        assert!(!markers.exists());
+        assert!(!poster.exists());
+        assert!(keep.exists());
+        assert_eq!(report.status.total_bytes, 10);
+    }
+
+    #[test]
+    fn enforce_quota_deletes_osu_pending_sidecar_with_clip() {
+        let dir = TestDir::new("clipline-storage", "osu-pending-delete");
+        let old = dir.write("old.mp4", 10);
+        let pending = dir.write("old.osu-enrichment.json", 6);
+        tick_mtime();
+        let keep = write_owned(&dir, "keep.mp4", 10);
+
+        let report = enforce_quota(dir.path(), Some(10), None).unwrap();
+
+        assert_eq!(report.deleted_clips, 1);
+        assert_eq!(report.freed_bytes, 16);
+        assert!(!old.exists());
+        assert!(!pending.exists());
+        assert!(keep.exists());
+        assert_eq!(report.status.total_bytes, 10);
+    }
+
+    #[test]
+    fn enforce_quota_deletes_clip_metadata_sidecar_with_clip() {
+        let dir = TestDir::new("clipline-storage", "clip-metadata-delete");
+        let old = dir.write("old.mp4", 10);
+        let metadata = dir.write("old.clipline.json", 6);
+        tick_mtime();
+        let keep = write_owned(&dir, "keep.mp4", 10);
+
+        let report = enforce_quota(dir.path(), Some(10), None).unwrap();
+
+        assert_eq!(report.deleted_clips, 1);
+        assert_eq!(report.freed_bytes, 16);
+        assert!(!old.exists());
+        assert!(!metadata.exists());
+        assert!(keep.exists());
+        assert_eq!(report.status.total_bytes, 10);
+    }
+
+    #[test]
+    fn enforce_quota_leaves_library_when_protected_clip_alone_exceeds_budget() {
+        let dir = TestDir::new("clipline-storage", "protect-fresh");
+        let old = write_owned(&dir, "old.mp4", 10);
+        tick_mtime();
+        let fresh = dir.write("fresh.mp4", 20);
+
+        let report = enforce_quota(dir.path(), Some(15), Some(&fresh)).unwrap();
+
+        assert_eq!(report.deleted_clips, 0);
+        assert_eq!(report.freed_bytes, 0);
+        assert!(old.exists());
+        assert!(fresh.exists());
+        assert_eq!(report.status.total_bytes, 30);
+        assert!(report.status.is_over_quota());
+    }
+
+    #[test]
+    fn enforce_quota_counts_active_recording_but_never_deletes_it() {
+        let dir = TestDir::new("clipline-storage", "recording-quota");
+        let old = write_owned(&dir, "old.mp4", 10);
+        tick_mtime();
+        let recording = dir.write("session.mp4.recording", 12);
+        mark_owned(&recording);
+        tick_mtime();
+        let keep = write_owned(&dir, "keep.mp4", 5);
+
+        let report = enforce_quota(dir.path(), Some(20), None).unwrap();
+
+        assert_eq!(report.deleted_clips, 1);
+        assert!(!old.exists());
+        assert!(recording.exists());
+        assert!(keep.exists());
+        assert_eq!(report.status.clip_count, 1);
+        assert_eq!(report.status.total_bytes, 17);
     }
 
     #[test]
@@ -587,5 +909,61 @@ mod tests {
 
         assert_eq!(status.clip_count, 2);
         assert_eq!(status.total_bytes, 20);
+    }
+
+    #[test]
+    fn enforce_quota_crosses_folders_and_removes_emptied_session_dirs() {
+        let dir = TestDir::new("clipline-storage", "session-gc");
+        let old = dir.write("2026-06-11 09-00/old.mp4", 10);
+        let old_sidecar = dir.write("2026-06-11 09-00/old.markers.json", 2);
+        let old_poster = dir.write("2026-06-11 09-00/old.poster.jpg", 4);
+        let old_metadata = dir.write("2026-06-11 09-00/old.clipline.json", 0);
+        tick_mtime();
+        let legacy = write_owned(&dir, "legacy.mp4", 10);
+        tick_mtime();
+        let fresh = write_owned(&dir, "2026-06-12 14-30/fresh.mp4", 10);
+
+        let report = enforce_quota(dir.path(), Some(20), None).unwrap();
+
+        assert_eq!(report.deleted_clips, 1);
+        assert_eq!(report.freed_bytes, 16);
+        assert!(!old.exists());
+        assert!(!old_sidecar.exists());
+        assert!(!old_poster.exists());
+        assert!(!old_metadata.exists());
+        assert!(
+            !old.parent().unwrap().exists(),
+            "emptied session folder must be removed even with a poster sidecar"
+        );
+        assert!(legacy.exists());
+        assert!(fresh.exists());
+    }
+
+    #[test]
+    fn enforce_quota_keeps_session_dirs_that_still_hold_clips() {
+        let dir = TestDir::new("clipline-storage", "session-keep");
+        let old = write_owned(&dir, "2026-06-12 14-30/old.mp4", 10);
+        tick_mtime();
+        let new = write_owned(&dir, "2026-06-12 14-30/new.mp4", 10);
+
+        let report = enforce_quota(dir.path(), Some(10), None).unwrap();
+
+        assert_eq!(report.deleted_clips, 1);
+        assert!(!old.exists());
+        assert!(new.exists());
+        assert!(new.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn disabled_quota_does_not_delete() {
+        let dir = TestDir::new("clipline-storage", "disabled");
+        let clip = write_owned(&dir, "clip.mp4", 10);
+
+        let report = enforce_quota(dir.path(), None, None).unwrap();
+
+        assert_eq!(report.deleted_clips, 0);
+        assert_eq!(report.freed_bytes, 0);
+        assert!(clip.exists());
+        assert_eq!(report.status.total_bytes, 10);
     }
 }

@@ -213,6 +213,7 @@ function fillSettings(s) {
   $("set-custom-bitrate").value = String(advanced.bitrate_mbps);
   $("set-custom-fps").value = String(advanced.fps);
   $("set-quota").value = s.disk_quota_gb;
+  $("set-auto-delete-when-over-quota").checked = !!s.auto_delete_when_over_quota;
   $("set-media-dir").value = s.media_dir ?? "";
   $("set-replay-disk-enabled").checked = replayStorage.mode === "disk";
   $("set-replay-disk-dir").value = replayStorage.disk_dir || "";
@@ -293,6 +294,7 @@ function readSettings() {
     fps: smoothnessPreset(Number($("set-fps").value)).fps,
     advanced_recording: readAdvancedRecordingSettings(),
     disk_quota_gb: Number($("set-quota").value),
+    auto_delete_when_over_quota: $("set-auto-delete-when-over-quota").checked,
     media_dir: $("set-media-dir").value.trim(),
     replay_storage: {
       mode: $("set-replay-disk-enabled").checked ? "disk" : "memory",

@@ -1567,6 +1567,7 @@ impl RuntimeState {
         app: AppHandle<R>,
         media_dir: &Path,
         quota_bytes: Option<u64>,
+        auto_delete: bool,
         announce: bool,
     ) -> Result<bool, String> {
         let (required_bytes, still_stopping) = {
@@ -1586,11 +1587,34 @@ impl RuntimeState {
             }
             return Ok(false);
         }
-        let status = clipline_storage::storage_status(media_dir, quota_bytes)
+        let mut status = clipline_storage::storage_status(media_dir, quota_bytes)
             .map_err(|error| format!("storage status for {media_dir:?}: {error}"))?;
-        if quota_bytes.is_some_and(|quota| {
-            status.total_bytes > quota || required_bytes > quota.saturating_sub(status.total_bytes)
-        }) {
+        let over_quota = |status: &clipline_storage::StorageStatus| {
+            quota_bytes.is_some_and(|quota| {
+                status.total_bytes > quota
+                    || required_bytes > quota.saturating_sub(status.total_bytes)
+            })
+        };
+        if over_quota(&status) && auto_delete {
+            if let Some(quota) = quota_bytes {
+                let target = quota.saturating_sub(required_bytes);
+                if let Err(error) = clipline_storage::enforce_quota_with_protection(
+                    media_dir,
+                    Some(target),
+                    None,
+                    crate::cloud_upload::is_active_upload_source,
+                ) {
+                    tracing::warn!(
+                        event = "storage_quota_auto_delete_failed",
+                        path = ?media_dir,
+                        error = %error,
+                    );
+                }
+                status = clipline_storage::storage_status(media_dir, quota_bytes)
+                    .map_err(|error| format!("storage status for {media_dir:?}: {error}"))?;
+            }
+        }
+        if over_quota(&status) {
             let event = Event::StorageQuotaFull {
                 total_bytes: status.total_bytes,
                 quota_bytes: quota_bytes.expect("quota checked above"),
@@ -2005,10 +2029,12 @@ fn recheck_storage_quota<R: Runtime>(
     storage_settings: tauri::State<crate::library::StorageSettings>,
     announce: bool,
 ) -> Result<bool, String> {
+    let auto_delete = state.settings().auto_delete_when_over_quota;
     state.recheck_storage_quota(
         app,
         &storage_settings.media_dir(),
         storage_settings.quota_bytes(),
+        auto_delete,
         announce,
     )
 }
@@ -3076,7 +3102,13 @@ fn save_settings<R: Runtime>(
     }
     storage_settings.set_quota_bytes(quota_bytes);
     storage_settings.set_media_dir(media_dir.clone());
-    if let Err(error) = state.recheck_storage_quota(app.clone(), &media_dir, quota_bytes, true) {
+    if let Err(error) = state.recheck_storage_quota(
+        app.clone(),
+        &media_dir,
+        quota_bytes,
+        settings.auto_delete_when_over_quota,
+        true,
+    ) {
         tracing::warn!(event = "storage_quota_recheck_failed", error = %error);
         let _ = app.emit("error", error);
     }
