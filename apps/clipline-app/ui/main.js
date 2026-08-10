@@ -41,26 +41,6 @@ listen("library-changed", () => {
   requestRefresh();
 });
 
-function updateStorageQuotaUsage(payload) {
-  storageQuotaState = { ...(storageQuotaState || {}), ...(payload || {}) };
-  const used = Number(storageQuotaState.total_bytes) || 0;
-  const quota = Number(storageQuotaState.quota_bytes) || 0;
-  const needed = Number(storageQuotaState.required_bytes) || 0;
-  $("storage-quota-usage").textContent = needed > 0
-    ? `${fmtBytes(used)} used of ${fmtBytes(quota)} · ${fmtBytes(needed)} needed for this recording`
-    : `${fmtBytes(used)} used of ${fmtBytes(quota)}`;
-}
-
-function showStorageQuotaFull(payload) {
-  storageQuotaBlocked = true;
-  updateStorageQuotaUsage(payload);
-  recordingActive = false;
-  recorderWaitingForGame = false;
-  fullSessionRecordingActive = false;
-  updateCaptureStatus();
-  if (!$("storage-quota-dialog").open) $("storage-quota-dialog").showModal();
-}
-
 listen("storage-quota-full", (event) => showStorageQuotaFull(event.payload));
 listen("storage-quota-resolved", () => {
   storageQuotaBlocked = false;
