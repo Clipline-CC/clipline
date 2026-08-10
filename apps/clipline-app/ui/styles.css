@@ -9,6 +9,7 @@
   --muted: #a2937e;
   --accent: #ffb224;
   --accent-hover: #ffc65a;
+  --accent-text: #171310;
   --marker: #e8c56a;
   --session: #b98aff;
   --rec: #ff4b4b;
@@ -288,7 +289,7 @@
 .first-run-steps li.active span,
 .first-run-steps li.complete span {
   border-color: var(--accent);
-  color: var(--btn-primary-text);
+  color: var(--accent-text);
   background: var(--accent);
 }
 
@@ -693,6 +694,7 @@
   --muted: #8b93a3;
   --accent: #3d7bfd;
   --accent-hover: #5a8efd;
+  --accent-text: #0f1115;
   --marker: #e8b341;
   --session: #b06bf2;
   --rec: #e5484d;
@@ -763,6 +765,7 @@
   --muted: #a99bb8;
   --accent: #a970ff;
   --accent-hover: #c092ff;
+  --accent-text: #100c18;
   --marker: #edc66d;
   --session: var(--marker);
   --rec: #ff5c68;
@@ -833,6 +836,7 @@
   --muted: #b79baa;
   --accent: #f06aab;
   --accent-hover: #ff8bc2;
+  --accent-text: #160c12;
   --marker: #e7bc5f;
   --session: var(--marker);
   --rec: #ff555f;
@@ -903,6 +907,7 @@
   --muted: #8d8d8d;
   --accent: #5b8cff;
   --accent-hover: #79a2ff;
+  --accent-text: #000000;
   --marker: #e5b45a;
   --session: var(--marker);
   --rec: #ff555f;
@@ -973,6 +978,7 @@
   --muted: #9299a3;
   --accent: #4f83e8;
   --accent-hover: #6b98ee;
+  --accent-text: #111315;
   --marker: #d9a441;
   --session: var(--marker);
   --rec: #e6555e;
@@ -1044,6 +1050,7 @@
   --muted: #66707c;
   --accent: #2f66cf;
   --accent-hover: #2458bb;
+  --accent-text: #ffffff;
   --marker: #b87416;
   --session: var(--marker);
   --rec: #c83f49;
@@ -4657,7 +4664,7 @@ button.primary.settings-save-glow {
   background: rgba(var(--accent-rgb), 0.12);
 }
 #trim-mode-toggle.active {
-  color: var(--btn-primary-text);
+  color: var(--accent-text);
   border-color: var(--accent);
   background: var(--accent);
 }
