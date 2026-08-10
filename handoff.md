@@ -61,8 +61,11 @@ active recordings and in-progress uploads stay protected. If cleanup still canno
 the existing durable quota-full lock still applies. Background full-session cleanup refreshes
 the cached library baseline and emits `LibraryChanged` so the Library drops deleted clips;
 emptied session folders also remove `clipline-session.json`; GC skips sidecar deletion when
-the inventoried MP4 has already vanished (rename/delete race). First-run / Storage copy and
-`ddoc.md` describe the opt-in instead of claiming clips are never removed automatically.
+the inventoried MP4 has already vanished (rename/delete race) and drops those bytes from the
+running total; directory symlinks/junctions under the media root are ignored; collectors share
+a process-wide lock so overlapping recorder generations cannot over-delete; partial GC failures
+still refresh the Library when bytes dropped. First-run / Storage copy and `ddoc.md` describe
+the opt-in instead of claiming clips are never removed automatically.
 
 Validation: focused quota/settings/UI-contract tests pass; Settings toggle confirmed in the
 local debug build.

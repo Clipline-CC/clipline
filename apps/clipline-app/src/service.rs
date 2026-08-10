@@ -642,8 +642,9 @@ fn make_room_for_quota(
     let Some(quota) = quota_bytes else {
         return storage_status_or_warn(clips_dir, None).map(|status| (status, 0));
     };
+    let before_bytes = storage_status_or_warn(clips_dir, quota_bytes).map(|status| status.total_bytes);
     let target = quota.saturating_sub(required_bytes);
-    let deleted_clips = match enforce_quota_with_protection(
+    let mut deleted_clips = match enforce_quota_with_protection(
         clips_dir,
         Some(target),
         protect,
@@ -659,10 +660,18 @@ fn make_room_for_quota(
             0
         }
     };
+    let status = storage_status_or_warn(clips_dir, quota_bytes)?;
+    // A collector can remove an MP4 and then fail on a later sidecar/scan.
+    // Compare the post-error inventory so LibraryChanged still fires.
+    if deleted_clips == 0
+        && before_bytes.is_some_and(|before| status.total_bytes < before)
+    {
+        deleted_clips = 1;
+    }
     if deleted_clips > 0 {
         let _ = events.send(Event::LibraryChanged);
     }
-    storage_status_or_warn(clips_dir, quota_bytes).map(|status| (status, deleted_clips))
+    Some((status, deleted_clips))
 }
 
 fn storage_quota_full_event(

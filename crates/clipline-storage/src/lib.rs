@@ -7,7 +7,13 @@ pub use sessions::{session_label, SessionTracker};
 use std::fs;
 use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Serializes quota collectors so overlapping recorder generations (and any
+/// concurrent app-side GC) cannot inventory the same over-quota library and
+/// over-delete while another collector's deletions are in flight.
+static QUOTA_GC_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StorageStatus {
@@ -171,6 +177,10 @@ pub fn enforce_quota_with_protection(
     protect: Option<&Path>,
     additionally_protected: impl Fn(&Path) -> bool,
 ) -> io::Result<GcReport> {
+    let _guard = QUOTA_GC_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
     let Some(quota) = quota_bytes else {
         return Ok(GcReport {
             deleted_clips: 0,
@@ -217,6 +227,12 @@ pub fn enforce_quota_with_protection(
                 total_bytes = total_bytes.saturating_sub(clip_bytes);
                 freed_bytes += clip_bytes;
                 deleted_clips += 1;
+            }
+            // The file is already gone from this tree (rename/delete race or a
+            // prior collector). Drop its bytes from the running total so we do
+            // not keep deleting the next-oldest clip against a stale sum.
+            DeletedClip::AlreadyGone => {
+                total_bytes = total_bytes.saturating_sub(clip_bytes);
             }
             DeletedClip::Skipped => {}
         }
@@ -428,6 +444,9 @@ const SESSION_META_FILE: &str = "clipline-session.json";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeletedClip {
     Removed,
+    /// Inventoried MP4 vanished before we could delete it.
+    AlreadyGone,
+    /// Still present but protected (upload lease / active mutation).
     Skipped,
 }
 
@@ -436,13 +455,19 @@ fn delete_inventoried_clip(
     media_root: &Path,
     additionally_protected: &impl Fn(&Path) -> bool,
 ) -> io::Result<DeletedClip> {
+    // Never delete through a directory symlink/junction that escaped the
+    // configured media root (or any path that no longer resolves under it).
+    if !is_within_media_root(&clip.path, media_root) {
+        return Ok(DeletedClip::Skipped);
+    }
+
     match fs::remove_file(&clip.path) {
         Ok(()) => {}
         Err(error) if error.kind() == ErrorKind::NotFound => {
             // Another task already moved or deleted the MP4 (rename/delete).
             // Do not touch the inventoried sidecars — they may still belong
             // to the renamed clip, and the other task owns their cleanup.
-            return Ok(DeletedClip::Skipped);
+            return Ok(DeletedClip::AlreadyGone);
         }
         Err(error) => {
             // A lease can begin after the pre-delete protection check. If it
@@ -454,18 +479,56 @@ fn delete_inventoried_clip(
             return Err(error);
         }
     }
+
+    // The MP4 is gone; sidecar/session cleanup is best-effort so a transient
+    // sidecar error cannot hide the deletion from LibraryChanged callers or
+    // abort collection of remaining over-quota clips.
     for sidecar in &clip.sidecars {
-        remove_file_if_exists(sidecar)?;
+        let _ = remove_file_if_exists(sidecar);
     }
     // Session folders disappear with their last clip; remove_dir refuses
     // non-empty directories, so a leftover sidecar/export keeps it alive.
     if let Some(parent) = clip.path.parent() {
-        if parent != media_root && !session_dir_has_managed_clips(parent)? {
-            remove_file_if_exists(&parent.join(SESSION_META_FILE))?;
+        if parent != media_root && !session_dir_has_managed_clips(parent).unwrap_or(true) {
+            let _ = remove_file_if_exists(&parent.join(SESSION_META_FILE));
             let _ = fs::remove_dir(parent);
         }
     }
     Ok(DeletedClip::Removed)
+}
+
+fn is_within_media_root(path: &Path, media_root: &Path) -> bool {
+    let Ok(root) = media_root.canonicalize() else {
+        return false;
+    };
+    if let Ok(path) = path.canonicalize() {
+        return path.starts_with(&root);
+    }
+    // The inventoried MP4 may already be gone (rename/delete race). Fall back
+    // to the parent directory so containment still holds for AlreadyGone.
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    match parent.canonicalize() {
+        Ok(parent) => parent.starts_with(&root) || parent == root,
+        Err(_) => false,
+    }
+}
+
+fn is_link_or_reparse_point(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
 }
 
 fn session_dir_has_managed_clips(dir: &Path) -> io::Result<bool> {
@@ -543,9 +606,16 @@ fn visit_media_dirs(dir: &Path, mut f: impl FnMut(&Path) -> io::Result<()>) -> i
     f(dir)?;
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
-        if entry.metadata()?.is_dir() {
-            f(&entry.path())?;
+        let path = entry.path();
+        // symlink_metadata does not follow links, so a child junction/symlink
+        // into an external tree cannot be entered for inventory or GC.
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !metadata.is_dir() || is_link_or_reparse_point(&metadata) {
+            continue;
         }
+        f(&path)?;
     }
     Ok(())
 }
@@ -1017,7 +1087,7 @@ mod tests {
 
         let outcome = delete_inventoried_clip(&clip, dir.path(), &|_| false).unwrap();
 
-        assert_eq!(outcome, DeletedClip::Skipped);
+        assert_eq!(outcome, DeletedClip::AlreadyGone);
         assert!(old_meta.exists());
         assert!(old_markers.exists());
     }
@@ -1041,6 +1111,59 @@ mod tests {
             "emptied session folder must disappear with its session metadata"
         );
         assert!(keep.exists());
+    }
+
+    #[test]
+    fn enforce_quota_ignores_symlinked_child_directories() {
+        let root = TestDir::new("clipline-storage", "symlink-root");
+        let outside = TestDir::new("clipline-storage", "symlink-outside");
+        let external = write_owned(&outside, "external.mp4", 90);
+        let link = root.path().join("linked-session");
+        let linked = {
+            #[cfg(windows)]
+            {
+                std::os::windows::fs::symlink_dir(outside.path(), &link)
+            }
+            #[cfg(unix)]
+            {
+                std::os::unix::fs::symlink(outside.path(), &link)
+            }
+        };
+        if let Err(error) = linked {
+            eprintln!("skipping symlink containment test: {error}");
+            return;
+        }
+        let keep = write_owned(&root, "keep.mp4", 10);
+
+        let report = enforce_quota(root.path(), Some(20), None).unwrap();
+
+        assert_eq!(report.deleted_clips, 0);
+        assert_eq!(report.status.total_bytes, 10);
+        assert!(
+            external.exists(),
+            "quota GC must not delete managed clips through a linked child directory"
+        );
+        assert!(keep.exists());
+    }
+
+    #[test]
+    fn enforce_quota_skips_clips_outside_canonical_media_root() {
+        let root = TestDir::new("clipline-storage", "containment-root");
+        let outside = TestDir::new("clipline-storage", "containment-outside");
+        let external = write_owned(&outside, "external.mp4", 40);
+        let clip = ClipFile {
+            path: external.clone(),
+            sidecars: Vec::new(),
+            mp4_bytes: 40,
+            sidecar_bytes: 0,
+            modified: UNIX_EPOCH,
+            recording: false,
+        };
+
+        let outcome = delete_inventoried_clip(&clip, root.path(), &|_| false).unwrap();
+
+        assert_eq!(outcome, DeletedClip::Skipped);
+        assert!(external.exists());
     }
 
     #[test]

@@ -11,7 +11,9 @@ oldest-first auto-delete from Settings when they want the classic recorder behav
 When enabled, quota checks free oldest managed clips before locking recording; active recordings
 and in-progress uploads stay protected; the Library refreshes after background cleanup; emptied
 session folders including `clipline-session.json` are removed; concurrent rename/delete cannot
-lose sidecars if the MP4 disappears mid-collection.
+lose sidecars if the MP4 disappears mid-collection; linked child directories
+are never entered for inventory/GC; collectors are process-serialized so
+overlapping recorder generations cannot over-delete.
 
 **Architecture:** Restore `clipline-storage::enforce_quota(_with_protection)` as an explicit
 collector used only when the setting is on. The recorder service passes the flag into startup,
@@ -32,7 +34,12 @@ UI refreshes without waiting for a save.
 - [ ] Reintroduce `GcReport` / `enforce_quota_with_protection`.
 - [ ] Before removing an emptied session directory, delete `clipline-session.json` when no
   managed clips remain.
-- [ ] If `remove_file` on the inventoried MP4 returns `NotFound`, skip sidecar cleanup.
+- [ ] If `remove_file` on the inventoried MP4 returns `NotFound`, skip sidecar cleanup and
+  drop those bytes from the running total (`AlreadyGone`).
+- [ ] Skip directory symlinks/junctions in `visit_media_dirs` and refuse deletes outside the
+  canonical media root.
+- [ ] Hold a process-wide quota GC lock across collectors.
+- [ ] After a successful MP4 delete, treat sidecar/session cleanup as best-effort.
 
 ### Task 2: settings + service wiring
 
