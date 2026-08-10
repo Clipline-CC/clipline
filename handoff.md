@@ -4,6 +4,42 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-10): League game-type recording gate
+
+Plan: `docs/superpowers/plans/2026-08-10-league-game-type-recording-gate.md`.
+
+Users can now choose which League game types are recorded automatically (Settings → League
+plugin → **Record game types**): per-category toggles for Ranked Solo/Duo, Ranked Flex, Normal,
+ARAM, Arena, Custom, Other, plus an Unknown policy for lookup failures — all defaulting to
+record so upgrades keep current behavior. Manual session recording (button or hotkey) always
+bypasses the gate.
+
+At game detection, the runtime tears the previous recorder down immediately, runs one bounded
+LCU queue lookup (`LcuClient` lockfile path, connect 1 s / read 2 s / total 2 s) on a dedicated
+thread, and defers the replacement spawn until the verdict. The per-detection
+`Pending/Allowed/Denied` state is consulted by every automatic start path (detection,
+settings-save restart, autostart resume), so a save while pending/denied cannot sneak a recorder
+up; verdicts evaluate the settings current at resolution time, so mid-lookup toggle changes are
+honored. A denied game emits a skip notice; the poller's existing in-match enrichment is
+unchanged for allowed games.
+
+Gate tests use a held-open resolver seam: immediate teardown while pending, deferred
+Allowed-spawn, Denied-skip, unknown policy both ways, save-while-pending/denied, mid-lookup
+toggle flip, manual bypass/stop, non-League and all-record bypasses, same-window re-detection
+without re-kick, exit clearing the verdict, and a missing-lockfile lookup resolving to Unknown.
+Settings defaults, backward-compatible load, and persistence round-trip are covered in
+`settings/tests.rs`; `tests/ui_contract.rs` guards the settings-tab wiring. The 116 ui-contract
+tests, 590 app tests, full workspace suite, fresh-cache changed-crate Clippy, and
+warning-denied workspace Clippy all pass.
+
+PR #153 review follow-up (Bugbot + Codex): the rail `start_recording` path now goes through the
+gate predicate too; a settings save that drops the active game clears its gate verdict and is
+allowed to resume the primary-monitor recorder; the gate factory race no longer panics the
+detector thread (falls back to immediate start); an allowed verdict no longer restarts a manual
+session that began while the lookup was pending; and a stopped status is published whenever the
+gate tears the recorder down with no replacement, so the rail cannot stick on a stale
+"recording" state.
+
 ## Checkpoint (2026-08-10): quota-full dialog ReferenceError fix
 
 User hit `ReferenceError: updateStorageQuotaUsage is not defined` after the "storage quota

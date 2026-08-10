@@ -24,6 +24,7 @@ use crate::updates::UpdateChannel;
 pub mod cloud;
 pub mod games;
 pub mod hotkey;
+pub mod league;
 pub mod osu;
 pub mod persistence;
 pub mod types;
@@ -36,6 +37,7 @@ pub use games::{
     MatchEventSettings, TimelineMarkerSettings,
 };
 pub use hotkey::{is_global_shortcut_hotkey, normalize_hotkey, parse_hotkey};
+pub use league::LeagueModeSettings;
 pub use osu::OsuApiSettings;
 pub use persistence::{
     audio_preview_cache_dir, icon_cache_dir, normalize_media_dir, normalize_replay_cache_dir,
@@ -123,6 +125,9 @@ pub struct AppSettings {
     pub cloud: CloudSettings,
     #[serde(default)]
     pub osu: OsuApiSettings,
+    /// League game-type recording gate; defaults to record everything.
+    #[serde(default)]
+    pub league: LeagueModeSettings,
 }
 
 fn default_enabled() -> bool {
@@ -166,6 +171,7 @@ impl Default for AppSettings {
             update_channel: UpdateChannel::Nightly,
             cloud: CloudSettings::default(),
             osu: OsuApiSettings::default(),
+            league: LeagueModeSettings::default(),
         }
     }
 }
