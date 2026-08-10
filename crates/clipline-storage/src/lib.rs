@@ -460,11 +460,9 @@ fn delete_inventoried_clip(
     // Session folders disappear with their last clip; remove_dir refuses
     // non-empty directories, so a leftover sidecar/export keeps it alive.
     if let Some(parent) = clip.path.parent() {
-        if parent != media_root {
-            if !session_dir_has_managed_clips(parent)? {
-                remove_file_if_exists(&parent.join(SESSION_META_FILE))?;
-                let _ = fs::remove_dir(parent);
-            }
+        if parent != media_root && !session_dir_has_managed_clips(parent)? {
+            remove_file_if_exists(&parent.join(SESSION_META_FILE))?;
+            let _ = fs::remove_dir(parent);
         }
     }
     Ok(DeletedClip::Removed)
