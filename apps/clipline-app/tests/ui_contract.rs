@@ -972,6 +972,51 @@ fn legacy_audio_preview_code_is_absent() {
 }
 
 #[test]
+fn league_game_type_recording_gate_controls_are_persisted_and_wired() {
+    let settings = read_ui_js("settings.js");
+    let general_tab = js_function_body(&settings, "renderGamePluginSettingsGeneralTab");
+    let settings_module = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/settings/league.rs"),
+    )
+    .expect("read src/settings/league.rs");
+    let settings_root = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/settings/mod.rs"),
+    )
+    .expect("read src/settings/mod.rs");
+    assert!(
+        settings_module.contains("pub struct LeagueModeSettings")
+            && settings_module.contains("pub fn has_gate")
+            && settings_module.contains("pub fn allows")
+            && settings_module.contains("record_unknown"),
+        "league gate settings must expose per-category flags plus the unknown policy"
+    );
+    assert!(
+        settings_root.contains("pub league: LeagueModeSettings")
+            && app_rs().contains("fn tick_league_gate")
+            && app_rs().contains("LEAGUE_GATE_SKIP_NOTICE"),
+        "the runtime must persist league gate settings and resolve the gate per detection"
+    );
+    assert!(
+        settings.contains("var leagueModeSettings = null")
+            && settings.contains("function defaultLeagueModeSettings")
+            && settings.contains("function readLeagueModeSettingInputs")
+            && settings.contains("function updateLeagueModeSetting")
+            && settings.contains("data-league-mode-record")
+            && settings.contains("record_ranked_solo_duo")
+            && settings.contains("record_normal")
+            && settings.contains("Record game types")
+            && settings.contains("Automatic recording is skipped for unchecked game types")
+            && settings.contains("league: { ...leagueModeSettings }"),
+        "the League settings tab must render per-game-type toggles that survive dialog close and save"
+    );
+    assert!(
+        general_tab.contains("plugin.id === \"league_of_legends\"")
+            && general_tab.contains("input.dataset.leagueModeRecord = key"),
+        "the game-type toggles must render inside the League plugin's General tab"
+    );
+}
+
+#[test]
 fn review_player_owns_all_controls() {
     let html = index_html();
 
@@ -1527,8 +1572,7 @@ fn review_player_owns_all_controls() {
         "supported games must expose persisted League match detail controls in the settings dialog"
     );
     let settings = read_ui_js("settings.js");
-    let render_games = js_function_body(&settings, "renderGamePlugins");
-    assert!(
+    let render_games = js_function_body(&settings, "renderGamePlugins");    assert!(
         render_games.contains("empty.textContent = \"no supported games available\"")
             && !render_games.contains("not installed")
             && !render_games.contains("repair available")

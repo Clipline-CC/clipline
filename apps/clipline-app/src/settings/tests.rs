@@ -8,6 +8,7 @@ use crate::settings::types::ReplayStorageMode;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use clipline_lol::LeagueQueueCategory;
 use clipline_test_utils::TestDir;
 use serde_json::Value;
 
@@ -49,6 +50,94 @@ fn defaults_match_current_recorder_behavior() {
     assert_eq!(settings.update_channel, UpdateChannel::Nightly);
     assert!(!settings.legacy_timeline_editor);
     assert_eq!(serialized["legacy_timeline_editor"], false);
+}
+
+#[test]
+fn league_mode_settings_default_record_all_and_no_gate() {
+    let settings = LeagueModeSettings::default();
+    assert!(settings.record_ranked_solo_duo);
+    assert!(settings.record_ranked_flex);
+    assert!(settings.record_normal);
+    assert!(settings.record_aram);
+    assert!(settings.record_arena);
+    assert!(settings.record_custom);
+    assert!(settings.record_other);
+    assert!(settings.record_unknown);
+    assert!(!settings.has_gate(), "record-all must not arm the gate");
+    assert_eq!(AppSettings::default().league, LeagueModeSettings::default());
+}
+
+#[test]
+fn league_mode_settings_allows_per_category_and_unknown_policy() {
+    let mut settings = LeagueModeSettings::default();
+    for category in [
+        LeagueQueueCategory::RankedSoloDuo,
+        LeagueQueueCategory::RankedFlex,
+        LeagueQueueCategory::Normal,
+        LeagueQueueCategory::Aram,
+        LeagueQueueCategory::Arena,
+        LeagueQueueCategory::Custom,
+        LeagueQueueCategory::Other,
+    ] {
+        assert!(settings.allows(Some(&category)), "{category:?} records by default");
+    }
+    assert!(settings.allows(None));
+
+    settings.record_normal = false;
+    assert!(settings.has_gate());
+    assert!(!settings.allows(Some(&LeagueQueueCategory::Normal)));
+    assert!(settings.allows(Some(&LeagueQueueCategory::RankedSoloDuo)));
+    assert!(settings.allows(Some(&LeagueQueueCategory::Aram)));
+    assert!(settings.allows(None));
+
+    settings.record_unknown = false;
+    assert!(!settings.allows(None));
+}
+
+#[test]
+fn league_mode_settings_missing_fields_load_record_all() {
+    let settings: LeagueModeSettings = serde_json::from_str("{}").unwrap();
+    assert_eq!(settings, LeagueModeSettings::default());
+
+    let partial = serde_json::from_str::<LeagueModeSettings>(
+        r#"{"record_normal": false}"#,
+    )
+    .unwrap();
+    assert!(!partial.record_normal);
+    assert!(partial.record_ranked_solo_duo);
+    assert!(partial.record_unknown);
+    assert!(partial.has_gate());
+
+    // Older settings files without the `league` key keep record-all.
+    let settings = AppSettings::load_from_object(
+        serde_json::from_str::<Value>(r#"{"hotkey": "F6"}"#)
+            .unwrap()
+            .as_object()
+            .unwrap(),
+    );
+    assert_eq!(settings.league, LeagueModeSettings::default());
+}
+
+#[test]
+fn league_mode_settings_round_trip_through_persistence() {
+    let dir = TestDir::new("clipline-settings", "league-mode-round-trip");
+    let path = dir.path().join("settings.json");
+    let settings = AppSettings {
+        league: LeagueModeSettings {
+            record_normal: false,
+            record_unknown: false,
+            ..LeagueModeSettings::default()
+        },
+        ..AppSettings::default()
+    };
+
+    settings.save_to(&path).unwrap();
+    let loaded = AppSettings::load_from(&path).unwrap();
+
+    assert_eq!(loaded, settings);
+    assert!(!loaded.league.record_normal);
+    assert!(!loaded.league.record_unknown);
+    assert!(loaded.league.record_ranked_solo_duo);
 }
 
 #[test]

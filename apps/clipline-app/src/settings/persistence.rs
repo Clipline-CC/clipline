@@ -205,6 +205,7 @@ impl AppSettings {
                 .unwrap_or(defaults.update_channel),
             cloud: deserialize_field(object, "cloud").unwrap_or_default(),
             osu: deserialize_field(object, "osu").unwrap_or_default(),
+            league: deserialize_field(object, "league").unwrap_or_default(),
         };
 
         settings.games.normalize();

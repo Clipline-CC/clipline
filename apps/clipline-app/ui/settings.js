@@ -2,6 +2,47 @@
 var gamePluginSettingsDialogPluginId = null;
 var gamePluginSettingsDialogTab = "general";
 var activeEncoderLabel = "";
+// Live League game-type recording toggles; survives dialog open/close because
+// the checkbox inputs are removed from the DOM when the dialog closes.
+var leagueModeSettings = null;
+
+const LEAGUE_MODE_RECORD_LABELS = [
+  ["record_ranked_solo_duo", "Ranked Solo/Duo"],
+  ["record_ranked_flex", "Ranked Flex"],
+  ["record_normal", "Normal"],
+  ["record_aram", "ARAM"],
+  ["record_arena", "Arena"],
+  ["record_custom", "Custom"],
+  ["record_other", "Other"],
+  ["record_unknown", "Unknown (client lookup failed)"],
+];
+
+function defaultLeagueModeSettings() {
+  return {
+    record_ranked_solo_duo: true,
+    record_ranked_flex: true,
+    record_normal: true,
+    record_aram: true,
+    record_arena: true,
+    record_custom: true,
+    record_other: true,
+    record_unknown: true,
+  };
+}
+
+function readLeagueModeSettingInputs() {
+  const next = { ...defaultLeagueModeSettings(), ...(leagueModeSettings || {}) };
+  for (const [key] of LEAGUE_MODE_RECORD_LABELS) {
+    const input = document.querySelector(`[data-league-mode-record="${key}"]`);
+    if (input) next[key] = input.checked;
+  }
+  return next;
+}
+
+function updateLeagueModeSetting() {
+  leagueModeSettings = readLeagueModeSettingInputs();
+  syncSettingsDraftFromForm();
+}
 
 function cloneSettings(settings) {
   return settings ? JSON.parse(JSON.stringify(settings)) : null;
@@ -165,6 +206,7 @@ function fillSettings(s) {
   const games = { ...defaultGameSettings(), ...(s.games || {}) };
   const cloud = { ...defaultCloudSettings(), ...(s.cloud || {}) };
   const osu = { ...defaultOsuApiSettings(), ...(s.osu || {}) };
+  const league = { ...defaultLeagueModeSettings(), ...(s.league || {}) };
   const replay = Math.min(120, Math.max(5, Number(s.replay_window_s) || 60));
   cloud.uploads = { ...(cloud.uploads || {}) };
   gamePluginSettings = normalizeGamePluginSettingsMap(games.plugins || {});
@@ -175,12 +217,14 @@ function fillSettings(s) {
     replay_storage: replayStorage,
     cloud,
     osu,
+    league,
     games: {
       ...games,
       plugins: { ...gamePluginSettings },
       custom_games: customGames.map((game) => ({ ...game })),
     },
   };
+  leagueModeSettings = { ...league };
   settingsDraft = cloneSettings(currentSettings);
   regionState = s.capture_region ?? regionState;
   captureTargetDirty = false;
@@ -311,6 +355,7 @@ function readSettings() {
     update_channel: $("set-update-channel").value,
     cloud: readCloudSettings(),
     osu: readOsuApiSettings(),
+    league: { ...leagueModeSettings },
   };
 }
 
@@ -890,6 +935,32 @@ function renderGamePluginSettingsGeneralTab(plugin, settings) {
   masterText.textContent = "Show League match details";
   master.append(masterInput, masterText);
   reviewSection.append(master);
+
+  if (plugin.id === "league_of_legends") {
+    const gateSection = document.createElement("section");
+    gateSection.className = "game-plugin-settings-section";
+    const gateTitle = document.createElement("strong");
+    gateTitle.textContent = "Record game types";
+    const gateHint = document.createElement("span");
+    gateHint.className = "hint";
+    gateHint.textContent =
+      "Automatic recording is skipped for unchecked game types. Manual recording always works.";
+    gateSection.append(gateTitle, gateHint);
+    for (const [key, label] of LEAGUE_MODE_RECORD_LABELS) {
+      const check = document.createElement("label");
+      check.className = "check-line";
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.checked = (leagueModeSettings || {})[key] !== false;
+      input.dataset.leagueModeRecord = key;
+      input.addEventListener("change", updateLeagueModeSetting);
+      const text = document.createElement("span");
+      text.textContent = label;
+      check.append(input, text);
+      gateSection.append(check);
+    }
+    root.append(gateSection);
+  }
 
   root.append(reviewSection);
   return root;
