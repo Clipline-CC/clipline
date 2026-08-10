@@ -1010,9 +1010,11 @@ enum LeagueGateVerdict {
 }
 
 /// Outcome of a resolved gate lookup. `Allowed` carries the restart that
-/// spawns the deferred recorder; `Denied` skips it and should notify the user.
+/// spawns the deferred recorder — `None` when a manual session already runs
+/// (manual bypasses the gate, so nothing should be restarted). `Denied` skips
+/// the recorder and should notify the user.
 enum LeagueGateResolution {
-    Allowed(Box<PreparedServiceRestart>),
+    Allowed(Option<Box<PreparedServiceRestart>>),
     Denied,
 }
 
@@ -1092,6 +1094,22 @@ fn waiting_for_game_status() -> Event {
     Event::Status {
         recording: false,
         waiting_for_game: true,
+        segments: 0,
+        buffered_s: 0.0,
+        buffered_mb: 0.0,
+        full_session: false,
+        encoder: String::new(),
+        capture_backend: String::new(),
+    }
+}
+
+/// Truthful idle status for a stopped recorder with no game wait (e.g. the
+/// League gate blocking an active game). Keeps the rail from showing a stale
+/// "recording" state after the gate tears a service down.
+fn stopped_status() -> Event {
+    Event::Status {
+        recording: false,
+        waiting_for_game: false,
         segments: 0,
         buffered_s: 0.0,
         buffered_mb: 0.0,
@@ -1435,6 +1453,8 @@ impl RuntimeState {
     ) -> Result<(), String> {
         let waiting_for_game = prepared.waiting_for_game;
         let waiting_generation = prepared.waiting_generation;
+        let stopped_without_replacement =
+            prepared.old_tx.is_some() && prepared.replacement.is_none() && !waiting_for_game;
         if let Some(tx) = prepared.old_tx {
             let _ = tx.send(Cmd::Stop { announce: false });
         }
@@ -1450,6 +1470,13 @@ impl RuntimeState {
                     let _ = tx.send(Cmd::Stop { announce: false });
                 }
             }
+        }
+        if stopped_without_replacement {
+            // The old service was stopped and nothing replaced it without a
+            // game wait (e.g. the League gate blocked an active game). Its
+            // final status is stale after the generation bump, so publish the
+            // truth here instead of leaving the rail stuck on "recording".
+            let _ = app.emit("status", stopped_status());
         }
         if waiting_for_game
             && waiting_generation
@@ -1503,10 +1530,14 @@ impl RuntimeState {
             inner.active_game.as_ref()
         };
         let base_should_run = recorder_should_run(&settings, active_game);
+        // A game dropped by the settings change takes its gate verdict with
+        // it: the stale Denied/Pending must not keep blocking (it is also
+        // cleared below, but the spawn decision happens first).
+        let gate_allows = cleared_active_game || league_gate_allows(inner);
         let should_run = inner.recording_desired
             && inner.quota_blocked.is_none()
             && (inner.manual_full_session_desired
-                || (base_should_run && league_gate_allows(inner)));
+                || (base_should_run && gate_allows));
         let waiting_for_game = inner.recording_desired
             && inner.quota_blocked.is_none()
             && !inner.manual_full_session_desired
@@ -1530,6 +1561,8 @@ impl RuntimeState {
         inner.settings = settings;
         if cleared_active_game {
             inner.active_game = None;
+            inner.league_gate = None;
+            inner.league_gate_rx = None;
         }
         let old_tx = inner.tx.take();
         let replacement = if let Some(options) = next_options {
@@ -1841,7 +1874,7 @@ impl RuntimeState {
             if let Some(event) = inner.quota_blocked.clone() {
                 (None, Some(event))
             } else if inner.manual_full_session_desired
-                || recorder_should_run(&inner.settings, inner.active_game.as_ref())
+                || automatic_start_allowed(&inner, &inner.settings)
             {
                 let (tx, rx) = service::spawn(Self::options(&inner)?);
                 let generation = Self::install_recording_sender(&mut inner, tx);
@@ -1858,6 +1891,11 @@ impl RuntimeState {
             pump_events(app, rx, generation);
         } else if let Some(status) = self.current_waiting_status() {
             let _ = app.emit("status", status);
+        } else {
+            // No spawn and no game wait: an active game is blocked by the
+            // League gate. Publish the stopped state instead of leaving the
+            // rail on a stale recording status.
+            let _ = app.emit("status", stopped_status());
         }
         Ok(true)
     }
@@ -1992,15 +2030,22 @@ impl RuntimeState {
         } else {
             inner.active_game = detected;
             if league_gate_applies(&inner.settings, inner.active_game.as_ref()) {
-                let lookup = league_lookup
-                    .expect("gated League detection requires a lookup factory");
-                inner.league_gate = Some(LeagueGateVerdict::Pending);
-                inner.league_gate_rx = Some(lookup(
-                    inner
-                        .active_game
-                        .as_ref()
-                        .expect("gated detection always has a game"),
-                ));
+                // The factory comes from a settings snapshot taken before the
+                // runtime lock; settings may have changed in between. Without a
+                // factory, fall back to today's behavior instead of panicking
+                // the only game-detector thread.
+                if let Some(lookup) = league_lookup {
+                    inner.league_gate = Some(LeagueGateVerdict::Pending);
+                    inner.league_gate_rx = Some(lookup(
+                        inner
+                            .active_game
+                            .as_ref()
+                            .expect("gated detection always has a game"),
+                    ));
+                } else {
+                    inner.league_gate = None;
+                    inner.league_gate_rx = None;
+                }
             } else {
                 inner.league_gate = None;
                 inner.league_gate_rx = None;
@@ -2038,9 +2083,15 @@ impl RuntimeState {
             .allows(queue.as_ref().map(|queue| &queue.category))
         {
             inner.league_gate = Some(LeagueGateVerdict::Allowed);
-            Ok(Some(LeagueGateResolution::Allowed(Box::new(
-                Self::prepare_service_restart(inner)?,
-            ))))
+            // A manual session that started while the lookup was pending must
+            // keep running: it bypasses the gate, so restarting it here would
+            // split the recording.
+            let restart = if inner.manual_full_session_desired {
+                None
+            } else {
+                Some(Box::new(Self::prepare_service_restart(inner)?))
+            };
+            Ok(Some(LeagueGateResolution::Allowed(restart)))
         } else {
             inner.league_gate = Some(LeagueGateVerdict::Denied);
             Ok(Some(LeagueGateResolution::Denied))
@@ -2055,8 +2106,11 @@ impl RuntimeState {
             Self::resolve_league_gate(&mut inner)?
         };
         match resolution {
-            Some(LeagueGateResolution::Allowed(prepared)) => {
-                self.finish_service_restart(app, *prepared)
+            Some(LeagueGateResolution::Allowed(restart)) => {
+                if let Some(prepared) = restart {
+                    self.finish_service_restart(app, *prepared)?;
+                }
+                Ok(())
             }
             Some(LeagueGateResolution::Denied) => {
                 let _ = app.emit("error", LEAGUE_GATE_SKIP_NOTICE.to_string());
@@ -6613,10 +6667,11 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
             RuntimeState::resolve_league_gate(&mut inner).unwrap()
         };
         match resolution.expect("resolved verdict") {
-            LeagueGateResolution::Allowed(prepared) => {
+            LeagueGateResolution::Allowed(Some(prepared)) => {
                 assert!(prepared.replacement.is_some());
                 assert!(prepared.old_tx.is_none());
             }
+            LeagueGateResolution::Allowed(None) => panic!("no manual session was active"),
             LeagueGateResolution::Denied => panic!("ranked solo/duo must be allowed"),
         }
         assert!(matches!(old_rx.try_recv(), Err(TryRecvError::Empty)));
@@ -6918,6 +6973,112 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
             RuntimeState::plan_detection_transition(&mut inner, None, None).unwrap()
         };
         assert!(prepared.unwrap().replacement.is_none());
+        {
+            let inner = state.0.lock().unwrap();
+            assert_eq!(inner.league_gate, None);
+            assert!(inner.league_gate_rx.is_none());
+            assert!(inner.active_game.is_none());
+        }
+    }
+
+    #[test]
+    fn allowed_resolution_preserves_an_active_manual_session() {
+        let state = RuntimeState::new(gated_settings(false), None);
+        let (gate_tx, lookup, _) = held_lookup();
+        {
+            let mut inner = state.0.lock().unwrap();
+            RuntimeState::plan_detection_transition(
+                &mut inner,
+                Some(league_game(41)),
+                Some(lookup),
+            )
+            .unwrap();
+            // Manual recording started while the lookup was pending, after
+            // the detection teardown.
+            let (manual_tx, _manual_rx) = mpsc::channel();
+            RuntimeState::install_recording_sender(&mut inner, manual_tx);
+            inner.manual_full_session_desired = true;
+        }
+
+        gate_tx.send(Some(LeagueQueue::from_id(420))).unwrap();
+        let resolution = {
+            let mut inner = state.0.lock().unwrap();
+            RuntimeState::resolve_league_gate(&mut inner).unwrap()
+        };
+        assert!(
+            matches!(resolution, Some(LeagueGateResolution::Allowed(None))),
+            "an allowed verdict must not restart a running manual session"
+        );
+        {
+            let inner = state.0.lock().unwrap();
+            assert_eq!(inner.league_gate, Some(LeagueGateVerdict::Allowed));
+            assert!(inner.tx.is_some(), "the manual sender must stay installed");
+        }
+    }
+
+    #[test]
+    fn detection_without_factory_falls_back_to_immediate_start() {
+        // Simulates the settings snapshot race: the detector decided no gate
+        // and passed no factory, but the live settings are gated by the time
+        // the runtime checks. Must not panic the detector thread.
+        let (tx, _rx) = mpsc::channel();
+        let state = RuntimeState::with_sender(tx, gated_settings(false), None);
+        let (prepared, _, _) = {
+            let mut inner = state.0.lock().unwrap();
+            RuntimeState::plan_detection_transition(&mut inner, Some(league_game(41)), None)
+                .unwrap()
+        };
+        let prepared = prepared.expect("fallback must start immediately");
+        assert!(prepared.replacement.is_some());
+        {
+            let inner = state.0.lock().unwrap();
+            assert_eq!(inner.league_gate, None);
+            assert!(inner.league_gate_rx.is_none());
+        }
+    }
+
+    #[test]
+    fn settings_restart_clearing_the_active_game_clears_the_gate() {
+        let (tx, _rx) = mpsc::channel();
+        let state = RuntimeState::with_sender(tx, gated_settings(false), None);
+        let (gate_tx, lookup, _) = held_lookup();
+        {
+            let mut inner = state.0.lock().unwrap();
+            RuntimeState::plan_detection_transition(
+                &mut inner,
+                Some(league_game(41)),
+                Some(lookup),
+            )
+            .unwrap();
+        }
+        gate_tx.send(Some(LeagueQueue::from_id(430))).unwrap();
+        {
+            let mut inner = state.0.lock().unwrap();
+            RuntimeState::resolve_league_gate(&mut inner).unwrap();
+            assert_eq!(inner.league_gate, Some(LeagueGateVerdict::Denied));
+        }
+
+        // Disabling auto-detect removes the active game on the next save.
+        let changed = AppSettings {
+            games: crate::settings::GameSettings {
+                auto_detect: false,
+                ..AppSettings::default().games
+            },
+            ..AppSettings::default()
+        };
+        let prepared = state.prepare_settings_restart(changed).unwrap();
+        let committed: CommittedRuntimeRestart<()> = {
+            let mut inner = state.0.lock().unwrap();
+            RuntimeState::commit_prepared_restart_with(&mut inner, prepared, |_| {
+                (mpsc::channel().0, ())
+            })
+            .unwrap()
+        };
+        assert!(committed.cleared_active_game);
+        assert!(
+            committed.replacement.is_some(),
+            "a stale gate must not keep the recorder stopped after the game is cleared"
+        );
         {
             let inner = state.0.lock().unwrap();
             assert_eq!(inner.league_gate, None);

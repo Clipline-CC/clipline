@@ -29,8 +29,16 @@ toggle flip, manual bypass/stop, non-League and all-record bypasses, same-window
 without re-kick, exit clearing the verdict, and a missing-lockfile lookup resolving to Unknown.
 Settings defaults, backward-compatible load, and persistence round-trip are covered in
 `settings/tests.rs`; `tests/ui_contract.rs` guards the settings-tab wiring. The 116 ui-contract
-tests, 587 app tests, full workspace suite, fresh-cache changed-crate Clippy, and
+tests, 590 app tests, full workspace suite, fresh-cache changed-crate Clippy, and
 warning-denied workspace Clippy all pass.
+
+PR #153 review follow-up (Bugbot + Codex): the rail `start_recording` path now goes through the
+gate predicate too; a settings save that drops the active game clears its gate verdict and is
+allowed to resume the primary-monitor recorder; the gate factory race no longer panics the
+detector thread (falls back to immediate start); an allowed verdict no longer restarts a manual
+session that began while the lookup was pending; and a stopped status is published whenever the
+gate tears the recorder down with no replacement, so the rail cannot stick on a stale
+"recording" state.
 
 ## Checkpoint (2026-08-10): quota-full dialog ReferenceError fix
 
