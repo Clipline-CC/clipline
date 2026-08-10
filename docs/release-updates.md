@@ -3,12 +3,12 @@
 Clipline uses Tauri's signed updater. The app checks a channel-specific
 `latest.json` file uploaded as a GitHub Release asset.
 
-## Upcoming storage behavior change
+## Storage quota behavior
 
-Saved-media quotas no longer remove the oldest clips automatically. Existing
-installs that reach their configured quota will instead pause recording and
-replay saves until the user deletes media or raises the quota. Clipline retains
-all non-empty recordings, including short osu! sessions that older builds
+Saved-media quotas stay non-destructive by default: when an install reaches its configured
+quota, recording and replay saves pause until the user deletes media or raises the quota.
+Settings → Storage can opt into oldest-first auto-delete of managed clips before that lock.
+Clipline retains all non-empty recordings, including short osu! sessions that older builds
 discarded as startup transients.
 
 ## Nightly

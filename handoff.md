@@ -4,6 +4,29 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-10): Nightly 0.1.51
+
+Plan: `docs/superpowers/plans/2026-08-10-nightly-0.1.51.md`.
+
+Nightly 0.1.51 publishes the merged optional disk-quota auto-delete toggle (**#150**) and pink
+theme (**#151**) on top of automated Nightly 0.1.50.
+
+User-visible highlights:
+
+- Settings → Storage adds opt-in **Auto-delete oldest clips** (off by default). When enabled,
+  oldest managed clips are deleted to free room before the durable quota-full lock; active
+  recordings and in-progress uploads stay protected, and Library refreshes after background GC.
+- Appearance gains a pink theme with legible accent fills on pink surfaces.
+
+The Microsoft WebView2 Fixed Version page still lists **151.0.4129.59** as the current Fixed
+Version Runtime x64 payload. The pinned CAB URL, size, and SHA-256 remain unchanged; only the
+required review dates were refreshed for this release (`reviewed_on` 2026-08-10,
+`review_due_on` 2026-09-09).
+
+The release commit advances only Clipline/Tauri version metadata, WebView2 review dates, this
+handoff, and the release plan/docs from the CI-green merge `e2caa2cb`. Publication and
+downloaded-asset hashes are filled in after the Nightly Release action finishes.
+
 ## Checkpoint (2026-08-09): Nightly 0.1.50
 
 Plans: `docs/superpowers/plans/2026-08-09-nightly-0.1.49-recovery.md`,
