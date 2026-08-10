@@ -32,7 +32,7 @@ tauri-plugin-updater = "2"
 chrono = "0.4.45"
 rfd = "0.15"
 png = "0.17"
-base64 = "0.22"
+base64 = "0.23"
 rodio = { version = "0.17", default-features = false, features = ["vorbis"] }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
