@@ -5495,6 +5495,7 @@ fn quota_full_is_a_durable_recording_lock_with_optional_auto_delete() {
     assert!(
         main.contains(r#"listen("storage-quota-full""#)
             && main.contains(r#"listen("storage-quota-resolved""#)
+            && main.contains(r#"listen("library-changed""#)
             && main.contains(r#"invoke("recheck_storage_quota", { announce: true })"#)
             && main.contains("recordingRequested = true;")
             && app_core.contains(r#"invoke("recheck_storage_quota", { announce: false })"#)

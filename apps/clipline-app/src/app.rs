@@ -1180,6 +1180,7 @@ impl RuntimeState {
                 });
             }
             Event::StorageQuotaFull { .. } => {}
+            Event::LibraryChanged => {}
             Event::Error { .. } => inner.recent_recorder_error = true,
             Event::MediaRootResolved { .. } => {}
         }
@@ -3761,6 +3762,7 @@ fn pump_events<R: Runtime>(handle: AppHandle<R>, event_rx: Receiver<Event>, gene
                 Event::Status { .. } => handle.emit("status", &event),
                 Event::Saved { .. } => handle.emit("saved", &event),
                 Event::StorageQuotaFull { .. } => handle.emit("storage-quota-full", &event),
+                Event::LibraryChanged => handle.emit("library-changed", ()),
                 Event::Error { message } => handle.emit("error", message.clone()),
             };
             if let Event::Saved {

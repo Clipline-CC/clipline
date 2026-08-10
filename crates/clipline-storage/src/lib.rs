@@ -212,28 +212,14 @@ pub fn enforce_quota_with_protection(
         }
 
         let clip_bytes = clip.total_bytes();
-        if let Err(error) = remove_file_if_exists(&clip.path) {
-            // A lease can begin after the pre-delete protection check. If it
-            // now owns the file, keep collecting other clips instead of
-            // surfacing the kernel's sharing-violation text to the user.
-            if additionally_protected(&clip.path) {
-                continue;
+        match delete_inventoried_clip(&clip, dir, &additionally_protected)? {
+            DeletedClip::Removed => {
+                total_bytes = total_bytes.saturating_sub(clip_bytes);
+                freed_bytes += clip_bytes;
+                deleted_clips += 1;
             }
-            return Err(error);
+            DeletedClip::Skipped => {}
         }
-        for sidecar in &clip.sidecars {
-            remove_file_if_exists(sidecar)?;
-        }
-        // Session folders disappear with their last clip; remove_dir refuses
-        // non-empty directories, so a leftover sidecar/export keeps it alive.
-        if let Some(parent) = clip.path.parent() {
-            if parent != dir {
-                let _ = fs::remove_dir(parent);
-            }
-        }
-        total_bytes = total_bytes.saturating_sub(clip_bytes);
-        freed_bytes += clip_bytes;
-        deleted_clips += 1;
     }
 
     Ok(GcReport {
@@ -434,6 +420,64 @@ fn recovery_destination_available(path: &Path, current_marker: &Path) -> bool {
     !path.exists()
         && clip_ownership_marker_path(path)
             .is_ok_and(|marker| marker == current_marker || !marker.exists())
+}
+
+
+const SESSION_META_FILE: &str = "clipline-session.json";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeletedClip {
+    Removed,
+    Skipped,
+}
+
+fn delete_inventoried_clip(
+    clip: &ClipFile,
+    media_root: &Path,
+    additionally_protected: &impl Fn(&Path) -> bool,
+) -> io::Result<DeletedClip> {
+    match fs::remove_file(&clip.path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            // Another task already moved or deleted the MP4 (rename/delete).
+            // Do not touch the inventoried sidecars — they may still belong
+            // to the renamed clip, and the other task owns their cleanup.
+            return Ok(DeletedClip::Skipped);
+        }
+        Err(error) => {
+            // A lease can begin after the pre-delete protection check. If it
+            // now owns the file, keep collecting other clips instead of
+            // surfacing the kernel's sharing-violation text to the user.
+            if additionally_protected(&clip.path) {
+                return Ok(DeletedClip::Skipped);
+            }
+            return Err(error);
+        }
+    }
+    for sidecar in &clip.sidecars {
+        remove_file_if_exists(sidecar)?;
+    }
+    // Session folders disappear with their last clip; remove_dir refuses
+    // non-empty directories, so a leftover sidecar/export keeps it alive.
+    if let Some(parent) = clip.path.parent() {
+        if parent != media_root {
+            if !session_dir_has_managed_clips(parent)? {
+                remove_file_if_exists(&parent.join(SESSION_META_FILE))?;
+                let _ = fs::remove_dir(parent);
+            }
+        }
+    }
+    Ok(DeletedClip::Removed)
+}
+
+fn session_dir_has_managed_clips(dir: &Path) -> io::Result<bool> {
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        if (is_mp4(&path) || is_recording_mp4(&path)) && is_managed_clip(&path) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn sidecar_path(path: &Path) -> PathBuf {
@@ -952,6 +996,53 @@ mod tests {
         assert!(!old.exists());
         assert!(new.exists());
         assert!(new.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn delete_inventoried_clip_skips_sidecars_when_mp4_already_gone() {
+        let dir = TestDir::new("clipline-storage", "gc-rename-race");
+        let old = write_owned(&dir, "old.mp4", 40);
+        let old_meta = dir.path().join("old.clipline.json");
+        let old_markers = dir.write("old.markers.json", 3);
+        let clip = ClipFile {
+            path: old.clone(),
+            sidecars: vec![old_meta.clone(), old_markers.clone()],
+            mp4_bytes: 40,
+            sidecar_bytes: 3,
+            modified: UNIX_EPOCH,
+            recording: false,
+        };
+
+        // Concurrent rename already moved the MP4; inventoried sidecar paths
+        // must be left alone so the renamer can finish moving them.
+        std::fs::rename(&old, dir.path().join("renamed.mp4")).unwrap();
+
+        let outcome = delete_inventoried_clip(&clip, dir.path(), &|_| false).unwrap();
+
+        assert_eq!(outcome, DeletedClip::Skipped);
+        assert!(old_meta.exists());
+        assert!(old_markers.exists());
+    }
+
+    #[test]
+    fn enforce_quota_removes_session_metadata_with_emptied_folder() {
+        let dir = TestDir::new("clipline-storage", "session-meta-gc");
+        let old = dir.write("2026-06-11 09-00/old.mp4", 30);
+        let _ = dir.write("2026-06-11 09-00/old.clipline.json", 0);
+        let session_meta = dir.write("2026-06-11 09-00/clipline-session.json", 12);
+        tick_mtime();
+        let keep = write_owned(&dir, "keep.mp4", 10);
+
+        let report = enforce_quota(dir.path(), Some(20), None).unwrap();
+
+        assert_eq!(report.deleted_clips, 1);
+        assert!(!old.exists());
+        assert!(!session_meta.exists());
+        assert!(
+            !old.parent().unwrap().exists(),
+            "emptied session folder must disappear with its session metadata"
+        );
+        assert!(keep.exists());
     }
 
     #[test]
