@@ -582,6 +582,9 @@ const PlayerCore = (() => {
     return { start, end: start + span };
   };
 
+  const trimPlaybackStopTime = (trimMode, paused, currentTime, trimEnd) =>
+    trimMode && !paused && Number.isFinite(currentTime) && currentTime >= trimEnd ? trimEnd : null;
+
   const trimDrag = (kind, time, start, end, duration) => {
     if (kind === "in") {
       return resolveTrim(Math.min(time, end - MIN_TRIM_GAP_S), end, duration);
@@ -2135,6 +2138,7 @@ const PlayerCore = (() => {
     editPoints,
     resolveTrim,
     quickTrimRange,
+    trimPlaybackStopTime,
     trimDrag,
     slideTrim,
     trimSummary,

@@ -1862,6 +1862,34 @@ fn quick_trim_range_centers_on_playhead_and_clamps_to_clip() {
 }
 
 #[test]
+fn trim_playback_stops_at_the_out_point_without_constraining_scrubbing() {
+    let mut ctx = player_core_context();
+
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.trimPlaybackStopTime(true, false, 8, 8)"
+        ),
+        "8"
+    );
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.trimPlaybackStopTime(true, false, 8.2, 8)"
+        ),
+        "8"
+    );
+    for expression in [
+        "PlayerCore.trimPlaybackStopTime(true, false, 7.9, 8)",
+        "PlayerCore.trimPlaybackStopTime(false, false, 8.2, 8)",
+        "PlayerCore.trimPlaybackStopTime(true, true, 8.2, 8)",
+        "PlayerCore.trimPlaybackStopTime(true, false, NaN, 8)",
+    ] {
+        assert_eq!(eval(&mut ctx, expression), "null");
+    }
+}
+
+#[test]
 fn zoom_view_keeps_the_anchor_time_fixed() {
     let mut ctx = player_core_context();
     // Zoom in to half span, anchored mid-window: the center time stays put.
