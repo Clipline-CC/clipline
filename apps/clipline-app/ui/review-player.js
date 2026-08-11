@@ -900,6 +900,24 @@ function stopAtTrimEnd(current) {
   return true;
 }
 
+var trimBoundaryFrameCallback = 0;
+
+function clearTrimBoundaryCheck() {
+  if (!trimBoundaryFrameCallback) return;
+  video.cancelVideoFrameCallback(trimBoundaryFrameCallback);
+  trimBoundaryFrameCallback = 0;
+}
+
+function scheduleTrimBoundaryCheck() {
+  clearTrimBoundaryCheck();
+  if (!simpleTrimMode || video.paused || video.ended
+      || typeof video.requestVideoFrameCallback !== "function") return;
+  trimBoundaryFrameCallback = video.requestVideoFrameCallback((_now, metadata) => {
+    trimBoundaryFrameCallback = 0;
+    if (!stopAtTrimEnd(metadata.mediaTime)) scheduleTrimBoundaryCheck();
+  });
+}
+
 function legacyTimelineEnabled() {
   return !!(currentSettings && currentSettings.legacy_timeline_editor);
 }
@@ -934,6 +952,7 @@ function applyTimelineEditorPreference() {
 function setSimpleTrimMode(active) {
   if (legacyTimelineEnabled()) {
     simpleTrimMode = false;
+    scheduleTrimBoundaryCheck();
     applyTimelineEditorPreference();
     return;
   }
@@ -949,6 +968,7 @@ function setSimpleTrimMode(active) {
   } else if (currentClip) {
     zoomFit();
   }
+  scheduleTrimBoundaryCheck();
   applyTimelineEditorPreference();
 }
 

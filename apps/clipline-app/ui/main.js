@@ -375,6 +375,7 @@ $("settings-save").addEventListener("click", async () => {
 video.addEventListener("click", togglePlay);
 video.addEventListener("play", () => {
   const current = reviewPlayheadTime();
+  scheduleTrimBoundaryCheck();
   syncPlayState();
   syncGameEventRail(current);
   syncGamePlayRail(current);
@@ -384,6 +385,7 @@ video.addEventListener("play", () => {
   scheduleOverlayIdleCheck();
 });
 video.addEventListener("pause", () => {
+  clearTrimBoundaryCheck();
   syncReviewAudioSidecars();
   refreshReviewAudioDriftTimer();
   syncPlayState();
