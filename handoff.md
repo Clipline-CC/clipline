@@ -4,6 +4,22 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-11): Nightly 0.1.52
+
+Plan: `docs/superpowers/plans/2026-08-11-nightly-0.1.52.md`.
+
+Nightly 0.1.52 publishes the merged storage-full fix (**#152**), League game-type recording
+controls (**#153**), League review visuals (**#157**), hardware encoder validation (**#158**),
+and trim playback boundary fix (**#159**) on top of Nightly 0.1.51.
+
+The live Microsoft Fixed Version selector advanced to **151.0.4129.78** for x64. Its exact
+official CAB URL, byte size, and SHA-256 are pinned in `webview2-fixed-runtime.json`; both
+standalone Tauri paths now name the same runtime. The review is current through 2026-09-10.
+
+The release commit advances only Clipline/Tauri version metadata, WebView2 release-input metadata
+and paths, this handoff, and the unticked release plan from CI-green merge `993681bc`. Publication
+and public-asset verification are recorded after the Nightly Release action finishes.
+
 ## Checkpoint (2026-08-10): MFT hardware encoder validation
 
 Plan: `docs/superpowers/plans/2026-08-10-mft-hardware-encoder-validation.md`.
