@@ -4,6 +4,47 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-10): MFT hardware encoder validation
+
+Plan: `docs/superpowers/plans/2026-08-10-mft-hardware-encoder-validation.md`.
+
+**A registered hardware MFT is not a working one.** On Intel Alder Lake-N (N97 / UHD Graphics,
+driver 32.0.101.7082) the vendor H.264 encoder MFT enumerates, opens, and accepts its first
+frame — then fails frame 1 with `E_UNEXPECTED` (`0x8000FFFF`). `mft_probe::enumerate()` reported
+it from registration alone, `merit()` ranks MFT above FFmpeg for the same backend+codec, and
+`select_encoder` only falls back on *open* failure, so recording died with
+`recording: encoder failed: Catastrophic failure (0x8000FFFF)` on a machine that had four
+working encoders. The same silicon encodes H.264 fine through oneVPL (`h264_qsv`): this is the
+Media Foundation encoder specifically, not Quick Sync as such.
+
+Hardware backends now prove themselves before being advertised, the discipline the FFmpeg probe
+already applied and documented. `mft_probe::enumerate()` filters `enumerate_registered()` through
+`probe::retain_encodable_hardware` using `mft::hardware_backend_can_encode`: a hardware D3D11
+device, 640x360 (the FFmpeg probe's size — AMF rejects tiny resolutions), `HARDWARE_PROBE_FRAMES`
+= 8 frames, a drain, and at least one packet. **One frame is not enough** — an async MFT banks the
+first `ProcessInput` against its NeedInput credit and returns `Ok` without encoding, so a
+single-frame probe passes on a broken encoder. Every failure path reports "unusable" rather than
+an error; probing must never fail startup. Software tiers are exempt (`MfSoftware` is the inbox
+last resort and driver-independent), mirroring `requires_test_encode` exempting SvtAv1.
+
+The filtering logic (`EncoderBackend::is_hardware`, `retain_encodable_hardware`) lives in the
+neutral `probe.rs` and is unit-tested with a stub validator on both CI OSes;
+`enumerate_with_validator` is the injection seam. Two device tests built encoders with
+`encoder_backend: None`, which takes the first *registered* MFT — both were already failing on
+this hardware before the change (verified by stashing it) and now gate on a validated backend and
+encode with it explicitly: `mft.rs::encodes_synthetic_frames_to_keyframed_avcc` and
+`wgc.rs::real_engines_on_one_clock_produce_a_synced_timeline`.
+
+Verified end to end: `encoder_selected` moved from `api=Mft backend=QuickSync` to
+`api=Ffmpeg backend=QuickSync` and recording succeeds. Full workspace suite green
+(clipline-capture 250/250) and fresh-cache warning-denied Clippy clean.
+
+**Two gaps this change deliberately leaves open.** `select_encoder` still only downgrades on open
+failure, so an encoder that dies after opening aborts the recording instead of falling through —
+worth fixing now that we know registered MFTs fail late. And `available_encoder_options` dedupes
+by `(backend, codec)` while ignoring `api` (`service.rs`), so a working FFmpeg-tier encoder
+collapses into the same Settings entry as its MFT twin and cannot be chosen independently.
+
 ## Checkpoint (2026-08-10): League game-type recording gate
 
 Plan: `docs/superpowers/plans/2026-08-10-league-game-type-recording-gate.md`.

@@ -222,6 +222,73 @@ fn h264_activate(
     }
 }
 
+/// Probe encode size. 640x360 rather than a tiny placeholder, matching the
+/// FFmpeg probe and for the same reason: AMF rejects very small resolutions,
+/// which would wrongly condemn a working encoder.
+const HARDWARE_PROBE_WIDTH: u32 = 640;
+const HARDWARE_PROBE_HEIGHT: u32 = 360;
+/// Frames pushed through a probe encode.
+///
+/// One is not enough: an async MFT banks the first `ProcessInput` against its
+/// NeedInput credit and returns `Ok` without touching the encoder, so Intel's
+/// broken MFT on Alder Lake-N accepts frame 0 and only fails on frame 1. A
+/// short run past that, then a drain, is what actually exercises the pump.
+const HARDWARE_PROBE_FRAMES: u32 = 8;
+
+/// Confirm a hardware H.264 MFT can actually encode on this machine.
+///
+/// Neither registration nor a successful open is proof. Intel's H.264 MFT on
+/// Alder Lake-N enumerates, opens and accepts a frame, then fails with
+/// `E_UNEXPECTED` once the pump asks it to do real work. By then the recorder
+/// has committed, so the session dies mid-flight.
+///
+/// Success means the encoder survived [`HARDWARE_PROBE_FRAMES`] frames, drained
+/// cleanly, and produced at least one packet — a silent encoder that never
+/// emits anything is no more usable than one that errors.
+///
+/// Every failure path — no D3D device, no MFT for this backend, a failed encode
+/// or drain — reports "unusable" rather than an error: probing must never fail
+/// startup. All COM objects are released when this returns.
+pub(crate) fn hardware_backend_can_encode(backend: EncoderBackend) -> bool {
+    let Ok((device, _context)) = crate::windows::d3d11::create_device() else {
+        return false;
+    };
+    let cfg = MftConfig {
+        width: HARDWARE_PROBE_WIDTH,
+        height: HARDWARE_PROBE_HEIGHT,
+        fps: 30,
+        bitrate_bps: 2_000_000,
+        encoder_backend: Some(backend),
+    };
+    let Ok(mut encoder) =
+        MftH264Encoder::new(&device, HARDWARE_PROBE_WIDTH, HARDWARE_PROBE_HEIGHT, cfg)
+    else {
+        return false;
+    };
+    let mut packets = 0usize;
+    for frame_index in 0..HARDWARE_PROBE_FRAMES {
+        let Ok(texture) = crate::windows::d3d11::create_bgra_texture(
+            &device,
+            HARDWARE_PROBE_WIDTH,
+            HARDWARE_PROBE_HEIGHT,
+        ) else {
+            return false;
+        };
+        let frame = Frame {
+            pts_s: f64::from(frame_index) / 30.0,
+            data: FrameData::Gpu(texture),
+        };
+        match encoder.encode(&frame) {
+            Ok(produced) => packets += produced.len(),
+            Err(_) => return false,
+        }
+    }
+    match encoder.finish() {
+        Ok(produced) => packets + produced.len() > 0,
+        Err(_) => false,
+    }
+}
+
 impl MftH264Encoder {
     /// `in_w`/`in_h` = capture frame size; `cfg` = encode parameters. With
     /// `cfg.encoder_backend = None` the first enumerated hardware H.264 MFT
@@ -1319,27 +1386,38 @@ mod tests {
 
     /// Real hardware encode (AMF on the dev machine). CI-skipped: runners
     /// have no hardware encoder and MF behaves erratically there.
+    ///
+    /// Also skipped when probing finds no *working* hardware MFT. A machine can
+    /// register one that opens and then fails its first frame (Intel Alder
+    /// Lake-N); excluding those is the probe's job, and this test asserts what
+    /// a functioning hardware encoder produces. It encodes with the advertised
+    /// backend explicitly rather than letting `None` pick the first registered
+    /// MFT, which would be the broken one on exactly those machines.
     #[test]
     fn encodes_synthetic_frames_to_keyframed_avcc() {
         if std::env::var_os("CI").is_some() {
             eprintln!("SKIP: hardware MFT test");
             return;
         }
+        let advertised = mft_probe::enumerate().ok().and_then(|caps| {
+            caps.into_iter()
+                .find(|cap| cap.backend.is_hardware())
+                .map(|cap| cap.backend)
+        });
+        let Some(backend) = advertised else {
+            eprintln!("SKIP: no working hardware H.264 MFT on this machine");
+            return;
+        };
         let (device, _ctx) = crate::windows::d3d11::create_device().expect("device");
         let cfg = MftConfig {
             width: 640,
             height: 360,
             fps: 30,
             bitrate_bps: 2_000_000,
-            encoder_backend: None,
+            encoder_backend: Some(backend),
         };
-        let mut enc = match MftH264Encoder::new(&device, 640, 360, cfg) {
-            Ok(e) => e,
-            Err(e) => {
-                eprintln!("SKIP: no hardware H.264 MFT: {e}");
-                return;
-            }
-        };
+        let mut enc =
+            MftH264Encoder::new(&device, 640, 360, cfg).expect("validated hardware MFT opens");
         let mut packets = Vec::new();
         for i in 0..30 {
             let tex = crate::windows::d3d11::create_bgra_texture(&device, 640, 360).unwrap();

@@ -14,7 +14,9 @@ use windows::Win32::Media::MediaFoundation::{
 };
 use windows::Win32::System::Com::CoTaskMemFree;
 
-use crate::probe::{Codec, EncoderApi, EncoderBackend, EncoderCapability};
+use crate::probe::{
+    retain_encodable_hardware, Codec, EncoderApi, EncoderBackend, EncoderCapability,
+};
 
 /// PCI vendor id (as MFT_ENUM_HARDWARE_VENDOR_ID reports it) → backend.
 pub fn backend_for_vendor(vendor: &str) -> Option<EncoderBackend> {
@@ -92,9 +94,32 @@ pub(crate) fn is_microsoft_software_h264(activate: &IMFActivate) -> bool {
         .is_ok_and(|clsid| clsid == CMSH264EncoderMFT)
 }
 
-/// MF-backed implementation of the ddoc §4 probe — H.264 only, since that
-/// is all the native MFT wrappers implement.
+/// MF-backed implementation of the ddoc §4 probe — H.264 only, since that is
+/// all the native MFT wrappers implement.
+///
+/// Hardware backends are confirmed with a real probe encode before being
+/// reported: a registered vendor MFT can open cleanly, accept a frame, and
+/// still fail once the pump does real work (`mft::hardware_backend_can_encode`).
+/// Use [`enumerate_registered`] for the raw, unvalidated view.
 pub fn enumerate() -> windows::core::Result<Vec<EncoderCapability>> {
+    enumerate_with_validator(crate::windows::mft::hardware_backend_can_encode)
+}
+
+/// [`enumerate`] with the hardware check injected, so tests can decide the
+/// verdict instead of depending on whatever silicon they run on.
+pub fn enumerate_with_validator(
+    can_encode: impl FnMut(EncoderBackend) -> bool,
+) -> windows::core::Result<Vec<EncoderCapability>> {
+    Ok(retain_encodable_hardware(
+        enumerate_registered()?,
+        can_encode,
+    ))
+}
+
+/// Every H.264 encoder MFT this machine *registers*, with no proof any of them
+/// can encode. Callers that act on the result want [`enumerate`]; this exists
+/// for diagnostics and for the validation layer above it.
+pub fn enumerate_registered() -> windows::core::Result<Vec<EncoderCapability>> {
     ensure_mf_started()?;
     let mut backends: Vec<EncoderBackend> = Vec::new();
     for activate in enum_activates(
@@ -153,6 +178,53 @@ mod tests {
             assert!(!c.codecs.is_empty(), "empty-codec entries are filtered");
         }
         eprintln!("encoders found: {caps:?}");
+    }
+
+    /// The invariant this module exists to uphold: anything we advertise, the
+    /// recorder will commit to. Intel's Alder Lake-N H.264 MFT registers and
+    /// opens but fails its first frame, so registration alone must never reach
+    /// this list. Trivially true on machines with no hardware encoder.
+    #[test]
+    fn advertised_hardware_encoders_can_actually_encode() {
+        let caps = match enumerate() {
+            Ok(caps) => caps,
+            Err(e) => {
+                eprintln!("SKIP: Media Foundation unavailable: {e}");
+                return;
+            }
+        };
+        for cap in caps.iter().filter(|cap| cap.backend.is_hardware()) {
+            assert!(
+                crate::windows::mft::hardware_backend_can_encode(cap.backend),
+                "{:?} is advertised but cannot encode a frame",
+                cap.backend
+            );
+        }
+    }
+
+    /// Validation is the only difference between the two entry points, so a
+    /// rejecting validator must leave the software tier and nothing else.
+    #[test]
+    fn validation_drops_hardware_but_keeps_software() {
+        let registered = match enumerate_registered() {
+            Ok(caps) => caps,
+            Err(e) => {
+                eprintln!("SKIP: Media Foundation unavailable: {e}");
+                return;
+            }
+        };
+        let validated =
+            enumerate_with_validator(|_| false).expect("enumeration already succeeded above");
+        assert!(
+            validated.iter().all(|cap| !cap.backend.is_hardware()),
+            "a rejecting validator left hardware advertised: {validated:?}"
+        );
+        let software_registered = registered.iter().filter(|c| !c.backend.is_hardware()).count();
+        assert_eq!(
+            validated.len(),
+            software_registered,
+            "software tiers must survive validation untouched"
+        );
     }
 
     #[test]
