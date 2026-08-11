@@ -54,6 +54,7 @@ var {
   DEFAULT_FINE_STEP_S,
   resolveTrim,
   quickTrimRange,
+  trimPlaybackStopTime,
   trimDrag,
   slideTrim,
   trimSummary,

@@ -2450,6 +2450,22 @@ fn game_event_rail_does_not_run_on_every_animation_frame() {
 }
 
 #[test]
+fn trim_mode_playback_stops_at_the_out_point() {
+    let js = main_js();
+    let stop = js_function_body(&js, "stopAtTrimEnd");
+
+    assert!(
+        js.contains("if (stopAtTrimEnd(current)) return;")
+            && stop.contains(
+                "trimPlaybackStopTime(simpleTrimMode, video.paused, current, trimEnd)",
+            )
+            && stop.contains("video.pause();")
+            && stop.contains("seekTo(stopTime,"),
+        "the shared playback tick should pause and settle exactly on the trim out-point"
+    );
+}
+
+#[test]
 fn rail_shows_save_hotkey() {
     let html = index_html();
     let js = main_js();

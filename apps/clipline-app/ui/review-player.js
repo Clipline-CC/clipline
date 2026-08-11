@@ -892,6 +892,14 @@ function setTrim(start, end) {
   paintTimeline();
 }
 
+function stopAtTrimEnd(current) {
+  const stopTime = trimPlaybackStopTime(simpleTrimMode, video.paused, current, trimEnd);
+  if (stopTime === null) return false;
+  video.pause();
+  seekTo(stopTime, { keepGameEventSelection: true, keepGamePlaySelection: true });
+  return true;
+}
+
 function legacyTimelineEnabled() {
   return !!(currentSettings && currentSettings.legacy_timeline_editor);
 }

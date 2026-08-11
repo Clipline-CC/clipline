@@ -393,6 +393,7 @@ video.addEventListener("pause", () => {
 });
 video.addEventListener("timeupdate", () => {
   const current = reviewPlayheadTime();
+  if (stopAtTrimEnd(current)) return;
   maybeFollow(current);
   paintTimeline();
   syncGameEventRail(current);
