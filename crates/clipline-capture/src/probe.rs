@@ -31,6 +31,52 @@ pub enum EncoderBackend {
     MfSoftware,
 }
 
+impl EncoderBackend {
+    /// True for engines that live on the GPU, whose availability depends on
+    /// silicon and driver rather than on our own code shipping. Only these
+    /// need to prove themselves with a test encode; the software tiers
+    /// (`SvtAv1`, `MfSoftware`) are self-contained.
+    pub fn is_hardware(self) -> bool {
+        match self {
+            EncoderBackend::Nvenc | EncoderBackend::Amf | EncoderBackend::QuickSync => true,
+            EncoderBackend::SvtAv1 | EncoderBackend::MfSoftware => false,
+        }
+    }
+}
+
+/// Drop hardware capabilities that cannot actually encode on this machine.
+///
+/// Being enumerable is not proof of being usable: Intel's H.264 MFT on
+/// Alder Lake-N registers *and opens*, then fails the first frame with
+/// `E_UNEXPECTED`. Advertising it makes the recorder commit to an encoder that
+/// dies mid-session, so each hardware backend is confirmed by an actual encode
+/// before it is offered — the same rule the FFmpeg probe already applies.
+///
+/// Software tiers are never consulted: `MfSoftware` is the inbox last resort
+/// and does not depend on a GPU driver, so validating it could leave a machine
+/// with no MFT tier at all.
+pub fn retain_encodable_hardware(
+    caps: Vec<EncoderCapability>,
+    mut can_encode: impl FnMut(EncoderBackend) -> bool,
+) -> Vec<EncoderCapability> {
+    let mut verdicts: Vec<(EncoderBackend, bool)> = Vec::new();
+    caps.into_iter()
+        .filter(|cap| {
+            if !cap.backend.is_hardware() {
+                return true;
+            }
+            // Probing spawns a real encode, so ask at most once per backend
+            // even when several capabilities share it.
+            if let Some((_, ok)) = verdicts.iter().find(|(b, _)| *b == cap.backend) {
+                return *ok;
+            }
+            let ok = can_encode(cap.backend);
+            verdicts.push((cap.backend, ok));
+            ok
+        })
+        .collect()
+}
+
 /// Default codec preference order: H.264 first for broad playback
 /// compatibility, then HEVC/AV1 for explicit local-efficiency use cases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -144,6 +190,78 @@ mod tests {
             backend,
             codec,
         }
+    }
+
+    #[test]
+    fn only_gpu_backends_count_as_hardware() {
+        assert!(EncoderBackend::Nvenc.is_hardware());
+        assert!(EncoderBackend::Amf.is_hardware());
+        assert!(EncoderBackend::QuickSync.is_hardware());
+        assert!(!EncoderBackend::SvtAv1.is_hardware());
+        assert!(!EncoderBackend::MfSoftware.is_hardware());
+    }
+
+    #[test]
+    fn unencodable_hardware_is_dropped() {
+        let caps = vec![
+            cap(EncoderApi::Mft, EncoderBackend::QuickSync, &[Codec::H264]),
+            cap(EncoderApi::Mft, EncoderBackend::MfSoftware, &[Codec::H264]),
+        ];
+        let kept = retain_encodable_hardware(caps, |_| false);
+        assert_eq!(kept.len(), 1, "only the software tier survives");
+        assert_eq!(kept[0].backend, EncoderBackend::MfSoftware);
+    }
+
+    #[test]
+    fn encodable_hardware_is_kept_in_order() {
+        let caps = vec![
+            cap(EncoderApi::Mft, EncoderBackend::QuickSync, &[Codec::H264]),
+            cap(EncoderApi::Mft, EncoderBackend::MfSoftware, &[Codec::H264]),
+        ];
+        let kept = retain_encodable_hardware(caps, |_| true);
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[0].backend, EncoderBackend::QuickSync);
+        assert_eq!(kept[1].backend, EncoderBackend::MfSoftware);
+    }
+
+    /// A test encode is expensive, and software tiers must never trigger one.
+    #[test]
+    fn software_tiers_are_never_probed() {
+        let caps = vec![
+            cap(EncoderApi::Mft, EncoderBackend::MfSoftware, &[Codec::H264]),
+            cap(EncoderApi::Ffmpeg, EncoderBackend::SvtAv1, &[Codec::Av1]),
+        ];
+        let mut asked = Vec::new();
+        let kept = retain_encodable_hardware(caps, |backend| {
+            asked.push(backend);
+            false
+        });
+        assert!(asked.is_empty(), "validator consulted for {asked:?}");
+        assert_eq!(kept.len(), 2, "software tiers pass through untouched");
+    }
+
+    /// Several capabilities can share one backend; each probe is a real
+    /// encode, so the verdict is reused rather than re-measured.
+    #[test]
+    fn each_hardware_backend_is_probed_once() {
+        let caps = vec![
+            cap(EncoderApi::Mft, EncoderBackend::Nvenc, &[Codec::H264]),
+            cap(EncoderApi::Ffmpeg, EncoderBackend::Nvenc, &[Codec::Hevc]),
+            cap(EncoderApi::Ffmpeg, EncoderBackend::Nvenc, &[Codec::Av1]),
+        ];
+        let mut calls = 0;
+        let kept = retain_encodable_hardware(caps, |_| {
+            calls += 1;
+            true
+        });
+        assert_eq!(calls, 1, "one probe for three Nvenc capabilities");
+        assert_eq!(kept.len(), 3);
+    }
+
+    #[test]
+    fn empty_capabilities_stay_empty() {
+        let kept = retain_encodable_hardware(Vec::new(), |_| panic!("must not probe"));
+        assert!(kept.is_empty());
     }
 
     #[test]

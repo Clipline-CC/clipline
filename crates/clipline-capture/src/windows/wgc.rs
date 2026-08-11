@@ -771,12 +771,27 @@ mod tests {
                 return;
             }
         };
+        // Encode with a backend probing has proven, not with `None`, which
+        // takes the first *registered* hardware MFT. Some machines register one
+        // that opens and then fails mid-encode (Intel Alder Lake-N), which would
+        // fail this test for a reason it does not exist to check.
+        let advertised = crate::windows::mft_probe::enumerate()
+            .ok()
+            .and_then(|caps| {
+                caps.into_iter()
+                    .find(|cap| cap.backend.is_hardware())
+                    .map(|cap| cap.backend)
+            });
+        let Some(encoder_backend) = advertised else {
+            eprintln!("SKIP: no working hardware H.264 MFT on this machine");
+            return;
+        };
         let cfg = crate::windows::MftConfig {
             width: 640,
             height: 360,
             fps: 60,
             bitrate_bps: 2_000_000,
-            encoder_backend: None,
+            encoder_backend: Some(encoder_backend),
         };
         // Pull one frame to learn the capture size, then hand the engine on.
         let mut cap = cap;
