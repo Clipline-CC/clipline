@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
+use std::time::Instant;
 
 use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
@@ -37,6 +38,16 @@ pub(crate) enum HookAction {
     Bookmark,
 }
 
+/// A matched hotkey press, with the moment the hook saw the key go down.
+/// The stamp is taken inside the hook callback rather than by the dispatch
+/// thread, so a descheduled or busy dispatcher cannot shift a time-sensitive
+/// action — a bookmark — later than the press that asked for it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct HookTrigger {
+    pub(crate) action: HookAction,
+    pub(crate) pressed_at: Instant,
+}
+
 /// Every configured binding set, by action. A struct rather than positional
 /// slices so adding an action stays a one-line change at each call site.
 #[derive(Clone, Copy, Debug, Default)]
@@ -63,7 +74,7 @@ struct HookBinding {
 struct HookState {
     bindings: Mutex<Vec<HookBinding>>,
     down_keys: Mutex<BTreeSet<u32>>,
-    trigger_tx: Sender<HookAction>,
+    trigger_tx: Sender<HookTrigger>,
     keyboard_hook: Option<KeyboardHookThread>,
     mouse_hook: Mutex<Option<MouseHookThread>>,
 }
@@ -100,6 +111,9 @@ impl HookState {
     }
 
     fn on_key_down(&self, vk_code: u32, ctrl: bool, alt: bool, shift: bool) -> bool {
+        // Before any lock: contention here, and the dispatch thread's own
+        // scheduling, must not move where a bookmark lands.
+        let pressed_at = Instant::now();
         let mut down_keys = match self.down_keys.lock() {
             Ok(keys) => keys,
             Err(_) => return false,
@@ -118,7 +132,7 @@ impl HookState {
             .find(|binding| binding.hotkey.matches(vk_code, ctrl, alt, shift))
             .map(|binding| binding.action)
         {
-            let _ = self.trigger_tx.send(action);
+            let _ = self.trigger_tx.send(HookTrigger { action, pressed_at });
             return true;
         }
         false
@@ -202,7 +216,7 @@ impl KeyboardHookThread {
 
 pub fn install_hotkey_hook<F>(hotkeys: HookHotkeys<'_>, on_trigger: F) -> Result<(), String>
 where
-    F: Fn(HookAction) + Send + Sync + 'static,
+    F: Fn(HookTrigger) + Send + Sync + 'static,
 {
     if let Some(state) = HOTKEY_HOOK.get() {
         return state.set_hotkeys(hotkeys);
@@ -213,8 +227,8 @@ where
     thread::Builder::new()
         .name("clipline-hotkey-dispatch".into())
         .spawn(move || {
-            while let Ok(action) = trigger_rx.recv() {
-                on_trigger(action);
+            while let Ok(trigger) = trigger_rx.recv() {
+                on_trigger(trigger);
             }
         })
         .map_err(|e| format!("spawn hotkey dispatcher: {e}"))?;
@@ -558,6 +572,11 @@ mod tests {
         }
     }
 
+    /// Which action fired; the press stamp rides along but is not comparable.
+    fn recv_action(rx: &Receiver<HookTrigger>) -> Result<HookAction, mpsc::TryRecvError> {
+        rx.try_recv().map(|trigger| trigger.action)
+    }
+
     #[test]
     fn parses_function_key_hotkeys_for_hook_matching() {
         let hotkey = parse_hook_hotkey("Ctrl+Alt+F9").unwrap();
@@ -630,10 +649,10 @@ mod tests {
         };
 
         assert!(state.on_key_down(VK_F1_CODE + 9, false, true, false));
-        assert_eq!(trigger_rx.try_recv(), Ok(HookAction::SaveReplay));
+        assert_eq!(recv_action(&trigger_rx), Ok(HookAction::SaveReplay));
 
         assert!(state.on_key_down(VK_XBUTTON2_CODE, true, false, false));
-        assert_eq!(trigger_rx.try_recv(), Ok(HookAction::SaveReplay));
+        assert_eq!(recv_action(&trigger_rx), Ok(HookAction::SaveReplay));
 
         assert!(!state.on_key_down(VK_F1_CODE + 8, false, true, false));
         assert!(trigger_rx.try_recv().is_err());
@@ -658,15 +677,15 @@ mod tests {
         };
 
         assert!(state.on_key_down(VK_F1_CODE + 9, false, true, false));
-        assert_eq!(trigger_rx.try_recv(), Ok(HookAction::SaveReplay));
+        assert_eq!(recv_action(&trigger_rx), Ok(HookAction::SaveReplay));
         state.on_key_up(VK_F1_CODE + 9);
 
         assert!(state.on_key_down(VK_XBUTTON2_CODE, true, false, false));
-        assert_eq!(trigger_rx.try_recv(), Ok(HookAction::ToggleRecording));
+        assert_eq!(recv_action(&trigger_rx), Ok(HookAction::ToggleRecording));
         state.on_key_up(VK_XBUTTON2_CODE);
 
         assert!(state.on_key_down(VK_F1_CODE + 8, false, true, false));
-        assert_eq!(trigger_rx.try_recv(), Ok(HookAction::ToggleRecording));
+        assert_eq!(recv_action(&trigger_rx), Ok(HookAction::ToggleRecording));
     }
 
     #[test]
@@ -688,15 +707,15 @@ mod tests {
         };
 
         assert!(state.on_key_down(VK_F1_CODE + 6, false, false, false));
-        assert_eq!(trigger_rx.try_recv(), Ok(HookAction::Bookmark));
+        assert_eq!(recv_action(&trigger_rx), Ok(HookAction::Bookmark));
         state.on_key_up(VK_F1_CODE + 6);
 
         assert!(state.on_key_down(VK_XBUTTON2_CODE, true, false, false));
-        assert_eq!(trigger_rx.try_recv(), Ok(HookAction::Bookmark));
+        assert_eq!(recv_action(&trigger_rx), Ok(HookAction::Bookmark));
         state.on_key_up(VK_XBUTTON2_CODE);
 
         assert!(state.on_key_down(VK_F1_CODE + 5, false, false, false));
-        assert_eq!(trigger_rx.try_recv(), Ok(HookAction::SaveReplay));
+        assert_eq!(recv_action(&trigger_rx), Ok(HookAction::SaveReplay));
     }
 
     #[test]
@@ -766,12 +785,16 @@ mod tests {
 
         thread::sleep(std::time::Duration::from_millis(25));
         assert!(trigger_rx.try_recv().is_err());
+        let released_at = Instant::now();
         drop(guard);
 
         assert!(worker.join().unwrap());
-        assert!(trigger_rx
+        let trigger = trigger_rx
             .recv_timeout(std::time::Duration::from_millis(250))
-            .is_ok());
+            .expect("a delayed trigger still arrives");
+        // The stamp is the press, not whenever the hook got its lock back —
+        // otherwise a bookmark lands wherever the contention ended.
+        assert!(trigger.pressed_at < released_at);
     }
 
     #[test]

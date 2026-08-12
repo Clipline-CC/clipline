@@ -1648,10 +1648,9 @@ impl RuntimeState {
 
     /// Drop a bookmark on the running recorder's timeline. Key repeat is already
     /// filtered by the hook, so rapid deliberate presses each place a marker.
-    fn request_bookmark<R: Runtime>(&self, app: &AppHandle<R>) -> bool {
-        if self.send(Cmd::Bookmark {
-            pressed_at: Instant::now(),
-        }) {
+    /// `pressed_at` comes from the hook rather than from here — see `HookTrigger`.
+    fn request_bookmark<R: Runtime>(&self, app: &AppHandle<R>, pressed_at: Instant) -> bool {
+        if self.send(Cmd::Bookmark { pressed_at }) {
             return true;
         }
         let _ = app.emit(
@@ -1751,11 +1750,13 @@ impl RuntimeState {
         Ok(true)
     }
 
+    /// True only when the recorder actually received `cmd`. A stopped recorder
+    /// thread can outlive the `tx` that fed it, and a caller that reports
+    /// success there promises an outcome — an event, a sound — that never comes.
     fn send(&self, cmd: Cmd) -> bool {
         if let Ok(inner) = self.0.lock() {
             if let Some(tx) = &inner.tx {
-                let _ = tx.send(cmd);
-                return true;
+                return tx.send(cmd).is_ok();
             }
         }
         false
@@ -3571,7 +3572,7 @@ pub fn run() {
                 },
                 {
                 let app = app.handle().clone();
-                move |action| match action {
+                move |trigger| match trigger.action {
                     crate::hotkeys::HookAction::SaveReplay => {
                         app.state::<RuntimeState>().request_save_or_show_quota(&app);
                     }
@@ -3584,7 +3585,8 @@ pub fn run() {
                         }
                     }
                     crate::hotkeys::HookAction::Bookmark => {
-                        app.state::<RuntimeState>().request_bookmark(&app);
+                        app.state::<RuntimeState>()
+                            .request_bookmark(&app, trigger.pressed_at);
                     }
                 }
             },
@@ -4591,6 +4593,21 @@ mod tests {
 
         assert!(state.request_save());
         assert!(matches!(rx.try_recv(), Ok(Cmd::Save)));
+    }
+
+    #[test]
+    fn a_command_is_only_sent_when_the_recorder_is_still_listening() {
+        let (tx, rx) = mpsc::channel();
+        let state = RuntimeState::with_sender(tx, AppSettings::default(), None);
+        let pressed_at = Instant::now();
+
+        assert!(state.send(Cmd::Bookmark { pressed_at }));
+        assert!(matches!(rx.try_recv(), Ok(Cmd::Bookmark { .. })));
+
+        // A recorder thread can exit before its sender is cleared; nothing
+        // downstream of the bookmark can happen, so this must not claim success.
+        drop(rx);
+        assert!(!state.send(Cmd::Bookmark { pressed_at }));
     }
 
     #[test]

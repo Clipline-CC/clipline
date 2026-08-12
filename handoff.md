@@ -32,7 +32,18 @@ Sharp edges worth remembering:
   bookmarks, or a bookmark-only session would write no sidecar at all.
 - `Cmd::Bookmark` carries `pressed_at: Instant`, not "now": the recorder loop drains commands
   between capture steps, so stamping the offset on receipt would smear the marker by a frame or
-  more. It converts against `recording_t0`, the same origin game markers use.
+  more. It converts against `recording_t0`, the same origin game markers use. The stamp is taken
+  in `HookState::on_key_down` (carried through the channel as `HookTrigger`) rather than by the
+  dispatch thread — that thread also runs Save Replay, so it can be seconds behind the press.
+- **The confirmation must not name an offset the user cannot find again.** `BookmarkAdded` carries
+  both `t_s` (recorder-wide, the marker log's origin) and `session_t_s` (re-based on the full
+  session's start, which is what review will show). The UI prints a time only for the second: a
+  replay bookmark has no knowable clip offset until a save window is chosen, so it says just
+  "bookmarked". `Recorder::full_session_start_s()` exposes the same anchor `FullSessionSummary`
+  reports, so the toast and the sidecar agree.
+- `RuntimeState::send` returns whether the recorder *received* the command. It used to discard the
+  `Sender::send` result, so a stopped recorder thread whose `tx` had not been cleared yet reported
+  success and the bookmark path suppressed its own error while no event, sound, or marker followed.
 - **The `F7` default cannot be allowed to steal an existing keybind.** `bookmark_hotkey` is
   `Option<String>` defaulting to `Some("F7")`, and `load_from_object` distinguishes *absent* (file
   predates the feature → apply the default, dropped if it collides with any existing binding) from

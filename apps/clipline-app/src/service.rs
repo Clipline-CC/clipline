@@ -541,9 +541,14 @@ pub enum Event {
         required_bytes: u64,
     },
     /// A user-placed bookmark landed on the recording timeline, `t_s` seconds
-    /// from the start of this recorder run.
+    /// from the start of this recorder run — the marker log's own origin, not
+    /// an offset in any clip. `session_t_s` is that bookmark's position inside
+    /// the full session being written, which is the only offset a user can
+    /// already see; a replay bookmark has none, because where it falls depends
+    /// on a save window that has not been chosen yet.
     BookmarkAdded {
         t_s: f64,
+        session_t_s: Option<f64>,
     },
     /// Saved-media tree changed outside a normal save (auto-delete).
     LibraryChanged,
@@ -1365,7 +1370,12 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                         .saturating_duration_since(recording_t0)
                         .as_secs_f64();
                     marker_log.push_bookmark(t_s);
-                    let _ = events.send(Event::BookmarkAdded { t_s });
+                    // Re-based the way the sidecar will re-base it, so the
+                    // confirmation names the offset review will show.
+                    let session_t_s = rec
+                        .full_session_start_s()
+                        .map(|start_s| (t_s - start_s).max(0.0));
+                    let _ = events.send(Event::BookmarkAdded { t_s, session_t_s });
                 }
                 Ok(Cmd::StartFullSession) => {
                     if full_session.is_none() {

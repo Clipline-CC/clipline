@@ -38,13 +38,17 @@ listen("saved", (e) => {
 });
 
 // The sound is the real confirmation (the app is usually behind a game), so
-// this is just the visible echo for anyone watching the window.
+// this is just the visible echo for anyone watching the window. Only a full
+// session can name a time the user will recognise; the recorder-wide offset a
+// replay bookmark carries is not where it lands in the eventual clip, so that
+// case stays wordless rather than lying about the position.
 listen("bookmark-added", (e) => {
-  const t_s = Number(e.payload && e.payload.t_s);
-  setNotice(
-    Number.isFinite(t_s) ? `bookmarked at ${fmtDur(t_s)}` : "bookmarked",
-    { transient: true },
-  );
+  // Guard the object first: `Number(null)` is 0, which would read as 0:00.
+  const session_t_s = e.payload ? e.payload.session_t_s : null;
+  const at = typeof session_t_s === "number" && Number.isFinite(session_t_s);
+  setNotice(at ? `bookmarked at ${fmtDur(session_t_s)}` : "bookmarked", {
+    transient: true,
+  });
 });
 
 listen("library-changed", () => {
