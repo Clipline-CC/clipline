@@ -1840,6 +1840,19 @@ function updateNotesPreview(notes) {
   return text.length > 220 ? `${text.slice(0, 217)}...` : text;
 }
 
+// Reveal the rail button rather than seizing the window. A modal that opens on
+// its own interrupts whatever the user came here to do, and Clipline runs for
+// days at a time — the button waits until they are ready to deal with it.
+function announceUpdate(update) {
+  if (!update || !update.available) return;
+  pendingUpdate = update;
+  const button = $("rail-update");
+  button.hidden = false;
+  button.title = update.version
+    ? `Update to ${update.version}`
+    : "A new version is ready";
+}
+
 function showUpdateDialog(update) {
   pendingUpdate = update;
   $("update-install").disabled = false;
@@ -1859,6 +1872,10 @@ async function checkForUpdates({ manual = false } = {}) {
     const update = await invoke("check_for_updates");
     if (update.available) {
       setUpdateStatus(`${update.channel_label} ${update.version} available`);
+      // Both callers of this are moments the user is already looking at
+      // Clipline — launching it, or clicking Check for updates — so the modal
+      // is not an interruption. The button outlives dismissing it.
+      announceUpdate(update);
       showUpdateDialog(update);
     } else if (manual) {
       setUpdateStatus(update.status || updateUpToDateStatus(update));

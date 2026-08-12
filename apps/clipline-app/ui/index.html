@@ -61,6 +61,10 @@
           <div id="rail-profile-avatar" class="rail-profile-avatar" aria-hidden="true"></div>
           <div id="rail-profile-name" class="rail-profile-name"></div>
         </button>
+        <button id="rail-update" class="rail-update" type="button" title="A new version is ready" hidden>
+          <svg viewBox="0 0 24 24"><path d="M12 3a1 1 0 0 1 1 1v8.59l3.3-3.3a1 1 0 1 1 1.4 1.42l-5 5a1 1 0 0 1-1.4 0l-5-5a1 1 0 1 1 1.4-1.42l3.3 3.3V4a1 1 0 0 1 1-1zM5 18a1 1 0 0 1 1-1h12a1 1 0 1 1 0 2H6a1 1 0 0 1-1-1z"/></svg>
+          <span class="rail-label">Update</span>
+        </button>
         <button id="rail-settings" title="Settings">
           <svg viewBox="0 0 24 24"><path d="M19.4 13c.04-.33.07-.66.07-1s-.03-.67-.07-1l2.1-1.65a.5.5 0 0 0 .12-.64l-2-3.46a.5.5 0 0 0-.61-.22l-2.48 1a7.6 7.6 0 0 0-1.73-1l-.37-2.63A.5.5 0 0 0 13.93 2h-4a.5.5 0 0 0-.5.43l-.37 2.63c-.62.26-1.2.6-1.73 1l-2.48-1a.5.5 0 0 0-.6.22l-2 3.46a.5.5 0 0 0 .11.64L4.53 11c-.04.33-.07.66-.07 1s.03.67.07 1l-2.1 1.65a.5.5 0 0 0-.12.64l2 3.46c.13.22.39.31.61.22l2.48-1c.53.4 1.1.74 1.73 1l.37 2.63c.04.25.25.43.5.43h4c.25 0 .46-.18.5-.43l.37-2.63a7.6 7.6 0 0 0 1.73-1l2.48 1c.22.09.48 0 .6-.22l2-3.46a.5.5 0 0 0-.11-.64L19.4 13zM11.93 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7z"/></svg>
           <span class="rail-label">Settings</span>
@@ -1216,6 +1220,7 @@
       <strong id="update-dialog-title">Update available</strong>
       <span id="update-dialog-body"></span>
       <span id="update-dialog-notes" class="hint"></span>
+      <span class="hint">Clipline stops recording, installs the update, and restarts. Anything still in the replay buffer is lost.</span>
     </div>
     <div class="confirm-actions">
       <button id="update-install" class="primary">Install Update</button>

@@ -2555,6 +2555,83 @@ fn recording_hotkey_and_rail_control_a_real_full_session() {
 }
 
 #[test]
+fn a_waiting_update_surfaces_on_the_rail_above_settings() {
+    let html = index_html();
+    let js = main_js();
+    let app = app_rs();
+
+    // Placement is the requirement, not merely presence: the button belongs
+    // directly above Settings in the rail.
+    let update_at = html
+        .find("<button id=\"rail-update\"")
+        .expect("rail update button exists");
+    let update_end = html[update_at..]
+        .find("</button>")
+        .map(|offset| update_at + offset)
+        .expect("the update button closes");
+    let next_button = html[update_end..]
+        .find("<button")
+        .map(|offset| update_end + offset)
+        .expect("another rail button follows");
+    assert!(
+        html[next_button..].starts_with("<button id=\"rail-settings\""),
+        "Settings must be the very next button after the update button"
+    );
+
+    // Hidden by default, or an up-to-date build advertises an update.
+    let update_tag_end = html[update_at..]
+        .find('>')
+        .map(|end| update_at + end)
+        .expect("the update button tag is closed");
+    assert!(
+        html[update_at..update_tag_end].contains("hidden"),
+        "the update button must start hidden"
+    );
+
+    // One update modal, reused. A second dialog would fight the first over
+    // `pendingUpdate` and the shared `update-dialog-*` ids.
+    assert_eq!(
+        html.matches("<dialog id=\"update-dialog\"").count(),
+        1,
+        "the rail button must reuse the existing update dialog"
+    );
+
+    assert!(
+        js.contains("listen(\"update-available\"")
+            && js.contains("announceUpdate(e.payload)")
+            && js.contains("showUpdateDialog(pendingUpdate)"),
+        "the rail button must be driven by the update event and open the shared dialog"
+    );
+
+    // The launch and manual checks still open the dialog — the user is present
+    // for both. The background poll can land mid-game, so it only lights the
+    // button, and the button outlives dismissing the dialog either way.
+    assert!(
+        js.contains("function announceUpdate(")
+            && js.contains("button.hidden = false")
+            && js.contains("announceUpdate(update);\n      showUpdateDialog(update);"),
+        "the launch check must light the rail button and still open the dialog"
+    );
+    let listener = js
+        .split("listen(\"update-available\"")
+        .nth(1)
+        .expect("the update-available listener exists");
+    assert!(
+        !listener[..listener.find(");").unwrap_or(0)].contains("showUpdateDialog"),
+        "the background poll must not open a modal over a running game"
+    );
+
+    // A webview-owned poll would stop the moment the window closed to tray,
+    // while the recorder kept running.
+    assert!(
+        app.contains("fn spawn_update_poller")
+            && app.contains("spawn_update_poller(app.handle().clone())")
+            && app.contains("app.emit(\"update-available\""),
+        "the native shell must poll for updates and announce them"
+    );
+}
+
+#[test]
 fn bookmark_hotkey_drops_a_user_placed_timeline_marker() {
     let html = index_html();
     let js = main_js();

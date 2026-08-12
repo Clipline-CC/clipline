@@ -1655,6 +1655,17 @@ label span { white-space: nowrap; }
   fill: currentColor;
 }
 
+/* Hidden until an update exists, so when it appears it should read as
+   something to act on rather than another neutral rail icon. */
+#rail-update {
+  color: var(--accent);
+}
+
+#rail-update:hover {
+  background: rgba(var(--accent-rgb), 0.14);
+  color: var(--accent-hover);
+}
+
 #rail-status {
   color: var(--text);
 }

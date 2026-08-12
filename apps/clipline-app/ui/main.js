@@ -559,6 +559,17 @@ $("storage-quota-recheck").addEventListener("click", async () => {
 $("storage-quota-dialog").addEventListener("click", (event) => {
   if (event.target === $("storage-quota-dialog")) $("storage-quota-dialog").close();
 });
+// The background poller announces the first newer build it finds. This one
+// only lights the rail button: it can land ten minutes into a game, unlike the
+// launch and manual checks, which the user is present for and which do open the
+// dialog. A window that was closed to tray when this fired catches up through
+// the launch check when it reopens.
+listen("update-available", (e) => announceUpdate(e.payload));
+
+$("rail-update").addEventListener("click", () => {
+  if (pendingUpdate) showUpdateDialog(pendingUpdate);
+});
+
 $("rail-profile").addEventListener("click", openRailProfile);
 $("rail-settings").addEventListener("click", () => {
   if (settingsOpen) requestSettingsClose();
