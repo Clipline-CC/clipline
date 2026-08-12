@@ -224,7 +224,11 @@ $("choose-replay-cache-folder").addEventListener("click", chooseReplayCacheFolde
 $("check-updates").addEventListener("click", () => checkForUpdates({ manual: true }));
 $("update-install").addEventListener("click", installPendingUpdate);
 $("update-cancel").addEventListener("click", () => {
-  pendingUpdate = null;
+  // Keep `pendingUpdate`: the rail button reopens this dialog from it, and the
+  // background poller stops after its first find, so clearing it here would
+  // leave a visible button that does nothing until the next launch. Nothing
+  // reads it for the install itself — `install_update` re-resolves the update
+  // server-side — so a stale payload cannot install the wrong build.
   $("update-dialog").close();
 });
 $("elevation-cancel").addEventListener("click", () => {
@@ -559,6 +563,17 @@ $("storage-quota-recheck").addEventListener("click", async () => {
 $("storage-quota-dialog").addEventListener("click", (event) => {
   if (event.target === $("storage-quota-dialog")) $("storage-quota-dialog").close();
 });
+// The background poller announces the first newer build it finds. This one
+// only lights the rail button: it can land ten minutes into a game, unlike the
+// launch and manual checks, which the user is present for and which do open the
+// dialog. A window that was closed to tray when this fired catches up through
+// the launch check when it reopens.
+listen("update-available", (e) => announceUpdate(e.payload));
+
+$("rail-update").addEventListener("click", () => {
+  if (pendingUpdate) showUpdateDialog(pendingUpdate);
+});
+
 $("rail-profile").addEventListener("click", openRailProfile);
 $("rail-settings").addEventListener("click", () => {
   if (settingsOpen) requestSettingsClose();

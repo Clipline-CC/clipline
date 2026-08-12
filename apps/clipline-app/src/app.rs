@@ -2795,6 +2795,61 @@ async fn check_update_for_channel<R: Runtime>(
     }
 }
 
+/// How long after launch the first background update check runs. Long enough
+/// that it does not compete with recorder startup, short enough that someone
+/// who just opened Clipline learns about a waiting build.
+const UPDATE_POLL_FIRST_DELAY: Duration = Duration::from_secs(30);
+
+/// Gap between background update checks. The endpoint is a GitHub release
+/// asset served from their CDN, not the rate-limited REST API, so ~144 checks
+/// a day of a roughly 1 KB JSON costs nothing worth saving.
+const UPDATE_POLL_INTERVAL: Duration = Duration::from_secs(600);
+
+/// Whether a completed check should end the poll. Finding an update is
+/// terminal: the rail button stays until the user acts on it, and someone who
+/// declined the install should not be asked again every ten minutes.
+fn update_poll_is_done(result: &UpdateCheckResult) -> bool {
+    result.available
+}
+
+/// Poll for a newer build in the background and announce the first one found.
+/// The webview cannot own this: the window closes to tray while the recorder
+/// keeps running, and a closed window would stop checking.
+fn spawn_update_poller<R: Runtime>(app: AppHandle<R>) {
+    tauri::async_runtime::spawn(async move {
+        let mut delay = UPDATE_POLL_FIRST_DELAY;
+        loop {
+            tokio::time::sleep(delay).await;
+            delay = UPDATE_POLL_INTERVAL;
+
+            let channel = app.state::<RuntimeState>().settings().update_channel;
+            // A channel with nothing published behind it is not an error worth
+            // reporting every ten minutes.
+            if !channel.enabled() {
+                continue;
+            }
+
+            match update_check_result(&app, channel).await {
+                Ok(result) => {
+                    if update_poll_is_done(&result) {
+                        tracing::info!(
+                            event = "update_available",
+                            version = result.version.as_deref().unwrap_or("unknown")
+                        );
+                        let _ = app.emit("update-available", &result);
+                        return;
+                    }
+                }
+                // Offline, DNS down, GitHub blipping — all expected. Keep the
+                // same interval rather than retrying tighter.
+                Err(error) => {
+                    tracing::debug!(event = "update_check_failed", error = %error);
+                }
+            }
+        }
+    });
+}
+
 fn missing_release_metadata_message(channel: UpdateChannel) -> String {
     format!(
         "No {} release metadata is published yet. Publish a {} release first.",
@@ -2803,15 +2858,14 @@ fn missing_release_metadata_message(channel: UpdateChannel) -> String {
     )
 }
 
-#[tauri::command]
-async fn check_for_updates<R: Runtime>(
-    app: AppHandle<R>,
-    state: tauri::State<'_, RuntimeState>,
+/// One update check, shaped for both the Settings button and the background
+/// poll so the two can never disagree about what "available" means.
+async fn update_check_result<R: Runtime>(
+    app: &AppHandle<R>,
+    channel: UpdateChannel,
 ) -> Result<UpdateCheckResult, String> {
-    let settings = state.settings();
-    let channel = settings.update_channel;
     let current_version = app.package_info().version.to_string();
-    let (update, status) = check_update_for_channel(&app, channel).await?;
+    let (update, status) = check_update_for_channel(app, channel).await?;
 
     Ok(UpdateCheckResult {
         channel,
@@ -2823,9 +2877,18 @@ async fn check_for_updates<R: Runtime>(
             .as_ref()
             .and_then(|update| update.date.map(|date| date.to_string())),
         notes: update.as_ref().and_then(|update| update.body.clone()),
-        endpoint: channel.endpoint(is_standalone_install(&app)),
+        endpoint: channel.endpoint(is_standalone_install(app)),
         status,
     })
+}
+
+#[tauri::command]
+async fn check_for_updates<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<'_, RuntimeState>,
+) -> Result<UpdateCheckResult, String> {
+    let channel = state.settings().update_channel;
+    update_check_result(&app, channel).await
 }
 
 #[tauri::command]
@@ -3598,6 +3661,7 @@ pub fn run() {
             if let Err(e) = crate::library::prune_audio_preview_cache_on_startup() {
                 tracing::warn!(event = "audio_preview_startup_prune_failed", error = %e);
             }
+            spawn_update_poller(app.handle().clone());
             if let Some(local) = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from) {
                 let staging = crate::ffmpeg_install::staging_root(&local);
                 if let Err(e) = crate::ffmpeg_install::sweep_abandoned_staging(&staging) {
