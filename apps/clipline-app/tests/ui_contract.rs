@@ -2526,9 +2526,8 @@ fn recording_hotkey_and_rail_control_a_real_full_session() {
         "recording_hotkey_secondary: recordingKeybinds[1] || null",
         "$(\"set-recording-hotkey\").value = s.recording_hotkey || \"\"",
         "$(\"set-recording-hotkey-2\").value = s.recording_hotkey_secondary || \"\"",
-        "const HOTKEY_FIELD_IDS = [\"set-hotkey\", \"set-hotkey-2\", \"set-recording-hotkey\", \"set-recording-hotkey-2\"]",
         "function hotkeyStatusId(fieldId)",
-        "return fieldId.startsWith(\"set-recording-hotkey\") ? \"recording-hotkey-status\" : \"hotkey-status\";",
+        "if (fieldId.startsWith(\"set-recording-hotkey\")) return \"recording-hotkey-status\";",
         "$(\"rail-status\").addEventListener(\"click\", toggleSessionRecording)",
         "$(\"rail-game\").addEventListener(\"click\", toggleRecording)",
         "invoke(\"set_session_recording\"",
@@ -2552,6 +2551,67 @@ fn recording_hotkey_and_rail_control_a_real_full_session() {
             && service.contains("begin_full_session_recording(")
             && service.contains("finish_full_session_recording("),
         "the recorder loop must attach and finalize the existing full-session sink"
+    );
+}
+
+#[test]
+fn bookmark_hotkey_drops_a_user_placed_timeline_marker() {
+    let html = index_html();
+    let js = main_js();
+    let app = app_rs();
+    let service = service_rs();
+
+    for required in [
+        "id=\"set-bookmark-hotkey\"",
+        "id=\"set-bookmark-hotkey-2\"",
+        "id=\"bookmark-hotkey-status\"",
+        "aria-describedby=\"bookmark-hotkey-status\"",
+        "data-settings-key=\"bookmark_hotkey bookmark_hotkey_secondary\"",
+        "Drop bookmark",
+    ] {
+        assert!(
+            html.contains(required),
+            "bookmark keybind settings need `{required}`"
+        );
+    }
+    for required in [
+        "const bookmarkKeybinds = [\"set-bookmark-hotkey\", \"set-bookmark-hotkey-2\"]",
+        "bookmark_hotkey: bookmarkKeybinds[0] || null",
+        "bookmark_hotkey_secondary: bookmarkKeybinds[1] || null",
+        "$(\"set-bookmark-hotkey\").value = s.bookmark_hotkey || \"\"",
+        "$(\"set-bookmark-hotkey-2\").value = s.bookmark_hotkey_secondary || \"\"",
+        "\"set-bookmark-hotkey\",",
+        "if (fieldId.startsWith(\"set-bookmark-hotkey\")) return \"bookmark-hotkey-status\";",
+        "listen(\"bookmark-added\"",
+    ] {
+        assert!(js.contains(required), "bookmark UI must include `{required}`");
+    }
+    assert!(
+        app.contains("HookAction::Bookmark")
+            && app.contains("fn request_bookmark")
+            && app.contains("Cmd::Bookmark")
+            && app.contains("play_bookmark_added"),
+        "the native shell must route the bookmark hotkey to the recorder and confirm it audibly"
+    );
+    assert!(
+        service.contains("Cmd::Bookmark { pressed_at }")
+            && service.contains("push_bookmark(t_s)")
+            && service.contains("Event::BookmarkAdded"),
+        "the recorder loop must place the bookmark on its own timeline and report it"
+    );
+    // The review timeline must show bookmarks past the game-review filters, or
+    // a clip with no detected game would silently hide them.
+    assert!(
+        js.contains("clip.markers.bookmarks") && js.contains("PlayerCore.withBookmarks("),
+        "the review player must merge sidecar bookmarks into its timeline markers"
+    );
+    assert!(
+        player_core_js().contains("Bookmark: \"bookmark\""),
+        "bookmarks need their own marker category so no game filter can hide them"
+    );
+    assert!(
+        styles_css().contains(".marker-bookmark"),
+        "bookmark pins need their own category color"
     );
 }
 

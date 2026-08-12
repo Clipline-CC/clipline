@@ -436,6 +436,15 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
         Ok(())
     }
 
+    /// Where the in-progress full session starts on the recording timeline,
+    /// once its first segment has landed. The same value
+    /// `FullSessionSummary::start_s` will report, so a live caller can place a
+    /// marker exactly where the finished clip will show it. `None` when no
+    /// session is being written, or before its first segment arrives.
+    pub fn full_session_start_s(&self) -> Option<f64> {
+        self.full_session.as_ref().and_then(|sink| sink.start_s)
+    }
+
     pub fn finish_full_session(&mut self) -> io::Result<Option<FullSessionSummary>> {
         let Some(sink) = self.full_session.take() else {
             return Ok(None);
@@ -2139,6 +2148,27 @@ mod tests {
             (duration - 3.0).abs() < 1e-3,
             "full-session file keeps all GOPs, got {duration}"
         );
+    }
+
+    #[test]
+    fn a_live_full_session_reports_the_start_its_summary_will_report() {
+        let dir = TestDir::new("clipline-pipeline", "full-session-start");
+        let path = dir.path().join("session.mp4");
+        let file = std::fs::File::create(&path).unwrap();
+        let mut rec = Recorder::new(MockCapture::new(90, 30), MockEncoder::new(30, 30), 4 * 1024);
+
+        assert_eq!(rec.full_session_start_s(), None, "nothing recording yet");
+        rec.start_full_session(file).unwrap();
+        assert_eq!(rec.full_session_start_s(), None, "no segment has landed");
+
+        rec.run_to_end().unwrap();
+        let live_start = rec.full_session_start_s().expect("a segment has landed");
+        let summary = rec.finish_full_session().unwrap().expect("session summary");
+
+        // Callers re-base live markers on this, so it has to be the origin the
+        // finished clip's sidecar re-bases on, not merely close to it.
+        assert!((live_start - summary.start_s).abs() < 1e-9);
+        assert_eq!(rec.full_session_start_s(), None, "session is over");
     }
 
     #[test]

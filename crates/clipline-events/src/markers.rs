@@ -10,6 +10,8 @@ use crate::schema::{GameEvent, GameId};
 #[derive(Debug, Default)]
 pub struct MarkerLog {
     events: Vec<GameEvent>, // every entry has recording_offset_s = Some
+    /// User-placed bookmark offsets on the recording timeline, in arrival order.
+    bookmarks: Vec<f64>,
     retained_from_s: Option<f64>,
 }
 
@@ -19,6 +21,14 @@ pub struct ClipMarker {
     pub t_s: f64,
     #[serde(flatten)]
     pub event: GameEvent,
+}
+
+/// One user-placed bookmark inside a saved clip, `t_s` seconds from clip start.
+/// A struct rather than a bare offset so an optional label can be added later
+/// without migrating existing sidecars.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ClipBookmark {
+    pub t_s: f64,
 }
 
 /// One player in a game adapter's match summary roster.
@@ -141,6 +151,10 @@ pub struct ClipMarkers {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plays: Vec<ClipPlay>,
     pub markers: Vec<ClipMarker>,
+    /// User-placed bookmarks, ordered by time. Absent from clips without any,
+    /// and defaulted so sidecars written before bookmarks existed still read.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bookmarks: Vec<ClipBookmark>,
 }
 
 impl MarkerLog {
@@ -163,6 +177,22 @@ impl MarkerLog {
         self.events.push(event);
     }
 
+    /// Record a user-placed bookmark at `offset_s` on the recording timeline.
+    /// Like `push`, a bookmark behind the retained media front is dropped: the
+    /// recorder can no longer put that moment in a clip.
+    pub fn push_bookmark(&mut self, offset_s: f64) {
+        if !offset_s.is_finite() {
+            return;
+        }
+        if self
+            .retained_from_s
+            .is_some_and(|retained_from_s| offset_s < retained_from_s)
+        {
+            return;
+        }
+        self.bookmarks.push(offset_s);
+    }
+
     /// Discard markers that the recorder can no longer include in a future
     /// replay. The caller supplies the actual oldest retained media timestamp,
     /// including keyframe coverage and encoder lag, rather than deriving a
@@ -180,6 +210,8 @@ impl MarkerLog {
                 .recording_offset_s
                 .is_some_and(|offset_s| offset_s >= retained_from_s)
         });
+        self.bookmarks
+            .retain(|offset_s| *offset_s >= retained_from_s);
     }
 
     pub fn len(&self) -> usize {
@@ -190,7 +222,7 @@ impl MarkerLog {
         self.events.is_empty()
     }
 
-    /// Markers within [start, end), re-based to clip time.
+    /// Markers and bookmarks within [start, end), re-based to clip time.
     pub fn clip_markers(&self, start_s: f64, end_s: f64) -> ClipMarkers {
         let markers = self
             .events
@@ -203,6 +235,15 @@ impl MarkerLog {
                 })
             })
             .collect();
+        // Bookmarks arrive in press order, which is already time order; sorting
+        // keeps the sidecar contract explicit for the review timeline.
+        let mut bookmarks = self
+            .bookmarks
+            .iter()
+            .filter(|off| **off >= start_s && **off < end_s)
+            .map(|off| ClipBookmark { t_s: off - start_s })
+            .collect::<Vec<_>>();
+        bookmarks.sort_by(|a, b| a.t_s.total_cmp(&b.t_s));
         ClipMarkers {
             recording_start_s: start_s,
             duration_s: end_s - start_s,
@@ -210,6 +251,7 @@ impl MarkerLog {
             audio_tracks: Vec::new(),
             plays: Vec::new(),
             markers,
+            bookmarks,
         }
     }
 }
@@ -336,6 +378,104 @@ mod tests {
     }
 
     #[test]
+    fn bookmarks_filter_and_rebase_to_clip_start() {
+        let mut log = MarkerLog::new();
+        log.push_bookmark(10.0);
+        log.push_bookmark(70.0);
+        log.push_bookmark(120.0);
+
+        let clip = log.clip_markers(60.0, 120.0);
+
+        assert_eq!(
+            clip.bookmarks,
+            [ClipBookmark { t_s: 10.0 }],
+            "inclusive start, exclusive end, re-based to clip time"
+        );
+    }
+
+    #[test]
+    fn bookmarks_are_ordered_by_time() {
+        let mut log = MarkerLog::new();
+        log.push_bookmark(30.0);
+        log.push_bookmark(10.0);
+        log.push_bookmark(20.0);
+
+        let times: Vec<_> = log
+            .clip_markers(0.0, 60.0)
+            .bookmarks
+            .iter()
+            .map(|bookmark| bookmark.t_s)
+            .collect();
+
+        assert_eq!(times, [10.0, 20.0, 30.0]);
+    }
+
+    #[test]
+    fn non_finite_bookmarks_are_ignored() {
+        let mut log = MarkerLog::new();
+        log.push_bookmark(f64::NAN);
+        log.push_bookmark(f64::INFINITY);
+
+        assert!(log.clip_markers(0.0, 60.0).bookmarks.is_empty());
+    }
+
+    #[test]
+    fn replay_pruning_discards_bookmarks_behind_the_media_front() {
+        let mut log = MarkerLog::new();
+        log.push_bookmark(5.0);
+        log.push_bookmark(12.0);
+
+        log.retain_from_recording_offset(8.0);
+        // A press that arrives late but names a moment already gone stays gone.
+        log.push_bookmark(6.0);
+
+        assert_eq!(
+            log.clip_markers(0.0, 20.0).bookmarks,
+            [ClipBookmark { t_s: 12.0 }]
+        );
+    }
+
+    #[test]
+    fn full_session_log_keeps_bookmarks_older_than_the_replay_window() {
+        let mut log = MarkerLog::new();
+        log.push_bookmark(0.0);
+        log.push_bookmark(600.0);
+
+        assert_eq!(log.clip_markers(0.0, 900.0).bookmarks.len(), 2);
+    }
+
+    #[test]
+    fn sidecar_round_trips_bookmarks_and_omits_them_when_empty() {
+        let mut log = MarkerLog::new();
+        log.push_bookmark(65.0);
+        let clip = log.clip_markers(60.0, 120.0);
+
+        let json = serde_json::to_string_pretty(&clip).unwrap();
+        let back: ClipMarkers = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.bookmarks, [ClipBookmark { t_s: 5.0 }]);
+
+        let empty = MarkerLog::new().clip_markers(0.0, 10.0);
+        let empty_json = serde_json::to_string(&empty).unwrap();
+        assert!(
+            !empty_json.contains("bookmarks"),
+            "clips without bookmarks gain no sidecar field: {empty_json}"
+        );
+    }
+
+    #[test]
+    fn sidecar_written_before_bookmarks_existed_still_reads() {
+        let json = r#"{
+          "recording_start_s": 0.0,
+          "duration_s": 1.0,
+          "markers": []
+        }"#;
+
+        let back: ClipMarkers = serde_json::from_str(json).unwrap();
+
+        assert!(back.bookmarks.is_empty());
+    }
+
+    #[test]
     fn sidecar_serializes_round_trip() {
         let mut log = MarkerLog::new();
         log.push(ev(EventKind::ChampionKill, 65.0));
@@ -399,6 +539,7 @@ mod tests {
             player_summary: None,
             audio_tracks: Vec::new(),
             markers: Vec::new(),
+            bookmarks: Vec::new(),
             plays: vec![ClipPlay {
                 game_id: GameId::Osu,
                 source: "osu_api".into(),

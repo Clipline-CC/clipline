@@ -322,6 +322,12 @@ function rawClipMarkers(clip = currentClip) {
     : [];
 }
 
+function rawClipBookmarks(clip = currentClip) {
+  return clip && clip.markers && Array.isArray(clip.markers.bookmarks)
+    ? clip.markers.bookmarks
+    : [];
+}
+
 function clipPlayerSummary(clip = currentClip) {
   return clip && clip.markers ? clip.markers.player_summary : null;
 }
@@ -337,11 +343,16 @@ function gameReviewEnabledForClip(clip = currentClip) {
 }
 
 function clipMarkers(clip = currentClip) {
-  return PlayerCore.reviewTimelineMarkers(
-    rawClipMarkers(clip),
-    clipPlayerSummary(clip),
-    gameReviewSettingsForClip(clip),
-    pluginPresentationForClip(clip),
+  // User-placed bookmarks join the timeline past the game-review filter, so
+  // they survive a clip with no game and any per-game marker settings.
+  return PlayerCore.withBookmarks(
+    PlayerCore.reviewTimelineMarkers(
+      rawClipMarkers(clip),
+      clipPlayerSummary(clip),
+      gameReviewSettingsForClip(clip),
+      pluginPresentationForClip(clip),
+    ),
+    rawClipBookmarks(clip),
   );
 }
 

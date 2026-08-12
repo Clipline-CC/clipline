@@ -134,6 +134,34 @@ impl AppSettings {
         if recording_secondary == recording_primary && recording_primary.is_some() {
             return Err("secondary recording hotkey matches the primary recording hotkey".into());
         }
+        let bookmark_primary = self
+            .bookmark_hotkey
+            .as_deref()
+            .filter(|hotkey| !hotkey.trim().is_empty())
+            .map(super::hotkey::normalize_hotkey)
+            .transpose()?;
+        let bookmark_secondary = self
+            .bookmark_hotkey_secondary
+            .as_deref()
+            .filter(|hotkey| !hotkey.trim().is_empty())
+            .map(super::hotkey::normalize_hotkey)
+            .transpose()?;
+        for bookmark in [&bookmark_primary, &bookmark_secondary]
+            .into_iter()
+            .flatten()
+        {
+            if bookmark == &primary || secondary.as_ref() == Some(bookmark) {
+                return Err("bookmark hotkey matches a Save Replay hotkey".into());
+            }
+            if recording_primary.as_ref() == Some(bookmark)
+                || recording_secondary.as_ref() == Some(bookmark)
+            {
+                return Err("bookmark hotkey matches a recording hotkey".into());
+            }
+        }
+        if bookmark_secondary == bookmark_primary && bookmark_primary.is_some() {
+            return Err("secondary bookmark hotkey matches the primary bookmark hotkey".into());
+        }
         self.cloud.validate()?;
         self.osu.validate()?;
         Ok(())

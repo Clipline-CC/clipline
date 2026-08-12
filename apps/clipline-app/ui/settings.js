@@ -267,6 +267,8 @@ function fillSettings(s) {
   $("set-hotkey-2").value = s.hotkey_secondary || "";
   $("set-recording-hotkey").value = s.recording_hotkey || "";
   $("set-recording-hotkey-2").value = s.recording_hotkey_secondary || "";
+  $("set-bookmark-hotkey").value = s.bookmark_hotkey || "";
+  $("set-bookmark-hotkey-2").value = s.bookmark_hotkey_secondary || "";
   updateHotkeyLabels(s.hotkey, s.hotkey_secondary || "");
   $("set-open-on-startup").checked = !!s.open_on_startup;
   $("set-close-to-tray").checked = s.close_to_tray !== false;
@@ -368,11 +370,18 @@ function readHotkeySettings() {
   const recordingKeybinds = ["set-recording-hotkey", "set-recording-hotkey-2"]
     .map((fieldId) => $(fieldId).value.trim())
     .filter(Boolean);
+  const bookmarkKeybinds = ["set-bookmark-hotkey", "set-bookmark-hotkey-2"]
+    .map((fieldId) => $(fieldId).value.trim())
+    .filter(Boolean);
   return {
     hotkey: keybinds[0] || "",
     hotkey_secondary: keybinds[1] || null,
     recording_hotkey: recordingKeybinds[0] || null,
     recording_hotkey_secondary: recordingKeybinds[1] || null,
+    // Always sent, so clearing the field is persisted as null rather than
+    // reverting to the default keybind on the next load.
+    bookmark_hotkey: bookmarkKeybinds[0] || null,
+    bookmark_hotkey_secondary: bookmarkKeybinds[1] || null,
   };
 }
 
@@ -1815,11 +1824,20 @@ async function toggleSessionRecording() {
 
 // All shortcut fields share capture and conflict handling. Esc clears a field;
 // at least one Save Replay keybind must remain, while recording is optional.
-const HOTKEY_FIELD_IDS = ["set-hotkey", "set-hotkey-2", "set-recording-hotkey", "set-recording-hotkey-2"];
+const HOTKEY_FIELD_IDS = [
+  "set-hotkey",
+  "set-hotkey-2",
+  "set-recording-hotkey",
+  "set-recording-hotkey-2",
+  "set-bookmark-hotkey",
+  "set-bookmark-hotkey-2",
+];
 const HOTKEY_IDLE_MESSAGE = "Click a field to record a shortcut. Esc clears it.";
 
 function hotkeyStatusId(fieldId) {
-  return fieldId.startsWith("set-recording-hotkey") ? "recording-hotkey-status" : "hotkey-status";
+  if (fieldId.startsWith("set-recording-hotkey")) return "recording-hotkey-status";
+  if (fieldId.startsWith("set-bookmark-hotkey")) return "bookmark-hotkey-status";
+  return "hotkey-status";
 }
 
 function setHotkeyStatus(fieldId, message, state = "") {

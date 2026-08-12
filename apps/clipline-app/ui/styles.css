@@ -4472,6 +4472,8 @@ button.primary.settings-save-glow {
 .marker-objective { --mc: #cdb2ff; --hair-top: rgba(189, 147, 255, 0.6); --hair-bot: rgba(189, 147, 255, 0.12); }
 .marker-structure { --mc: #f0cd7a; --hair-top: rgba(232, 179, 65, 0.6); --hair-bot: rgba(232, 179, 65, 0.12); }
 .marker-info { --mc: var(--mc-info); --hair-top: rgba(var(--soft-rgb), 0.55); --hair-bot: rgba(var(--soft-rgb), 0.12); }
+/* user-placed, so it reads brighter than any game-derived category */
+.marker-bookmark { --mc: #8ff0c4; --hair-top: rgba(64, 224, 160, 0.68); --hair-bot: rgba(64, 224, 160, 0.14); }
 
 .ruler {
   position: relative;
