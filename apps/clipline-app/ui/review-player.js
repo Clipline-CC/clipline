@@ -1157,6 +1157,7 @@ const MARKER_ICONS = {
   GameStart: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 21 6.5 3"/><path d="M6.5 4 17 7 6.5 10"/></svg>`,
   MinionsSpawning: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5 12 12 15 14"/></svg>`,
   GameEnd: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4 17 4 17 7A5 5 0 0 1 7 7Z"/><path d="M7 5 4.5 5A2 2 0 0 0 7 8.7M17 5 19.5 5A2 2 0 0 1 17 8.7"/><path d="M12 12 12 16M8.5 19.5 15.5 19.5 15 16.5 9 16.5Z"/></svg>`,
+  Bookmark: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3.5 17 3.5 17 20.5 12 16 7 20.5Z"/></svg>`,
   Other: `<svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><circle cx="12" cy="12" r="3"/></svg>`,
 };
 // Unknown / future kinds fall back to a representative glyph for their category.
@@ -1166,6 +1167,7 @@ const MARKER_ICON_FALLBACK = {
   spree: MARKER_ICONS.Ace,
   objective: MARKER_ICONS.BaronKill,
   structure: MARKER_ICONS.TurretKilled,
+  bookmark: MARKER_ICONS.Bookmark,
   info: MARKER_ICONS.Other,
 };
 // Game-authentic art for marker kinds shown by the review timeline filter. Used
@@ -1234,7 +1236,10 @@ function renderMarkers() {
     const marker = document.createElement("button");
     marker.className = `marker marker-${style.cls}`;
     marker.style.left = `${left}%`;
-    marker.title = `${m.kind}${m.subtype ? ` (${m.subtype})` : ""} — ${m.actor}${m.victim ? " → " + m.victim : ""} @ ${m.t_s.toFixed(1)}s`;
+    // A bookmark has no actor or victim to describe — only when it happened.
+    marker.title = PlayerCore.isBookmarkMarker(m)
+      ? `Bookmark @ ${m.t_s.toFixed(1)}s`
+      : `${m.kind}${m.subtype ? ` (${m.subtype})` : ""} — ${m.actor}${m.victim ? " → " + m.victim : ""} @ ${m.t_s.toFixed(1)}s`;
 
     const glyph = document.createElement("span");
     glyph.className = "glyph";

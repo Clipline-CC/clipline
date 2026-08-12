@@ -385,6 +385,7 @@ fn write_plays_sidecar(
     plays: Vec<ClipPlay>,
 ) -> Result<(), String> {
     let mut markers = crate::util::read_markers_raw(clip_path).unwrap_or(ClipMarkers {
+        bookmarks: Vec::new(),
         recording_start_s: 0.0,
         duration_s: pending.clip_duration_s,
         player_summary: None,

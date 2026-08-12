@@ -109,6 +109,14 @@ pub struct AppSettings {
     /// Optional second keybind for starting or stopping a full-session recording.
     #[serde(default)]
     pub recording_hotkey_secondary: Option<String>,
+    /// Keybind for dropping a bookmark on the recording timeline. Defaults to
+    /// `F7` for a settings file that predates the feature, unless that key is
+    /// already taken (see `load_from_object`); `None` means unbound.
+    #[serde(default = "default_bookmark_hotkey")]
+    pub bookmark_hotkey: Option<String>,
+    /// Optional second keybind for dropping a bookmark.
+    #[serde(default)]
+    pub bookmark_hotkey_secondary: Option<String>,
     #[serde(default)]
     pub open_on_startup: bool,
     #[serde(default = "default_enabled")]
@@ -138,6 +146,11 @@ fn default_media_dir() -> String {
     persistence::default_media_dir()
 }
 
+/// Sits next to the `F6` Save Replay default so the feature is discoverable.
+pub(crate) fn default_bookmark_hotkey() -> Option<String> {
+    Some("F7".into())
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -163,6 +176,8 @@ impl Default for AppSettings {
             hotkey_secondary: None,
             recording_hotkey: None,
             recording_hotkey_secondary: None,
+            bookmark_hotkey: default_bookmark_hotkey(),
+            bookmark_hotkey_secondary: None,
             open_on_startup: false,
             close_to_tray: true,
             minimize_to_tray: false,
@@ -197,6 +212,18 @@ impl AppSettings {
         [
             self.recording_hotkey.as_deref(),
             self.recording_hotkey_secondary.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|hotkey| !hotkey.trim().is_empty())
+        .collect()
+    }
+
+    /// All configured bookmark keybinds. Empty when the user cleared them.
+    pub fn bookmark_hotkeys(&self) -> Vec<&str> {
+        [
+            self.bookmark_hotkey.as_deref(),
+            self.bookmark_hotkey_secondary.as_deref(),
         ]
         .into_iter()
         .flatten()

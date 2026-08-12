@@ -34,6 +34,16 @@ static HOTKEY_HOOK: OnceLock<Arc<HookState>> = OnceLock::new();
 pub(crate) enum HookAction {
     SaveReplay,
     ToggleRecording,
+    Bookmark,
+}
+
+/// Every configured binding set, by action. A struct rather than positional
+/// slices so adding an action stays a one-line change at each call site.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HookHotkeys<'a> {
+    pub save: &'a [&'a str],
+    pub recording: &'a [&'a str],
+    pub bookmark: &'a [&'a str],
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -69,8 +79,8 @@ struct MouseHookThread {
 }
 
 impl HookState {
-    fn set_hotkeys(&self, save: &[&str], recording: &[&str]) -> Result<(), String> {
-        let parsed = parse_hook_bindings(save, recording)?;
+    fn set_hotkeys(&self, hotkeys: HookHotkeys<'_>) -> Result<(), String> {
+        let parsed = parse_hook_bindings(hotkeys)?;
         let requires_mouse_hook = parsed
             .iter()
             .any(|binding| binding.hotkey.requires_mouse_hook());
@@ -190,19 +200,15 @@ impl KeyboardHookThread {
     }
 }
 
-pub fn install_hotkey_hook<F>(
-    save_hotkeys: &[&str],
-    recording_hotkeys: &[&str],
-    on_trigger: F,
-) -> Result<(), String>
+pub fn install_hotkey_hook<F>(hotkeys: HookHotkeys<'_>, on_trigger: F) -> Result<(), String>
 where
     F: Fn(HookAction) + Send + Sync + 'static,
 {
     if let Some(state) = HOTKEY_HOOK.get() {
-        return state.set_hotkeys(save_hotkeys, recording_hotkeys);
+        return state.set_hotkeys(hotkeys);
     }
 
-    let parsed_bindings = parse_hook_bindings(save_hotkeys, recording_hotkeys)?;
+    let parsed_bindings = parse_hook_bindings(hotkeys)?;
     let (trigger_tx, trigger_rx) = mpsc::channel();
     thread::Builder::new()
         .name("clipline-hotkey-dispatch".into())
@@ -233,11 +239,11 @@ where
     Ok(())
 }
 
-pub fn set_hotkeys(save_hotkeys: &[&str], recording_hotkeys: &[&str]) -> Result<(), String> {
+pub fn set_hotkeys(hotkeys: HookHotkeys<'_>) -> Result<(), String> {
     if let Some(state) = HOTKEY_HOOK.get() {
-        state.set_hotkeys(save_hotkeys, recording_hotkeys)
+        state.set_hotkeys(hotkeys)
     } else {
-        parse_hook_bindings(save_hotkeys, recording_hotkeys).map(|_| ())
+        parse_hook_bindings(hotkeys).map(|_| ())
     }
 }
 
@@ -275,30 +281,28 @@ fn parse_hook_hotkeys(raws: &[&str]) -> Result<Vec<HookHotkey>, String> {
     raws.iter().map(|raw| parse_hook_hotkey(raw)).collect()
 }
 
-fn parse_hook_bindings(
-    save_hotkeys: &[&str],
-    recording_hotkeys: &[&str],
-) -> Result<Vec<HookBinding>, String> {
-    let mut bindings = parse_hook_hotkeys(save_hotkeys)?
+fn parse_hook_bindings(hotkeys: HookHotkeys<'_>) -> Result<Vec<HookBinding>, String> {
+    // Save Replay is always bound, so it is parsed strictly and claims its keys
+    // first; the optional actions skip blanks and refuse to shadow a key that is
+    // already taken.
+    let mut bindings = parse_hook_hotkeys(hotkeys.save)?
         .into_iter()
         .map(|hotkey| HookBinding {
             hotkey,
             action: HookAction::SaveReplay,
         })
         .collect::<Vec<_>>();
-    for raw in recording_hotkeys
-        .iter()
-        .copied()
-        .filter(|raw| !raw.trim().is_empty())
-    {
-        let hotkey = parse_hook_hotkey(raw)?;
-        if bindings.iter().any(|binding| binding.hotkey == hotkey) {
-            return Err("recording hotkey matches another configured hotkey".into());
+    for (raws, action, label) in [
+        (hotkeys.recording, HookAction::ToggleRecording, "recording"),
+        (hotkeys.bookmark, HookAction::Bookmark, "bookmark"),
+    ] {
+        for raw in raws.iter().copied().filter(|raw| !raw.trim().is_empty()) {
+            let hotkey = parse_hook_hotkey(raw)?;
+            if bindings.iter().any(|binding| binding.hotkey == hotkey) {
+                return Err(format!("{label} hotkey matches another configured hotkey"));
+            }
+            bindings.push(HookBinding { hotkey, action });
         }
-        bindings.push(HookBinding {
-            hotkey,
-            action: HookAction::ToggleRecording,
-        });
     }
     Ok(bindings)
 }
@@ -547,6 +551,13 @@ fn key_is_down(vk: i32) -> bool {
 mod tests {
     use super::*;
 
+    fn save_only<'a>(save: &'a [&'a str]) -> HookHotkeys<'a> {
+        HookHotkeys {
+            save,
+            ..HookHotkeys::default()
+        }
+    }
+
     #[test]
     fn parses_function_key_hotkeys_for_hook_matching() {
         let hotkey = parse_hook_hotkey("Ctrl+Alt+F9").unwrap();
@@ -609,7 +620,9 @@ mod tests {
     fn either_configured_hotkey_triggers_a_save() {
         let (trigger_tx, trigger_rx) = mpsc::channel();
         let state = HookState {
-            bindings: Mutex::new(parse_hook_bindings(&["Alt+F10", "Ctrl+Mouse5"], &[]).unwrap()),
+            bindings: Mutex::new(
+                parse_hook_bindings(save_only(&["Alt+F10", "Ctrl+Mouse5"])).unwrap(),
+            ),
             down_keys: Mutex::new(BTreeSet::new()),
             trigger_tx,
             keyboard_hook: None,
@@ -631,7 +644,12 @@ mod tests {
         let (trigger_tx, trigger_rx) = mpsc::channel();
         let state = HookState {
             bindings: Mutex::new(
-                parse_hook_bindings(&["Alt+F10"], &["Ctrl+Mouse5", "Alt+F9"]).unwrap(),
+                parse_hook_bindings(HookHotkeys {
+                    save: &["Alt+F10"],
+                    recording: &["Ctrl+Mouse5", "Alt+F9"],
+                    bookmark: &[],
+                })
+                .unwrap(),
             ),
             down_keys: Mutex::new(BTreeSet::new()),
             trigger_tx,
@@ -649,6 +667,62 @@ mod tests {
 
         assert!(state.on_key_down(VK_F1_CODE + 8, false, true, false));
         assert_eq!(trigger_rx.try_recv(), Ok(HookAction::ToggleRecording));
+    }
+
+    #[test]
+    fn bookmark_bindings_dispatch_their_own_action() {
+        let (trigger_tx, trigger_rx) = mpsc::channel();
+        let state = HookState {
+            bindings: Mutex::new(
+                parse_hook_bindings(HookHotkeys {
+                    save: &["F6"],
+                    recording: &["Alt+F9"],
+                    bookmark: &["F7", "Ctrl+Mouse5"],
+                })
+                .unwrap(),
+            ),
+            down_keys: Mutex::new(BTreeSet::new()),
+            trigger_tx,
+            keyboard_hook: None,
+            mouse_hook: Mutex::new(None),
+        };
+
+        assert!(state.on_key_down(VK_F1_CODE + 6, false, false, false));
+        assert_eq!(trigger_rx.try_recv(), Ok(HookAction::Bookmark));
+        state.on_key_up(VK_F1_CODE + 6);
+
+        assert!(state.on_key_down(VK_XBUTTON2_CODE, true, false, false));
+        assert_eq!(trigger_rx.try_recv(), Ok(HookAction::Bookmark));
+        state.on_key_up(VK_XBUTTON2_CODE);
+
+        assert!(state.on_key_down(VK_F1_CODE + 5, false, false, false));
+        assert_eq!(trigger_rx.try_recv(), Ok(HookAction::SaveReplay));
+    }
+
+    #[test]
+    fn a_bookmark_hotkey_cannot_shadow_another_action() {
+        for bookmark in [&["F6"], &["Alt+F9"]] {
+            assert!(parse_hook_bindings(HookHotkeys {
+                save: &["F6"],
+                recording: &["Alt+F9"],
+                bookmark,
+            })
+            .is_err());
+        }
+
+        assert!(parse_hook_bindings(HookHotkeys {
+            save: &["F6"],
+            recording: &["Alt+F9"],
+            bookmark: &["F7", "F7"],
+        })
+        .is_err());
+
+        assert!(parse_hook_bindings(HookHotkeys {
+            save: &["F6"],
+            recording: &["Alt+F9"],
+            bookmark: &["F7", ""],
+        })
+        .is_ok());
     }
 
     #[test]
@@ -679,7 +753,7 @@ mod tests {
     fn hotkey_lock_contention_waits_instead_of_dropping_trigger() {
         let (trigger_tx, trigger_rx) = mpsc::channel();
         let state = Arc::new(HookState {
-            bindings: Mutex::new(parse_hook_bindings(&["Ctrl+Mouse5"], &[]).unwrap()),
+            bindings: Mutex::new(parse_hook_bindings(save_only(&["Ctrl+Mouse5"])).unwrap()),
             down_keys: Mutex::new(BTreeSet::new()),
             trigger_tx,
             keyboard_hook: None,
@@ -703,8 +777,15 @@ mod tests {
     #[test]
     fn updating_hotkeys_without_an_installed_hook_still_validates_and_succeeds() {
         if HOTKEY_HOOK.get().is_none() {
-            assert_eq!(set_hotkeys(&["Alt+F10"], &["Ctrl+R"]), Ok(()));
-            assert!(set_hotkeys(&["not a hotkey"], &[]).is_err());
+            assert_eq!(
+                set_hotkeys(HookHotkeys {
+                    save: &["Alt+F10"],
+                    recording: &["Ctrl+R"],
+                    bookmark: &["F7"],
+                }),
+                Ok(())
+            );
+            assert!(set_hotkeys(save_only(&["not a hotkey"])).is_err());
         }
     }
 

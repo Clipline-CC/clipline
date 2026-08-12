@@ -35,6 +35,7 @@ pub(crate) fn markers_with_inferred_audio_tracks(
             markers
         }
         None => ClipMarkers {
+            bookmarks: Vec::new(),
             recording_start_s: 0.0,
             duration_s: 0.0,
             player_summary: None,

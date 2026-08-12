@@ -855,6 +855,80 @@ fn review_marker_filters_apply_per_surface_game_settings() {
 }
 
 #[test]
+fn user_bookmarks_join_the_timeline_regardless_of_game_review_filters() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        r#"
+        const GAME_MARKERS = [
+          { t_s: 5, kind: 'DragonKill', actor: 'Dain' },
+          { t_s: 40, kind: 'BaronKill', actor: 'Dain' }
+        ];
+        const BOOKMARKS = [{ t_s: 20 }, { t_s: 1 }];
+        "#,
+    ))
+    .expect("fixtures evaluate");
+
+    // Merged into one time-ordered list the timeline surfaces can consume.
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.withBookmarks(GAME_MARKERS, BOOKMARKS).map(m => [m.t_s, m.kind])"
+        ),
+        r#"[[1,"Bookmark"],[5,"DragonKill"],[20,"Bookmark"],[40,"BaronKill"]]"#
+    );
+    // The whole point: a clip with no game, or with game review switched off,
+    // still shows what the user marked by hand.
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.withBookmarks(PlayerCore.reviewTimelineMarkers(GAME_MARKERS, null, { enabled: false }), BOOKMARKS).map(m => m.t_s)"
+        ),
+        "[1,20]"
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.withBookmarks([], [])"),
+        "[]"
+    );
+    // Bookmarks get their own category, so no game's marker settings can hide
+    // them and they never borrow a kill/objective color.
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.markerStyle('Bookmark').cls"),
+        "bookmark"
+    );
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.markerDigest(PlayerCore.withBookmarks([], BOOKMARKS))"
+        ),
+        "2 bookmarks"
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "[PlayerCore.isBookmarkMarker({ kind: 'Bookmark' }), PlayerCore.isBookmarkMarker({ kind: 'DragonKill' }), PlayerCore.isBookmarkMarker(null)]"
+        ),
+        "[true,false,false]"
+    );
+}
+
+#[test]
+fn bookmark_markers_drop_unusable_offsets_and_duplicates() {
+    let mut ctx = player_core_context();
+
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.bookmarkMarkers([{ t_s: 3 }, { t_s: 'x' }, { t_s: -1 }, {}, null, { t_s: 3 }]).map(m => m.t_s)"
+        ),
+        "[3]"
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.bookmarkMarkers(undefined)"),
+        "[]"
+    );
+}
+
+#[test]
 fn review_marker_filters_honor_profile_declared_categories() {
     // A future supported game (CS2-shaped) whose kind names player-core has no
     // built-in knowledge of: its profile's marker_kinds categories alone must

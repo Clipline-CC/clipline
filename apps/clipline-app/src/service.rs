@@ -52,6 +52,10 @@ const AMBIGUOUS_REPLAY_CACHE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 6
 mod media_root;
 pub enum Cmd {
     Save,
+    /// Drop a user-placed bookmark on the recording timeline. The keypress
+    /// instant travels with the command so command-queue latency cannot skew
+    /// where the marker lands.
+    Bookmark { pressed_at: Instant },
     StartFullSession,
     StopFullSession,
     Stop { announce: bool },
@@ -535,6 +539,11 @@ pub enum Event {
         total_bytes: u64,
         quota_bytes: u64,
         required_bytes: u64,
+    },
+    /// A user-placed bookmark landed on the recording timeline, `t_s` seconds
+    /// from the start of this recorder run.
+    BookmarkAdded {
+        t_s: f64,
     },
     /// Saved-media tree changed outside a normal save (auto-delete).
     LibraryChanged,
@@ -1348,6 +1357,15 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                             let _ = std::fs::remove_file(&path);
                         }
                     }
+                }
+                Ok(Cmd::Bookmark { pressed_at }) => {
+                    // Anchored on `recording_t0`, the same origin every game
+                    // marker offset uses, so both land on one timeline.
+                    let t_s = pressed_at
+                        .saturating_duration_since(recording_t0)
+                        .as_secs_f64();
+                    marker_log.push_bookmark(t_s);
+                    let _ = events.send(Event::BookmarkAdded { t_s });
                 }
                 Ok(Cmd::StartFullSession) => {
                     if full_session.is_none() {
@@ -2673,7 +2691,9 @@ fn write_marker_sidecar(
     clip.markers.retain(|m| is_review_event(&m.event));
     clip.player_summary = player_summary.cloned();
     clip.audio_tracks = audio_tracks.to_vec();
-    let markers = clip.markers.len();
+    // User-placed bookmarks are markers to the review timeline, so they count
+    // toward the clip's marker total and keep the sidecar worth writing.
+    let markers = clip.markers.len() + clip.bookmarks.len();
     if markers == 0
         && clip.player_summary.is_none()
         && clip.audio_tracks.is_empty()
@@ -3676,6 +3696,34 @@ mod tests {
         let sidecar: clipline_events::ClipMarkers = serde_json::from_str(&json).unwrap();
         assert!(sidecar.markers.is_empty());
         assert_eq!(sidecar.player_summary, Some(summary));
+    }
+
+    #[test]
+    fn write_marker_sidecar_writes_a_bookmark_only_clip() {
+        let dir = TestDir::new("clipline-service", "sidecar-bookmarks");
+        let path = dir.path().join("clip.mp4");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut marker_log = MarkerLog::new();
+        marker_log.push_bookmark(4.0);
+        marker_log.push_bookmark(9.0);
+        // Outside the clip window, so it must not reach the sidecar.
+        marker_log.push_bookmark(30.0);
+
+        let count = write_marker_sidecar(&tx, &marker_log, &path, 0.0, 10.0, None, &[]);
+
+        assert_eq!(count, 2, "bookmarks count toward the clip's markers");
+        let json = std::fs::read_to_string(path.with_extension("markers.json")).unwrap();
+        let sidecar: clipline_events::ClipMarkers = serde_json::from_str(&json).unwrap();
+        assert!(sidecar.markers.is_empty());
+        assert_eq!(
+            sidecar
+                .bookmarks
+                .iter()
+                .map(|bookmark| bookmark.t_s)
+                .collect::<Vec<_>>(),
+            [4.0, 9.0],
+            "bookmarks survive the review-event filter"
+        );
     }
 
     #[test]

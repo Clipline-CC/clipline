@@ -955,6 +955,133 @@ fn recording_hotkeys_are_optional_normalized_and_distinct_from_each_other_and_sa
     assert!(recording_conflict.validate().is_err());
 }
 
+fn settings_from_json(json: &str) -> AppSettings {
+    AppSettings::load_from_object(
+        serde_json::from_str::<Value>(json)
+            .unwrap()
+            .as_object()
+            .unwrap(),
+    )
+}
+
+#[test]
+fn bookmark_hotkey_defaults_to_f7_and_round_trips() {
+    assert_eq!(
+        AppSettings::default().bookmark_hotkey.as_deref(),
+        Some("F7")
+    );
+    assert_eq!(AppSettings::default().bookmark_hotkey_secondary, None);
+    assert_eq!(AppSettings::default().bookmark_hotkeys(), vec!["F7"]);
+
+    let dir = TestDir::new("clipline-settings", "bookmark-hotkey-round-trip");
+    let path = dir.path().join("settings.json");
+    let settings = AppSettings {
+        bookmark_hotkey: Some("ctrl+shift+b".into()),
+        bookmark_hotkey_secondary: Some("alt+mouse4".into()),
+        ..AppSettings::default()
+    };
+    settings.save_to(&path).unwrap();
+    let loaded = AppSettings::load_from(&path).unwrap();
+
+    assert_eq!(loaded.bookmark_hotkey.as_deref(), Some("Ctrl+Shift+B"));
+    assert_eq!(loaded.bookmark_hotkey_secondary.as_deref(), Some("Alt+Mouse4"));
+    assert_eq!(
+        loaded.bookmark_hotkeys(),
+        vec!["Ctrl+Shift+B", "Alt+Mouse4"]
+    );
+}
+
+#[test]
+fn validation_rejects_a_bookmark_hotkey_taken_by_another_action() {
+    for conflict in [
+        AppSettings {
+            bookmark_hotkey: Some("f6".into()),
+            ..AppSettings::default()
+        },
+        AppSettings {
+            hotkey_secondary: Some("Ctrl+B".into()),
+            bookmark_hotkey: Some("ctrl+b".into()),
+            ..AppSettings::default()
+        },
+        AppSettings {
+            recording_hotkey: Some("Ctrl+R".into()),
+            bookmark_hotkey: Some("ctrl+r".into()),
+            ..AppSettings::default()
+        },
+        AppSettings {
+            recording_hotkey_secondary: Some("Ctrl+R".into()),
+            bookmark_hotkey: Some("ctrl+r".into()),
+            ..AppSettings::default()
+        },
+        AppSettings {
+            bookmark_hotkey: Some("Alt+B".into()),
+            bookmark_hotkey_secondary: Some("alt+b".into()),
+            ..AppSettings::default()
+        },
+    ] {
+        assert!(
+            conflict.validate().is_err(),
+            "a bookmark hotkey must not shadow another action: {:?}/{:?}",
+            conflict.bookmark_hotkey,
+            conflict.bookmark_hotkey_secondary
+        );
+    }
+
+    assert!(AppSettings::default().validate().is_ok());
+}
+
+#[test]
+fn upgrading_applies_the_bookmark_default_without_stealing_an_existing_keybind() {
+    // A settings file written before bookmarks existed adopts the default.
+    let upgraded = settings_from_json(r#"{"hotkey": "F6"}"#);
+    assert_eq!(upgraded.bookmark_hotkey.as_deref(), Some("F7"));
+
+    // …unless the user already bound that key, in which case theirs wins and
+    // the default is dropped rather than invalidating the whole file.
+    for (json, taken_by) in [
+        (r#"{"hotkey": "F7"}"#, "save primary"),
+        (r#"{"hotkey": "F6", "hotkey_secondary": "F7"}"#, "save secondary"),
+        (r#"{"hotkey": "F6", "recording_hotkey": "F7"}"#, "recording"),
+        (
+            r#"{"hotkey": "F6", "recording_hotkey_secondary": "F7"}"#,
+            "recording secondary",
+        ),
+    ] {
+        let settings = settings_from_json(json);
+        assert_eq!(
+            settings.bookmark_hotkey, None,
+            "F7 was already taken by the {taken_by} keybind"
+        );
+        assert!(
+            settings.validate().is_ok(),
+            "an upgraded file must stay loadable when {taken_by} owns F7"
+        );
+    }
+}
+
+#[test]
+fn a_cleared_bookmark_hotkey_is_not_resurrected_by_the_default() {
+    for json in [
+        r#"{"hotkey": "F6", "bookmark_hotkey": null}"#,
+        r#"{"hotkey": "F6", "bookmark_hotkey": "   "}"#,
+    ] {
+        let settings = settings_from_json(json);
+        assert_eq!(settings.bookmark_hotkey, None);
+        assert!(settings.bookmark_hotkeys().is_empty());
+    }
+
+    // And a save round-trip keeps it cleared rather than re-defaulting.
+    let dir = TestDir::new("clipline-settings", "bookmark-hotkey-cleared");
+    let path = dir.path().join("settings.json");
+    let cleared = AppSettings {
+        bookmark_hotkey: None,
+        ..AppSettings::default()
+    };
+    cleared.save_to(&path).unwrap();
+
+    assert_eq!(AppSettings::load_from(&path).unwrap().bookmark_hotkey, None);
+}
+
 #[test]
 fn load_tolerates_unknown_video_encoder_without_resetting_settings() {
     let dir = TestDir::new("clipline-settings", "unknown-encoder");

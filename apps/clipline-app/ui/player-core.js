@@ -978,6 +978,9 @@ const PlayerCore = (() => {
     TurretKilled: "structure",
     InhibKilled: "structure",
     FirstBrick: "structure",
+    // User-placed, not game-derived. It has its own category so the review
+    // filters (which key on category) can never hide it.
+    Bookmark: "bookmark",
   };
   const DEFAULT_MARKER_CATEGORIES = {
     kill: { singular: "kill", plural: "kills", glyph: "✕" },
@@ -986,8 +989,10 @@ const PlayerCore = (() => {
     spree: { singular: "spree", plural: "sprees", glyph: "★" },
     objective: { singular: "objective", plural: "objectives", glyph: "◆" },
     structure: { singular: "structure", plural: "structures", glyph: "▣" },
+    bookmark: { singular: "bookmark", plural: "bookmarks", glyph: "⚑" },
     info: { singular: "event", plural: "events", glyph: "•" },
   };
+  const BOOKMARK_KIND = "Bookmark";
 
   const PRESENTATION_KEY = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
   const ownObjectValue = (object, key) => typeof key === "string"
@@ -1626,6 +1631,32 @@ const PlayerCore = (() => {
     );
   };
 
+  // Bookmarks are user-placed, so they deliberately skip the game-review
+  // filters above: they must show on clips with no detected game and must not
+  // disappear because someone turned a game's marker categories off. Shaping
+  // them like markers lets the pins, overview ticks, marker count, prev/next
+  // navigation and drag snapping treat them as one list.
+  const isBookmarkMarker = (marker) =>
+    Boolean(marker) && marker.kind === BOOKMARK_KIND;
+
+  const bookmarkMarkers = (bookmarks) => {
+    const seen = new Set();
+    const out = [];
+    for (const bookmark of Array.isArray(bookmarks) ? bookmarks : []) {
+      // Guard the object first: Number(null) is 0, which would plant a phantom
+      // bookmark at the very start of the clip.
+      if (!bookmark || typeof bookmark !== "object") continue;
+      const t_s = Number(bookmark.t_s);
+      if (!Number.isFinite(t_s) || t_s < 0 || seen.has(t_s)) continue;
+      seen.add(t_s);
+      out.push({ t_s, kind: BOOKMARK_KIND });
+    }
+    return out.sort((a, b) => a.t_s - b.t_s);
+  };
+
+  const withBookmarks = (markers, bookmarks) =>
+    [...(markers || []), ...bookmarkMarkers(bookmarks)].sort((a, b) => a.t_s - b.t_s);
+
   const gameEventRailItem = (marker, summary = null, presentation = null, options = {}) => {
     const kind = marker && marker.kind ? marker.kind : "Other";
     const category = markerCategory(kind, presentation);
@@ -2172,6 +2203,9 @@ const PlayerCore = (() => {
     normalizeGameReviewSettings,
     reviewMatchEventMarkers,
     reviewTimelineMarkers,
+    isBookmarkMarker,
+    bookmarkMarkers,
+    withBookmarks,
     playerSummaryLabel,
     playerSummaryFields,
     galleryCardPreview,

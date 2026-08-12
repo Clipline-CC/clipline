@@ -192,6 +192,16 @@ impl AppSettings {
                 .and_then(|raw| normalize_hotkey(&raw).ok()),
             recording_hotkey_secondary: string_field(object, "recording_hotkey_secondary")
                 .and_then(|raw| normalize_hotkey(&raw).ok()),
+            // Absent means the file predates bookmarks, so the default applies.
+            // Present-but-blank/null means the user cleared the keybind, and the
+            // default must not resurrect it.
+            bookmark_hotkey: if object.contains_key("bookmark_hotkey") {
+                string_field(object, "bookmark_hotkey").and_then(|raw| normalize_hotkey(&raw).ok())
+            } else {
+                super::default_bookmark_hotkey()
+            },
+            bookmark_hotkey_secondary: string_field(object, "bookmark_hotkey_secondary")
+                .and_then(|raw| normalize_hotkey(&raw).ok()),
             open_on_startup: bool_field(object, "open_on_startup")
                 .unwrap_or(defaults.open_on_startup),
             close_to_tray: bool_field(object, "close_to_tray").unwrap_or(defaults.close_to_tray),
@@ -235,6 +245,29 @@ impl AppSettings {
         {
             settings.recording_hotkey_secondary = None;
         }
+        // A binding the user already had always wins over the bookmark default,
+        // so upgrading never silently steals or invalidates an existing keybind.
+        if settings.bookmark_hotkey.as_deref().is_some_and(|bookmark| {
+            bookmark == settings.hotkey
+                || settings.hotkey_secondary.as_deref() == Some(bookmark)
+                || settings.recording_hotkey.as_deref() == Some(bookmark)
+                || settings.recording_hotkey_secondary.as_deref() == Some(bookmark)
+        }) {
+            settings.bookmark_hotkey = None;
+        }
+        if settings
+            .bookmark_hotkey_secondary
+            .as_deref()
+            .is_some_and(|bookmark| {
+                bookmark == settings.hotkey
+                    || settings.hotkey_secondary.as_deref() == Some(bookmark)
+                    || settings.recording_hotkey.as_deref() == Some(bookmark)
+                    || settings.recording_hotkey_secondary.as_deref() == Some(bookmark)
+                    || settings.bookmark_hotkey.as_deref() == Some(bookmark)
+            })
+        {
+            settings.bookmark_hotkey_secondary = None;
+        }
         settings.buffer_seconds = super::compatibility_buffer_seconds(&settings);
         settings.bitrate_mbps = settings.effective_bitrate_mbps();
         if matches!(settings.capture_mode, CaptureMode::WindowTitle)
@@ -261,6 +294,14 @@ impl AppSettings {
                 Some(raw) if !raw.trim().is_empty() => Some(normalize_hotkey(raw)?),
                 _ => None,
             };
+        settings.bookmark_hotkey = match settings.bookmark_hotkey.as_deref() {
+            Some(raw) if !raw.trim().is_empty() => Some(normalize_hotkey(raw)?),
+            _ => None,
+        };
+        settings.bookmark_hotkey_secondary = match settings.bookmark_hotkey_secondary.as_deref() {
+            Some(raw) if !raw.trim().is_empty() => Some(normalize_hotkey(raw)?),
+            _ => None,
+        };
         settings.games.normalize();
         settings.cloud.normalize();
         settings.osu.normalize();

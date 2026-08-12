@@ -3484,6 +3484,7 @@ mod tests {
 
     fn audio_markers() -> ClipMarkers {
         ClipMarkers {
+            bookmarks: Vec::new(),
             recording_start_s: 0.0,
             duration_s: 1.0,
             player_summary: None,

@@ -24,7 +24,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use clipline_capture::{Codec, EncoderBackend};
-use clipline_events::{is_review_event, ClipMarker, ClipMarkers, ClipPlay};
+use clipline_events::{is_review_event, ClipBookmark, ClipMarker, ClipMarkers, ClipPlay};
 use clipline_mp4::{
     media_video_codecs_file, remux_with_mixed_audio_track_file,
     remux_with_selected_audio_tracks_file, trim_keyframe_aligned_file, MediaTrackCounts,
@@ -2512,6 +2512,7 @@ fn filter_review_markers(mut markers: ClipMarkers) -> ClipMarkers {
 
 fn has_marker_sidecar_content(markers: &ClipMarkers) -> bool {
     !markers.markers.is_empty()
+        || !markers.bookmarks.is_empty()
         || markers.player_summary.is_some()
         || !markers.audio_tracks.is_empty()
         || !markers.plays.is_empty()
@@ -2532,6 +2533,14 @@ fn crop_markers(markers: &ClipMarkers, start_s: f64, end_s: f64) -> ClipMarkers 
         .iter()
         .filter_map(|play| crop_play(play, start_s, end_s))
         .collect();
+    let bookmarks = markers
+        .bookmarks
+        .iter()
+        .filter(|bookmark| bookmark.t_s >= start_s && bookmark.t_s < end_s)
+        .map(|bookmark| ClipBookmark {
+            t_s: bookmark.t_s - start_s,
+        })
+        .collect();
     ClipMarkers {
         recording_start_s: markers.recording_start_s + start_s,
         duration_s: end_s - start_s,
@@ -2539,6 +2548,7 @@ fn crop_markers(markers: &ClipMarkers, start_s: f64, end_s: f64) -> ClipMarkers 
         audio_tracks: markers.audio_tracks.clone(),
         plays,
         markers: cropped,
+        bookmarks,
     }
 }
 
@@ -2733,6 +2743,7 @@ mod tests {
     #[test]
     fn crop_markers_rebases_times_and_recording_start() {
         let markers = ClipMarkers {
+            bookmarks: Vec::new(),
             recording_start_s: 10.0,
             duration_s: 5.0,
             player_summary: Some(PlayerSummary {
@@ -2771,8 +2782,36 @@ mod tests {
     }
 
     #[test]
+    fn crop_markers_crops_and_rebases_user_bookmarks() {
+        let markers = ClipMarkers {
+            recording_start_s: 10.0,
+            duration_s: 5.0,
+            player_summary: None,
+            audio_tracks: Vec::new(),
+            plays: Vec::new(),
+            markers: Vec::new(),
+            bookmarks: vec![
+                ClipBookmark { t_s: 0.5 },
+                ClipBookmark { t_s: 1.5 },
+                ClipBookmark { t_s: 2.0 },
+            ],
+        };
+
+        let cropped = crop_markers(&markers, 1.0, 2.0);
+
+        assert_eq!(
+            cropped.bookmarks,
+            [ClipBookmark { t_s: 0.5 }],
+            "inclusive start, exclusive end, re-based like game markers"
+        );
+        // A bookmark-only trim still has content worth writing a sidecar for.
+        assert!(has_marker_sidecar_content(&cropped));
+    }
+
+    #[test]
     fn filter_review_markers_keeps_match_event_sources_and_drops_noise() {
         let markers = ClipMarkers {
+            bookmarks: Vec::new(),
             recording_start_s: 10.0,
             duration_s: 100.0,
             player_summary: Some(PlayerSummary {
@@ -2836,6 +2875,7 @@ mod tests {
     #[test]
     fn summary_only_markers_are_export_sidecar_content() {
         let markers = ClipMarkers {
+            bookmarks: Vec::new(),
             recording_start_s: 10.0,
             duration_s: 20.0,
             player_summary: Some(PlayerSummary {
@@ -2862,6 +2902,7 @@ mod tests {
     #[test]
     fn empty_markers_are_not_export_sidecar_content() {
         let markers = ClipMarkers {
+            bookmarks: Vec::new(),
             recording_start_s: 10.0,
             duration_s: 20.0,
             player_summary: None,
@@ -2876,6 +2917,7 @@ mod tests {
     #[test]
     fn play_only_markers_are_export_sidecar_content() {
         let markers = ClipMarkers {
+            bookmarks: Vec::new(),
             recording_start_s: 10.0,
             duration_s: 20.0,
             player_summary: None,
@@ -2893,6 +2935,7 @@ mod tests {
         let source = dir.path().join("session.mp4");
         std::fs::write(&source, b"mp4").unwrap();
         let markers = ClipMarkers {
+            bookmarks: Vec::new(),
             recording_start_s: 10.0,
             duration_s: 20.0,
             player_summary: None,
@@ -2914,6 +2957,7 @@ mod tests {
     #[test]
     fn crop_markers_keeps_and_clamps_overlapping_plays() {
         let markers = ClipMarkers {
+            bookmarks: Vec::new(),
             recording_start_s: 10.0,
             duration_s: 20.0,
             player_summary: None,
@@ -2950,6 +2994,7 @@ mod tests {
             kind: Some("microphone".into()),
         }];
         let markers = ClipMarkers {
+            bookmarks: Vec::new(),
             recording_start_s: 10.0,
             duration_s: 20.0,
             player_summary: None,
@@ -2969,6 +3014,7 @@ mod tests {
     #[test]
     fn selected_audio_track_indices_follow_sidecar_order_and_reject_unknown_ids() {
         let markers = ClipMarkers {
+            bookmarks: Vec::new(),
             recording_start_s: 0.0,
             duration_s: 10.0,
             player_summary: None,
@@ -3010,6 +3056,7 @@ mod tests {
         let source = dir.path().join("clip.mp4");
         std::fs::write(&source, b"source mp4").unwrap();
         let markers = ClipMarkers {
+            bookmarks: Vec::new(),
             recording_start_s: 0.0,
             duration_s: 10.0,
             player_summary: None,
@@ -3885,6 +3932,7 @@ mod tests {
 
     fn write_audio_track_markers(source: &Path, tracks: Vec<(&str, u32, &str)>) {
         let markers = ClipMarkers {
+            bookmarks: Vec::new(),
             recording_start_s: 0.0,
             duration_s: 1.0,
             player_summary: None,
@@ -3950,6 +3998,7 @@ mod tests {
         let clip = media.join("broken-but-listed.mp4");
         touch_mp4(&clip);
         let markers = ClipMarkers {
+            bookmarks: Vec::new(),
             recording_start_s: 0.0,
             duration_s: 42.5,
             player_summary: None,
@@ -4069,6 +4118,7 @@ mod tests {
         let clip = dir.path().join("clip.mp4");
         touch_mp4(&clip);
         let markers = ClipMarkers {
+            bookmarks: Vec::new(),
             recording_start_s: 0.0,
             duration_s: 20.0,
             player_summary: None,

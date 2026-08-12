@@ -37,6 +37,16 @@ listen("saved", (e) => {
   requestRefresh();
 });
 
+// The sound is the real confirmation (the app is usually behind a game), so
+// this is just the visible echo for anyone watching the window.
+listen("bookmark-added", (e) => {
+  const t_s = Number(e.payload && e.payload.t_s);
+  setNotice(
+    Number.isFinite(t_s) ? `bookmarked at ${fmtDur(t_s)}` : "bookmarked",
+    { transient: true },
+  );
+});
+
 listen("library-changed", () => {
   requestRefresh();
 });

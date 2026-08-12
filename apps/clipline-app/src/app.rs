@@ -1251,6 +1251,7 @@ impl RuntimeState {
                 });
             }
             Event::StorageQuotaFull { .. } => {}
+            Event::BookmarkAdded { .. } => {}
             Event::LibraryChanged => {}
             Event::Error { .. } => inner.recent_recorder_error = true,
             Event::MediaRootResolved { .. } => {}
@@ -1642,6 +1643,21 @@ impl RuntimeState {
                 return true;
             }
         }
+        false
+    }
+
+    /// Drop a bookmark on the running recorder's timeline. Key repeat is already
+    /// filtered by the hook, so rapid deliberate presses each place a marker.
+    fn request_bookmark<R: Runtime>(&self, app: &AppHandle<R>) -> bool {
+        if self.send(Cmd::Bookmark {
+            pressed_at: Instant::now(),
+        }) {
+            return true;
+        }
+        let _ = app.emit(
+            "error",
+            "nothing is recording, so there was no timeline to bookmark".to_string(),
+        );
         false
     }
 
@@ -3142,9 +3158,14 @@ fn rollback_settings_side_effects<R: Runtime>(
         }
     }
     if applied.hook_hotkeys {
-        if let Err(error) =
-            crate::hotkeys::set_hotkeys(&old.hotkeys(), &old.recording_hotkeys())
-        {
+        let save = old.hotkeys();
+        let recording = old.recording_hotkeys();
+        let bookmark = old.bookmark_hotkeys();
+        if let Err(error) = crate::hotkeys::set_hotkeys(crate::hotkeys::HookHotkeys {
+            save: &save,
+            recording: &recording,
+            bookmark: &bookmark,
+        }) {
             errors.push(format!("restore low-level hotkeys: {error}"));
         }
     }
@@ -3229,10 +3250,14 @@ fn save_settings<R: Runtime>(
         |shortcut| shortcuts.unregister(shortcut),
     )?;
     applied.global_hotkeys = true;
-    if let Err(primary) = crate::hotkeys::set_hotkeys(
-        &settings.hotkeys(),
-        &settings.recording_hotkeys(),
-    ) {
+    let new_save_hotkeys = settings.hotkeys();
+    let new_recording_hotkeys = settings.recording_hotkeys();
+    let new_bookmark_hotkeys = settings.bookmark_hotkeys();
+    if let Err(primary) = crate::hotkeys::set_hotkeys(crate::hotkeys::HookHotkeys {
+        save: &new_save_hotkeys,
+        recording: &new_recording_hotkeys,
+        bookmark: &new_bookmark_hotkeys,
+    }) {
         let rollback = rollback_settings_side_effects(
             &app,
             &tray_items,
@@ -3535,9 +3560,15 @@ pub fn run() {
                     let _ = app.handle().emit("error", message);
                 }
             }
+            let startup_save_hotkeys = settings.hotkeys();
+            let startup_recording_hotkeys = settings.recording_hotkeys();
+            let startup_bookmark_hotkeys = settings.bookmark_hotkeys();
             if let Err(e) = crate::hotkeys::install_hotkey_hook(
-                &settings.hotkeys(),
-                &settings.recording_hotkeys(),
+                crate::hotkeys::HookHotkeys {
+                    save: &startup_save_hotkeys,
+                    recording: &startup_recording_hotkeys,
+                    bookmark: &startup_bookmark_hotkeys,
+                },
                 {
                 let app = app.handle().clone();
                 move |action| match action {
@@ -3551,6 +3582,9 @@ pub fn run() {
                         {
                             let _ = app.emit("error", error);
                         }
+                    }
+                    crate::hotkeys::HookAction::Bookmark => {
+                        app.state::<RuntimeState>().request_bookmark(&app);
                     }
                 }
             },
@@ -3995,9 +4029,13 @@ fn pump_events<R: Runtime>(handle: AppHandle<R>, event_rx: Receiver<Event>, gene
                 Event::Status { .. } => handle.emit("status", &event),
                 Event::Saved { .. } => handle.emit("saved", &event),
                 Event::StorageQuotaFull { .. } => handle.emit("storage-quota-full", &event),
+                Event::BookmarkAdded { .. } => handle.emit("bookmark-added", &event),
                 Event::LibraryChanged => handle.emit("library-changed", ()),
                 Event::Error { message } => handle.emit("error", message.clone()),
             };
+            if let Event::BookmarkAdded { .. } = &event {
+                crate::sound::play_bookmark_added();
+            }
             if let Event::Saved {
                 full_session: false,
                 ..
