@@ -78,8 +78,14 @@ stable major — Runtime 152 begins the two-week cadence on 2026-08-24 — so th
 `reviewed_on` / `review_due_on`, current through 2026-09-11.
 
 The release commit advances only Clipline/Tauri version metadata, the WebView2 review dates, this
-handoff, and the unticked release plan from CI-green merge `9f3bcb42`. Publication and public-asset
-verification are recorded after the Nightly Release action finishes.
+handoff, and the unticked release plan from CI-green merge `9f3bcb42`.
+
+Published from tag `nightly-v0.1.53` at release commit `ee8d86a6`
+([run 31567569306](https://github.com/dain98/clipline/actions/runs/31567569306)). The rolling
+[`nightly`](https://github.com/dain98/clipline/releases/tag/nightly) prerelease targets that commit
+and exposes exactly seven assets: both installers, both `.sig` files, `latest.json`,
+`latest-standalone.json`, and `release-notes-0.1.53.md`. The action's own public-download
+verification passed — published bytes match the staged build.
 
 ## Checkpoint (2026-08-11): Nightly 0.1.52
 
