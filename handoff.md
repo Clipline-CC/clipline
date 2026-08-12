@@ -66,6 +66,21 @@ Sharp edges worth remembering:
 Not built: placing or deleting bookmarks from the review timeline, bookmarks in the game-event
 rail, labels, and chapter-marker export.
 
+## Checkpoint (2026-08-12): Nightly 0.1.53
+
+Plan: `docs/superpowers/plans/2026-08-12-nightly-0.1.53.md`.
+
+Nightly 0.1.53 publishes the user bookmark hotkey (**#160**) on top of Nightly 0.1.52. It is the
+only change in the release; nothing else landed on `develop` since 0.1.52.
+
+The WebView2 Fixed Version pin stays at **151.0.4129.78** for x64. Runtime 151 is still the current
+stable major — Runtime 152 begins the two-week cadence on 2026-08-24 — so the re-review moved only
+`reviewed_on` / `review_due_on`, current through 2026-09-11.
+
+The release commit advances only Clipline/Tauri version metadata, the WebView2 review dates, this
+handoff, and the unticked release plan from CI-green merge `9f3bcb42`. Publication and public-asset
+verification are recorded after the Nightly Release action finishes.
+
 ## Checkpoint (2026-08-11): Nightly 0.1.52
 
 Plan: `docs/superpowers/plans/2026-08-11-nightly-0.1.52.md`.
