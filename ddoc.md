@@ -162,6 +162,8 @@ Event {
 }
 ```
 
+**User bookmarks.** Not every moment worth finding again is one a game API reports, and full-session recordings are long. A **bookmark hotkey** (default `F7`) drops a user-placed marker at the moment it is pressed, anchored on the same `recording_t0` as game markers so both share one timeline. Bookmarks are deliberately *not* `GameEvent`s — there is no game identity to attribute one to while recording a custom game or nothing in particular — so they ride in their own `bookmarks` array in the `<clip>.markers.json` sidecar, and the review timeline shows them past the per-game marker filters. They work in both recording modes: in replays-only mode the rolling ring prunes bookmarks that scroll out of the window, exactly as it does game markers.
+
 **Timeline synchronization.** The recorder timestamps each encoded frame against a monotonic clock at capture start (`t0`). Event sources report a game clock (e.g., League's `EventTime` in seconds since GameStart). The subagent confirmed there is no wall-clock timestamp in the League payload, so we anchor: sample current game time (`gamestats.gameTime`) and wall time together, then `recording_offset = (event.EventTime − current_gameTime) + (now − t0)`. The anchor is **re-sampled on every poll** rather than computed once, so game-clock pauses (custom/tournament pauses, remakes) and drift self-correct; markers already placed are never re-mapped. A small fixed latency offset (kill-feed/event-emit delay) nudges markers onto the visual moment.
 
 #### 5a. League of Legends adapter (fully supported, MVP)

@@ -4,6 +4,57 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-11): User bookmark hotkey
+
+Plan: `docs/superpowers/plans/2026-08-11-user-bookmark-hotkey.md`.
+
+**A bookmark is not a `GameEvent`.** `GameEvent.game_id` is a four-game enum, so reusing it for a
+user-placed marker would mean inventing a game identity for someone recording a custom game or
+nothing in particular. Bookmarks therefore get their own `bookmarks: Vec<ClipBookmark>` array on
+`ClipMarkers` (serde-defaulted and skipped when empty, so old sidecars read and bookmark-free clips
+are byte-identical), owned by `MarkerLog` so they inherit its pruning and clip-window re-basing for
+free. `ClipBookmark` is a struct, not a bare `f64`, so an optional label can be added later without
+a sidecar migration.
+
+The whole review UI came free because it is generic: pins, overview ticks, the marker count,
+prev/next-marker navigation, drag snapping and the library "marked" filter all key on
+`{t_s, kind}` → category → glyph/color. Bookmarks are mapped into marker shape in exactly one place
+(`clipMarkers()` in `app-core.js`, via the pure `PlayerCore.withBookmarks`) and every surface picked
+them up. They are merged **past** `reviewTimelineMarkers` on purpose: that filter keys on
+game-marker categories and is gated on per-game review settings, so filtering bookmarks through it
+would hide them on a clip with no detected game.
+
+Sharp edges worth remembering:
+
+- Three Rust gates silently drop non-review markers (`service.rs` intake, `write_marker_sidecar`,
+  `library.rs::filter_review_markers`). A bookmark that is not exempted at every one of them
+  vanishes without an error. `write_marker_sidecar`'s early-return content guard also had to count
+  bookmarks, or a bookmark-only session would write no sidecar at all.
+- `Cmd::Bookmark` carries `pressed_at: Instant`, not "now": the recorder loop drains commands
+  between capture steps, so stamping the offset on receipt would smear the marker by a frame or
+  more. It converts against `recording_t0`, the same origin game markers use.
+- **The `F7` default cannot be allowed to steal an existing keybind.** `bookmark_hotkey` is
+  `Option<String>` defaulting to `Some("F7")`, and `load_from_object` distinguishes *absent* (file
+  predates the feature → apply the default, dropped if it collides with any existing binding) from
+  *present-but-null/blank* (the user cleared it → stays unbound). Without the absent/null
+  distinction, clearing the field in Settings would be undone by the default on the next load.
+- Registration is hook-only, like the recording toggle. The Tauri global-shortcut handler assumes
+  Save Replay, so adding bookmarks there would have needed per-action shortcut matching.
+- rodio is built `default-features = false, features = ["vorbis"]`, so the confirmation sound had to
+  be Ogg Vorbis — a WAV would have needed a new feature and dep. `bookmark.ogg` is a 130 ms
+  two-tone blip, quieter than `soundeffect.ogg` so the two are not mistaken for each other.
+  Regenerate or replace it with:
+
+  ```sh
+  ffmpeg -y -f lavfi -i "sine=frequency=1244.5:duration=0.055,volume=0.45" \
+    -f lavfi -i "sine=frequency=1864.7:duration=0.075,volume=0.38" \
+    -filter_complex "[0:a]afade=t=out:st=0.04:d=0.015[a0];[1:a]adelay=55|55,afade=t=in:d=0.008,afade=t=out:st=0.05:d=0.025[a1];[a0][a1]amix=inputs=2:normalize=0,aformat=sample_rates=48000:channel_layouts=mono" \
+    -c:a libvorbis -q:a 3 bookmark.ogg
+  ```
+
+Not built: placing or deleting bookmarks from the review timeline, bookmarks in the game-event
+rail, labels, and chapter-marker export.
+
 ## Checkpoint (2026-08-11): Nightly 0.1.52
 
 Plan: `docs/superpowers/plans/2026-08-11-nightly-0.1.52.md`.
