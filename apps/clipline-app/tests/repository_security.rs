@@ -354,6 +354,7 @@ fn dependency_exceptions_and_fixed_runtime_are_owned_and_current() {
         "228e55adda46e79b7d5be1950283aa2f79f3de8b19081cb1a6ed74fa71f5f602",
         "opus.lib",
         "no reviewed prebuilt Opus hash",
+        "--retry-all-errors",
     ] {
         assert!(
             fork_build.contains(contract),
