@@ -4,6 +4,22 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-12): Nightly 0.1.54
+
+Plan: `docs/superpowers/plans/2026-08-12-nightly-0.1.54.md`.
+
+Nightly 0.1.54 publishes the waiting-update rail button (**#161**) and library context-menu Select
+(**#162**) on top of Nightly 0.1.53.
+
+The WebView2 Fixed Version pin stays at **151.0.4129.78** for x64. Runtime 151 is still the current
+stable major — Runtime 152 begins the two-week cadence on 2026-08-24 — and the official Fixed
+Version selector still names 151.0.4129.78. The pin was re-reviewed today; `reviewed_on` /
+`review_due_on` were already current through 2026-09-11.
+
+The release commit advances only Clipline/Tauri version metadata, this handoff, and the unticked
+release plan from CI-green merge `902a14ea`. Publication and public-asset verification are recorded
+after the Nightly Release action finishes.
+
 ## Checkpoint (2026-08-11): User bookmark hotkey
 
 Plan: `docs/superpowers/plans/2026-08-11-user-bookmark-hotkey.md`.
