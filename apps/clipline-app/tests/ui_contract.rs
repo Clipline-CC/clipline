@@ -2588,6 +2588,14 @@ fn a_waiting_update_surfaces_on_the_rail_above_settings() {
         "the update button must start hidden"
     );
 
+    // The `hidden` attribute alone is not enough: `.sidebar-rail button` sets
+    // `display: grid`, which outranks the user-agent `[hidden]` rule and leaves
+    // the button permanently visible.
+    assert!(
+        styles_css().contains("#rail-update[hidden] {\n  display: none;\n}"),
+        "the rail's display rule must be overridden for the hidden update button"
+    );
+
     // One update modal, reused. A second dialog would fight the first over
     // `pendingUpdate` and the shared `update-dialog-*` ids.
     assert_eq!(
@@ -2619,6 +2627,18 @@ fn a_waiting_update_surfaces_on_the_rail_above_settings() {
     assert!(
         !listener[..listener.find(");").unwrap_or(0)].contains("showUpdateDialog"),
         "the background poll must not open a modal over a running game"
+    );
+
+    // Dismissing must not strand the button. The rail click reopens the dialog
+    // from `pendingUpdate`, and the poller stops after its first find, so
+    // clearing it on cancel leaves a visible button that does nothing.
+    let cancel = js
+        .split("$(\"update-cancel\").addEventListener")
+        .nth(1)
+        .expect("the update-cancel handler exists");
+    assert!(
+        !cancel[..cancel.find("});").unwrap_or(0)].contains("pendingUpdate = null"),
+        "dismissing the update dialog must not clear the update the rail button reopens"
     );
 
     // A webview-owned poll would stop the moment the window closed to tray,

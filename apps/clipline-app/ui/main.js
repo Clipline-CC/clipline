@@ -224,7 +224,11 @@ $("choose-replay-cache-folder").addEventListener("click", chooseReplayCacheFolde
 $("check-updates").addEventListener("click", () => checkForUpdates({ manual: true }));
 $("update-install").addEventListener("click", installPendingUpdate);
 $("update-cancel").addEventListener("click", () => {
-  pendingUpdate = null;
+  // Keep `pendingUpdate`: the rail button reopens this dialog from it, and the
+  // background poller stops after its first find, so clearing it here would
+  // leave a visible button that does nothing until the next launch. Nothing
+  // reads it for the install itself — `install_update` re-resolves the update
+  // server-side — so a stale payload cannot install the wrong build.
   $("update-dialog").close();
 });
 $("elevation-cancel").addEventListener("click", () => {

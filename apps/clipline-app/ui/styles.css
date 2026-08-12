@@ -1661,6 +1661,13 @@ label span { white-space: nowrap; }
   color: var(--accent);
 }
 
+/* `.sidebar-rail button` sets `display: grid`, which outranks the user-agent
+   `[hidden]` rule — without this the button is permanently visible. Same
+   reason `.rail-profile[hidden]` exists. */
+#rail-update[hidden] {
+  display: none;
+}
+
 #rail-update:hover {
   background: rgba(var(--accent-rgb), 0.14);
   color: var(--accent-hover);
