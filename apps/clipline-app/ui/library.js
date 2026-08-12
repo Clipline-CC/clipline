@@ -1294,6 +1294,15 @@ function toggleClipSelection(path) {
   syncBulkBar();
 }
 
+function selectClipFromContext(path) {
+  if (!path || gallerySource !== "local") return;
+  selectMode = true;
+  selectedClipPaths.add(path);
+  const card = findClipCard(path);
+  if (card) applySelectionToCard(card, true);
+  syncSelectionControls();
+}
+
 function clearSelection() {
   selectedClipPaths.clear();
   for (const card of document.querySelectorAll("#gallery-grid .card[data-clip-path]")) {
@@ -1764,6 +1773,7 @@ function showClipContextMenu(ev, clip) {
   const busy = record && ["queued", "uploading", "processing", "retrying"].includes(record.upload_status);
   const uploaded = cloudRecordUploaded(record);
   const shareable = !!cloudShareUrl(record);
+  $("clip-menu-select").hidden = false;
   $("clip-menu-play").hidden = true;
   $("clip-menu-open-cloud-page").hidden = true;
   $("clip-menu-copy-cloud-link").hidden = true;
@@ -1789,6 +1799,7 @@ function showCloudClipContextMenu(ev, entry) {
   clipContextTarget = null;
   cloudContextTarget = entry;
   gamePlayContextTarget = null;
+  $("clip-menu-select").hidden = true;
   $("clip-menu-play").hidden = false;
   $("clip-menu-play").disabled = false;
   $("clip-menu-open-cloud-page").hidden = false;
@@ -1814,6 +1825,7 @@ function showGamePlayContextMenu(ev, play) {
   clipContextTarget = currentClip;
   cloudContextTarget = null;
   gamePlayContextTarget = play;
+  $("clip-menu-select").hidden = true;
   $("clip-menu-play").hidden = true;
   $("clip-menu-open-cloud-page").hidden = true;
   $("clip-menu-copy-cloud-link").hidden = true;

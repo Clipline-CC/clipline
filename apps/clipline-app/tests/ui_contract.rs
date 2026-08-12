@@ -1142,6 +1142,7 @@ fn review_player_owns_all_controls() {
         "id=\"region-align-menu\"",
         "id=\"region-display-menu\"",
         "id=\"clip-context-menu\"",
+        "id=\"clip-menu-select\"",
         "id=\"clip-menu-play\"",
         "id=\"clip-menu-open-cloud-page\"",
         "id=\"clip-menu-copy-cloud-link\"",
@@ -3722,6 +3723,7 @@ fn no_native_browser_dialogs() {
             && js.contains("ev.preventDefault();")
             && js.contains("showClipContextMenu(ev, c)")
             && js.contains("showCloudClipContextMenu(ev, entry)")
+            && js.contains("$(\"clip-menu-select\").addEventListener(\"click\"")
             && js.contains("$(\"clip-menu-play\").addEventListener(\"click\"")
             && js.contains("$(\"clip-menu-open-cloud-page\").addEventListener(\"click\"")
             && js.contains("$(\"clip-menu-copy-cloud-link\").addEventListener(\"click\"")
@@ -3749,13 +3751,15 @@ fn no_native_browser_dialogs() {
         "native context menus must be suppressed and library rows must expose an app-owned clip menu"
     );
 
+    let select = html.find("id=\"clip-menu-select\"").unwrap();
+    let play = html.find("id=\"clip-menu-play\"").unwrap();
     let rename_file = html.find("id=\"clip-menu-rename-file\"").unwrap();
     let copy = html.find("id=\"clip-menu-copy\"").unwrap();
     let copy_shareable = html.find("id=\"clip-menu-copy-shareable\"").unwrap();
     let delete = html.find("id=\"clip-menu-delete\"").unwrap();
     assert!(
-        rename_file < copy && copy < copy_shareable && copy_shareable < delete,
-        "clipboard actions should sit between Rename file and Delete"
+        select < play && rename_file < copy && copy < copy_shareable && copy_shareable < delete,
+        "Select should lead the library clip menu; clipboard actions should sit between Rename file and Delete"
     );
 }
 
@@ -5206,6 +5210,8 @@ fn gallery_supports_multi_select_bulk_actions() {
     for required in [
         "id=\"gallery-select-toggle\"",
         ">Select multiple</button>",
+        "id=\"clip-menu-select\"",
+        ">Select</button>",
         "class=\"gallery-filter-row\"",
         "class=\"gallery-filter-chips\"",
         "class=\"gallery-filter-actions\"",
@@ -5250,6 +5256,7 @@ fn gallery_supports_multi_select_bulk_actions() {
         "selectedClipPaths",
         "selectMode",
         "function toggleClipSelection",
+        "function selectClipFromContext",
         "function clearSelection",
         "function selectAllVisible",
         "function exitSelectMode",
@@ -5267,6 +5274,9 @@ fn gallery_supports_multi_select_bulk_actions() {
         "selectMode || count > 0",
         "await invoke(\"delete_clips\"",
         "gallerySource !== \"local\"",
+        "$(\"clip-menu-select\").hidden = false",
+        "$(\"clip-menu-select\").hidden = true",
+        "selectClipFromContext(clip.path)",
     ] {
         assert!(
             js.contains(required),
@@ -5348,6 +5358,14 @@ fn gallery_supports_multi_select_bulk_actions() {
     assert!(
         bulk_delete_fn.contains("if (report.deleted.length > 0) exitSelectMode();"),
         "bulk delete should leave select mode after at least one clip is removed"
+    );
+
+    let select_from_context = js_function_body(&js, "selectClipFromContext");
+    assert!(
+        select_from_context.contains("selectMode = true")
+            && select_from_context.contains("selectedClipPaths.add(path)")
+            && select_from_context.contains("syncSelectionControls()"),
+        "context-menu Select must turn on select multiple and select the right-clicked clip"
     );
 
     let select_all_fn = js
