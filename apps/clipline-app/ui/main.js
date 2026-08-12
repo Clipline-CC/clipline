@@ -307,6 +307,11 @@ document.addEventListener("contextmenu", (ev) => {
   hideClipContextMenu();
 });
 $("clip-context-menu").addEventListener("contextmenu", (ev) => ev.preventDefault());
+$("clip-menu-select").addEventListener("click", () => {
+  const clip = clipContextTarget;
+  hideClipContextMenu();
+  if (clip) selectClipFromContext(clip.path);
+});
 $("clip-menu-play").addEventListener("click", () => {
   const entry = cloudContextTarget;
   hideClipContextMenu();

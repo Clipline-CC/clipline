@@ -93,9 +93,20 @@ fn download_prebuilt(out_dir: &Path) -> PathBuf {
     fs::create_dir_all(&prebuilt_dir).expect("failed to create prebuilt directory");
 
     // curl でアーカイブをダウンロード
+    // GitHub release assets occasionally return 503 / empty replies; retry
+    // those as well as connection drops so CI clippy does not fail after a
+    // successful test build that already paid for a cold download.
     eprintln!("prebuilt ライブラリをダウンロード中: {}", archive_url);
     let status = Command::new("curl")
-        .args(["-fsSL", "-o"])
+        .args([
+            "-fsSL",
+            "--retry",
+            "8",
+            "--retry-all-errors",
+            "--retry-delay",
+            "2",
+            "-o",
+        ])
         .arg(&archive_path)
         .arg(&archive_url)
         .status()
