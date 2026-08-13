@@ -4,6 +4,22 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-13): Nightly 0.1.55
+
+Plan: `docs/superpowers/plans/2026-08-13-nightly-0.1.55.md`.
+
+Nightly 0.1.55 publishes the League Replay gate, Library LoL Type search tokens, and header stats
+wrap (**#163**) on top of Nightly 0.1.54.
+
+The WebView2 Fixed Version pin stays at **151.0.4129.78** for x64. Runtime 151 is still the current
+stable major — Runtime 152 begins the two-week cadence on 2026-08-24 — and the official Fixed
+Version selector still names 151.0.4129.78. The pin was re-reviewed today; `reviewed_on` /
+`review_due_on` are current through 2026-09-12.
+
+The release commit advances only Clipline/Tauri version metadata, WebView2 review dates, this
+handoff, and the unticked release plan from CI-green merge `0d3e5b5b`. Publication and public-asset
+verification are recorded after the Nightly Release action finishes.
+
 ## Checkpoint (2026-08-12): League Replay gate, Library stats wrap, LoL Type search
 
 Plan: `docs/superpowers/plans/2026-08-12-league-replay-and-library-search.md`.
@@ -32,8 +48,9 @@ Version selector still names 151.0.4129.78. The pin was re-reviewed today; `revi
 `review_due_on` were already current through 2026-09-11.
 
 The release commit advances only Clipline/Tauri version metadata, this handoff, and the unticked
-release plan from CI-green merge `902a14ea`. Publication and public-asset verification are recorded
-after the Nightly Release action finishes.
+release plan from CI-green merge `902a14ea`. Published from tag `nightly-v0.1.54` at release commit
+`7ab06487` ([rolling nightly](https://github.com/dain98/clipline/releases/tag/nightly)); seven
+assets, public-download verification passed.
 
 ## Checkpoint (2026-08-11): User bookmark hotkey
 
