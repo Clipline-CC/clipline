@@ -1361,58 +1361,268 @@ function syncBulkBar() {
 
 /* ---- gallery: filter / sort / group ---- */
 
-const LEAGUE_GAME_TYPE_OPTIONS = [
-  ["ranked-solo-duo", "Ranked Solo/Duo"],
-  ["ranked-flex", "Ranked Flex"],
-  ["normal", "Normal"],
-  ["aram", "ARAM"],
-  ["arena", "Arena"],
-  ["custom", "Custom"],
-  ["other", "Other"],
-  ["unknown", "Unknown"],
-];
-
 function syncLeagueGameTypeFilter() {
-  const select = $("gallery-game-type");
-  if (!select) return;
-  const present = new Set();
-  let hasCategorizedLeagueClip = false;
+  const present = [];
+  const seen = new Set();
   for (const c of clipsCache) {
     if (!c.game || c.game.id !== "league_of_legends") continue;
-    if (c.game.queue && c.game.queue.category) {
-      present.add(c.game.queue.category);
-      hasCategorizedLeagueClip = true;
-    } else {
-      present.add("unknown");
-    }
+    const category = c.game.queue && c.game.queue.category ? c.game.queue.category : "unknown";
+    if (seen.has(category)) continue;
+    seen.add(category);
+    present.push(category);
   }
+  leagueGameTypePresent = present;
+  const optionsKey = present.slice().sort().join("|");
+  leagueGameTypeOptionsKey = optionsKey;
+  if (galleryGameType !== "all" && present.length && !seen.has(galleryGameType)) {
+    clearGallerySearchToken({ render: false });
+  }
+  renderGallerySearchToken();
+}
 
-  select.hidden = !hasCategorizedLeagueClip;
-  if (!hasCategorizedLeagueClip) {
-    galleryGameType = "all";
-    leagueGameTypeOptionsKey = "";
+function renderGallerySearchToken() {
+  const root = $("gallery-search-tokens");
+  if (!root) return;
+  root.replaceChildren();
+  if (!gallerySearchToken) {
+    root.hidden = true;
+    return;
+  }
+  const chip = document.createElement("span");
+  chip.className = "gallery-search-chip";
+  const label = document.createElement("span");
+  label.textContent = GallerySearchCore.chipText(gallerySearchToken.key, gallerySearchToken.value);
+  const clear = document.createElement("button");
+  clear.type = "button";
+  clear.className = "gallery-search-chip-clear";
+  clear.title = "Clear filter";
+  clear.setAttribute("aria-label", "Clear LoL Type filter");
+  clear.textContent = "×";
+  clear.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    clearGallerySearchToken({ render: true });
+    $("gallery-search").focus();
+    updateGallerySearchMenu();
+  });
+  chip.append(label, clear);
+  root.appendChild(chip);
+  root.hidden = false;
+}
+
+function clearGallerySearchToken({ render = true } = {}) {
+  gallerySearchToken = null;
+  galleryGameType = "all";
+  renderGallerySearchToken();
+  if (render) renderClips();
+}
+
+function applyGallerySearchToken(key, value, { clearInput = true } = {}) {
+  gallerySearchToken = { key, value: value || null };
+  galleryGameType = value || "all";
+  const input = $("gallery-search");
+  if (clearInput && input) input.value = "";
+  gallerySearch = input ? input.value.trim().toLowerCase() : "";
+  renderGallerySearchToken();
+  if (value) hideGallerySearchMenu();
+  renderClips();
+}
+
+function hideGallerySearchMenu() {
+  const menu = $("gallery-search-menu");
+  if (!menu) return;
+  menu.hidden = true;
+  menu.replaceChildren();
+  gallerySearchMenuIndex = 0;
+}
+
+function gallerySearchMenuItems() {
+  return [...document.querySelectorAll("#gallery-search-menu .gallery-search-option")];
+}
+
+function highlightGallerySearchMenu(index) {
+  const items = gallerySearchMenuItems();
+  if (!items.length) return;
+  gallerySearchMenuIndex = ((index % items.length) + items.length) % items.length;
+  items.forEach((item, i) => item.classList.toggle("is-active", i === gallerySearchMenuIndex));
+}
+
+function updateGallerySearchMenu() {
+  const menu = $("gallery-search-menu");
+  const input = $("gallery-search");
+  if (!menu || !input || gallerySource === "cloud") {
+    hideGallerySearchMenu();
+    return;
+  }
+  if (gallerySearchToken && gallerySearchToken.value) {
+    hideGallerySearchMenu();
+    return;
+  }
+  if (document.activeElement !== input) {
+    hideGallerySearchMenu();
     return;
   }
 
-  const previous = galleryGameType;
-  const optionsKey = [...present].sort().join("|");
-  if (leagueGameTypeOptionsKey !== optionsKey) {
-    leagueGameTypeOptionsKey = optionsKey;
-    select.replaceChildren();
-    const all = document.createElement("option");
-    all.value = "all";
-    all.textContent = "Game type: All";
-    select.appendChild(all);
-    for (const [value, label] of LEAGUE_GAME_TYPE_OPTIONS) {
-      if (!present.has(value)) continue;
-      const option = document.createElement("option");
-      option.value = value;
-      option.textContent = `Game type: ${label}`;
-      select.appendChild(option);
+  const pendingKey = gallerySearchToken && !gallerySearchToken.value ? gallerySearchToken.key : null;
+  const inspected = GallerySearchCore.inspect(input.value);
+  let mode = "none";
+  let filterKey = pendingKey;
+  let valueDraft = input.value;
+  if (pendingKey) {
+    mode = "values";
+  } else if (inspected.kind === "empty" || inspected.kind === "filters") {
+    mode = "filters";
+  } else if (inspected.kind === "values") {
+    mode = "values";
+    filterKey = inspected.filterKey;
+    valueDraft = inspected.valueDraft;
+  }
+
+  menu.replaceChildren();
+  if (mode === "filters") {
+    const filters = GallerySearchCore.matchingFilters(input.value);
+    if (!filters.length) {
+      hideGallerySearchMenu();
+      return;
+    }
+    const head = document.createElement("div");
+    head.className = "gallery-search-menu-head";
+    head.textContent = "Filters";
+    menu.appendChild(head);
+    for (const filter of filters) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "gallery-search-option";
+      button.dataset.searchAction = "filter";
+      button.dataset.filterKey = filter.key;
+      const title = document.createElement("strong");
+      title.textContent = `${filter.chipLabel}:`;
+      const hint = document.createElement("span");
+      hint.textContent = filter.hint;
+      button.append(title, hint);
+      menu.appendChild(button);
+    }
+  } else if (mode === "values") {
+    const values = GallerySearchCore.matchingValues(filterKey, valueDraft, leagueGameTypePresent);
+    if (!values.length) {
+      hideGallerySearchMenu();
+      return;
+    }
+    const filter = GallerySearchCore.filterByKey(filterKey);
+    const head = document.createElement("div");
+    head.className = "gallery-search-menu-head";
+    head.textContent = filter ? filter.chipLabel : "Filter";
+    menu.appendChild(head);
+    for (const item of values) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "gallery-search-option";
+      button.dataset.searchAction = "value";
+      button.dataset.filterKey = filterKey;
+      button.dataset.filterValue = item.value;
+      const title = document.createElement("strong");
+      title.textContent = item.label;
+      button.appendChild(title);
+      menu.appendChild(button);
+    }
+  } else {
+    hideGallerySearchMenu();
+    return;
+  }
+  menu.hidden = false;
+  highlightGallerySearchMenu(0);
+}
+
+function activateGallerySearchMenuItem(button) {
+  if (!button) return;
+  if (button.dataset.searchAction === "filter") {
+    applyGallerySearchToken(button.dataset.filterKey, null);
+    $("gallery-search").focus();
+    updateGallerySearchMenu();
+    return;
+  }
+  if (button.dataset.searchAction === "value") {
+    applyGallerySearchToken(button.dataset.filterKey, button.dataset.filterValue);
+  }
+}
+
+function onGallerySearchInput() {
+  const input = $("gallery-search");
+  if (gallerySearchToken && gallerySearchToken.value) {
+    gallerySearch = input.value.trim().toLowerCase();
+    hideGallerySearchMenu();
+    renderClips();
+    return;
+  }
+  if (gallerySearchToken && !gallerySearchToken.value) {
+    gallerySearch = "";
+    updateGallerySearchMenu();
+    return;
+  }
+  const inspected = GallerySearchCore.inspect(input.value);
+  if (inspected.kind === "values" && inspected.filterKey) {
+    applyGallerySearchToken(inspected.filterKey, null, { clearInput: true });
+    input.value = inspected.valueDraft;
+    gallerySearch = "";
+    const exact = GallerySearchCore.matchingValues(
+      inspected.filterKey,
+      inspected.valueDraft,
+      leagueGameTypePresent,
+    );
+    if (exact.length === 1 && inspected.valueDraft.trim()) {
+      const draft = inspected.valueDraft.trim().toLowerCase();
+      if (draft === exact[0].label.toLowerCase() || draft === exact[0].value) {
+        applyGallerySearchToken(inspected.filterKey, exact[0].value);
+        return;
+      }
+    }
+    updateGallerySearchMenu();
+    return;
+  }
+  gallerySearch = inspected.kind === "query" ? inspected.remainder.trim().toLowerCase() : "";
+  updateGallerySearchMenu();
+  renderClips();
+}
+
+function onGallerySearchKeydown(ev) {
+  const menu = $("gallery-search-menu");
+  const items = gallerySearchMenuItems();
+  if (ev.key === "ArrowDown" && menu && !menu.hidden && items.length) {
+    ev.preventDefault();
+    highlightGallerySearchMenu(gallerySearchMenuIndex + 1);
+    return;
+  }
+  if (ev.key === "ArrowUp" && menu && !menu.hidden && items.length) {
+    ev.preventDefault();
+    highlightGallerySearchMenu(gallerySearchMenuIndex - 1);
+    return;
+  }
+  if (ev.key === "Enter" && menu && !menu.hidden && items.length) {
+    ev.preventDefault();
+    activateGallerySearchMenuItem(items[gallerySearchMenuIndex]);
+    return;
+  }
+  if (ev.key === "Escape") {
+    if (menu && !menu.hidden) {
+      ev.preventDefault();
+      hideGallerySearchMenu();
+      return;
+    }
+    if (gallerySearchToken) {
+      ev.preventDefault();
+      clearGallerySearchToken({ render: true });
+    }
+    return;
+  }
+  if (ev.key === "Backspace" && $("gallery-search").value === "" && gallerySearchToken) {
+    ev.preventDefault();
+    if (gallerySearchToken.value) {
+      applyGallerySearchToken(gallerySearchToken.key, null);
+    } else {
+      clearGallerySearchToken({ render: true });
+      updateGallerySearchMenu();
     }
   }
-  galleryGameType = present.has(previous) ? previous : "all";
-  select.value = galleryGameType;
 }
 
 function filterGalleryClips(clips) {
@@ -1608,7 +1818,6 @@ function renderClips() {
   root.hidden = showingCloud;
   if (cloudRoot) cloudRoot.hidden = !showingCloud;
   $("gallery-filter").hidden = showingCloud;
-  $("gallery-game-type").hidden = showingCloud;
   $("gallery-group").hidden = showingCloud;
   $("gallery-sort").hidden = showingCloud;
   syncSelectionControls();

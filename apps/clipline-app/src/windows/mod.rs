@@ -27,6 +27,27 @@ use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
 const ELEVATED_AFTER_ARGUMENT: &str = "--clipline-elevated-after";
 const PROCESS_SYNCHRONIZE: u32 = 0x0010_0000;
+const PROCESS_COMMAND_LINE_INFORMATION: u32 = 60;
+const STATUS_SUCCESS: i32 = 0;
+const STATUS_INFO_LENGTH_MISMATCH: i32 = -1073741820; // 0xC000_0004
+
+#[link(name = "ntdll")]
+extern "system" {
+    fn NtQueryInformationProcess(
+        process_handle: HANDLE,
+        process_information_class: u32,
+        process_information: *mut c_void,
+        process_information_length: u32,
+        return_length: *mut u32,
+    ) -> i32;
+}
+
+#[repr(C)]
+struct UnicodeString {
+    length: u16,
+    maximum_length: u16,
+    buffer: *const u16,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ProcessIdentity {
@@ -91,6 +112,68 @@ pub fn process_instance_id(process_id: u32) -> Result<String, String> {
         "{}:{}",
         identity.process_id, identity.creation_time
     ))
+}
+
+/// Best-effort Win32 command line for `process_id`. `None` when the process
+/// cannot be opened or the query is unavailable (protected processes, older OS).
+pub fn process_command_line(process_id: u32) -> Option<String> {
+    if process_id == 0 {
+        return None;
+    }
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id) };
+    if process.is_null() {
+        return None;
+    }
+    let process = OwnedHandle(process);
+    let mut needed = 0u32;
+    let status = unsafe {
+        NtQueryInformationProcess(
+            process.0,
+            PROCESS_COMMAND_LINE_INFORMATION,
+            std::ptr::null_mut(),
+            0,
+            &mut needed,
+        )
+    };
+    if needed == 0 {
+        return None;
+    }
+    if status != STATUS_INFO_LENGTH_MISMATCH && status != STATUS_SUCCESS {
+        return None;
+    }
+    let mut buf = vec![0u8; needed as usize];
+    let mut returned = 0u32;
+    let status = unsafe {
+        NtQueryInformationProcess(
+            process.0,
+            PROCESS_COMMAND_LINE_INFORMATION,
+            buf.as_mut_ptr().cast(),
+            needed,
+            &mut returned,
+        )
+    };
+    if status != STATUS_SUCCESS {
+        return None;
+    }
+    if buf.len() < std::mem::size_of::<UnicodeString>() {
+        return None;
+    }
+    // SAFETY: ProcessCommandLineInformation writes a UNICODE_STRING at the
+    // start of our buffer; Buffer points at UTF-16 inside the same allocation.
+    let unicode = unsafe { buf.as_ptr().cast::<UnicodeString>().read_unaligned() };
+    if unicode.buffer.is_null() || unicode.length == 0 || unicode.length % 2 != 0 {
+        return None;
+    }
+    let start = unicode.buffer as usize;
+    let buf_start = buf.as_ptr() as usize;
+    let buf_end = buf_start.saturating_add(buf.len());
+    let byte_len = unicode.length as usize;
+    if start < buf_start || start.saturating_add(byte_len) > buf_end {
+        return None;
+    }
+    let n_u16 = byte_len / 2;
+    let slice = unsafe { std::slice::from_raw_parts(unicode.buffer, n_u16) };
+    Some(String::from_utf16_lossy(slice))
 }
 
 /// Launch this exact Clipline executable through the UAC `runas` verb. The
@@ -394,6 +477,18 @@ mod tests {
             .expect("query this test process creation time");
         assert_eq!(identity.process_id, std::process::id());
         assert_ne!(identity.creation_time, 0);
+    }
+
+    #[test]
+    fn current_process_command_line_is_queryable() {
+        let command_line = process_command_line(std::process::id())
+            .expect("query this test process command line");
+        assert!(
+            command_line.to_ascii_lowercase().contains("clipline")
+                || command_line.to_ascii_lowercase().contains("deps"),
+            "command line should name the test binary: {command_line}"
+        );
+        assert!(process_command_line(0).is_none());
     }
 
     #[test]

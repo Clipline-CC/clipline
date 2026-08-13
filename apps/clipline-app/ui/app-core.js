@@ -117,7 +117,10 @@ var railProfileAvatarRequest = 0;
 var railCaptureTargetIconKey = "";
 var galleryFilter = "all";
 var galleryGameType = "all";
+var gallerySearchToken = null;
 var leagueGameTypeOptionsKey = "";
+var leagueGameTypePresent = [];
+var gallerySearchMenuIndex = 0;
 var gallerySort = "new";
 var galleryGroup = "smart";
 var gallerySearch = "";
@@ -540,7 +543,7 @@ async function refreshStorage(work = captureForegroundWork()) {
   $("rail-clips-count").textContent = compactCount(s.clip_count);
   $("rail-library-status").title = `${plural(s.clip_count, "clip")} in library`;
   $("gallery-storage-used").textContent =
-    `· ${fmtLibraryStorageUsage(s.total_bytes, quotaGb)}`;
+    fmtLibraryStorageUsage(s.total_bytes, quotaGb);
   if (storageQuotaBlocked) {
     updateStorageQuotaUsage(s);
     await invoke("recheck_storage_quota", { announce: false });

@@ -107,6 +107,7 @@ fn common_queue_ids_map_to_stable_user_categories() {
         (1700, LeagueQueueCategory::Arena, "Arena"),
         (0, LeagueQueueCategory::Custom, "Custom"),
         (2300, LeagueQueueCategory::Other, "Brawl"),
+        (u32::MAX, LeagueQueueCategory::Replay, "Replay"),
         (999_999, LeagueQueueCategory::Other, "Other"),
     ];
 

@@ -29,6 +29,8 @@ pub struct LeagueModeSettings {
     #[serde(default = "record_default")]
     pub record_custom: bool,
     #[serde(default = "record_default")]
+    pub record_replay: bool,
+    #[serde(default = "record_default")]
     pub record_other: bool,
     /// Policy when the local client lookup fails or is unavailable.
     #[serde(default = "record_default")]
@@ -44,6 +46,7 @@ impl Default for LeagueModeSettings {
             record_aram: true,
             record_arena: true,
             record_custom: true,
+            record_replay: true,
             record_other: true,
             record_unknown: true,
         }
@@ -59,6 +62,7 @@ impl LeagueModeSettings {
             && self.record_aram
             && self.record_arena
             && self.record_custom
+            && self.record_replay
             && self.record_other
             && self.record_unknown)
     }
@@ -73,6 +77,7 @@ impl LeagueModeSettings {
             Some(LeagueQueueCategory::Aram) => self.record_aram,
             Some(LeagueQueueCategory::Arena) => self.record_arena,
             Some(LeagueQueueCategory::Custom) => self.record_custom,
+            Some(LeagueQueueCategory::Replay) => self.record_replay,
             Some(LeagueQueueCategory::Other) => self.record_other,
             None => self.record_unknown,
         }

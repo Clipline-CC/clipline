@@ -13,6 +13,7 @@ const LEAGUE_MODE_RECORD_LABELS = [
   ["record_aram", "ARAM"],
   ["record_arena", "Arena"],
   ["record_custom", "Custom"],
+  ["record_replay", "Replay"],
   ["record_other", "Other"],
   ["record_unknown", "Unknown (client lookup failed)"],
 ];
@@ -25,6 +26,7 @@ function defaultLeagueModeSettings() {
     record_aram: true,
     record_arena: true,
     record_custom: true,
+    record_replay: true,
     record_other: true,
     record_unknown: true,
   };

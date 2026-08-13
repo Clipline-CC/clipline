@@ -143,9 +143,23 @@ listen("cloud-upload-progress", (e) => {
 $("review-back").addEventListener("click", () => closeReview());
 
 // Gallery (library home) controls.
-$("gallery-search").addEventListener("input", (ev) => {
-  gallerySearch = ev.target.value.trim().toLowerCase();
-  renderClips();
+$("gallery-search").addEventListener("input", () => onGallerySearchInput());
+$("gallery-search").addEventListener("focus", () => updateGallerySearchMenu());
+$("gallery-search").addEventListener("keydown", onGallerySearchKeydown);
+$("gallery-search").addEventListener("blur", () => {
+  setTimeout(() => {
+    if (document.activeElement === $("gallery-search")) return;
+    hideGallerySearchMenu();
+  }, 120);
+});
+$("gallery-search-field").addEventListener("click", () => $("gallery-search").focus());
+$("gallery-search-menu").addEventListener("mousedown", (ev) => {
+  ev.preventDefault();
+});
+$("gallery-search-menu").addEventListener("click", (ev) => {
+  const option = ev.target.closest(".gallery-search-option");
+  if (!option) return;
+  activateGallerySearchMenuItem(option);
 });
 $("gallery-source-tabs").addEventListener("click", (ev) => {
   const tab = ev.target.closest(".source-tab");
@@ -178,10 +192,6 @@ $("ffmpeg-runtime-cancel").addEventListener("click", () => {
   });
 });
 $("gallery-sort").addEventListener("change", (ev) => { gallerySort = ev.target.value; renderClips(); });
-$("gallery-game-type").addEventListener("change", (ev) => {
-  galleryGameType = ev.target.value;
-  renderClips();
-});
 $("gallery-group").addEventListener("change", (ev) => { galleryGroup = ev.target.value; renderClips(); });
 $("gallery-filter").addEventListener("click", (ev) => {
   const chip = ev.target.closest(".g-chip");

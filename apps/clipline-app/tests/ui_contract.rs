@@ -14,6 +14,7 @@ const APP_UI_JS: &[&str] = &[
     "presentation-core.js",
     "cloud-core.js",
     "gallery-window-core.js",
+    "gallery-search-core.js",
     "window-lifecycle-core.js",
     "support-core.js",
     "app-core.js",
@@ -987,7 +988,8 @@ fn league_game_type_recording_gate_controls_are_persisted_and_wired() {
         settings_module.contains("pub struct LeagueModeSettings")
             && settings_module.contains("pub fn has_gate")
             && settings_module.contains("pub fn allows")
-            && settings_module.contains("record_unknown"),
+            && settings_module.contains("record_unknown")
+            && settings_module.contains("record_replay"),
         "league gate settings must expose per-category flags plus the unknown policy"
     );
     assert!(
@@ -1003,6 +1005,7 @@ fn league_game_type_recording_gate_controls_are_persisted_and_wired() {
             && settings.contains("function updateLeagueModeSetting")
             && settings.contains("data-league-mode-record")
             && settings.contains("record_ranked_solo_duo")
+            && settings.contains("record_replay")
             && settings.contains("record_normal")
             && settings.contains("Record game types")
             && settings.contains("Automatic recording is skipped for unchecked game types")
@@ -3874,8 +3877,10 @@ fn gallery_header_shows_library_storage_usage() {
     let css = styles_css();
 
     assert!(
-        html.contains("id=\"gallery-count\"") && html.contains("id=\"gallery-storage-used\""),
-        "gallery header should include storage usage beside the clip count"
+        html.contains("id=\"gallery-count\"")
+            && html.contains("id=\"gallery-storage-used\"")
+            && html.contains("class=\"gallery-stats\""),
+        "gallery header should group clip count and storage so they wrap as whole phrases"
     );
     assert!(
         js.contains("$(\"gallery-storage-used\").textContent")
@@ -3884,8 +3889,10 @@ fn gallery_header_shows_library_storage_usage() {
         "refreshStorage should render total library bytes and configured quota from storage_status into the gallery header"
     );
     assert!(
-        css.contains(".gallery-storage-used"),
-        "storage usage should have gallery header metadata styling"
+        css.contains(".gallery-storage-used")
+            && css.contains("white-space: nowrap")
+            && css.contains(".gallery-stats"),
+        "storage usage should stay on one line and wrap as a unit with the clip count"
     );
 }
 
@@ -4771,6 +4778,7 @@ fn ui_is_split_into_markup_styles_and_logic() {
         "src=\"presentation-core.js\"",
         "src=\"player-core.js\"",
         "src=\"gallery-window-core.js\"",
+        "src=\"gallery-search-core.js\"",
         "src=\"window-lifecycle-core.js\"",
         "src=\"app-core.js\"",
         "src=\"settings.js\"",
@@ -4798,11 +4806,12 @@ fn ui_is_split_into_markup_styles_and_logic() {
     );
 
     let gallery_core = html.find("src=\"gallery-window-core.js\"").unwrap();
+    let search_core = html.find("src=\"gallery-search-core.js\"").unwrap();
     let lifecycle_core = html.find("src=\"window-lifecycle-core.js\"").unwrap();
     let app_core = html.find("src=\"app-core.js\"").unwrap();
     assert!(
-        gallery_core < app_core && lifecycle_core < app_core,
-        "pure gallery/lifecycle cores must load before controller state consumes them"
+        gallery_core < search_core && search_core < app_core && lifecycle_core < app_core,
+        "pure gallery/search/lifecycle cores must load before controller state consumes them"
     );
 
     let presentation = read_ui_js("presentation-core.js");
@@ -5792,24 +5801,31 @@ fn league_game_type_metadata_filters_the_local_library() {
     let main = read_ui_js("main.js");
     let app_core = read_ui_js("app-core.js");
     let library = read_ui_js("library.js");
+    let search = read_ui_js("gallery-search-core.js");
 
     assert!(
-        html.contains(r#"id="gallery-game-type""#) && html.contains(">Game type: All<"),
-        "the local library must expose an independent League game-type selector"
+        !html.contains(r#"id="gallery-game-type""#)
+            && html.contains("id=\"gallery-search-menu\"")
+            && html.contains("id=\"gallery-search-tokens\""),
+        "League game type must be a search token, not a header dropdown"
     );
     assert!(
-        app_core.contains("galleryGameType")
-            && main.contains(r#"$("gallery-game-type").addEventListener("change""#),
-        "the selector must own stable state and rerender when changed"
+        search.contains("LoL Type")
+            && search.contains("replay")
+            && search.contains("lol type")
+            && app_core.contains("galleryGameType")
+            && app_core.contains("gallerySearchToken")
+            && main.contains("onGallerySearchInput")
+            && main.contains("updateGallerySearchMenu"),
+        "the search bar must own LoL Type prefix suggestions and stable filter state"
     );
     assert!(
         library.contains("function syncLeagueGameTypeFilter")
             && app_core.contains("leagueGameTypeOptionsKey")
             && library.contains("c.game.queue.category")
-            && library.contains("leagueGameTypeOptionsKey !== optionsKey")
             && library.contains("galleryGameType !== \"all\"")
             && library.contains("c.game.queue.label")
             && library.contains("galleryGameType}"),
-        "queue metadata must drive visibility, filtering, card labels, search, and pagination identity"
+        "queue metadata must drive filtering, card labels, search, and pagination identity"
     );
 }

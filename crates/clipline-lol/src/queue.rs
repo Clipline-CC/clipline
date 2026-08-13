@@ -1,4 +1,9 @@
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
+
+/// Sentinel queue id for League *client replay* sessions. Not a Riot queue.
+pub const REPLAY_QUEUE_ID: u32 = u32::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -9,6 +14,7 @@ pub enum LeagueQueueCategory {
     Aram,
     Arena,
     Custom,
+    Replay,
     Other,
 }
 
@@ -40,6 +46,7 @@ impl LeagueQueue {
             1900 => (LeagueQueueCategory::Other, "Pick URF"),
             2300 => (LeagueQueueCategory::Other, "Brawl"),
             2400 => (LeagueQueueCategory::Aram, "ARAM: Mayhem"),
+            REPLAY_QUEUE_ID => (LeagueQueueCategory::Replay, "Replay"),
             _ => (LeagueQueueCategory::Other, "Other"),
         };
         Self {
@@ -47,5 +54,55 @@ impl LeagueQueue {
             category,
             label: label.to_string(),
         }
+    }
+
+    /// Tag for watching a `.rofl` in the League client, not a live queue.
+    pub fn replay() -> Self {
+        Self::from_id(REPLAY_QUEUE_ID)
+    }
+}
+
+/// True when a League of Legends.exe command line is launching a client replay
+/// (an argument whose path ends in `.rofl`). Live matches and spectator
+/// sessions do not carry that extension.
+pub fn is_league_replay_command_line(command_line: &str) -> bool {
+    command_line
+        .split(|c: char| c.is_whitespace() || matches!(c, '"' | '\''))
+        .any(|token| {
+            Path::new(token)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("rofl"))
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replay_constructor_uses_the_reserved_id_and_category() {
+        let queue = LeagueQueue::replay();
+        assert_eq!(queue.id, REPLAY_QUEUE_ID);
+        assert_eq!(queue.category, LeagueQueueCategory::Replay);
+        assert_eq!(queue.label, "Replay");
+        assert_eq!(LeagueQueue::from_id(REPLAY_QUEUE_ID), queue);
+    }
+
+    #[test]
+    fn replay_command_line_detects_rofl_arguments() {
+        assert!(is_league_replay_command_line(
+            r#""C:\Riot Games\League of Legends\Game\League of Legends.exe" "C:\Users\dain\Documents\League of Legends\Replays\NA1-123.rofl""#
+        ));
+        assert!(is_league_replay_command_line(
+            r"League of Legends.exe D:\Replays\foo.ROFL"
+        ));
+        assert!(!is_league_replay_command_line(
+            r#""C:\Riot Games\League of Legends\Game\League of Legends.exe""#
+        ));
+        assert!(!is_league_replay_command_line(
+            r#"League of Legends.exe "spectator 127.0.0.1:8080 key 123 NA1""#
+        ));
+        assert!(!is_league_replay_command_line("rofl replay wow"));
+        assert!(!is_league_replay_command_line(r"C:\clips\game.rofl.bak"));
     }
 }

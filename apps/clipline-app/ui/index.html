@@ -75,21 +75,26 @@
     <main class="review">
       <section id="gallery-view" class="gallery-view" hidden>
         <header class="gallery-head">
-          <h1>Library</h1>
-          <span id="gallery-count" class="gallery-count"></span>
-          <span id="gallery-storage-used" class="gallery-storage-used"></span>
+          <div class="gallery-heading">
+            <h1>Library</h1>
+            <div class="gallery-stats">
+              <span id="gallery-count" class="gallery-count"></span>
+              <span id="gallery-storage-used" class="gallery-storage-used"></span>
+            </div>
+          </div>
           <nav id="gallery-source-tabs" class="gallery-source-tabs" aria-label="Library source">
             <button class="source-tab active" data-gallery-source="local" type="button">Local</button>
             <button class="source-tab" data-gallery-source="cloud" type="button">Cloud</button>
           </nav>
           <span class="gallery-spacer"></span>
-          <label class="gallery-search">
+          <div class="gallery-search">
             <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
-            <input id="gallery-search" type="text" placeholder="Search clips, champions…" spellcheck="false" />
-          </label>
-          <select id="gallery-game-type" class="gallery-select" title="Filter League clips by game type" hidden>
-            <option value="all">Game type: All</option>
-          </select>
+            <div class="gallery-search-field" id="gallery-search-field">
+              <div id="gallery-search-tokens" class="gallery-search-tokens" hidden></div>
+              <input id="gallery-search" type="text" placeholder="Search clips, champions…" spellcheck="false" autocomplete="off" />
+            </div>
+            <div id="gallery-search-menu" class="gallery-search-menu" hidden role="listbox"></div>
+          </div>
           <select id="gallery-group" class="gallery-select" title="Group clips by">
             <option value="smart">Group: Recent</option>
             <option value="day">Group: Day</option>
@@ -1393,6 +1398,7 @@
   <script src="player-core.js"></script>
   <script src="cloud-core.js"></script>
   <script src="gallery-window-core.js"></script>
+  <script src="gallery-search-core.js"></script>
   <script src="window-lifecycle-core.js"></script>
   <script src="support-core.js"></script>
   <script src="app-core.js"></script>

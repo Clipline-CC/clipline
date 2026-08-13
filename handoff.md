@@ -4,6 +4,21 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-12): League Replay gate, Library stats wrap, LoL Type search
+
+Plan: `docs/superpowers/plans/2026-08-12-league-replay-and-library-search.md`.
+
+League client replays (`.rofl` on `League of Legends.exe`'s command line) are their own game type.
+Settings → League → Record game types now includes **Replay** (default on). The automatic gate
+prefers that command-line signal over LCU `gameData.queue.id`, so a ranked replay is skipped or
+recorded as Replay rather than Ranked Solo/Duo. The poller emits `Queue(Replay)` immediately so
+the session sidecar is tagged even when Live Client Data never comes up.
+
+Library search no longer has a Game type dropdown. Type or choose **`LoL Type:`** in the search
+bar (Discord-style chip + suggestion list) to filter Ranked, ARAM, Replay, and the rest. The
+header clip count and storage figures wrap as whole phrases (`18 of 18` / `25.2 GB / 100 GB`)
+instead of splitting mid-token when the window is narrow.
+
 ## Checkpoint (2026-08-12): Nightly 0.1.54
 
 Plan: `docs/superpowers/plans/2026-08-12-nightly-0.1.54.md`.
