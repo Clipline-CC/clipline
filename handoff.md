@@ -17,8 +17,14 @@ Version selector still names 151.0.4129.78. The pin was re-reviewed today; `revi
 `review_due_on` are current through 2026-09-12.
 
 The release commit advances only Clipline/Tauri version metadata, WebView2 review dates, this
-handoff, and the unticked release plan from CI-green merge `0d3e5b5b`. Publication and public-asset
-verification are recorded after the Nightly Release action finishes.
+handoff, and the unticked release plan from CI-green merge `0d3e5b5b`.
+
+Published from tag `nightly-v0.1.55` at release commit `b7eab010`
+([run 31674374256](https://github.com/dain98/clipline/actions/runs/31674374256)). The rolling
+[`nightly`](https://github.com/dain98/clipline/releases/tag/nightly) prerelease targets that commit
+and exposes exactly seven assets: both installers, both `.sig` files, `latest.json`,
+`latest-standalone.json`, and `release-notes-0.1.55.md`. The action's own public-download
+verification passed — published bytes match the staged build.
 
 ## Checkpoint (2026-08-12): League Replay gate, Library stats wrap, LoL Type search
 
