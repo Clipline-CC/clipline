@@ -141,19 +141,50 @@ fn send_boundary(tx: &Sender<PollerMsg>, boundary: MatchBoundary) -> bool {
     tx.send(message).is_ok()
 }
 
+/// Forward match boundaries, then re-issue a detected Replay tag after each
+/// start. The recorder clears `league_queue` on `MatchStarted` and may have
+/// switched session folders, so the early spawn-time Queue write is not enough.
+fn send_match_boundaries(
+    tx: &Sender<PollerMsg>,
+    boundaries: &[MatchBoundary],
+    replay_queue: Option<&LeagueQueue>,
+) -> bool {
+    for boundary in boundaries {
+        if !send_boundary(tx, *boundary) {
+            return false;
+        }
+        if *boundary == MatchBoundary::Started {
+            if let Some(queue) = replay_queue {
+                if tx.send(PollerMsg::Queue(queue.clone())).is_err() {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
 /// Spawn the poller. `base_url` overrides the local Live Client endpoint
 /// (mock servers in tests/demos); `recording_t0` is the wall-clock twin of
 /// the capture clock origin, sampled at the same time. The League executable
 /// locates the local client lockfile for best-effort queue identification.
+/// `process_id` is used to detect League client replays from the command line.
 pub fn spawn(
     base_url: Option<String>,
     recording_t0: Instant,
     game_executable: Option<PathBuf>,
+    process_id: Option<u32>,
 ) -> Receiver<PollerMsg> {
     let (tx, rx) = mpsc::channel();
     std::thread::Builder::new()
         .name("clipline-lol-poller".into())
         .spawn(move || {
+            let replay_queue = process_id.and_then(league_replay_queue_from_pid);
+            if let Some(queue) = replay_queue.clone() {
+                if tx.send(PollerMsg::Queue(queue)).is_err() {
+                    return;
+                }
+            }
             let rt = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -180,6 +211,9 @@ pub fn spawn(
                 let mut lifecycle = MatchLifecycle::default();
                 let mut local_player = None;
                 let mut queue_lookup = QueueLookupState::default();
+                if replay_queue.is_some() {
+                    queue_lookup.resolved = true;
+                }
                 let (queue_result_tx, queue_result_rx) =
                     mpsc::channel::<(u64, Result<LeagueQueue, String>)>();
 
@@ -236,13 +270,17 @@ pub fn spawn(
                                 .iter()
                                 .any(|event| event.kind == EventKind::GameEnd);
                             let decision = lifecycle.poll_succeeded(batch.new_match, has_game_end);
-                            if decision.before_events.contains(&MatchBoundary::Started) {
+                            if decision.before_events.contains(&MatchBoundary::Started)
+                                && replay_queue.is_none()
+                            {
                                 queue_lookup.reset();
                             }
-                            for boundary in decision.before_events {
-                                if !send_boundary(&tx, boundary) {
-                                    return;
-                                }
+                            if !send_match_boundaries(
+                                &tx,
+                                &decision.before_events,
+                                replay_queue.as_ref(),
+                            ) {
+                                return;
                             }
                             if let Ok(Some(summary)) = client.player_summary(player).await {
                                 if tx.send(PollerMsg::PlayerSummary(summary)).is_err() {
@@ -305,9 +343,59 @@ pub fn spawn(
     rx
 }
 
+fn league_replay_queue_from_pid(process_id: u32) -> Option<LeagueQueue> {
+    crate::windows::process_command_line(process_id)
+        .filter(|command_line| clipline_lol::is_league_replay_command_line(command_line))
+        .map(|_| LeagueQueue::replay())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn current_process_is_not_a_league_replay() {
+        assert_eq!(league_replay_queue_from_pid(std::process::id()), None);
+        assert_eq!(league_replay_queue_from_pid(0), None);
+    }
+
+    #[test]
+    fn match_start_reemits_a_detected_replay_queue() {
+        let (tx, rx) = mpsc::channel();
+        let queue = LeagueQueue::replay();
+        assert!(send_match_boundaries(
+            &tx,
+            &[MatchBoundary::Started],
+            Some(&queue),
+        ));
+        assert!(matches!(rx.try_recv(), Ok(PollerMsg::MatchStarted)));
+        match rx.try_recv() {
+            Ok(PollerMsg::Queue(got)) => assert_eq!(got, queue),
+            Ok(_) => panic!("expected replay queue after MatchStarted"),
+            Err(_) => panic!("missing replay queue after MatchStarted"),
+        }
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn match_end_does_not_reemit_replay_queue() {
+        let (tx, rx) = mpsc::channel();
+        assert!(send_match_boundaries(
+            &tx,
+            &[MatchBoundary::Ended],
+            Some(&LeagueQueue::replay()),
+        ));
+        assert!(matches!(rx.try_recv(), Ok(PollerMsg::MatchEnded)));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn live_match_start_does_not_invent_a_replay_queue() {
+        let (tx, rx) = mpsc::channel();
+        assert!(send_match_boundaries(&tx, &[MatchBoundary::Started], None));
+        assert!(matches!(rx.try_recv(), Ok(PollerMsg::MatchStarted)));
+        assert!(rx.try_recv().is_err());
+    }
 
     #[test]
     fn transient_failures_do_not_end_or_restart_a_match() {

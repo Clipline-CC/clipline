@@ -61,6 +61,7 @@ fn league_mode_settings_default_record_all_and_no_gate() {
     assert!(settings.record_aram);
     assert!(settings.record_arena);
     assert!(settings.record_custom);
+    assert!(settings.record_replay);
     assert!(settings.record_other);
     assert!(settings.record_unknown);
     assert!(!settings.has_gate(), "record-all must not arm the gate");
@@ -77,12 +78,19 @@ fn league_mode_settings_allows_per_category_and_unknown_policy() {
         LeagueQueueCategory::Aram,
         LeagueQueueCategory::Arena,
         LeagueQueueCategory::Custom,
+        LeagueQueueCategory::Replay,
         LeagueQueueCategory::Other,
     ] {
         assert!(settings.allows(Some(&category)), "{category:?} records by default");
     }
     assert!(settings.allows(None));
 
+    settings.record_replay = false;
+    assert!(settings.has_gate());
+    assert!(!settings.allows(Some(&LeagueQueueCategory::Replay)));
+    assert!(settings.allows(Some(&LeagueQueueCategory::RankedSoloDuo)));
+
+    settings.record_replay = true;
     settings.record_normal = false;
     assert!(settings.has_gate());
     assert!(!settings.allows(Some(&LeagueQueueCategory::Normal)));

@@ -10,6 +10,8 @@ pub use client::{Error, LiveClient};
 pub use lcu::{league_lockfile_path, LcuClient, LcuError};
 pub use normalize::normalize;
 pub use poller::{poll_once, poll_once_with_continuity, PollBatch};
-pub use queue::{LeagueQueue, LeagueQueueCategory};
+pub use queue::{
+    is_league_replay_command_line, LeagueQueue, LeagueQueueCategory, REPLAY_QUEUE_ID,
+};
 pub use raw::{EventData, PlayerListEntry, PlayerScores, RawEvent};
 pub use tracker::EventTracker;

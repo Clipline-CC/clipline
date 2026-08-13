@@ -1346,6 +1346,7 @@ impl RuntimeState {
                 identity: game.identity.clone(),
                 name: game.name.clone(),
                 exe_path: game.exe_path.as_deref().map(PathBuf::from),
+                process_id: Some(game.process_id),
             });
         }
         Ok(opts)
@@ -2198,14 +2199,24 @@ fn preserve_backend_owned_settings_fields(settings: &mut AppSettings, backend: &
 fn spawn_gate_lookup(game: &DetectedGame) -> Receiver<Option<LeagueQueue>> {
     let (tx, rx) = mpsc::channel();
     let exe_path = game.exe_path.clone();
+    let process_id = game.process_id;
     std::thread::Builder::new()
         .name("clipline-lol-gate".into())
         .spawn(move || {
-            let queue = gate_queue_for_exe(exe_path.as_deref());
+            let queue = gate_queue_for_game(exe_path.as_deref(), process_id);
             let _ = tx.send(queue);
         })
         .expect("spawn league gate lookup thread");
     rx
+}
+
+fn gate_queue_for_game(exe_path: Option<&str>, process_id: u32) -> Option<LeagueQueue> {
+    if let Some(command_line) = crate::windows::process_command_line(process_id) {
+        if clipline_lol::is_league_replay_command_line(&command_line) {
+            return Some(LeagueQueue::replay());
+        }
+    }
+    gate_queue_for_exe(exe_path)
 }
 
 fn gate_queue_for_exe(exe_path: Option<&str>) -> Option<LeagueQueue> {

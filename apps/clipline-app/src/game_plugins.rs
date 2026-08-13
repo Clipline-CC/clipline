@@ -30,6 +30,7 @@ pub struct GameEventSourceContext {
     pub lol_url: Option<String>,
     pub recording_t0: Instant,
     pub league_game_executable: Option<PathBuf>,
+    pub league_process_id: Option<u32>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -759,6 +760,7 @@ mod league_of_legends {
             context.lol_url,
             context.recording_t0,
             context.league_game_executable,
+            context.league_process_id,
         )
     }
 }

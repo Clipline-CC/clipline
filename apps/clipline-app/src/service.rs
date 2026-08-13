@@ -564,6 +564,7 @@ pub struct ActiveGame {
     pub identity: crate::game_identity::GameIdentity,
     pub name: String,
     pub exe_path: Option<PathBuf>,
+    pub process_id: Option<u32>,
 }
 
 pub struct ServiceOptions {
@@ -810,16 +811,14 @@ fn marker_source_kind(opts: &ServiceOptions) -> MarkerSourceKind {
 }
 
 fn spawn_marker_source(opts: &ServiceOptions, recording_t0: Instant) -> Receiver<PollerMsg> {
+    let league_game = opts.active_game.as_ref().filter(|game| {
+        game.identity.plugin_id() == Some(crate::game_plugins::LEAGUE_OF_LEGENDS_ID)
+    });
     let context = crate::game_plugins::GameEventSourceContext {
         lol_url: opts.lol_url.clone(),
         recording_t0,
-        league_game_executable: opts
-            .active_game
-            .as_ref()
-            .filter(|game| {
-                game.identity.plugin_id() == Some(crate::game_plugins::LEAGUE_OF_LEGENDS_ID)
-            })
-            .and_then(|game| game.exe_path.clone()),
+        league_game_executable: league_game.and_then(|game| game.exe_path.clone()),
+        league_process_id: league_game.and_then(|game| game.process_id),
     };
     match marker_source_kind(opts) {
         MarkerSourceKind::Plugin => {
@@ -834,6 +833,7 @@ fn spawn_marker_source(opts: &ServiceOptions, recording_t0: Instant) -> Receiver
             context.lol_url,
             context.recording_t0,
             context.league_game_executable,
+            context.league_process_id,
         ),
     }
 }
@@ -3535,6 +3535,7 @@ mod tests {
                 .unwrap(),
                 name: "League of Legends".into(),
                 exe_path: None,
+                process_id: None,
             }),
             ..ServiceOptions::default()
         };
@@ -3552,6 +3553,7 @@ mod tests {
             .unwrap(),
             name: "League of Legends".into(),
             exe_path: None,
+            process_id: None,
         };
         let queue = clipline_lol::LeagueQueue::from_id(420);
 
@@ -3577,6 +3579,7 @@ mod tests {
                 ),
                 name: "Community game".into(),
                 exe_path: None,
+                process_id: None,
             }),
             ..ServiceOptions::default()
         };
