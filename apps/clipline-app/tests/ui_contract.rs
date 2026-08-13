@@ -5824,6 +5824,7 @@ fn league_game_type_metadata_filters_the_local_library() {
             && app_core.contains("leagueGameTypeOptionsKey")
             && library.contains("c.game.queue.category")
             && library.contains("galleryGameType !== \"all\"")
+            && library.contains("!seen.has(galleryGameType)")
             && library.contains("c.game.queue.label")
             && library.contains("galleryGameType}"),
         "queue metadata must drive filtering, card labels, search, and pagination identity"

@@ -1374,7 +1374,9 @@ function syncLeagueGameTypeFilter() {
   leagueGameTypePresent = present;
   const optionsKey = present.slice().sort().join("|");
   leagueGameTypeOptionsKey = optionsKey;
-  if (galleryGameType !== "all" && present.length && !seen.has(galleryGameType)) {
+  // Empty `present` still clears: a Replay chip with no League clips left
+  // would otherwise hide every remaining non-League card.
+  if (galleryGameType !== "all" && !seen.has(galleryGameType)) {
     clearGallerySearchToken({ render: false });
   }
   renderGallerySearchToken();
