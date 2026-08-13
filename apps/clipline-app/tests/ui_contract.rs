@@ -5828,4 +5828,10 @@ fn league_game_type_metadata_filters_the_local_library() {
             && library.contains("galleryGameType}"),
         "queue metadata must drive filtering, card labels, search, and pagination identity"
     );
+    assert!(
+        library.contains("function onGallerySearchInput")
+            && library.contains("gallerySource === \"cloud\"")
+            && library.contains("gallerySearch = input.value.trim().toLowerCase()"),
+        "cloud library search must keep the typed query as plain text, not a LoL Type token"
+    );
 }

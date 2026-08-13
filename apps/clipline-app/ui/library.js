@@ -1548,6 +1548,12 @@ function activateGallerySearchMenuItem(button) {
 
 function onGallerySearchInput() {
   const input = $("gallery-search");
+  if (gallerySource === "cloud") {
+    gallerySearch = input.value.trim().toLowerCase();
+    hideGallerySearchMenu();
+    renderClips();
+    return;
+  }
   if (gallerySearchToken && gallerySearchToken.value) {
     gallerySearch = input.value.trim().toLowerCase();
     hideGallerySearchMenu();
