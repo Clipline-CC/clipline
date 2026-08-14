@@ -17,6 +17,16 @@ selector moved off 151.0.4129.78. Its exact official CAB URL, 307,117,094-byte s
 `tauri.standalone.conf.json` were rotated together. Re-reviewed today; `reviewed_on` /
 `review_due_on` are current through 2026-09-13.
 
+The release commit advances only Clipline/Tauri version metadata, WebView2 release-input metadata
+and paths, this handoff, and the unticked release plan from CI-green merge `25e9d2a4`.
+
+Published from tag `nightly-v0.1.56` at release commit `457f92f1`
+([run 31848301930](https://github.com/dain98/clipline/actions/runs/31848301930)). The rolling
+[`nightly`](https://github.com/dain98/clipline/releases/tag/nightly) prerelease targets that commit
+and exposes exactly seven assets: both installers, both `.sig` files, `latest.json`,
+`latest-standalone.json`, and `release-notes-0.1.56.md`. The action's own public-download
+verification passed — published bytes match the staged build.
+
 ## Checkpoint (2026-08-14): Clip toggle shows Clip / Close
 
 Plan: `docs/superpowers/plans/2026-08-14-clip-toggle-labels.md`.
