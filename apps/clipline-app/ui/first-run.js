@@ -525,10 +525,14 @@ function closeFirstRunSetup({ discard = false } = {}) {
   const resolveClosed = firstRunCloseResolver;
   firstRunReplay = false;
   firstRunCloseResolver = null;
+  firstRunHotkeyCapturing = false;
+  $("first-run-hotkey").classList.remove("recording");
+  $("first-run-hotkey").blur();
   $("first-run-setup").hidden = true;
   const app = document.querySelector(".app");
   app.inert = false;
   app.removeAttribute("aria-hidden");
+  syncHotkeyCapturePause();
   if (replayed) {
     if (discard && currentSettings) fillSettings(currentSettings);
     toggleSettings(true);
@@ -636,9 +640,13 @@ $("first-run-browse").addEventListener("click", async () => {
 
 $("first-run-hotkey").addEventListener("focus", () => {
   $("first-run-hotkey").classList.add("recording");
+  firstRunHotkeyCapturing = true;
+  syncHotkeyCapturePause();
 });
 $("first-run-hotkey").addEventListener("blur", () => {
   $("first-run-hotkey").classList.remove("recording");
+  firstRunHotkeyCapturing = false;
+  syncHotkeyCapturePause();
 });
 $("first-run-hotkey").addEventListener("keydown", (event) => {
   if (event.key === "Tab") return;
@@ -658,11 +666,13 @@ $("first-run-hotkey").addEventListener("keydown", (event) => {
 $("first-run-hotkey").addEventListener("mousedown", (event) => {
   if (event.button === 0) return;
   event.preventDefault();
+  const field = $("first-run-hotkey");
+  if (!focusHotkeyRecorder(field)) return;
   const result = hotkeyFromMouseEvent(event);
   if (result.kind === "captured") {
-    $("first-run-hotkey").value = result.value;
+    field.value = result.value;
     $("first-run-error").textContent = "";
-    $("first-run-hotkey").blur();
+    field.blur();
   } else {
     $("first-run-error").textContent = result.message;
   }

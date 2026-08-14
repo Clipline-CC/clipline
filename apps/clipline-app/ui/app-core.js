@@ -220,6 +220,7 @@ var micAudioSources = [];
 var pendingUpdate = null;
 var updateCheckRunning = false;
 var activeHotkeyCaptureId = null;
+var firstRunHotkeyCapturing = false;
 var trimStart = 0;
 var trimEnd = 0;
 var simpleTrimMode = false;

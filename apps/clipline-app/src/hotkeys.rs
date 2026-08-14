@@ -2,6 +2,7 @@
 //! reliably deliver registered global shortcuts while focused.
 
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
@@ -30,6 +31,9 @@ const VK_F1_CODE: u32 = 0x70;
 const VK_F24_CODE: u32 = 0x87;
 
 static HOTKEY_HOOK: OnceLock<Arc<HookState>> = OnceLock::new();
+/// Set while a Settings/first-run hotkey field is focused so the live bind
+/// cannot fire (or, for OS-registered F-keys, swallow) the key being captured.
+static ACTIONS_PAUSED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HookAction {
@@ -77,6 +81,7 @@ struct HookState {
     trigger_tx: Sender<HookTrigger>,
     keyboard_hook: Option<KeyboardHookThread>,
     mouse_hook: Mutex<Option<MouseHookThread>>,
+    paused: AtomicBool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -111,6 +116,9 @@ impl HookState {
     }
 
     fn on_key_down(&self, vk_code: u32, ctrl: bool, alt: bool, shift: bool) -> bool {
+        if self.paused.load(Ordering::Acquire) {
+            return false;
+        }
         // Before any lock: contention here, and the dispatch thread's own
         // scheduling, must not move where a bookmark lands.
         let pressed_at = Instant::now();
@@ -243,6 +251,7 @@ where
         trigger_tx,
         keyboard_hook: Some(keyboard_hook),
         mouse_hook: Mutex::new(None),
+        paused: AtomicBool::new(ACTIONS_PAUSED.load(Ordering::Acquire)),
     });
     if requires_mouse_hook {
         state.ensure_mouse_hook()?;
@@ -259,6 +268,17 @@ pub fn set_hotkeys(hotkeys: HookHotkeys<'_>) -> Result<(), String> {
     } else {
         parse_hook_bindings(hotkeys).map(|_| ())
     }
+}
+
+pub fn set_actions_paused(paused: bool) {
+    ACTIONS_PAUSED.store(paused, Ordering::Release);
+    if let Some(state) = HOTKEY_HOOK.get() {
+        state.paused.store(paused, Ordering::Release);
+    }
+}
+
+pub fn actions_paused() -> bool {
+    ACTIONS_PAUSED.load(Ordering::Acquire)
 }
 
 fn start_keyboard_hook() -> Result<KeyboardHookThread, String> {
@@ -646,6 +666,7 @@ mod tests {
             trigger_tx,
             keyboard_hook: None,
             mouse_hook: Mutex::new(None),
+            paused: AtomicBool::new(false),
         };
 
         assert!(state.on_key_down(VK_F1_CODE + 9, false, true, false));
@@ -674,6 +695,7 @@ mod tests {
             trigger_tx,
             keyboard_hook: None,
             mouse_hook: Mutex::new(None),
+            paused: AtomicBool::new(false),
         };
 
         assert!(state.on_key_down(VK_F1_CODE + 9, false, true, false));
@@ -704,6 +726,7 @@ mod tests {
             trigger_tx,
             keyboard_hook: None,
             mouse_hook: Mutex::new(None),
+            paused: AtomicBool::new(false),
         };
 
         assert!(state.on_key_down(VK_F1_CODE + 6, false, false, false));
@@ -714,6 +737,36 @@ mod tests {
         assert_eq!(recv_action(&trigger_rx), Ok(HookAction::Bookmark));
         state.on_key_up(VK_XBUTTON2_CODE);
 
+        assert!(state.on_key_down(VK_F1_CODE + 5, false, false, false));
+        assert_eq!(recv_action(&trigger_rx), Ok(HookAction::SaveReplay));
+    }
+
+    #[test]
+    fn paused_hook_does_not_dispatch_the_live_save_bind() {
+        let (trigger_tx, trigger_rx) = mpsc::channel();
+        let state = HookState {
+            bindings: Mutex::new(
+                parse_hook_bindings(HookHotkeys {
+                    save: &["F6"],
+                    recording: &["Alt+F9"],
+                    bookmark: &["F7"],
+                })
+                .unwrap(),
+            ),
+            down_keys: Mutex::new(BTreeSet::new()),
+            trigger_tx,
+            keyboard_hook: None,
+            mouse_hook: Mutex::new(None),
+            paused: AtomicBool::new(true),
+        };
+
+        assert!(!state.on_key_down(VK_F1_CODE + 5, false, false, false));
+        assert!(!state.on_key_down(VK_F1_CODE + 6, false, false, false));
+        assert!(!state.on_key_down(VK_F1_CODE + 8, false, true, false));
+        assert!(trigger_rx.try_recv().is_err());
+
+        state.paused.store(false, Ordering::Release);
+        state.on_key_up(VK_F1_CODE + 5);
         assert!(state.on_key_down(VK_F1_CODE + 5, false, false, false));
         assert_eq!(recv_action(&trigger_rx), Ok(HookAction::SaveReplay));
     }
@@ -777,6 +830,7 @@ mod tests {
             trigger_tx,
             keyboard_hook: None,
             mouse_hook: Mutex::new(None),
+            paused: AtomicBool::new(false),
         });
         let guard = state.bindings.lock().unwrap();
         let worker_state = Arc::clone(&state);

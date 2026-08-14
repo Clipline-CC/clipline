@@ -1850,21 +1850,85 @@ function setHotkeyStatus(fieldId, message, state = "") {
 
 function beginHotkeyCapture(fieldId) {
   if (activeHotkeyCaptureId && activeHotkeyCaptureId !== fieldId) {
-    endHotkeyCapture(activeHotkeyCaptureId);
+    $(activeHotkeyCaptureId).classList.remove("recording");
+    setHotkeyStatus(activeHotkeyCaptureId, HOTKEY_IDLE_MESSAGE);
   }
   activeHotkeyCaptureId = fieldId;
   $(fieldId).classList.add("recording");
   setHotkeyStatus(fieldId, "Press an F-key, mouse button, or Ctrl/Alt/Shift plus a keyboard key - or Esc to clear.", "recording");
+  syncHotkeyCapturePause();
 }
 
 function endHotkeyCapture(fieldId, message = HOTKEY_IDLE_MESSAGE, state = "") {
   if (activeHotkeyCaptureId === fieldId) activeHotkeyCaptureId = null;
   $(fieldId).classList.remove("recording");
   setHotkeyStatus(fieldId, message, state);
+  syncHotkeyCapturePause();
 }
 
 function endAllHotkeyCaptures() {
-  HOTKEY_FIELD_IDS.forEach((fieldId) => endHotkeyCapture(fieldId));
+  HOTKEY_FIELD_IDS.forEach((fieldId) => {
+    if (activeHotkeyCaptureId === fieldId) activeHotkeyCaptureId = null;
+    $(fieldId).classList.remove("recording");
+    setHotkeyStatus(fieldId, HOTKEY_IDLE_MESSAGE);
+  });
+  activeHotkeyCaptureId = null;
+  syncHotkeyCapturePause();
+}
+
+function isHotkeyRecorderFocus(el) {
+  return !!(el && (HOTKEY_FIELD_IDS.includes(el.id) || el.id === "first-run-hotkey"));
+}
+
+function hotkeyCaptureShouldPause() {
+  return isHotkeyRecorderFocus(document.activeElement) || firstRunHotkeyCapturing;
+}
+
+function hotkeyRecorderIsFocused(field) {
+  return document.activeElement === field;
+}
+
+function focusHotkeyRecorder(field) {
+  if (hotkeyRecorderIsFocused(field)) return true;
+  field.focus();
+  return false;
+}
+
+function hotkeyCapturePauseErrorTarget() {
+  const firstRun = $("first-run-setup");
+  if (firstRun && !firstRun.hidden) return $("first-run-error");
+  return $("error");
+}
+
+var hotkeyCapturePauseChain = Promise.resolve();
+var lastSentHotkeyCapturePause = false;
+
+function syncHotkeyCapturePause() {
+  // Blur then focus of another recorder field is one turn; wait until
+  // activeElement has settled so we do not resume-then-pause the live bind.
+  hotkeyCapturePauseChain = hotkeyCapturePauseChain
+    .catch(() => {})
+    .then(
+      () =>
+        new Promise((resolve) => {
+          queueMicrotask(resolve);
+        }),
+    )
+    .then(flushHotkeyCapturePause)
+    .catch((error) => {
+      const node = hotkeyCapturePauseErrorTarget();
+      if (node) node.textContent = String(error);
+    });
+}
+
+async function flushHotkeyCapturePause() {
+  const active = hotkeyCaptureShouldPause();
+  if (active === lastSentHotkeyCapturePause) return;
+  await invoke("set_hotkey_capture_active", { active });
+  lastSentHotkeyCapturePause = active;
+  if (hotkeyCaptureShouldPause() !== lastSentHotkeyCapturePause) {
+    return flushHotkeyCapturePause();
+  }
 }
 
 function recordHotkey(fieldId, ev) {
@@ -1877,9 +1941,13 @@ function recordHotkey(fieldId, ev) {
 
 function recordMouseHotkey(fieldId, ev) {
   if (ev.button === 0) return;
-  if (activeHotkeyCaptureId !== fieldId) beginHotkeyCapture(fieldId);
   ev.preventDefault();
   ev.stopPropagation();
+  const field = $(fieldId);
+  // An unfocused field has not paused live binds yet, and preventDefault
+  // would otherwise skip focus. Arm the recorder on this press; bind the next.
+  if (!focusHotkeyRecorder(field)) return;
+  if (activeHotkeyCaptureId !== fieldId) beginHotkeyCapture(fieldId);
 
   applyHotkeyCaptureResult(fieldId, hotkeyFromMouseEvent(ev));
 }
