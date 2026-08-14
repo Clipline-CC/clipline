@@ -139,6 +139,40 @@ fn clip_paths_match_legacy_windows_canonical_forms() {
 }
 
 #[test]
+fn clip_file_label_prefers_name_and_never_leaks_folders() {
+    let mut ctx = player_core_context();
+    // The recorded file name wins when present.
+    assert_eq!(
+        eval(
+            &mut ctx,
+            r#"PlayerCore.clipFileLabel({ name: 'Ranked win.mp4', path: 'C:\\Users\\me\\Videos\\Clipline\\Ranked win.mp4' })"#,
+        ),
+        "Ranked win.mp4"
+    );
+    // Without a name, only the final path segment is shown — never the folders.
+    assert_eq!(
+        eval(
+            &mut ctx,
+            r#"PlayerCore.clipFileLabel({ path: 'C:\\Users\\me\\Videos\\Clipline\\clip.mp4' })"#,
+        ),
+        "clip.mp4"
+    );
+    // Long (\\?\) device paths and forward slashes degrade to the file name too.
+    assert_eq!(
+        eval(
+            &mut ctx,
+            r#"PlayerCore.clipFileLabel({ path: '\\\\?\\C:\\secret\\folders\\clip.mp4' })"#,
+        ),
+        "clip.mp4"
+    );
+    assert_eq!(
+        eval(&mut ctx, r#"PlayerCore.clipFileLabel({ path: 'C:/Clips/clip.mp4' })"#),
+        "clip.mp4"
+    );
+    assert_eq!(eval(&mut ctx, "PlayerCore.clipFileLabel(null)"), "");
+}
+
+#[test]
 fn cloud_library_entries_filter_sort_and_mark_local_availability() {
     let mut ctx = player_core_context();
     let entries = eval_json(

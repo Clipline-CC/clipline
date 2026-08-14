@@ -47,6 +47,14 @@ const PlayerCore = (() => {
     return text.split(/[\\/]/).filter(Boolean).pop() || text;
   };
 
+  // Header-safe clip label: the recorded file name, else the final path segment.
+  // Never the full path — folder names leak when the header is screen-shared.
+  const clipFileLabel = (clip) => {
+    const name = String(clip && clip.name || "").trim();
+    if (name) return name;
+    return pathBaseName(clip && clip.path);
+  };
+
   const windowsClipPathKey = (path) => {
     const text = String(path || "").trim();
     if (!text) return null;
@@ -2131,6 +2139,7 @@ const PlayerCore = (() => {
     fmtMegabytes,
     fmtLibraryStorageUsage,
     sameClipPath,
+    clipFileLabel,
     cloudLibraryEntries,
     fmtDur,
     fmtTenths,
