@@ -4786,15 +4786,19 @@ button.primary.settings-save-glow {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 6px;
   z-index: 8;
   color: var(--text);
-  width: 30px;
+  width: auto;
   height: 26px;
   min-width: 0;
-  padding: 6px;
+  padding: 0 8px;
   border: 1px solid var(--line-strong);
   border-radius: 5px;
   background: var(--panel-2);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
 }
 #trim-mode-toggle[hidden] { display: none; }
 #trim-mode-toggle:hover {
@@ -4803,8 +4807,9 @@ button.primary.settings-save-glow {
 }
 #trim-mode-toggle svg {
   display: block;
-  width: 100%;
-  height: 100%;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
   fill: currentColor;
 }
 #snap-toggle.active {

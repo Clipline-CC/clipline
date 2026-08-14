@@ -3544,9 +3544,15 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
         .map(|offset| trim_toggle + offset)
         .expect("trim toggle closes");
     let trim_toggle_markup = &html[trim_toggle..trim_toggle_end];
+    let trim_label = trim_toggle_markup
+        .find("<span id=\"trim-mode-label\">Clip</span>")
+        .expect("clip toggle label");
+    let trim_icon = trim_toggle_markup.find("<svg").expect("clip toggle scissors");
     assert!(
-        !trim_toggle_markup.contains("<span>Clip</span>"),
-        "the below-timeline scissors toggle should stay icon-only so it cannot look like a second export button"
+        trim_label < trim_icon
+            && trim_toggle_markup.contains("title=\"Clip\"")
+            && trim_toggle_markup.contains("aria-label=\"Clip\""),
+        "the below-timeline scissors toggle should show Clip to the left of the scissors icon"
     );
     assert!(
         timeline < marker_layer
@@ -3635,8 +3641,12 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
     assert!(
         css_decl_value(css_rule_body(&css, "#trim-mode-toggle"), "display") == Some("inline-flex")
             && css_decl_value(css_rule_body(&css, "#trim-mode-toggle"), "color")
-                == Some("var(--text)"),
-        "the simple scissors trim control must read as a compact below-timeline action"
+                == Some("var(--text)")
+            && css_decl_value(css_rule_body(&css, "#trim-mode-toggle"), "width") == Some("auto")
+            && css_decl_value(css_rule_body(&css, "#trim-mode-toggle"), "gap") == Some("6px")
+            && css_decl_value(css_rule_body(&css, "#trim-mode-toggle svg"), "width")
+                == Some("14px"),
+        "the simple scissors trim control must read as a compact labeled below-timeline action"
     );
     assert!(
         css_decl_value(css_rule_body(&css, "#trim-mode-toggle"), "position").is_some()
@@ -3671,6 +3681,14 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
     assert!(
         timeline_preference.contains("$(\"trim-action-panel\").hidden = legacy;"),
         "legacy timeline mode should hide the below-timeline scissors strip"
+    );
+    assert!(
+        timeline_preference.contains("$(\"trim-mode-label\")")
+            && timeline_preference.contains("textContent = simpleTrimMode ? \"Close\" : \"Clip\"")
+            && timeline_preference.contains("toggle.title = simpleTrimMode ? \"Close\" : \"Clip\"")
+            && timeline_preference
+                .contains("setAttribute(\"aria-label\", simpleTrimMode ? \"Close\" : \"Clip\")"),
+        "the scissors toggle must read Close in clip mode and Clip when idle"
     );
     assert!(
         css.contains(".deck.simple-timeline:not(.simple-trim-active) #export-clip")

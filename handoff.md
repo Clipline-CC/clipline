@@ -4,6 +4,15 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-14): Clip toggle shows Clip / Close
+
+Plan: `docs/superpowers/plans/2026-08-14-clip-toggle-labels.md`.
+
+The below-timeline scissors control was icon-only, so people did not recognize it as Clip. It now
+shows **Clip** to the left of the scissors when idle, and **Close** to the left of the scissors
+while clip mode is on. The export row still reads **Create Clip** after entering clip mode; the
+toggle is text-then-icon so the two scissors buttons do not look like duplicates.
+
 ## Checkpoint (2026-08-14): Review header no longer leaks folder names
 
 The review player's meta line (`#pmeta`, under the clip title) used to append the clip's full
