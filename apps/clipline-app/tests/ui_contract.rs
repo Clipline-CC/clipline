@@ -2836,6 +2836,37 @@ fn opening_multitrack_clip_starts_direct_and_prepares_default_sidecars() {
 }
 
 #[test]
+fn review_header_meta_shows_file_name_not_folder_path() {
+    let review = read_ui_js("review-player.js");
+    let main = read_ui_js("main.js");
+
+    let mut pmeta_assignments: Vec<String> = Vec::new();
+    for source in [&review, &main] {
+        for (index, segment) in source.split("$(\"pmeta\").textContent").enumerate() {
+            if index == 0 {
+                continue;
+            }
+            let end = segment.find(';').unwrap_or(segment.len());
+            pmeta_assignments.push(segment[..end].to_string());
+        }
+    }
+    assert!(
+        !pmeta_assignments.is_empty(),
+        "expected #pmeta assignments in the review header"
+    );
+    for assignment in &pmeta_assignments {
+        assert!(
+            assignment.contains("PlayerCore.clipFileLabel("),
+            "#pmeta must render PlayerCore.clipFileLabel(...) so streams don't leak folders:{assignment}"
+        );
+        assert!(
+            !assignment.contains(".path}"),
+            "#pmeta must never display the clip's full folder path:{assignment}"
+        );
+    }
+}
+
+#[test]
 fn review_and_upload_audio_controls_render_exact_selected_ids() {
     let app_core = read_ui_js("app-core.js");
     let review_panel = js_function_body(&app_core, "renderAudioTrackPanel");

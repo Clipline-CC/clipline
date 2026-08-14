@@ -13,6 +13,15 @@ shows **Clip** to the left of the scissors when idle, and **Close** to the left 
 while clip mode is on. The export row still reads **Create Clip** after entering clip mode; the
 toggle is text-then-icon so the two scissors buttons do not look like duplicates.
 
+## Checkpoint (2026-08-14): Review header no longer leaks folder names
+
+The review player's meta line (`#pmeta`, under the clip title) used to append the clip's full
+file path, so streaming the app on Discord exposed every folder name in the path. All three
+assignments (open, rename, `loadedmetadata` refresh) now render `PlayerCore.clipFileLabel(clip)` —
+the recorded file name, falling back to the final path segment. A `ui_contract.rs` test pins every
+`#pmeta` assignment to `clipFileLabel` and forbids `.path}` interpolation; a `player_core.rs` test
+covers the pure function (name preference, `\\?\` device paths, mixed separators).
+
 ## Checkpoint (2026-08-14): Hotkey capture no longer fires the live bind
 
 Plan: `docs/superpowers/plans/2026-08-14-hotkey-capture-suppresses-actions.md`.
