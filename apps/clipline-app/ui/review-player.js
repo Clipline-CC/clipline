@@ -937,7 +937,10 @@ function applyTimelineEditorPreference() {
   toggle.hidden = legacy;
   toggle.classList.toggle("active", !legacy && simpleTrimMode);
   toggle.setAttribute("aria-pressed", String(!legacy && simpleTrimMode));
-  toggle.title = simpleTrimMode ? "Exit trim mode" : "Trim clip";
+  toggle.title = simpleTrimMode ? "Close" : "Clip";
+  toggle.setAttribute("aria-label", simpleTrimMode ? "Close" : "Clip");
+  const trimLabel = $("trim-mode-label");
+  if (trimLabel) trimLabel.textContent = simpleTrimMode ? "Close" : "Clip";
 
   const exportLabel = $("export-clip").querySelector("span");
   if (exportLabel) exportLabel.textContent = !legacy && simpleTrimMode ? "Create Clip" : "Clip";
@@ -945,7 +948,7 @@ function applyTimelineEditorPreference() {
     ? "Click to seek · drag the selection to slide · drag the edges to trim · scroll to zoom"
     : simpleTrimMode
       ? "Drag the handles to trim · drag the selection to slide · click to seek"
-      : "Click to seek · press Trim clip to create a clip";
+      : "Click to seek · press Clip to create a clip";
   paintTimeline();
 }
 
