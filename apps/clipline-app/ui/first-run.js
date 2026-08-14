@@ -527,6 +527,7 @@ function closeFirstRunSetup({ discard = false } = {}) {
   firstRunCloseResolver = null;
   firstRunHotkeyCapturing = false;
   $("first-run-hotkey").classList.remove("recording");
+  $("first-run-hotkey").blur();
   $("first-run-setup").hidden = true;
   const app = document.querySelector(".app");
   app.inert = false;
@@ -665,11 +666,13 @@ $("first-run-hotkey").addEventListener("keydown", (event) => {
 $("first-run-hotkey").addEventListener("mousedown", (event) => {
   if (event.button === 0) return;
   event.preventDefault();
+  const field = $("first-run-hotkey");
+  if (!focusHotkeyRecorder(field)) return;
   const result = hotkeyFromMouseEvent(event);
   if (result.kind === "captured") {
-    $("first-run-hotkey").value = result.value;
+    field.value = result.value;
     $("first-run-error").textContent = "";
-    $("first-run-hotkey").blur();
+    field.blur();
   } else {
     $("first-run-error").textContent = result.message;
   }

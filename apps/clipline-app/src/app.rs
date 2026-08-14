@@ -3216,21 +3216,38 @@ fn apply_hotkey_capture_active<R: Runtime>(
     active: bool,
 ) -> Result<(), String> {
     let settings = state.settings();
-    let old = effective_global_hotkeys(&settings, crate::hotkeys::actions_paused())?;
-    crate::hotkeys::set_actions_paused(active);
+    let previous = crate::hotkeys::actions_paused();
+    let old = effective_global_hotkeys(&settings, previous)?;
     let new = effective_global_hotkeys(&settings, active)?;
-    let shortcuts = app.global_shortcut();
-    let warnings = sync_global_hotkeys(
-        &old,
-        &new,
-        |shortcut| shortcuts.is_registered(shortcut),
-        |shortcut| shortcuts.register(shortcut),
-        |shortcut| shortcuts.unregister(shortcut),
-    )?;
+    let warnings = commit_hotkey_capture_pause(active, || {
+        let shortcuts = app.global_shortcut();
+        sync_global_hotkeys(
+            &old,
+            &new,
+            |shortcut| shortcuts.is_registered(shortcut),
+            |shortcut| shortcuts.register(shortcut),
+            |shortcut| shortcuts.unregister(shortcut),
+        )
+    })?;
     for warning in warnings {
         tracing::warn!(event = "hotkey_capture_global_sync_warning", message = %warning);
     }
     Ok(())
+}
+
+fn commit_hotkey_capture_pause<T>(
+    active: bool,
+    sync: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let previous = crate::hotkeys::actions_paused();
+    crate::hotkeys::set_actions_paused(active);
+    match sync() {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            crate::hotkeys::set_actions_paused(previous);
+            Err(error)
+        }
+    }
 }
 
 fn resume_hotkeys_after_ui_gone<R: Runtime>(app: &AppHandle<R>) {
@@ -4574,6 +4591,28 @@ mod tests {
             "capture must drop RegisterHotKey so the field can see the live save key"
         );
         assert_eq!(effective_global_hotkeys(&settings, false).unwrap(), live);
+    }
+
+    #[test]
+    fn failed_hotkey_capture_sync_restores_the_previous_pause_flag() {
+        crate::hotkeys::set_actions_paused(false);
+        let paused: Result<(), String> =
+            commit_hotkey_capture_pause(true, || Err("unregister failed".into()));
+        assert_eq!(paused, Err("unregister failed".into()));
+        assert!(
+            !crate::hotkeys::actions_paused(),
+            "a failed pause must not leave live actions suppressed"
+        );
+
+        crate::hotkeys::set_actions_paused(true);
+        let resumed: Result<(), String> =
+            commit_hotkey_capture_pause(false, || Err("register failed".into()));
+        assert_eq!(resumed, Err("register failed".into()));
+        assert!(
+            crate::hotkeys::actions_paused(),
+            "a failed resume must keep the pause the UI still believes is active"
+        );
+        crate::hotkeys::set_actions_paused(false);
     }
 
     #[test]

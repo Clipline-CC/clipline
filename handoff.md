@@ -15,9 +15,11 @@ Bookmark field may never see the key being assigned.
 
 While a Settings or first-run hotkey field is focused, the hook does not dispatch and OS global
 shortcuts are unregistered so the key reaches the recorder. Pause lasts until blur — including after
-"Ready to save." — so a second press in the same field is still a rebind. Tray-close and
+"Ready to save." — so a second press in the same field is still a rebind. Mouse binds on an unfocused
+field only arm capture (the press that focuses cannot have paused yet). Tray-close and
 `frontend_ready` resume, so a destroyed window cannot leave Save Replay dead. Unsaved drafts still
-do not go live; only capture is paused.
+do not go live; only capture is paused. If OS shortcut sync fails, the pause flag rolls back so the
+UI can retry instead of leaving actions suppressed.
 
 ## Checkpoint (2026-08-13): Nightly 0.1.55
 

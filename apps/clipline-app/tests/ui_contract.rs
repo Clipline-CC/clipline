@@ -2724,7 +2724,10 @@ fn hotkey_capture_pauses_live_actions_until_blur() {
     for required in [
         "invoke(\"set_hotkey_capture_active\", { active })",
         "function syncHotkeyCapturePause(",
-        "keepPaused: true",
+        "function flushHotkeyCapturePause(",
+        "queueMicrotask(resolve)",
+        "function isHotkeyRecorderFocus(",
+        "if (!focusHotkeyRecorder(field)) return",
         "firstRunHotkeyCapturing = true",
         "firstRunHotkeyCapturing = false",
         "hotkeyCaptureShouldPause()",
@@ -2738,6 +2741,7 @@ fn hotkey_capture_pauses_live_actions_until_blur() {
         "fn set_hotkey_capture_active",
         "fn effective_global_hotkeys",
         "fn apply_hotkey_capture_active",
+        "fn commit_hotkey_capture_pause",
         "resume_hotkeys_after_ui_gone",
         "set_hotkey_capture_active,",
     ] {
