@@ -4,6 +4,19 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-14): Nightly 0.1.56
+
+Plan: `docs/superpowers/plans/2026-08-14-nightly-0.1.56.md`.
+
+Nightly 0.1.56 publishes the hotkey-capture fixes (#164), replay buffer indicator glow (#165),
+review header filename (#166), and clip toggle labels (#167) on top of Nightly 0.1.55.
+
+The WebView2 Fixed Version pin advances to **151.0.4129.86** for x64 — the live Fixed Version
+selector moved off 151.0.4129.78. Its exact official CAB URL, 307,117,094-byte size, and SHA-256
+`b62fc1e3…2fac68` are pinned in `webview2-fixed-runtime.json`; both standalone paths in
+`tauri.standalone.conf.json` were rotated together. Re-reviewed today; `reviewed_on` /
+`review_due_on` are current through 2026-09-13.
+
 ## Checkpoint (2026-08-14): Clip toggle shows Clip / Close
 
 Plan: `docs/superpowers/plans/2026-08-14-clip-toggle-labels.md`.
