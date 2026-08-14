@@ -2717,6 +2717,38 @@ fn bookmark_hotkey_drops_a_user_placed_timeline_marker() {
 }
 
 #[test]
+fn hotkey_capture_pauses_live_actions_until_blur() {
+    let js = main_js();
+    let app = app_rs();
+
+    for required in [
+        "invoke(\"set_hotkey_capture_active\", { active })",
+        "function syncHotkeyCapturePause(",
+        "keepPaused: true",
+        "firstRunHotkeyCapturing = true",
+        "firstRunHotkeyCapturing = false",
+        "hotkeyCaptureShouldPause()",
+    ] {
+        assert!(
+            js.contains(required),
+            "hotkey capture must pause live actions; missing `{required}`"
+        );
+    }
+    for required in [
+        "fn set_hotkey_capture_active",
+        "fn effective_global_hotkeys",
+        "fn apply_hotkey_capture_active",
+        "resume_hotkeys_after_ui_gone",
+        "set_hotkey_capture_active,",
+    ] {
+        assert!(
+            app.contains(required),
+            "native hotkey capture pause missing `{required}`"
+        );
+    }
+}
+
+#[test]
 fn rail_shows_connected_cloud_identity() {
     let html = index_html();
     let js = main_js();

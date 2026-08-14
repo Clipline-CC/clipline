@@ -525,10 +525,13 @@ function closeFirstRunSetup({ discard = false } = {}) {
   const resolveClosed = firstRunCloseResolver;
   firstRunReplay = false;
   firstRunCloseResolver = null;
+  firstRunHotkeyCapturing = false;
+  $("first-run-hotkey").classList.remove("recording");
   $("first-run-setup").hidden = true;
   const app = document.querySelector(".app");
   app.inert = false;
   app.removeAttribute("aria-hidden");
+  syncHotkeyCapturePause();
   if (replayed) {
     if (discard && currentSettings) fillSettings(currentSettings);
     toggleSettings(true);
@@ -636,9 +639,13 @@ $("first-run-browse").addEventListener("click", async () => {
 
 $("first-run-hotkey").addEventListener("focus", () => {
   $("first-run-hotkey").classList.add("recording");
+  firstRunHotkeyCapturing = true;
+  syncHotkeyCapturePause();
 });
 $("first-run-hotkey").addEventListener("blur", () => {
   $("first-run-hotkey").classList.remove("recording");
+  firstRunHotkeyCapturing = false;
+  syncHotkeyCapturePause();
 });
 $("first-run-hotkey").addEventListener("keydown", (event) => {
   if (event.key === "Tab") return;

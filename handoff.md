@@ -4,6 +4,21 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-14): Hotkey capture no longer fires the live bind
+
+Plan: `docs/superpowers/plans/2026-08-14-hotkey-capture-suppresses-actions.md`.
+
+Swapping binds without hitting Save first used to save a replay (or bookmark, or toggle
+recording). The Settings fields are a draft; the OS shortcut and the low-level hook kept the last
+saved Save Replay key live. Function keys are worse: `RegisterHotKey` swallows the press, so the
+Bookmark field may never see the key being assigned.
+
+While a Settings or first-run hotkey field is focused, the hook does not dispatch and OS global
+shortcuts are unregistered so the key reaches the recorder. Pause lasts until blur — including after
+"Ready to save." — so a second press in the same field is still a rebind. Tray-close and
+`frontend_ready` resume, so a destroyed window cannot leave Save Replay dead. Unsaved drafts still
+do not go live; only capture is paused.
+
 ## Checkpoint (2026-08-13): Nightly 0.1.55
 
 Plan: `docs/superpowers/plans/2026-08-13-nightly-0.1.55.md`.

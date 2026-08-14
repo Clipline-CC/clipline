@@ -1850,21 +1850,60 @@ function setHotkeyStatus(fieldId, message, state = "") {
 
 function beginHotkeyCapture(fieldId) {
   if (activeHotkeyCaptureId && activeHotkeyCaptureId !== fieldId) {
-    endHotkeyCapture(activeHotkeyCaptureId);
+    $(activeHotkeyCaptureId).classList.remove("recording");
+    setHotkeyStatus(activeHotkeyCaptureId, HOTKEY_IDLE_MESSAGE);
   }
+  const alreadyPaused = hotkeyCaptureShouldPause();
   activeHotkeyCaptureId = fieldId;
   $(fieldId).classList.add("recording");
   setHotkeyStatus(fieldId, "Press an F-key, mouse button, or Ctrl/Alt/Shift plus a keyboard key - or Esc to clear.", "recording");
+  if (!alreadyPaused) syncHotkeyCapturePause();
 }
 
-function endHotkeyCapture(fieldId, message = HOTKEY_IDLE_MESSAGE, state = "") {
-  if (activeHotkeyCaptureId === fieldId) activeHotkeyCaptureId = null;
+function endHotkeyCapture(fieldId, message = HOTKEY_IDLE_MESSAGE, state = "", { keepPaused = false } = {}) {
+  if (activeHotkeyCaptureId === fieldId && !keepPaused) activeHotkeyCaptureId = null;
   $(fieldId).classList.remove("recording");
   setHotkeyStatus(fieldId, message, state);
+  if (!keepPaused) syncHotkeyCapturePause();
 }
 
 function endAllHotkeyCaptures() {
-  HOTKEY_FIELD_IDS.forEach((fieldId) => endHotkeyCapture(fieldId));
+  const wasPaused = hotkeyCaptureShouldPause();
+  HOTKEY_FIELD_IDS.forEach((fieldId) => {
+    if (activeHotkeyCaptureId === fieldId) activeHotkeyCaptureId = null;
+    $(fieldId).classList.remove("recording");
+    setHotkeyStatus(fieldId, HOTKEY_IDLE_MESSAGE);
+  });
+  activeHotkeyCaptureId = null;
+  if (wasPaused) syncHotkeyCapturePause();
+}
+
+function hotkeyCaptureShouldPause() {
+  return activeHotkeyCaptureId != null || firstRunHotkeyCapturing;
+}
+
+function hotkeyCapturePauseErrorTarget() {
+  const firstRun = $("first-run-setup");
+  if (firstRun && !firstRun.hidden) return $("first-run-error");
+  return $("error");
+}
+
+var hotkeyCapturePauseChain = Promise.resolve();
+var lastSentHotkeyCapturePause = false;
+
+function syncHotkeyCapturePause() {
+  const active = hotkeyCaptureShouldPause();
+  hotkeyCapturePauseChain = hotkeyCapturePauseChain
+    .then(async () => {
+      if (active === lastSentHotkeyCapturePause) return;
+      await invoke("set_hotkey_capture_active", { active });
+      lastSentHotkeyCapturePause = active;
+    })
+    .catch((error) => {
+      lastSentHotkeyCapturePause = !active;
+      const node = hotkeyCapturePauseErrorTarget();
+      if (node) node.textContent = String(error);
+    });
 }
 
 function recordHotkey(fieldId, ev) {
@@ -1892,7 +1931,7 @@ function applyHotkeyCaptureResult(fieldId, result) {
         break;
       }
       $(fieldId).value = result.value;
-      endHotkeyCapture(fieldId, "Ready to save.", "ready");
+      endHotkeyCapture(fieldId, "Ready to save.", "ready", { keepPaused: true });
       syncSettingsDraftFromForm();
       break;
     case "pending":

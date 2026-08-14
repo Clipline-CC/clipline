@@ -765,6 +765,7 @@ fn frontend_ready<R: Runtime>(
     if let Some(event) = runtime.durable_quota_event_for_replay() {
         let _ = app.emit("storage-quota-full", event);
     }
+    resume_hotkeys_after_ui_gone(&app);
     FrontendReadyResponse {
         warnings: startup_warnings.snapshot(),
         window_lifecycle: window_lifecycle.snapshot(),
@@ -1858,6 +1859,9 @@ impl RuntimeState {
     }
 
     fn active_shortcut_matches(&self, shortcut: &Shortcut) -> bool {
+        if crate::hotkeys::actions_paused() {
+            return false;
+        }
         let Ok(inner) = self.0.lock() else {
             return false;
         };
@@ -2529,6 +2533,8 @@ fn complete_main_window_destroyed<R: Runtime>(app: &AppHandle<R>) -> Result<(), 
         return Ok(());
     }
 
+    resume_hotkeys_after_ui_gone(app);
+
     let mut state = main_window_shell_state(app);
     // The dying label is gone by definition once Destroyed is observed.
     state.main_window_present = false;
@@ -3191,6 +3197,61 @@ fn global_hotkeys(settings: &AppSettings) -> Result<Vec<Shortcut>, String> {
     Ok(shortcuts)
 }
 
+/// What the OS should own right now. Capture unregisters every global shortcut
+/// so the key being bound can reach the field instead of saving a replay.
+fn effective_global_hotkeys(
+    settings: &AppSettings,
+    capture_active: bool,
+) -> Result<Vec<Shortcut>, String> {
+    if capture_active {
+        Ok(Vec::new())
+    } else {
+        global_hotkeys(settings)
+    }
+}
+
+fn apply_hotkey_capture_active<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &RuntimeState,
+    active: bool,
+) -> Result<(), String> {
+    let settings = state.settings();
+    let old = effective_global_hotkeys(&settings, crate::hotkeys::actions_paused())?;
+    crate::hotkeys::set_actions_paused(active);
+    let new = effective_global_hotkeys(&settings, active)?;
+    let shortcuts = app.global_shortcut();
+    let warnings = sync_global_hotkeys(
+        &old,
+        &new,
+        |shortcut| shortcuts.is_registered(shortcut),
+        |shortcut| shortcuts.register(shortcut),
+        |shortcut| shortcuts.unregister(shortcut),
+    )?;
+    for warning in warnings {
+        tracing::warn!(event = "hotkey_capture_global_sync_warning", message = %warning);
+    }
+    Ok(())
+}
+
+fn resume_hotkeys_after_ui_gone<R: Runtime>(app: &AppHandle<R>) {
+    if !crate::hotkeys::actions_paused() {
+        return;
+    }
+    if let Err(error) = apply_hotkey_capture_active(app, &app.state::<RuntimeState>(), false) {
+        tracing::warn!(event = "hotkey_capture_resume_failed", error = %error);
+        log_diagnostic(format!("resume hotkeys after UI gone: {error}"));
+    }
+}
+
+#[tauri::command]
+fn set_hotkey_capture_active<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<RuntimeState>,
+    active: bool,
+) -> Result<(), String> {
+    apply_hotkey_capture_active(&app, &state, active)
+}
+
 fn save_hotkey_label(settings: &AppSettings) -> String {
     settings.hotkeys().join(" / ")
 }
@@ -3312,8 +3373,8 @@ fn save_settings<R: Runtime>(
         requested_open_on_startup,
         old.open_on_startup,
     );
-    let old_global_hotkeys = global_hotkeys(&old)?;
-    let new_global_hotkeys = global_hotkeys(&settings)?;
+    let old_global_hotkeys = effective_global_hotkeys(&old, crate::hotkeys::actions_paused())?;
+    let new_global_hotkeys = effective_global_hotkeys(&settings, crate::hotkeys::actions_paused())?;
     let quota_bytes = quota_bytes_from_gb(settings.disk_quota_gb)?;
     let shortcuts = app.global_shortcut();
     let mut applied = AppliedSettingsSideEffects::default();
@@ -3578,6 +3639,7 @@ pub fn run() {
             check_for_updates,
             install_update,
             save_settings,
+            set_hotkey_capture_active,
             support::prepare_bug_report,
             support::submit_bug_report,
             support::cancel_bug_report,
@@ -4495,6 +4557,23 @@ mod tests {
         assert_eq!(result, Ok(Vec::new()));
         assert_eq!(registered, vec![new_shortcut]);
         assert!(unregistered.is_empty());
+    }
+
+    #[test]
+    fn capturing_a_hotkey_unbinds_os_global_shortcuts() {
+        let settings = AppSettings::default();
+        let live = global_hotkeys(&settings).unwrap();
+        assert!(
+            live.contains(&parse_hotkey("F6").unwrap()),
+            "the default Save Replay bind must be an OS global shortcut"
+        );
+        assert!(
+            effective_global_hotkeys(&settings, true)
+                .unwrap()
+                .is_empty(),
+            "capture must drop RegisterHotKey so the field can see the live save key"
+        );
+        assert_eq!(effective_global_hotkeys(&settings, false).unwrap(), live);
     }
 
     #[test]

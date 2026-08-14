@@ -610,7 +610,14 @@ for (const hotkeyFieldId of HOTKEY_FIELD_IDS) {
   field.addEventListener("contextmenu", (ev) => ev.preventDefault());
   field.addEventListener("paste", (ev) => ev.preventDefault());
   field.addEventListener("blur", () => {
-    if (activeHotkeyCaptureId === hotkeyFieldId) endHotkeyCapture(hotkeyFieldId, "Shortcut unchanged.");
+    if (activeHotkeyCaptureId !== hotkeyFieldId) return;
+    const status = $(hotkeyStatusId(hotkeyFieldId));
+    const keepStatus = status.dataset.state === "ready" || status.dataset.state === "error";
+    endHotkeyCapture(
+      hotkeyFieldId,
+      keepStatus ? status.textContent : "Shortcut unchanged.",
+      keepStatus ? status.dataset.state : "",
+    );
   });
 }
 
