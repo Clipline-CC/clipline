@@ -1460,7 +1460,7 @@ label span { white-space: nowrap; }
   padding: 0;
   border-radius: 10px;
   background: var(--well);
-  border: 1px solid var(--line);
+  border: 2px solid var(--line);
   color: var(--muted);
   cursor: pointer;
   overflow: hidden;
@@ -1476,8 +1476,30 @@ label span { white-space: nowrap; }
 .rail-game.active > img,
 .rail-game.active > .placeholder {
   filter:
-    drop-shadow(0 0 1px rgba(var(--accent-rgb), 0.95))
-    drop-shadow(0 0 7px rgba(var(--accent-rgb), 0.72));
+    drop-shadow(0 0 2px rgba(var(--accent-rgb), 1))
+    drop-shadow(0 0 9px rgba(var(--accent-rgb), 0.85))
+    drop-shadow(0 0 20px rgba(var(--accent-rgb), 0.5));
+  animation: rail-glow-pulse 1.5s ease-in-out infinite alternate;
+}
+@keyframes rail-glow-pulse {
+  from {
+    filter:
+      drop-shadow(0 0 2px rgba(var(--accent-rgb), 0.95))
+      drop-shadow(0 0 8px rgba(var(--accent-rgb), 0.7))
+      drop-shadow(0 0 14px rgba(var(--accent-rgb), 0.4));
+  }
+  to {
+    filter:
+      drop-shadow(0 0 2px rgba(var(--accent-rgb), 1))
+      drop-shadow(0 0 12px rgba(var(--accent-rgb), 0.95))
+      drop-shadow(0 0 26px rgba(var(--accent-rgb), 0.6));
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rail-game.active > img,
+  .rail-game.active > .placeholder {
+    animation: none;
+  }
 }
 .rail-game.waiting {
   border-color: rgba(var(--accent-rgb), 0.45);
