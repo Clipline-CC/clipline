@@ -4,6 +4,21 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-15): First Stable 0.1.57
+
+Plan: `docs/superpowers/plans/2026-08-15-stable-0.1.57.md`.
+
+0.1.57 is the first non-prerelease. It publishes the Stable channel picker (#168) on top of
+Nightly 0.1.56. Nightly stays the default; Settings → Updates now keeps a persisted `"stable"`
+choice.
+
+The WebView2 Fixed Version pin stays at **151.0.4129.86** for x64. The official Fixed Version
+selector still names that build; Runtime 152 has not replaced it. Re-reviewed today;
+`reviewed_on` / `review_due_on` are current through 2026-09-14.
+
+The release commit advances only Clipline/Tauri version metadata, WebView2 review dates, this
+handoff, and the unticked release plan from CI-green merge `283d381`.
+
 ## Checkpoint (2026-08-15): Stable update channel
 
 Plan: `docs/superpowers/plans/2026-08-15-first-stable-release.md`.
