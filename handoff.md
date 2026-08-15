@@ -19,6 +19,17 @@ selector still names that build; Runtime 152 has not replaced it. Re-reviewed to
 The release commit advances only Clipline/Tauri version metadata, WebView2 review dates, this
 handoff, and the unticked release plan from CI-green merge `283d381`.
 
+Published from tags `v0.1.57` and `nightly-v0.1.57` at release commit `39e9e395`
+([Stable run 31905275253](https://github.com/dain98/clipline/actions/runs/31905275253),
+[Nightly run 31905275477](https://github.com/dain98/clipline/actions/runs/31905275477)).
+`main` and `develop` both point at that commit. [`v0.1.57`](https://github.com/dain98/clipline/releases/tag/v0.1.57)
+is GitHub's latest non-prerelease; `/releases/latest/download/latest.json` matches the
+`v0.1.57` asset byte-for-byte. The rolling
+[`nightly`](https://github.com/dain98/clipline/releases/tag/nightly) prerelease targets the
+same commit. Each release exposes exactly seven assets: both installers, both `.sig` files,
+`latest.json`, `latest-standalone.json`, and `release-notes-0.1.57.md`. Both actions' public-download
+verification passed — published bytes match the staged build.
+
 ## Checkpoint (2026-08-15): Stable update channel
 
 Plan: `docs/superpowers/plans/2026-08-15-first-stable-release.md`.
