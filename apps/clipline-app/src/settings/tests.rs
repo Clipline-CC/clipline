@@ -251,7 +251,7 @@ fn load_preserves_legacy_timeline_editor_preference() {
 }
 
 #[test]
-fn load_repairs_disabled_stable_update_channel() {
+fn load_preserves_stable_update_channel() {
     let dir = TestDir::new("clipline-settings", "stable-update-channel");
     let path = dir.path().join("settings.json");
     std::fs::write(
@@ -271,7 +271,7 @@ fn load_repairs_disabled_stable_update_channel() {
 
     let settings = AppSettings::load_from(&path).unwrap();
 
-    assert_eq!(settings.update_channel, UpdateChannel::Nightly);
+    assert_eq!(settings.update_channel, UpdateChannel::Stable);
 }
 
 #[test]

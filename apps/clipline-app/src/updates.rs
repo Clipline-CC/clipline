@@ -14,8 +14,8 @@ pub const NIGHTLY_STANDALONE_UPDATE_ENDPOINT: &str =
 pub const STABLE_STANDALONE_UPDATE_ENDPOINT: &str =
     "https://github.com/dain98/clipline/releases/latest/download/latest-standalone.json";
 
-// Flip this once Clipline has stable, non-prerelease GitHub releases.
-pub const STABLE_CHANNEL_ENABLED: bool = false;
+// Stable GitHub releases publish latest.json as a non-prerelease asset.
+pub const STABLE_CHANNEL_ENABLED: bool = true;
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -66,11 +66,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stable_channel_is_modeled_but_disabled_for_now() {
-        assert!(!UpdateChannel::Stable.enabled());
+    fn stable_channel_is_enabled_and_kept_on_load() {
+        assert!(UpdateChannel::Stable.enabled());
         assert_eq!(
             normalize_channel(UpdateChannel::Stable),
-            UpdateChannel::Nightly
+            UpdateChannel::Stable
+        );
+    }
+
+    #[test]
+    fn stable_channel_points_at_github_latest_endpoint() {
+        assert_eq!(
+            UpdateChannel::Stable.endpoint(false),
+            "https://github.com/dain98/clipline/releases/latest/download/latest.json"
         );
     }
 
