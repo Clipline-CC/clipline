@@ -11,6 +11,7 @@
 | Fast test (skip device tests) | `cargo test --workspace` (device tests self-skip under `CI` env or no hardware) |
 | Test with fresh clippy cache | `cargo clean -p <crate> && cargo clippy -p <crate> --all-targets -- -D warnings` |
 | Publish a new Nightly | Follow `docs/release-updates.md` → **Agent runbook**; push `nightly-v<version>` only after the release commit is on `develop` |
+| Publish a new Stable | Follow `docs/release-updates.md` → **Stable**; push `v<version>` only after the release commit is on `main` |
 
 ## Quick reference — project structure
 
@@ -57,6 +58,18 @@ the agent runbook in `docs/release-updates.md` from start to finish. In particul
   force-move a version tag or move the rolling `nightly` tag yourself.
 - Watch the **Nightly Release** action through its public-download verification, verify the rolling
   release target and seven assets, then record the publication in `handoff.md`.
+
+## When the user says “make a new Stable release”
+
+Treat that phrase as authorization to prepare and publish the next non-prerelease GitHub Stable.
+Follow the Stable runbook in `docs/release-updates.md` from start to finish. In particular:
+
+- Do not build or upload release assets manually; `.github/workflows/stable.yml` owns that work.
+- Fast-forward `main` to the `develop` release commit before tagging. Never tag a commit that is
+  not contained in remote `main`.
+- Push a new immutable `v<version>` tag at that exact commit. Never force-move a version tag.
+- Watch the **Stable Release** action through its public-download verification, confirm GitHub
+  latest is that non-prerelease with seven assets, then record the publication in `handoff.md`.
 
 ## Sharp edges that cost real time
 

@@ -881,3 +881,200 @@ fn nightly_publish_job_sets_gh_repo_without_checkout() {
         "publish job must retain the draft-create, promote, and public-verify transaction"
     );
 }
+
+
+#[test]
+fn stable_tags_publish_both_verified_updater_variants_transactionally() {
+    let root = workspace_root();
+    let workflow = fs::read_to_string(root.join(".github/workflows/stable.yml"))
+        .expect("read active Stable workflow");
+    let prepare = fs::read_to_string(root.join("scripts/prepare-nightly-assets.ps1"))
+        .expect("read release asset script");
+
+    for contract in [
+        "\"v*\"",
+        "contents: read",
+        "contents: write",
+        "cancel-in-progress: false",
+        "cargo test --workspace",
+        "cargo clippy --workspace --all-targets -- -D warnings",
+        "scripts\\stage-webview2-runtime.ps1",
+        "scripts\\stage-ffmpeg-resource.ps1",
+        "cargo tauri build --config tauri.standalone.conf.json",
+        "scripts\\prepare-nightly-assets.ps1",
+        "-Channel Stable",
+        "TAURI_SIGNING_PRIVATE_KEY",
+        "origin/main",
+        "gh release create",
+        "gh release edit",
+        "--latest",
+        "releases/latest/download/latest.json",
+    ] {
+        assert!(
+            workflow.contains(contract),
+            "Stable workflow is missing contract: {contract}"
+        );
+    }
+
+    assert!(
+        !workflow.contains("nightly-staging-"),
+        "Stable must not use the rolling Nightly staging tag"
+    );
+    assert!(
+        !workflow.contains("--prerelease"),
+        "Stable GitHub releases must not be prereleases"
+    );
+    assert!(
+        !workflow.contains("origin/develop"),
+        "Stable tags are published from main, not develop"
+    );
+
+    let regular_build = workflow
+        .find("cargo tauri build\n")
+        .expect("regular Tauri build");
+    let ffmpeg_stage = workflow
+        .find("scripts\\stage-ffmpeg-resource.ps1")
+        .expect("standalone FFmpeg stage");
+    let standalone_build = workflow
+        .find("cargo tauri build --config tauri.standalone.conf.json")
+        .expect("standalone Tauri build");
+    assert!(
+        regular_build < ffmpeg_stage && ffmpeg_stage < standalone_build,
+        "standalone-only FFmpeg must be staged after preserving the regular installer"
+    );
+
+    assert!(
+        prepare.contains("ValidateSet('Nightly', 'Stable')")
+            && prepare.contains("v$version")
+            && prepare.contains("releases/download/$assetTag/"),
+        "asset script must emit versioned Stable download URLs"
+    );
+}
+
+#[test]
+fn stable_release_notes_fallback_clears_native_exit_code() {
+    let root = workspace_root();
+    let workflow = fs::read_to_string(root.join(".github/workflows/stable.yml"))
+        .expect("read active Stable workflow");
+    let runbook = fs::read_to_string(root.join("docs/release-updates.md"))
+        .expect("read release runbook");
+
+    let jobs = workflow.split_once("jobs:").expect("Stable jobs").1;
+    let build_job = jobs
+        .split_once("\n  publish:")
+        .map(|(build, _)| build)
+        .unwrap_or(jobs);
+    assert!(
+        !build_job.contains("contents: write"),
+        "Stable build job must stay read-only"
+    );
+    assert!(
+        !build_job.contains("gh release delete"),
+        "read-only Stable build must not delete GitHub releases"
+    );
+    assert!(
+        workflow.contains("permissions:\n  contents: read") || build_job.contains("contents: read"),
+        "Stable build remains contents: read; do not grant write just for generate-notes"
+    );
+
+    let notes_step = workflow
+        .find("Generate release notes and updater manifests")
+        .expect("release notes step");
+    let prepare = workflow[notes_step..]
+        .find("scripts\\prepare-nightly-assets.ps1")
+        .expect("prepare assets after release notes")
+        + notes_step;
+    let notes_block = &workflow[notes_step..prepare];
+    assert!(
+        notes_block.contains("releases/generate-notes"),
+        "release notes step must attempt generate-notes"
+    );
+    assert!(
+        notes_block.contains("Automated Stable build from the latest main changes."),
+        "release notes step must keep the generate-notes fallback"
+    );
+    assert!(
+        notes_block.contains("$global:LASTEXITCODE = 0"),
+        "optional generate-notes failures must clear the native exit status before prepare-nightly-assets.ps1"
+    );
+
+    assert!(
+        runbook.contains("v$version") && runbook.contains("STABLE_CHANNEL_ENABLED"),
+        "release runbook must document the Stable tag and channel gate"
+    );
+}
+
+#[test]
+fn stable_publish_job_sets_gh_repo_without_checkout() {
+    let root = workspace_root();
+    let workflow = fs::read_to_string(root.join(".github/workflows/stable.yml"))
+        .expect("read active Stable workflow");
+
+    let publish_job = workflow
+        .split_once("\n  publish:")
+        .map(|(_, rest)| rest)
+        .expect("Stable publish job");
+    let publish_header = publish_job
+        .split("steps:")
+        .next()
+        .expect("publish job header");
+
+    assert!(
+        !publish_header.contains("actions/checkout@"),
+        "publish remains artifact-only; do not require a checkout just to satisfy gh"
+    );
+    assert!(
+        publish_header.contains("GH_REPO: ${{ github.repository }}")
+            || publish_job.contains("GH_REPO: ${{ github.repository }}"),
+        "publish job must set GH_REPO so gh release commands work without a local .git directory"
+    );
+    assert!(
+        publish_job.contains("gh release create")
+            && publish_job.contains("gh release edit")
+            && publish_job.contains("gh release download $env:GITHUB_REF_NAME")
+            && publish_job.contains("releases/latest/download/latest.json"),
+        "publish job must retain the draft-create, publish, and public-verify transaction"
+    );
+}
+
+
+#[test]
+fn stable_already_published_rerun_still_verifies_public_assets() {
+    let root = workspace_root();
+    let workflow = fs::read_to_string(root.join(".github/workflows/stable.yml"))
+        .expect("read active Stable workflow");
+
+    assert!(
+        workflow.contains("already_published=true"),
+        "Stable must detect an already-published tag"
+    );
+
+    let publish_job = workflow
+        .split_once("\n  publish:")
+        .map(|(_, rest)| rest)
+        .expect("Stable publish job");
+    let publish_header = publish_job
+        .split("steps:")
+        .next()
+        .expect("publish job header");
+    assert!(
+        publish_header.contains("already_published != 'true'"),
+        "full publish remains skipped when the tag is already a non-prerelease"
+    );
+
+    let verify_marker = workflow
+        .find("already_published == 'true'")
+        .expect("already-published rerun must keep a verification job");
+    let verify_block = &workflow[verify_marker..];
+    assert!(
+        verify_block.contains("gh release download")
+            && verify_block.contains("releases/latest/download/latest.json")
+            && (verify_block.contains("exactly seven assets")
+                || verify_block.contains("Count -ne 7")),
+        "already-published rerun must still check the seven public assets and latest manifest"
+    );
+    assert!(
+        verify_block.contains("GH_REPO: ${{ github.repository }}"),
+        "verification without checkout still needs GH_REPO"
+    );
+}

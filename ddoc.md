@@ -137,10 +137,12 @@ selection while the packaged Windows icon remains the fixed product mark.
 - Ship/build FFmpeg **without `--enable-gpl`/`--enable-nonfree`**. Default H.264 recording uses Media Foundation and does not require FFmpeg. Posters, SVT-AV1/FFmpeg backends, audio sidecar extract, and shareable clipboard export request the managed runtime on demand. Keep source offer + attribution for LGPL 2.1 §6; never link libavcodec into Clipline.
 - Note that **codec patents are independent of license**: H.264/H.265 carry patent-pool obligations (HEVC's Access Advance pool alone covers 27,000+ patents, with a 25% rate increase for licensees joining after June 30, 2026 — deadline extended from the original Jan 2026). Prefer **AV1 + Opus** as the default: royalty-free by design under AOMedia/IETF terms, though not entirely pool-free — Sisvel runs an AV1 pool aimed at consumer hardware, and Dolby has asserted AV1 patents outside AOM's framework (Dolby v. Snap, 2026); exposure for software distribution is low but nonzero. H.264 remains available for edit compatibility.
 
-**Installer/update:** Tauri signed updater pulling from the rolling GitHub `nightly` prerelease;
-an immutable `nightly-v<version>` tag on `develop` triggers the Windows action that tests, builds
-both regular and standalone NSIS variants, verifies pinned runtime inputs, publishes through a
-complete draft asset set, and redownloads the public assets for byte comparison.
+**Installer/update:** Tauri signed updater with two GitHub channels. Nightly pulls from the rolling
+`nightly` prerelease; an immutable `nightly-v<version>` tag on `develop` triggers that Windows
+action. Stable pulls from GitHub `/releases/latest`; an immutable `v<version>` tag on `main`
+triggers the matching action. Both test, build regular and standalone NSIS variants, verify pinned
+runtime inputs, publish through a complete draft asset set, and redownload the public assets for
+byte comparison. Settings → Updates chooses the channel; new installs default to Nightly.
 
 ### 5. The Game Event Marker System (Differentiating Feature)
 

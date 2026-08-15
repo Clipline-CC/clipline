@@ -4,6 +4,20 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-15): Stable update channel
+
+Plan: `docs/superpowers/plans/2026-08-15-first-stable-release.md`.
+
+Settings → General → Updates now offers **Stable** next to Nightly. The compile-time gate
+`STABLE_CHANNEL_ENABLED` is on; persisted `"stable"` is kept instead of being repaired back to
+Nightly. The default channel is still Nightly.
+
+Stable publishes from immutable `v<version>` tags on `main` through `.github/workflows/stable.yml`.
+The updater endpoint is GitHub `/releases/latest/download/latest.json` (standalone:
+`latest-standalone.json`). The first Stable binary will be 0.1.57 so it does not collide with the
+already-shipped Nightly 0.1.56 bits. `docs/release.workflow.yml` stays the unused SignPath
+Authenticode template.
+
 ## Checkpoint (2026-08-14): Nightly 0.1.56
 
 Plan: `docs/superpowers/plans/2026-08-14-nightly-0.1.56.md`.

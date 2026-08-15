@@ -6689,8 +6689,8 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
     }
 
     #[test]
-    fn disabled_stable_channel_cannot_check_updates_yet() {
-        assert!(!UpdateChannel::Stable.enabled());
+    fn stable_and_nightly_channels_can_check_updates() {
+        assert!(UpdateChannel::Stable.enabled());
         assert!(UpdateChannel::Nightly.enabled());
     }
 
@@ -6699,6 +6699,10 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
         assert_eq!(
             missing_release_metadata_message(UpdateChannel::Nightly),
             "No Nightly release metadata is published yet. Publish a Nightly release first."
+        );
+        assert_eq!(
+            missing_release_metadata_message(UpdateChannel::Stable),
+            "No Stable release metadata is published yet. Publish a Stable release first."
         );
     }
 
