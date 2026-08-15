@@ -3,6 +3,8 @@ param(
     [string]$Tag,
     [Parameter(Mandatory = $true)]
     [string]$Commit,
+    [ValidateSet('Nightly', 'Stable')]
+    [string]$Channel = 'Nightly',
     [switch]$ValidateOnly,
     [string]$Repository = 'dain98/clipline',
     [string]$ReleaseDirectory = 'dist',
@@ -31,14 +33,16 @@ $lockVersion = [regex]::Match(
 if ([string]::IsNullOrWhiteSpace($version) -or $cargoVersion -cne $version -or $lockVersion -cne $version) {
     throw "Clipline versions disagree: Tauri=$version Cargo=$cargoVersion Cargo.lock=$lockVersion."
 }
-if ($Tag -cne "nightly-v$version") {
-    throw "Nightly tag must exactly match the application version: nightly-v$version."
+
+$expectedTag = if ($Channel -eq 'Stable') { "v$version" } else { "nightly-v$version" }
+if ($Tag -cne $expectedTag) {
+    throw "$Channel tag must exactly match the application version: $expectedTag."
 }
 if ($Commit -notmatch '^[0-9a-fA-F]{40}$') {
-    throw 'Nightly commit must be a full 40-character Git SHA.'
+    throw "$Channel commit must be a full 40-character Git SHA."
 }
 if ($ValidateOnly) {
-    Write-Host "Validated Nightly $version at $Commit."
+    Write-Host "Validated $Channel $version at $Commit."
     return
 }
 if ($Repository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') {
@@ -61,18 +65,21 @@ $standalonePath = Join-Path $releaseRoot $standaloneName
 foreach ($path in @($regularPath, "$regularPath.sig", $standalonePath, "$standalonePath.sig")) {
     $file = Get-Item -LiteralPath $path -Force -ErrorAction Stop
     if ($file.PSIsContainer -or $file.Length -eq 0) {
-        throw "Nightly asset must be a non-empty file: $path."
+        throw "$Channel asset must be a non-empty file: $path."
     }
 }
 
 $generatedNotes = (Get-Content -LiteralPath $NotesPath -Raw).Trim()
 $shortCommit = $Commit.Substring(0, 8).ToLowerInvariant()
+$assetTag = if ($Channel -eq 'Stable') { "v$version" } else { 'nightly' }
+$notesTitle = if ($Channel -eq 'Stable') { "Clipline $version" } else { "Clipline Nightly $version" }
+$notesSource = if ($Channel -eq 'Stable') { 'main' } else { 'develop' }
 $notes = @"
-## Clipline Nightly $version
+## $notesTitle
 
 $generatedNotes
 
-Built automatically from develop commit $shortCommit after workspace tests, warning-denied
+Built automatically from $notesSource commit $shortCommit after workspace tests, warning-denied
 Clippy, and pinned release-runtime verification.
 "@.Trim()
 $notesName = "release-notes-$version.md"
@@ -97,7 +104,7 @@ function Write-UpdaterManifest {
         platforms = [ordered]@{
             'windows-x86_64' = [ordered]@{
                 signature = $signature
-                url = "https://github.com/$Repository/releases/download/nightly/$InstallerName"
+                url = "https://github.com/$Repository/releases/download/$assetTag/$InstallerName"
             }
         }
     }
@@ -124,6 +131,6 @@ $expected = @(
 $actual = @(Get-ChildItem -LiteralPath $releaseRoot -File | ForEach-Object Name)
 $difference = @(Compare-Object $expected $actual)
 if ($difference.Count -ne 0) {
-    throw "Nightly release directory must contain exactly seven expected assets: $($difference | Out-String)"
+    throw "$Channel release directory must contain exactly seven expected assets: $($difference | Out-String)"
 }
-Write-Host "Prepared seven Nightly $version assets in $releaseRoot."
+Write-Host "Prepared seven $Channel $version assets in $releaseRoot."
