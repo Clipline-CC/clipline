@@ -156,9 +156,60 @@ the public key in the app.
 
 ## Stable
 
-Stable is modeled in settings but intentionally disabled until Clipline has
-stable releases. When stable is ready:
+The enabled Stable endpoint is GitHub's latest non-prerelease:
 
-1. Flip `STABLE_CHANNEL_ENABLED` in `apps/clipline-app/src/updates.rs`.
-2. Publish non-prerelease GitHub releases with updater `latest.json`.
-3. Re-enable the Stable option in the General settings UI.
+```text
+https://github.com/dain98/clipline/releases/latest/download/latest.json
+```
+
+Standalone installs use `latest-standalone.json` at the same latest URL. Settings → General →
+Updates exposes **Nightly** and **Stable**; the default remains Nightly. `STABLE_CHANNEL_ENABLED`
+in `apps/clipline-app/src/updates.rs` is the compile-time gate for that option.
+
+Each stable ships the same two installer variants as Nightly. Manifest installer URLs point at
+the versioned release (`/releases/download/v<version>/...`), not at `/releases/latest/download/`
+for the binaries, so a cached manifest cannot fetch a newer release's differently named setup.
+
+### Agent runbook: “make a new Stable release”
+
+When the user asks for a new Stable, carry out this entire sequence:
+
+1. Confirm the intended commit is on `develop` with green Ubuntu and Windows CI, then fast-forward
+   `main` so the two branches are identical.
+2. Read the current `/releases/latest/download/latest.json` (404 on the first Stable is expected),
+   choose the next patch version, and create the usual unticked release plan.
+3. Update `apps/clipline-app/Cargo.toml`, the `clipline-app` entry in `Cargo.lock`, and
+   `apps/clipline-app/tauri.conf.json` to that exact version. Re-review WebView2 Fixed Version
+   metadata as for Nightly.
+4. Run `scripts/verify-webview2-runtime.ps1`, `cargo test --workspace`, and
+   `cargo clippy --workspace --all-targets -- -D warnings`.
+5. Commit and push the release metadata to `develop`, then fast-forward `main` again. Do not tag a
+   commit that is not yet contained in remote `main`.
+6. Create and push the immutable `v<version>` tag at that exact `main` commit.
+7. Watch the **Stable Release** GitHub Action until it finishes. Do not upload assets while the
+   action is running.
+8. Confirm `gh release view v<version>` is a published non-prerelease targeting the release commit,
+   is GitHub's latest release, and exposes exactly seven assets. Confirm
+   `/releases/latest/download/latest.json` matches the staged manifest.
+9. Record the published commit, release URL, version, and verification result in `handoff.md`.
+
+For a transient Actions failure, rerun the same tag workflow. If the release inputs or code need a
+new commit, bump to the next patch version and create a new tag; never force-move an existing
+`v<version>` tag.
+
+Stable publication is automatic from the version tag. After the release commit is on `main`:
+
+```powershell
+git switch main
+git pull --ff-only origin main
+$version = (Get-Content apps/clipline-app/tauri.conf.json -Raw | ConvertFrom-Json).version
+git tag "v$version"
+git push origin "v$version"
+```
+
+`.github/workflows/stable.yml` rejects tags whose version does not exactly match Cargo, Cargo.lock,
+and Tauri, tags outside `main`, and version regressions against the current GitHub latest
+non-prerelease. It builds the same seven assets as Nightly, uploads them to a draft GitHub release
+for `v<version>`, then publishes that release as latest. It does not move or delete previous Stable
+releases. `docs/release.workflow.yml` remains the future SignPath Authenticode template and is not
+the active Stable pipeline.
