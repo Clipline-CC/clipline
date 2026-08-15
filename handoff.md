@@ -4,6 +4,20 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-15): First advertised Stable 1.0.0
+
+Plan: `docs/superpowers/plans/2026-08-15-stable-1.0.0.md`.
+
+0.1.57 shipped as a non-prerelease by mistake relative to the intended first Stable number.
+Tags are immutable, so this release keeps those bits and publishes **1.0.0** as GitHub Latest.
+Nightly follows the same version so the two channels stay on one sequence.
+
+The WebView2 Fixed Version pin stays at **151.0.4129.86** for x64. Re-reviewed with the 0.1.57
+release the same day; `reviewed_on` / `review_due_on` remain 2026-08-15 / 2026-09-14.
+
+After `v1.0.0` is Latest, the GitHub `v0.1.57` release is marked prerelease so it is no longer
+the advertised Stable. The `v0.1.57` git tag stays as an audit marker.
+
 ## Checkpoint (2026-08-15): First Stable 0.1.57
 
 Plan: `docs/superpowers/plans/2026-08-15-stable-0.1.57.md`.
