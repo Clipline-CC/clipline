@@ -1036,3 +1036,45 @@ fn stable_publish_job_sets_gh_repo_without_checkout() {
         "publish job must retain the draft-create, publish, and public-verify transaction"
     );
 }
+
+
+#[test]
+fn stable_already_published_rerun_still_verifies_public_assets() {
+    let root = workspace_root();
+    let workflow = fs::read_to_string(root.join(".github/workflows/stable.yml"))
+        .expect("read active Stable workflow");
+
+    assert!(
+        workflow.contains("already_published=true"),
+        "Stable must detect an already-published tag"
+    );
+
+    let publish_job = workflow
+        .split_once("\n  publish:")
+        .map(|(_, rest)| rest)
+        .expect("Stable publish job");
+    let publish_header = publish_job
+        .split("steps:")
+        .next()
+        .expect("publish job header");
+    assert!(
+        publish_header.contains("already_published != 'true'"),
+        "full publish remains skipped when the tag is already a non-prerelease"
+    );
+
+    let verify_marker = workflow
+        .find("already_published == 'true'")
+        .expect("already-published rerun must keep a verification job");
+    let verify_block = &workflow[verify_marker..];
+    assert!(
+        verify_block.contains("gh release download")
+            && verify_block.contains("releases/latest/download/latest.json")
+            && (verify_block.contains("exactly seven assets")
+                || verify_block.contains("Count -ne 7")),
+        "already-published rerun must still check the seven public assets and latest manifest"
+    );
+    assert!(
+        verify_block.contains("GH_REPO: ${{ github.repository }}"),
+        "verification without checkout still needs GH_REPO"
+    );
+}

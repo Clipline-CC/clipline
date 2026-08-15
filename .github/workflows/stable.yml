@@ -299,3 +299,40 @@ jobs:
           if ($stagedLatest -cne $publicLatest) {
             throw "GitHub /releases/latest/download/latest.json does not match the staged Stable manifest."
           }
+
+  verify:
+    needs: build
+    if: needs.build.outputs.already_published == 'true'
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Verify public release bytes
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $release = gh release view $tag `
+            --json isDraft,isPrerelease,targetCommitish | ConvertFrom-Json
+          if ($release.isDraft -or $release.isPrerelease -or $release.targetCommitish -cne $env:GITHUB_SHA) {
+            throw "Published Stable metadata does not match the tagged commit."
+          }
+
+          New-Item -ItemType Directory -Path downloaded | Out-Null
+          gh release download $tag --dir downloaded
+          $actual = @(Get-ChildItem -LiteralPath downloaded -File)
+          if ($actual.Count -ne 7) {
+            throw "Published Stable must contain exactly seven assets."
+          }
+
+          New-Item -ItemType Directory -Path latest-endpoint | Out-Null
+          Invoke-WebRequest -UseBasicParsing `
+            -Uri "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download/latest.json" `
+            -OutFile latest-endpoint/latest.json
+          $publishedLatest = (Get-FileHash -LiteralPath (Join-Path downloaded 'latest.json') -Algorithm SHA256).Hash
+          $publicLatest = (Get-FileHash -LiteralPath latest-endpoint/latest.json -Algorithm SHA256).Hash
+          if ($publishedLatest -cne $publicLatest) {
+            throw "GitHub /releases/latest/download/latest.json does not match the published Stable manifest."
+          }
