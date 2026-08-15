@@ -15,8 +15,21 @@ Nightly follows the same version so the two channels stay on one sequence.
 The WebView2 Fixed Version pin stays at **151.0.4129.86** for x64. Re-reviewed with the 0.1.57
 release the same day; `reviewed_on` / `review_due_on` remain 2026-08-15 / 2026-09-14.
 
-After `v1.0.0` is Latest, the GitHub `v0.1.57` release is marked prerelease so it is no longer
-the advertised Stable. The `v0.1.57` git tag stays as an audit marker.
+Published from tags `v1.0.0` and `nightly-v1.0.0` at release commit `24f574ac`
+([Stable run 31907587917](https://github.com/dain98/clipline/actions/runs/31907587917),
+[Nightly run 31907588294](https://github.com/dain98/clipline/actions/runs/31907588294)).
+[`v1.0.0`](https://github.com/dain98/clipline/releases/tag/v1.0.0) is GitHub's latest
+non-prerelease. The rolling [`nightly`](https://github.com/dain98/clipline/releases/tag/nightly)
+prerelease targets the same commit. Each release exposes exactly seven assets. Both actions'
+public-download verification passed.
+
+After Latest moved to 1.0.0, the GitHub `v0.1.57` release was marked prerelease so it is no
+longer advertised as Stable. The `v0.1.57` git tag stays as an audit marker.
+
+The 1.0.0 push also started main CI. Ubuntu sat on **Install ffprobe** (`apt-get update` /
+`apt-get install ffmpeg`) for over an hour; that run was cancelled. `.github/workflows/ci.yml`
+now gives that step `timeout-minutes: 5` so a wedged apt mirror cannot hold the job for the
+default six-hour job timeout.
 
 ## Checkpoint (2026-08-15): First Stable 0.1.57
 
