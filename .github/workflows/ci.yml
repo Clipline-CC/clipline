@@ -31,9 +31,15 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
       # Real-demuxer validation for the MP4 tests (they self-skip without it).
+      # Cap apt at 5 minutes: GitHub Ubuntu mirrors can hang on `apt-get update`
+      # with no default step timeout, which blocked main CI for over an hour on
+      # the 1.0.0 push.
       - name: Install ffprobe
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+        timeout-minutes: 5
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ffmpeg
 
       - name: Test
         run: cargo test --workspace
