@@ -1099,5 +1099,12 @@ fn release_workflows_bake_matching_update_channel_defaults() {
             2,
             "{workflow_name} must not bake any other channel default"
         );
+        assert_eq!(
+            workflow
+                .matches("CLIPLINE_BUG_REPORT_ENDPOINT: https://support.dain.cafe/api/v1/reports")
+                .count(),
+            2,
+            "{workflow_name} build steps must keep the official bug report endpoint env next to the channel default"
+        );
     }
 }
