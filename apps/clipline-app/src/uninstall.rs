@@ -4,8 +4,6 @@ use std::path::{Path, PathBuf};
 
 const CLEANUP_ARGUMENT: &str = "--uninstall-cleanup";
 const DELETE_RECORDINGS_ARGUMENT: &str = "--delete-recordings";
-const REPLAY_RUN_PREFIX: &str = "clipline-replay-cache-";
-#[cfg(windows)]
 const CREDENTIAL_PREFIXES: [&str; 2] = ["Clipline Cloud:", "Clipline osu!:"];
 const AUTOSTART_NAMES: [&str; 2] = ["clipline-app", "Clipline"];
 
@@ -58,8 +56,10 @@ struct SavedCleanupSettings {
 #[derive(Debug)]
 struct CleanupPlan {
     remove_trees: Vec<PathBuf>,
-    media_dir: Option<PathBuf>,
-    remove_empty_media_root: bool,
+    replay_trees: Vec<PathBuf>,
+    media_dirs: Vec<PathBuf>,
+    default_media_dir: Option<PathBuf>,
+    delete_recordings: bool,
     credential_targets: Vec<String>,
 }
 
@@ -98,10 +98,16 @@ pub(crate) fn run_if_requested() -> bool {
 
 fn build_cleanup_plan(layout: &CleanupLayout, delete_recordings: bool) -> CleanupPlan {
     let settings = load_saved_settings(&layout.config_dir);
-    let media_dir = settings
+    let configured_media = settings
         .media_dir
         .unwrap_or_else(|| layout.default_media_dir.clone());
-    let safe_media = safe_media_dir(&media_dir, layout).then_some(media_dir);
+    let default_media_dir =
+        safe_media_dir(&layout.default_media_dir, layout).then(|| layout.default_media_dir.clone());
+    let mut media_dirs = [configured_media, layout.default_media_dir.clone()]
+        .into_iter()
+        .filter(|media| safe_media_dir(media, layout))
+        .collect::<Vec<_>>();
+    dedup_paths(&mut media_dirs);
 
     let mut remove_trees = vec![layout.config_dir.clone(), layout.temp_dir.clone()];
     remove_trees.extend(
@@ -117,24 +123,24 @@ fn build_cleanup_plan(layout: &CleanupLayout, delete_recordings: bool) -> Cleanu
     remove_trees.push(layout.local_identifier_dir.clone());
     remove_trees.push(layout.roaming_identifier_dir.clone());
 
+    let mut replay_trees = Vec::new();
     if let Some(replay_dir) = settings.replay_dir.as_deref() {
-        let overlaps_media = safe_media
-            .as_deref()
-            .is_some_and(|media| same_or_nested(replay_dir, media));
+        let overlaps_media = media_dirs
+            .iter()
+            .any(|media| same_or_nested(replay_dir, media));
         if safe_replay_dir(replay_dir, layout) && (!overlaps_media || delete_recordings) {
-            collect_replay_run_dirs(replay_dir, &mut remove_trees);
+            collect_replay_run_dirs(replay_dir, &mut replay_trees);
         }
     }
 
     dedup_paths(&mut remove_trees);
-    let media_dir = delete_recordings.then_some(safe_media).flatten();
-    let remove_empty_media_root = media_dir
-        .as_deref()
-        .is_some_and(|media| same_path(media, &layout.default_media_dir));
+    dedup_paths(&mut replay_trees);
     CleanupPlan {
         remove_trees,
-        media_dir,
-        remove_empty_media_root,
+        replay_trees,
+        media_dirs,
+        default_media_dir,
+        delete_recordings,
         credential_targets: settings.credential_targets,
     }
 }
@@ -174,14 +180,14 @@ fn saved_settings_from_json(value: &serde_json::Value) -> SavedCleanupSettings {
             .pointer(&format!("/{section}/credential_target"))
             .and_then(serde_json::Value::as_str)
         {
-            push_unique_string(&mut credential_targets, target);
+            push_unique_credential(&mut credential_targets, target);
         }
         if let Some(targets) = value
             .pointer(&format!("/{section}/credential_cleanup_targets"))
             .and_then(serde_json::Value::as_array)
         {
             for target in targets.iter().filter_map(serde_json::Value::as_str) {
-                push_unique_string(&mut credential_targets, target);
+                push_unique_credential(&mut credential_targets, target);
             }
         }
     }
@@ -233,7 +239,7 @@ fn collect_replay_run_dirs(root: &Path, output: &mut Vec<PathBuf>) {
         let Ok(metadata) = fs::symlink_metadata(&path) else {
             continue;
         };
-        if name.starts_with(REPLAY_RUN_PREFIX)
+        if clipline_storage::is_replay_cache_run_name(name)
             && metadata.is_dir()
             && !is_link_or_reparse_point(&metadata)
         {
@@ -250,24 +256,31 @@ fn execute_cleanup_plan_with<'a, I>(
 ) where
     I: IntoIterator<Item = &'a str>,
 {
-    if let Some(media_dir) = plan.media_dir.as_deref() {
-        let _ = clipline_storage::delete_all_managed_media(media_dir);
-        if plan.remove_empty_media_root {
-            let _ = fs::remove_dir(media_dir);
+    if plan.delete_recordings {
+        for media_dir in &plan.media_dirs {
+            let _ = clipline_storage::delete_all_managed_media(media_dir);
         }
     }
-    for path in &plan.remove_trees {
+    for path in &plan.replay_trees {
         remove_tree_best_effort(path);
+    }
+    for path in &plan.remove_trees {
+        remove_tree_best_effort_except(path, &plan.media_dirs);
+    }
+    if plan.delete_recordings {
+        if let Some(default_media_dir) = plan.default_media_dir.as_deref() {
+            let _ = fs::remove_dir(default_media_dir);
+        }
     }
 
     let mut seen = HashSet::new();
     for target in &plan.credential_targets {
-        if seen.insert(target.to_owned()) {
+        if is_clipline_credential_target(target) && seen.insert(target.to_owned()) {
             let _ = delete_credential(target);
         }
     }
     for target in enumerated_credentials {
-        if seen.insert(target.to_owned()) {
+        if is_clipline_credential_target(target) && seen.insert(target.to_owned()) {
             let _ = delete_credential(target);
         }
     }
@@ -277,13 +290,35 @@ fn execute_cleanup_plan_with<'a, I>(
 }
 
 fn remove_tree_best_effort(path: &Path) {
+    remove_tree_best_effort_except(path, &[]);
+}
+
+fn remove_tree_best_effort_except(path: &Path, protected_roots: &[PathBuf]) {
+    if protected_roots
+        .iter()
+        .any(|protected| same_or_nested(path, protected))
+    {
+        return;
+    }
     let Ok(metadata) = fs::symlink_metadata(path) else {
         return;
     };
     if is_link_or_reparse_point(&metadata) {
         let _ = fs::remove_file(path).or_else(|_| fs::remove_dir(path));
     } else if metadata.is_dir() {
-        let _ = fs::remove_dir_all(path);
+        let contains_protected = protected_roots
+            .iter()
+            .any(|protected| same_or_nested(protected, path));
+        if contains_protected {
+            if let Ok(entries) = fs::read_dir(path) {
+                for entry in entries.flatten() {
+                    remove_tree_best_effort_except(&entry.path(), protected_roots);
+                }
+            }
+            let _ = fs::remove_dir(path);
+        } else {
+            let _ = fs::remove_dir_all(path);
+        }
     } else {
         let _ = fs::remove_file(path);
     }
@@ -330,8 +365,14 @@ fn dedup_paths(paths: &mut Vec<PathBuf>) {
     paths.retain(|path| seen.insert(path_key(path)));
 }
 
-fn push_unique_string(targets: &mut Vec<String>, target: &str) {
-    if !target.is_empty() && !targets.iter().any(|existing| existing == target) {
+fn is_clipline_credential_target(target: &str) -> bool {
+    CREDENTIAL_PREFIXES
+        .iter()
+        .any(|prefix| target.starts_with(prefix))
+}
+
+fn push_unique_credential(targets: &mut Vec<String>, target: &str) {
+    if is_clipline_credential_target(target) && !targets.iter().any(|existing| existing == target) {
         targets.push(target.to_owned());
     }
 }
@@ -405,7 +446,8 @@ mod tests {
             ));
         }
         assert!(!contains_path(&plan.remove_trees, &layout.local_cache_dir));
-        assert!(plan.media_dir.is_none());
+        assert!(!plan.delete_recordings);
+        assert!(contains_path(&plan.media_dirs, &media));
         assert!(!plan
             .remove_trees
             .iter()
@@ -523,7 +565,7 @@ mod tests {
 
         let plan = build_cleanup_plan(&layout, false);
 
-        assert!(contains_path(&plan.remove_trees, &replay_run));
+        assert!(contains_path(&plan.replay_trees, &replay_run));
         assert_eq!(
             plan.credential_targets,
             [
@@ -557,8 +599,82 @@ mod tests {
         let keep = build_cleanup_plan(&layout, false);
         let delete = build_cleanup_plan(&layout, true);
 
-        assert!(!contains_path(&keep.remove_trees, &replay_run));
-        assert!(contains_path(&delete.remove_trees, &replay_run));
+        assert!(!contains_path(&keep.replay_trees, &replay_run));
+        assert!(contains_path(&delete.replay_trees, &replay_run));
+    }
+
+    #[test]
+    fn replay_cleanup_requires_the_generated_run_name_shape() {
+        let root = TestDir::new("clipline-uninstall", "strict-replay-run-name");
+        let layout = layout(root.path());
+        let replay = root.path().join("Replay");
+        let valid = replay.join("clipline-replay-cache-123-456-0");
+        let unrelated = replay.join("clipline-replay-cache-backup");
+        fs::create_dir_all(&valid).unwrap();
+        fs::create_dir_all(&unrelated).unwrap();
+        write_settings(
+            &layout,
+            &format!(
+                r#"{{"replay_storage":{{"mode":"disk","disk_dir":{:?}}}}}"#,
+                replay.display().to_string(),
+            ),
+        );
+
+        let plan = build_cleanup_plan(&layout, false);
+
+        assert!(contains_path(&plan.replay_trees, &valid));
+        assert!(!contains_path(&plan.replay_trees, &unrelated));
+    }
+
+    #[test]
+    fn cleanup_preserves_a_custom_media_tree_nested_under_app_residue() {
+        let root = TestDir::new("clipline-uninstall", "nested-custom-media");
+        let layout = layout(root.path());
+        let media = layout.config_dir.join("Media");
+        let clip = media.join("owned.mp4");
+        let foreign = media.join("foreign.txt");
+        fs::create_dir_all(&media).unwrap();
+        fs::write(&clip, b"owned").unwrap();
+        fs::write(clip.with_extension("clipline.json"), b"{}").unwrap();
+        fs::write(&foreign, b"foreign").unwrap();
+        write_settings(
+            &layout,
+            &format!(r#"{{"media_dir":{:?}}}"#, media.display().to_string()),
+        );
+
+        let plan = build_cleanup_plan(&layout, false);
+        execute_cleanup_plan_with(&plan, [], |_| Ok(()), |_| Ok(()));
+
+        assert!(clip.exists());
+        assert!(foreign.exists());
+        assert!(media.exists());
+        assert!(!layout.config_dir.join("settings.json").exists());
+    }
+
+    #[test]
+    fn opted_in_cleanup_includes_configured_and_default_media_roots() {
+        let root = TestDir::new("clipline-uninstall", "fallback-media");
+        let layout = layout(root.path());
+        let custom = root.path().join("Custom Media");
+        let custom_clip = custom.join("custom.mp4");
+        let fallback_clip = layout.default_media_dir.join("fallback.mp4");
+        for clip in [&custom_clip, &fallback_clip] {
+            fs::create_dir_all(clip.parent().unwrap()).unwrap();
+            fs::write(clip, b"owned").unwrap();
+            fs::write(clip.with_extension("clipline.json"), b"{}").unwrap();
+        }
+        write_settings(
+            &layout,
+            &format!(r#"{{"media_dir":{:?}}}"#, custom.display().to_string()),
+        );
+
+        let plan = build_cleanup_plan(&layout, true);
+        execute_cleanup_plan_with(&plan, [], |_| Ok(()), |_| Ok(()));
+
+        assert!(!custom_clip.exists());
+        assert!(custom.exists());
+        assert!(!fallback_clip.exists());
+        assert!(!layout.default_media_dir.exists());
     }
 
     #[test]
@@ -583,8 +699,9 @@ mod tests {
 
         let plan = build_cleanup_plan(&layout, true);
 
-        assert!(plan.media_dir.is_none());
-        assert!(!contains_path(&plan.remove_trees, &replay_run));
+        assert!(!contains_path(&plan.media_dirs, &layout.profile_dir));
+        assert!(contains_path(&plan.media_dirs, &layout.default_media_dir));
+        assert!(!contains_path(&plan.replay_trees, &replay_run));
         assert!(!contains_path(&plan.remove_trees, &layout.local_cache_dir));
     }
 
@@ -594,7 +711,12 @@ mod tests {
         let layout = layout(root.path());
         write_settings(
             &layout,
-            r#"{"cloud":{"credential_target":"Clipline Cloud:settings"}}"#,
+            r#"{
+                "cloud":{
+                    "credential_target":"Clipline Cloud:settings",
+                    "credential_cleanup_targets":["Unrelated credential"]
+                }
+            }"#,
         );
         let plan = build_cleanup_plan(&layout, false);
         let credentials = RefCell::new(Vec::new());
@@ -602,7 +724,11 @@ mod tests {
 
         execute_cleanup_plan_with(
             &plan,
-            ["Clipline Cloud:swept", "Clipline osu!:swept"],
+            [
+                "Clipline Cloud:swept",
+                "Clipline osu!:swept",
+                "Another unrelated credential",
+            ],
             |target| {
                 credentials.borrow_mut().push(target.to_owned());
                 Ok(())

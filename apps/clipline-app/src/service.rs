@@ -45,7 +45,7 @@ pub use clipline_capture::probe::Codec;
 const LOW_REPLAY_CACHE_DISK_RESERVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const REPLAY_SAVE_QUOTA_RESERVE_BYTES: u64 = 4 * 1024 * 1024;
 const FULL_SESSION_QUOTA_RESERVE_BYTES: u64 = 64 * 1024 * 1024;
-const REPLAY_CACHE_RUN_PREFIX: &str = "clipline-replay-cache-";
+const REPLAY_CACHE_RUN_PREFIX: &str = clipline_storage::REPLAY_CACHE_RUN_PREFIX;
 const REPLAY_CACHE_OWNER_FILE: &str = ".clipline-run.json";
 const AMBIGUOUS_REPLAY_CACHE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 #[path = "service/media_root.rs"]
@@ -2075,7 +2075,7 @@ fn sweep_replay_cache_runs(
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
-        if !is_replay_cache_run_name(name) {
+        if !clipline_storage::is_replay_cache_run_name(name) {
             continue;
         }
         let Ok(metadata) = std::fs::symlink_metadata(&path) else {
@@ -2111,19 +2111,6 @@ fn sweep_replay_cache_runs(
         preserved_bytes = preserved_bytes.saturating_add(replay_cache_run_size(&path));
     }
     Ok(preserved_bytes)
-}
-
-fn is_replay_cache_run_name(name: &str) -> bool {
-    let Some(suffix) = name.strip_prefix(REPLAY_CACHE_RUN_PREFIX) else {
-        return false;
-    };
-    let mut parts = suffix.split('-');
-    let valid = (0..3).all(|_| {
-        parts
-            .next()
-            .is_some_and(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
-    });
-    valid && parts.next().is_none()
 }
 
 fn replay_cache_owner_pid(process_instance_id: &str) -> Option<u32> {

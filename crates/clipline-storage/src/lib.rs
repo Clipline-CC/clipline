@@ -10,6 +10,21 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub const REPLAY_CACHE_RUN_PREFIX: &str = "clipline-replay-cache-";
+
+pub fn is_replay_cache_run_name(name: &str) -> bool {
+    let Some(suffix) = name.strip_prefix(REPLAY_CACHE_RUN_PREFIX) else {
+        return false;
+    };
+    let mut parts = suffix.split('-');
+    let valid = (0..3).all(|_| {
+        parts
+            .next()
+            .is_some_and(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+    });
+    valid && parts.next().is_none()
+}
+
 /// Serializes quota collectors so overlapping recorder generations (and any
 /// concurrent app-side GC) cannot inventory the same over-quota library and
 /// over-delete while another collector's deletions are in flight.
@@ -170,12 +185,54 @@ pub fn delete_all_managed_media(dir: &Path) -> io::Result<()> {
         ));
     }
 
+    let mut clips = Vec::new();
     let mut first_error = None;
-    for mut clip in inventory(dir, None)? {
+    if let Err(error) = collect_clips(dir, None, &mut clips) {
+        first_error.get_or_insert(error);
+    }
+    match fs::read_dir(dir) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        first_error.get_or_insert(error);
+                        continue;
+                    }
+                };
+                let path = entry.path();
+                let metadata = match fs::symlink_metadata(&path) {
+                    Ok(metadata) => metadata,
+                    Err(error) => {
+                        first_error.get_or_insert(error);
+                        continue;
+                    }
+                };
+                if metadata.is_dir() && !is_link_or_reparse_point(&metadata) {
+                    if let Err(error) = collect_clips(&path, None, &mut clips) {
+                        first_error.get_or_insert(error);
+                    }
+                }
+            }
+        }
+        Err(error) => {
+            first_error.get_or_insert(error);
+        }
+    }
+
+    for mut clip in clips {
         if clip.recording {
             let sidecar_clip =
                 recording_final_path(&clip.path).unwrap_or_else(|| clip.path.clone());
-            (clip.sidecars, clip.sidecar_bytes) = clip_sidecars(&sidecar_clip)?;
+            match clip_sidecars(&sidecar_clip) {
+                Ok((sidecars, sidecar_bytes)) => {
+                    clip.sidecars = sidecars;
+                    clip.sidecar_bytes = sidecar_bytes;
+                }
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            }
         }
         if let Err(error) = delete_inventoried_clip(&clip, dir, &|_| false) {
             first_error.get_or_insert(error);
@@ -663,6 +720,15 @@ mod tests {
         let path = dir.write(relative, bytes);
         mark_owned(&path);
         path
+    }
+
+    #[test]
+    fn replay_cache_run_names_require_three_numeric_components() {
+        assert!(is_replay_cache_run_name("clipline-replay-cache-123-456-0"));
+        assert!(!is_replay_cache_run_name("clipline-replay-cache-backup"));
+        assert!(!is_replay_cache_run_name(
+            "clipline-replay-cache-123-456-0-extra"
+        ));
     }
 
     #[test]
@@ -1208,6 +1274,27 @@ mod tests {
         delete_all_managed_media(root.path()).unwrap();
 
         assert!(external.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_all_managed_media_continues_past_an_unreadable_session_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = TestDir::new("clipline-storage", "delete-all-unreadable-session");
+        let owned = write_owned(&root, "owned.mp4", 10);
+        let unreadable = root.path().join("unreadable-session");
+        fs::create_dir_all(&unreadable).unwrap();
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = delete_all_managed_media(root.path());
+
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(result.is_err(), "the partial failure remains observable");
+        assert!(
+            !owned.exists(),
+            "accessible managed clips are still deleted"
+        );
     }
 
     #[test]
