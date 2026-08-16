@@ -1089,22 +1089,27 @@ fn release_workflows_bake_matching_update_channel_defaults() {
         let workflow = fs::read_to_string(root.join(workflow_name))
             .unwrap_or_else(|e| panic!("read {workflow_name}: {e}"));
         let baked = format!("CLIPLINE_DEFAULT_UPDATE_CHANNEL: {channel}");
+        let build_steps: Vec<&str> = workflow
+            .split("\n      - name: ")
+            .skip(1)
+            .filter(|step| step.contains("cargo tauri build"))
+            .collect();
         assert_eq!(
-            workflow.matches(&baked).count(),
+            build_steps.len(),
             2,
-            "{workflow_name} must bake the {channel} channel default into both the regular and standalone installer builds"
+            "{workflow_name} must have exactly the regular and standalone installer build steps"
         );
-        assert_eq!(
-            workflow.matches("CLIPLINE_DEFAULT_UPDATE_CHANNEL:").count(),
-            2,
-            "{workflow_name} must not bake any other channel default"
-        );
-        assert_eq!(
-            workflow
-                .matches("CLIPLINE_BUG_REPORT_ENDPOINT: https://support.dain.cafe/api/v1/reports")
-                .count(),
-            2,
-            "{workflow_name} build steps must keep the official bug report endpoint env next to the channel default"
-        );
+        for step in build_steps {
+            assert!(
+                step.contains(&baked),
+                "build step '{}' must bake the {channel} channel default in {workflow_name}",
+                step.lines().next().unwrap_or_default()
+            );
+            assert!(
+                step.contains("CLIPLINE_BUG_REPORT_ENDPOINT: https://support.dain.cafe/api/v1/reports"),
+                "build step '{}' must keep the official bug report endpoint env",
+                step.lines().next().unwrap_or_default()
+            );
+        }
     }
 }

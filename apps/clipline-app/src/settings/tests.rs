@@ -47,7 +47,7 @@ fn defaults_match_current_recorder_behavior() {
     assert!(!settings.open_on_startup);
     assert!(settings.close_to_tray);
     assert!(!settings.minimize_to_tray);
-    assert_eq!(settings.update_channel, UpdateChannel::Nightly);
+    assert_eq!(settings.update_channel, UpdateChannel::install_default());
     assert!(!settings.legacy_timeline_editor);
     assert_eq!(serialized["legacy_timeline_editor"], false);
 }

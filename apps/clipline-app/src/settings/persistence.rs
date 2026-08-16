@@ -11,6 +11,7 @@ use serde_json::{Map, Value};
 
 use crate::service::VideoEncoder;
 use crate::updates::normalize_channel;
+use crate::updates::UpdateChannel;
 
 use super::hotkey::normalize_hotkey;
 use super::types::{
@@ -212,7 +213,10 @@ impl AppSettings {
             ui_theme: deserialize_field(object, "ui_theme").unwrap_or(defaults.ui_theme),
             update_channel: deserialize_field(object, "update_channel")
                 .map(normalize_channel)
-                .unwrap_or(defaults.update_channel),
+                // A file without the field predates the channel picker and
+                // was therefore running Nightly; the package default must
+                // not flip a legacy install's channel on upgrade.
+                .unwrap_or(UpdateChannel::Nightly),
             cloud: deserialize_field(object, "cloud").unwrap_or_default(),
             osu: deserialize_field(object, "osu").unwrap_or_default(),
             league: deserialize_field(object, "league").unwrap_or_default(),

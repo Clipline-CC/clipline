@@ -164,7 +164,10 @@ https://github.com/dain98/clipline/releases/latest/download/latest.json
 ```
 
 Standalone installs use `latest-standalone.json` at the same latest URL. Settings → General →
-Updates exposes **Nightly** and **Stable**; the default remains Nightly. `STABLE_CHANNEL_ENABLED`
+Updates exposes **Nightly** and **Stable**. A fresh install starts on the channel its package
+tracks (`CLIPLINE_DEFAULT_UPDATE_CHANNEL` baked by the release workflow: Stable installers default
+to Stable, Nightly installers and local dev builds to Nightly), and a saved choice always wins;
+legacy settings files written before the channel existed stay on Nightly. `STABLE_CHANNEL_ENABLED`
 in `apps/clipline-app/src/updates.rs` is the compile-time gate for that option.
 
 Each stable ships the same two installer variants as Nightly. Manifest installer URLs point at
