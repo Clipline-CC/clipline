@@ -2899,12 +2899,20 @@ async fn update_check_result<R: Runtime>(
     })
 }
 
+/// A manual Check must honor the channel shown in Settings, which can differ
+/// from the saved value until Save is pressed; launch and background checks
+/// have no selection in hand and always use the saved channel.
+fn resolve_update_channel(selected: Option<UpdateChannel>, saved: UpdateChannel) -> UpdateChannel {
+    selected.unwrap_or(saved)
+}
+
 #[tauri::command]
 async fn check_for_updates<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<'_, RuntimeState>,
+    channel: Option<UpdateChannel>,
 ) -> Result<UpdateCheckResult, String> {
-    let channel = state.settings().update_channel;
+    let channel = resolve_update_channel(channel, state.settings().update_channel);
     update_check_result(&app, channel).await
 }
 
@@ -2912,8 +2920,9 @@ async fn check_for_updates<R: Runtime>(
 async fn install_update<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<'_, RuntimeState>,
+    channel: Option<UpdateChannel>,
 ) -> Result<(), String> {
-    let channel = state.settings().update_channel;
+    let channel = resolve_update_channel(channel, state.settings().update_channel);
     let (update, status) = check_update_for_channel(&app, channel).await?;
     let Some(update) = update else {
         return Err(status.unwrap_or_else(|| "no update is available".into()));
@@ -6703,6 +6712,18 @@ HKEY_CURRENT_USER\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF
         assert_eq!(
             missing_release_metadata_message(UpdateChannel::Stable),
             "No Stable release metadata is published yet. Publish a Stable release first."
+        );
+    }
+
+    #[test]
+    fn manual_channel_selection_overrides_saved_channel() {
+        assert_eq!(
+            resolve_update_channel(Some(UpdateChannel::Stable), UpdateChannel::Nightly),
+            UpdateChannel::Stable
+        );
+        assert_eq!(
+            resolve_update_channel(None, UpdateChannel::Stable),
+            UpdateChannel::Stable
         );
     }
 

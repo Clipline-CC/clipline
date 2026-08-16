@@ -1872,7 +1872,10 @@ async function checkForUpdates({ manual = false } = {}) {
   updateCheckRunning = true;
   if (manual) setUpdateStatus("checking...");
   try {
-    const update = await invoke("check_for_updates");
+    // The dropdown can hold an unsaved channel; a manual Check must honor
+    // the selection on screen, while automatic checks use the saved channel.
+    const args = manual ? { channel: $("set-update-channel").value } : {};
+    const update = await invoke("check_for_updates", args);
     if (update.available) {
       setUpdateStatus(`${update.channel_label} ${update.version} available`);
       // Both callers of this are moments the user is already looking at
@@ -1899,7 +1902,9 @@ async function installPendingUpdate() {
   $("update-cancel").disabled = true;
   setUpdateStatus("installing update...");
   try {
-    await invoke("install_update");
+    // Install re-checks before downloading; keep it on the channel the
+    // update was found on, even if it is still unsaved in Settings.
+    await invoke("install_update", pendingUpdate ? { channel: pendingUpdate.channel } : {});
   } catch (e) {
     $("update-install").disabled = false;
     $("update-cancel").disabled = false;
