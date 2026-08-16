@@ -107,6 +107,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           CLIPLINE_BUG_REPORT_ENDPOINT: https://support.dain.cafe/api/v1/reports
+          CLIPLINE_DEFAULT_UPDATE_CHANNEL: stable
         run: cargo tauri build
 
       - name: Preserve regular updater assets
@@ -140,6 +141,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           CLIPLINE_BUG_REPORT_ENDPOINT: https://support.dain.cafe/api/v1/reports
+          CLIPLINE_DEFAULT_UPDATE_CHANNEL: stable
         run: cargo tauri build --config tauri.standalone.conf.json
 
       - name: Rename and re-sign standalone installer

@@ -77,9 +77,10 @@ git push origin "nightly-v$version"
 
 `.github/workflows/nightly.yml` rejects tags whose version does not exactly match Cargo,
 Cargo.lock, and Tauri, tags outside `develop`, and version regressions. It runs workspace tests and
-Clippy, builds and preserves the regular installer, downloads and verifies the hash-pinned
-WebView2 and FFmpeg inputs, builds and re-signs the renamed standalone installer, and generates
-both updater manifests plus release notes. All seven assets are uploaded to a draft staging
+Clippy, bakes the Nightly update-channel default into both installers
+(`CLIPLINE_DEFAULT_UPDATE_CHANNEL=nightly`), builds and preserves the regular installer, downloads
+and verifies the hash-pinned WebView2 and FFmpeg inputs, builds and re-signs the renamed standalone
+installer, and generates both updater manifests plus release notes. All seven assets are uploaded to a draft staging
 release before the action replaces the rolling `nightly` release. The published assets are then
 downloaded again and compared byte-for-byte with the staged build.
 
@@ -163,7 +164,10 @@ https://github.com/dain98/clipline/releases/latest/download/latest.json
 ```
 
 Standalone installs use `latest-standalone.json` at the same latest URL. Settings → General →
-Updates exposes **Nightly** and **Stable**; the default remains Nightly. `STABLE_CHANNEL_ENABLED`
+Updates exposes **Nightly** and **Stable**. A fresh install starts on the channel its package
+tracks (`CLIPLINE_DEFAULT_UPDATE_CHANNEL` baked by the release workflow: Stable installers default
+to Stable, Nightly installers and local dev builds to Nightly), and a saved choice always wins;
+legacy settings files written before the channel existed stay on Nightly. `STABLE_CHANNEL_ENABLED`
 in `apps/clipline-app/src/updates.rs` is the compile-time gate for that option.
 
 Each stable ships the same two installer variants as Nightly. Manifest installer URLs point at
@@ -209,7 +213,8 @@ git push origin "v$version"
 
 `.github/workflows/stable.yml` rejects tags whose version does not exactly match Cargo, Cargo.lock,
 and Tauri, tags outside `main`, and version regressions against the current GitHub latest
-non-prerelease. It builds the same seven assets as Nightly, uploads them to a draft GitHub release
+non-prerelease. It builds the same seven assets as Nightly (baking the Stable update-channel
+default via `CLIPLINE_DEFAULT_UPDATE_CHANNEL=stable`), uploads them to a draft GitHub release
 for `v<version>`, then publishes that release as latest. It does not move or delete previous Stable
 releases. `docs/release.workflow.yml` remains the future SignPath Authenticode template and is not
 the active Stable pipeline.

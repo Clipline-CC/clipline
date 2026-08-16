@@ -1078,3 +1078,38 @@ fn stable_already_published_rerun_still_verifies_public_assets() {
         "verification without checkout still needs GH_REPO"
     );
 }
+
+#[test]
+fn release_workflows_bake_matching_update_channel_defaults() {
+    let root = workspace_root();
+    for (workflow_name, channel) in [
+        (".github/workflows/nightly.yml", "nightly"),
+        (".github/workflows/stable.yml", "stable"),
+    ] {
+        let workflow = fs::read_to_string(root.join(workflow_name))
+            .unwrap_or_else(|e| panic!("read {workflow_name}: {e}"));
+        let baked = format!("CLIPLINE_DEFAULT_UPDATE_CHANNEL: {channel}");
+        let build_steps: Vec<&str> = workflow
+            .split("\n      - name: ")
+            .skip(1)
+            .filter(|step| step.contains("cargo tauri build"))
+            .collect();
+        assert_eq!(
+            build_steps.len(),
+            2,
+            "{workflow_name} must have exactly the regular and standalone installer build steps"
+        );
+        for step in build_steps {
+            assert!(
+                step.contains(&baked),
+                "build step '{}' must bake the {channel} channel default in {workflow_name}",
+                step.lines().next().unwrap_or_default()
+            );
+            assert!(
+                step.contains("CLIPLINE_BUG_REPORT_ENDPOINT: https://support.dain.cafe/api/v1/reports"),
+                "build step '{}' must keep the official bug report endpoint env",
+                step.lines().next().unwrap_or_default()
+            );
+        }
+    }
+}

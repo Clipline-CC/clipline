@@ -21,15 +21,25 @@ pub const CHANGELOG_URL: &str = "https://clipline.cc/changelog";
 // Stable GitHub releases publish latest.json as a non-prerelease asset.
 pub const STABLE_CHANNEL_ENABLED: bool = true;
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum UpdateChannel {
     Stable,
-    #[default]
     Nightly,
 }
 
 impl UpdateChannel {
+    /// The update channel this install package was built to track. Release
+    /// workflows bake `CLIPLINE_DEFAULT_UPDATE_CHANNEL` at build time, so a
+    /// Stable download starts on Stable and a Nightly download on Nightly;
+    /// local dev builds default to Nightly. A user's saved choice always wins.
+    pub fn install_default() -> Self {
+        match env!("CLIPLINE_DEFAULT_UPDATE_CHANNEL") {
+            "stable" => Self::Stable,
+            _ => Self::Nightly,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Stable => "Stable",
@@ -54,6 +64,12 @@ impl UpdateChannel {
             Self::Stable => STABLE_CHANNEL_ENABLED,
             Self::Nightly => true,
         }
+    }
+}
+
+impl Default for UpdateChannel {
+    fn default() -> Self {
+        Self::install_default()
     }
 }
 

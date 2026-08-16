@@ -183,7 +183,7 @@ impl Default for AppSettings {
             minimize_to_tray: false,
             legacy_timeline_editor: false,
             ui_theme: UiTheme::default(),
-            update_channel: UpdateChannel::Nightly,
+            update_channel: UpdateChannel::default(),
             cloud: CloudSettings::default(),
             osu: OsuApiSettings::default(),
             league: LeagueModeSettings::default(),

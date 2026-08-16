@@ -74,6 +74,8 @@ jobs:
           # Immutable operator-owned support route; the build rejects any
           # attempt to substitute a different diagnostic destination.
           CLIPLINE_BUG_REPORT_ENDPOINT: https://support.dain.cafe/api/v1/reports
+          # Signed Stable installers must track the Stable channel.
+          CLIPLINE_DEFAULT_UPDATE_CHANNEL: stable
         run: cargo tauri build
 
       - name: Retain private release symbols
