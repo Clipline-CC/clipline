@@ -7,6 +7,9 @@ fn main() {
 
 #[cfg(windows)]
 fn main() {
+    if uninstall::run_if_requested() {
+        return;
+    }
     if let Err(error) = windows::wait_for_elevation_parent_from_args() {
         eprintln!("administrator restart handoff: {error}");
         return;
@@ -61,6 +64,8 @@ mod settings;
 mod sound;
 #[cfg(windows)]
 mod updates;
+#[cfg(any(windows, test))]
+mod uninstall;
 #[cfg(windows)]
 mod util;
 #[cfg(windows)]

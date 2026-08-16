@@ -5,8 +5,8 @@ use std::ptr;
 
 use windows_sys::Win32::Foundation::{GetLastError, ERROR_NOT_FOUND};
 use windows_sys::Win32::Security::Credentials::{
-    CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE,
-    CRED_TYPE_GENERIC,
+    CredDeleteW, CredEnumerateW, CredFree, CredReadW, CredWriteW, CREDENTIALW,
+    CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC,
 };
 
 use super::{last_os_error, wide_null_checked};
@@ -14,6 +14,38 @@ use super::{last_os_error, wide_null_checked};
 #[derive(Clone, Copy)]
 pub(crate) struct CredentialStore {
     value_label: &'static str,
+}
+
+pub(crate) fn targets_with_prefixes(prefixes: &[&str]) -> Result<Vec<String>, String> {
+    let mut targets = Vec::new();
+    for prefix in prefixes {
+        let filter = wide_null_checked(OsStr::new(&format!("{prefix}*")), "credential filter")?;
+        let mut count = 0u32;
+        let mut raw = ptr::null_mut();
+        if unsafe { CredEnumerateW(filter.as_ptr(), 0, &mut count, &mut raw) } == 0 {
+            if unsafe { GetLastError() } == ERROR_NOT_FOUND {
+                continue;
+            }
+            return Err(last_os_error("enumerate Clipline credentials"));
+        }
+        if raw.is_null() {
+            continue;
+        }
+        let _owner = OwnedCredentialArray(raw);
+        let credentials = unsafe { std::slice::from_raw_parts(raw, count as usize) };
+        for &credential in credentials {
+            if credential.is_null() {
+                continue;
+            }
+            let target = unsafe { wide_string((*credential).TargetName) };
+            if let Some(target) = target.filter(|target| target.starts_with(prefix)) {
+                if !targets.contains(&target) {
+                    targets.push(target);
+                }
+            }
+        }
+    }
+    Ok(targets)
 }
 
 impl CredentialStore {
@@ -94,6 +126,29 @@ impl Drop for OwnedCredential {
     }
 }
 
+struct OwnedCredentialArray(*mut *mut CREDENTIALW);
+
+impl Drop for OwnedCredentialArray {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                CredFree(self.0.cast());
+            }
+        }
+    }
+}
+
+unsafe fn wide_string(value: *const u16) -> Option<String> {
+    if value.is_null() {
+        return None;
+    }
+    let mut len = 0usize;
+    while unsafe { *value.add(len) } != 0 {
+        len = len.checked_add(1)?;
+    }
+    String::from_utf16(unsafe { std::slice::from_raw_parts(value, len) }).ok()
+}
+
 unsafe fn decode_credential_blob(
     blob: *const u8,
     blob_len: u32,
@@ -153,5 +208,19 @@ mod tests {
             CredentialStore::new("osu! client secret").value_label,
             "osu! client secret"
         );
+    }
+
+    #[test]
+    fn enumerated_credential_targets_decode_from_windows_utf16() {
+        let target: Vec<u16> = "Clipline Cloud:https://example.test:user"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+
+        assert_eq!(
+            unsafe { wide_string(target.as_ptr()) }.as_deref(),
+            Some("Clipline Cloud:https://example.test:user")
+        );
+        assert_eq!(unsafe { wide_string(std::ptr::null()) }, None);
     }
 }

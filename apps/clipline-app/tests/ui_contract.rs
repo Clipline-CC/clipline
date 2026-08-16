@@ -383,6 +383,11 @@ fn app_rs() -> String {
     fs::read_to_string(path).expect("read src/app.rs")
 }
 
+fn main_rs() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs");
+    fs::read_to_string(path).expect("read src/main.rs")
+}
+
 fn service_rs() -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/service.rs");
     fs::read_to_string(path).expect("read src/service.rs")
@@ -391,6 +396,11 @@ fn service_rs() -> String {
 fn tauri_config() -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json");
     fs::read_to_string(path).expect("read tauri.conf.json")
+}
+
+fn nsis_hooks() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("windows/hooks.nsh");
+    fs::read_to_string(path).expect("read windows/hooks.nsh")
 }
 
 fn tauri_standalone_config() -> String {
@@ -498,6 +508,55 @@ fn windows_installer_repairs_webview2_with_bootstrapper() {
         config.contains("\"webviewInstallMode\"")
             && config.contains("\"type\": \"embedBootstrapper\""),
         "the default NSIS installer should embed the small Evergreen bootstrapper instead of bundling the offline WebView2 installer"
+    );
+}
+
+#[test]
+fn windows_uninstaller_runs_cleanup_helper_only_for_interactive_removal() {
+    let config: serde_json::Value =
+        serde_json::from_str(&tauri_config()).expect("tauri.conf.json should parse");
+    assert_eq!(
+        config
+            .pointer("/bundle/windows/nsis/installerHooks")
+            .and_then(serde_json::Value::as_str),
+        Some("windows/hooks.nsh")
+    );
+
+    let hooks = nsis_hooks();
+    for required in [
+        "NSIS_HOOK_PREUNINSTALL",
+        "${Silent}",
+        "$PassiveMode",
+        "$UpdateMode",
+        "taskkill.exe\" /F /IM ${MAINBINARYNAME}.exe",
+        "nsExec::ExecToLog",
+        "--uninstall-cleanup",
+        "--delete-recordings",
+        "NSIS_HOOK_POSTUNINSTALL",
+        "$INSTDIR\\EBWebView",
+    ] {
+        assert!(
+            hooks.contains(required),
+            "missing NSIS cleanup contract: {required}"
+        );
+    }
+    assert!(
+        !hooks.contains("$LOCALAPPDATA\\Microsoft\\EdgeWebView")
+            && !hooks.contains("RMDir /r \"$INSTDIR\""),
+        "the uninstaller must not remove shared WebView2 or recursively wipe the install/cache root"
+    );
+
+    let main = main_rs();
+    let cleanup = main
+        .find("uninstall::run_if_requested()")
+        .expect("main routes uninstall cleanup");
+    let elevation = main
+        .find("windows::wait_for_elevation_parent_from_args()")
+        .expect("main waits for elevation handoff");
+    let app = main.find("app::run();").expect("main starts Tauri");
+    assert!(
+        cleanup < elevation && elevation < app,
+        "uninstall cleanup must exit before elevation, diagnostics, single-instance, or Tauri startup"
     );
 }
 
