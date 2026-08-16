@@ -1858,6 +1858,7 @@ function announceUpdate(update) {
 
 function showUpdateDialog(update) {
   pendingUpdate = update;
+  updateDialogUpdate = update;
   $("update-install").disabled = false;
   $("update-cancel").disabled = false;
   $("update-dialog-title").textContent = `${update.channel_label} update available`;
@@ -1902,9 +1903,11 @@ async function installPendingUpdate() {
   $("update-cancel").disabled = true;
   setUpdateStatus("installing update...");
   try {
-    // Install re-checks before downloading; keep it on the channel the
-    // update was found on, even if it is still unsaved in Settings.
-    await invoke("install_update", pendingUpdate ? { channel: pendingUpdate.channel } : {});
+    // Install re-checks before downloading; keep it on the update the dialog
+    // is showing, even if a background event has since replaced the rail
+    // button's `pendingUpdate` or the channel is still unsaved in Settings.
+    const target = updateDialogUpdate || pendingUpdate;
+    await invoke("install_update", target ? { channel: target.channel } : {});
   } catch (e) {
     $("update-install").disabled = false;
     $("update-cancel").disabled = false;

@@ -22,6 +22,12 @@ Two fixes, no plan doc (small same-day bugs):
 Contract tests extended (`ui_contract.rs`): manual check/install must pass the channel, and the
 tray must keep the menu off left click.
 
+Review follow-up (Greptile P1 on PR #169): a background `update-available` event replaces the
+shared `pendingUpdate` (the rail payload) while a dialog opened from a manual check is still
+showing, so Install could re-check the background's channel instead of the displayed one. Install
+now targets `updateDialogUpdate` — the update captured when the dialog opened — falling back to
+`pendingUpdate`.
+
 ## Checkpoint (2026-08-15): First advertised Stable 1.0.0
 
 Plan: `docs/superpowers/plans/2026-08-15-stable-1.0.0.md`.

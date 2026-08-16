@@ -1267,7 +1267,7 @@ fn review_player_owns_all_controls() {
             && main_js().contains("check_for_updates")
             && main_js().contains("channel: $(\"set-update-channel\").value")
             && main_js().contains("install_update")
-            && main_js().contains("channel: pendingUpdate.channel")
+            && main_js().contains("channel: target.channel")
             && main_js().contains("function updateUpToDateStatus(update)")
             && main_js().contains("update.current_version")
             && main_js().contains("update.status || updateUpToDateStatus(update)")
@@ -2647,6 +2647,15 @@ fn a_waiting_update_surfaces_on_the_rail_above_settings() {
     assert!(
         !cancel[..cancel.find("});").unwrap_or(0)].contains("pendingUpdate = null"),
         "dismissing the update dialog must not clear the update the rail button reopens"
+    );
+
+    // A background update-available event replaces `pendingUpdate` (the rail
+    // payload) without touching an open dialog; Install must target the
+    // update the dialog is showing, captured when it opened.
+    let install = js_function_body(&js, "installPendingUpdate");
+    assert!(
+        install.contains("updateDialogUpdate || pendingUpdate"),
+        "install must re-check the channel of the update the dialog shows, not the shared rail payload"
     );
 
     // A webview-owned poll would stop the moment the window closed to tray,
