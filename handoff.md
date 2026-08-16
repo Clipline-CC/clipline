@@ -4,6 +4,24 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-16): Manual Check honors unsaved channel; tray left click opens app
+
+Two fixes, no plan doc (small same-day bugs):
+
+- **Manual update Check used the saved channel.** Switching Updates from Nightly to Stable (or
+  back) and pressing Check still checked the last *saved* channel. `check_for_updates` now takes
+  an optional `channel` argument; the Settings button passes the dropdown's live value while
+  launch/background checks keep using the saved setting (`resolve_update_channel` in `app.rs`).
+  `install_update` takes the same override and the dialog passes `pendingUpdate.channel`, so an
+  unsaved-channel install doesn't re-check the stale saved channel and bail with "no update".
+- **Tray left click opened the dropdown menu.** Tauri's tray defaults to
+  `show_menu_on_left_click(true)` on Windows, so left click showed the menu *and* fired the
+  open-window handler. The builder now sets `.show_menu_on_left_click(false)`: left click just
+  opens the app; right click is the menu.
+
+Contract tests extended (`ui_contract.rs`): manual check/install must pass the channel, and the
+tray must keep the menu off left click.
+
 ## Checkpoint (2026-08-15): First advertised Stable 1.0.0
 
 Plan: `docs/superpowers/plans/2026-08-15-stable-1.0.0.md`.

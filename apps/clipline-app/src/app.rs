@@ -3813,6 +3813,7 @@ pub fn run() {
                 .icon(tray_icon())
                 .tooltip("Clipline — replay buffer")
                 .menu(&menu)
+                .show_menu_on_left_click(false)
                 .on_menu_event(move |app, event| match event.id().as_ref() {
                     "open" => {
                         log_diagnostic("tray menu event: open");

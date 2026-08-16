@@ -3296,6 +3296,19 @@ fn native_background_lifecycle_releases_heavy_frontend_state() {
 }
 
 #[test]
+fn tray_left_click_opens_the_app_instead_of_the_menu() {
+    let app = app_rs();
+
+    // The tray menu must stay on right click: tauri's default is to also show
+    // it on left click, which steals the click that should open the app.
+    assert!(
+        app.contains(".show_menu_on_left_click(false)")
+            && app.contains("should_open_on_tray_click"),
+        "left click must open the main window while the menu stays on right click"
+    );
+}
+
+#[test]
 fn lifecycle_guards_refreshes_posters_and_cloud_media_completions() {
     let app_core = read_ui_js("app-core.js");
     let library = read_ui_js("library.js");
