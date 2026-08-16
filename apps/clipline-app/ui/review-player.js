@@ -1858,6 +1858,7 @@ function announceUpdate(update) {
 
 function showUpdateDialog(update) {
   pendingUpdate = update;
+  updateDialogUpdate = update;
   $("update-install").disabled = false;
   $("update-cancel").disabled = false;
   $("update-dialog-title").textContent = `${update.channel_label} update available`;
@@ -1872,7 +1873,10 @@ async function checkForUpdates({ manual = false } = {}) {
   updateCheckRunning = true;
   if (manual) setUpdateStatus("checking...");
   try {
-    const update = await invoke("check_for_updates");
+    // The dropdown can hold an unsaved channel; a manual Check must honor
+    // the selection on screen, while automatic checks use the saved channel.
+    const args = manual ? { channel: $("set-update-channel").value } : {};
+    const update = await invoke("check_for_updates", args);
     if (update.available) {
       setUpdateStatus(`${update.channel_label} ${update.version} available`);
       // Both callers of this are moments the user is already looking at
@@ -1899,7 +1903,11 @@ async function installPendingUpdate() {
   $("update-cancel").disabled = true;
   setUpdateStatus("installing update...");
   try {
-    await invoke("install_update");
+    // Install re-checks before downloading; keep it on the update the dialog
+    // is showing, even if a background event has since replaced the rail
+    // button's `pendingUpdate` or the channel is still unsaved in Settings.
+    const target = updateDialogUpdate || pendingUpdate;
+    await invoke("install_update", target ? { channel: target.channel } : {});
   } catch (e) {
     $("update-install").disabled = false;
     $("update-cancel").disabled = false;

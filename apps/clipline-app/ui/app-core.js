@@ -218,6 +218,10 @@ var micAudioContext = null;
 var micAudioCursor = 0;
 var micAudioSources = [];
 var pendingUpdate = null;
+// The update the open dialog is showing. A background update-available event
+// can replace `pendingUpdate` (rail button) mid-dialog; Install must target
+// what the user is actually looking at, not the newer rail payload.
+var updateDialogUpdate = null;
 var updateCheckRunning = false;
 var activeHotkeyCaptureId = null;
 var firstRunHotkeyCapturing = false;
