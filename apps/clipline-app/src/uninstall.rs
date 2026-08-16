@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 const CLEANUP_ARGUMENT: &str = "--uninstall-cleanup";
 const DELETE_RECORDINGS_ARGUMENT: &str = "--delete-recordings";
 const REPLAY_RUN_PREFIX: &str = "clipline-replay-cache-";
+#[cfg(windows)]
 const CREDENTIAL_PREFIXES: [&str; 2] = ["Clipline Cloud:", "Clipline osu!:"];
 const AUTOSTART_NAMES: [&str; 2] = ["clipline-app", "Clipline"];
 
