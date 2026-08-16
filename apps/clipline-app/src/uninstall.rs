@@ -6,6 +6,7 @@ const CLEANUP_ARGUMENT: &str = "--uninstall-cleanup";
 const DELETE_RECORDINGS_ARGUMENT: &str = "--delete-recordings";
 const CREDENTIAL_PREFIXES: [&str; 2] = ["Clipline Cloud:", "Clipline osu!:"];
 const AUTOSTART_NAMES: [&str; 2] = ["clipline-app", "Clipline"];
+const REPLAY_CACHE_OWNER_MAX_BYTES: u64 = 4096;
 
 #[derive(Debug, Clone)]
 struct CleanupLayout {
@@ -239,20 +240,45 @@ fn collect_replay_run_dirs(root: &Path, output: &mut Vec<PathBuf>) {
         let Ok(metadata) = fs::symlink_metadata(&path) else {
             continue;
         };
-        if !clipline_storage::is_replay_cache_run_name(name)
-            || !metadata.is_dir()
+        if !metadata.is_dir()
             || is_link_or_reparse_point(&metadata)
+            || !has_valid_replay_cache_owner(&path, name)
         {
             continue;
         }
-        let Ok(owner) = fs::symlink_metadata(path.join(clipline_storage::REPLAY_CACHE_OWNER_FILE))
-        else {
-            continue;
-        };
-        if owner.is_file() && !is_link_or_reparse_point(&owner) {
-            output.push(path);
-        }
+        output.push(path);
     }
+}
+
+fn has_valid_replay_cache_owner(run_dir: &Path, run_name: &str) -> bool {
+    let Some(run_pid) = clipline_storage::replay_cache_run_pid(run_name) else {
+        return false;
+    };
+    let owner_path = run_dir.join(clipline_storage::REPLAY_CACHE_OWNER_FILE);
+    let Ok(metadata) = fs::symlink_metadata(&owner_path) else {
+        return false;
+    };
+    if !metadata.is_file()
+        || is_link_or_reparse_point(&metadata)
+        || metadata.len() > REPLAY_CACHE_OWNER_MAX_BYTES
+    {
+        return false;
+    }
+    let Ok(bytes) = fs::read(owner_path) else {
+        return false;
+    };
+    let Ok(owner) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return false;
+    };
+    owner
+        .get("created_at_unix")
+        .and_then(serde_json::Value::as_u64)
+        .is_some()
+        && owner
+            .get("process_instance_id")
+            .and_then(serde_json::Value::as_str)
+            .and_then(clipline_storage::replay_cache_owner_pid)
+            == Some(run_pid)
 }
 
 fn execute_cleanup_plan_with<'a, I>(
@@ -549,7 +575,7 @@ mod tests {
         fs::create_dir_all(&replay_run).unwrap();
         fs::write(
             replay_run.join(clipline_storage::REPLAY_CACHE_OWNER_FILE),
-            b"{}",
+            br#"{"process_instance_id":"456:789","created_at_unix":123}"#,
         )
         .unwrap();
         fs::create_dir_all(&layout.config_dir).unwrap();
@@ -598,7 +624,7 @@ mod tests {
         fs::create_dir_all(&replay_run).unwrap();
         fs::write(
             replay_run.join(clipline_storage::REPLAY_CACHE_OWNER_FILE),
-            b"{}",
+            br#"{"process_instance_id":"456:789","created_at_unix":123}"#,
         )
         .unwrap();
         write_settings(
@@ -627,10 +653,28 @@ mod tests {
         let replay = root.path().join("Replay");
         let valid = replay.join("clipline-replay-cache-123-456-0");
         let unowned = replay.join("clipline-replay-cache-123-457-0");
+        let malformed = replay.join("clipline-replay-cache-123-458-0");
+        let mismatched = replay.join("clipline-replay-cache-123-459-0");
         let unrelated = replay.join("clipline-replay-cache-backup");
         fs::create_dir_all(&valid).unwrap();
-        fs::write(valid.join(clipline_storage::REPLAY_CACHE_OWNER_FILE), b"{}").unwrap();
+        fs::write(
+            valid.join(clipline_storage::REPLAY_CACHE_OWNER_FILE),
+            br#"{"process_instance_id":"456:789","created_at_unix":123}"#,
+        )
+        .unwrap();
         fs::create_dir_all(&unowned).unwrap();
+        fs::create_dir_all(&malformed).unwrap();
+        fs::write(
+            malformed.join(clipline_storage::REPLAY_CACHE_OWNER_FILE),
+            b"{}",
+        )
+        .unwrap();
+        fs::create_dir_all(&mismatched).unwrap();
+        fs::write(
+            mismatched.join(clipline_storage::REPLAY_CACHE_OWNER_FILE),
+            br#"{"process_instance_id":"999:789","created_at_unix":123}"#,
+        )
+        .unwrap();
         fs::create_dir_all(&unrelated).unwrap();
         write_settings(
             &layout,
@@ -644,6 +688,8 @@ mod tests {
 
         assert!(contains_path(&plan.replay_trees, &valid));
         assert!(!contains_path(&plan.replay_trees, &unowned));
+        assert!(!contains_path(&plan.replay_trees, &malformed));
+        assert!(!contains_path(&plan.replay_trees, &mismatched));
         assert!(!contains_path(&plan.replay_trees, &unrelated));
     }
 

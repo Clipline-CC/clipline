@@ -2091,7 +2091,8 @@ fn sweep_replay_cache_runs(
         let definitively_stale = owner
             .as_ref()
             .and_then(|owner| {
-                replay_cache_owner_pid(&owner.process_instance_id).map(|pid| (owner, pid))
+                clipline_storage::replay_cache_owner_pid(&owner.process_instance_id)
+                    .map(|pid| (owner, pid))
             })
             .and_then(|(owner, pid)| {
                 process_instance_id(pid)
@@ -2111,14 +2112,6 @@ fn sweep_replay_cache_runs(
         preserved_bytes = preserved_bytes.saturating_add(replay_cache_run_size(&path));
     }
     Ok(preserved_bytes)
-}
-
-fn replay_cache_owner_pid(process_instance_id: &str) -> Option<u32> {
-    let (pid, creation_time) = process_instance_id.split_once(':')?;
-    if creation_time.is_empty() || !creation_time.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    pid.parse().ok()
 }
 
 fn replay_cache_run_size(path: &Path) -> u64 {

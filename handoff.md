@@ -18,8 +18,9 @@ Recordings remain by default. Opting in deletes only Clipline-owned clips, in-pr
 and their sidecars through the shared storage inventory; foreign files and custom media-directory
 roots remain. Both the configured media root and the default fallback root are checked, and a
 custom media tree nested below an app-residue folder is protected while surrounding residue is
-removed. Replay cleanup requires both the runtime's generated three-number run name and its
-ownership marker, persisted credential targets are restricted to Clipline namespaces, and
+removed. Replay cleanup requires both the runtime's generated three-number run name and a valid
+ownership record whose process ID matches the run directory, persisted credential targets are
+restricted to Clipline namespaces, and
 unreadable media siblings do not block deletion of accessible owned clips. Cleanup planning uses
 injected roots in tests, never
 broad-deletes the current-user install root, and does not follow media symlinks or reparse points.
