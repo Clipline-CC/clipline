@@ -3270,6 +3270,7 @@ button.primary.settings-save-glow {
   border-radius: 8px;
   background: var(--panel-2);
 }
+.gallery-source-tabs[hidden] { display: none; }
 .source-tab {
   height: 26px;
   min-width: 0;
@@ -3843,6 +3844,10 @@ button.primary.settings-save-glow {
   gap: 8px;
   padding: 0 18px 16px;
 }
+/* Informational link sits left; Install/Not Now stay as the right-aligned pair.
+ * DOM keeps Install first so showModal() focuses the primary action; `order`
+ * moves the link left visually without touching tab order. */
+#update-whats-new { order: -1; margin-right: auto; }
 .upload-body { gap: 8px; }
 .upload-body label {
   display: block;

@@ -327,7 +327,6 @@ struct UpdateCheckResult {
     available: bool,
     version: Option<String>,
     date: Option<String>,
-    notes: Option<String>,
     endpoint: &'static str,
     status: Option<String>,
 }
@@ -2893,7 +2892,6 @@ async fn update_check_result<R: Runtime>(
         date: update
             .as_ref()
             .and_then(|update| update.date.map(|date| date.to_string())),
-        notes: update.as_ref().and_then(|update| update.body.clone()),
         endpoint: channel.endpoint(is_standalone_install(app)),
         status,
     })
@@ -2934,6 +2932,14 @@ async fn install_update<R: Runtime>(
         .download_and_install(|_, _| {}, || {})
         .await
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn open_changelog() -> Result<(), String> {
+    crate::windows::open_with_shell(
+        std::ffi::OsStr::new(crate::updates::CHANGELOG_URL),
+        "open changelog",
+    )
 }
 
 #[tauri::command]
@@ -3664,6 +3670,7 @@ pub fn run() {
             get_autostart_status,
             check_for_updates,
             install_update,
+            open_changelog,
             save_settings,
             set_hotkey_capture_active,
             support::prepare_bug_report,
