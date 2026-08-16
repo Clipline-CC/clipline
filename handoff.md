@@ -4,6 +4,16 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-16): Install package decides the default update channel
+
+Fresh installs no longer always start on Nightly. Each release workflow bakes
+`CLIPLINE_DEFAULT_UPDATE_CHANNEL` at build time (`nightly.yml` → nightly for both installer
+variants, `stable.yml` → stable); `UpdateChannel::install_default()` reads it through `build.rs`
+(validated to one of the two values), and `UpdateChannel::default()`/`AppSettings::default()`
+follow. Local dev builds keep the Nightly default. A user's saved `update_channel` always wins, so
+existing installs are untouched. `repository_security.rs` pins that both build steps in both
+workflows bake the matching channel.
+
 ## Checkpoint (2026-08-16): Nightly 1.0.1
 
 Plan: `docs/superpowers/plans/2026-08-16-nightly-1.0.1.md`.

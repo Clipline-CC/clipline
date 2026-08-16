@@ -1078,3 +1078,26 @@ fn stable_already_published_rerun_still_verifies_public_assets() {
         "verification without checkout still needs GH_REPO"
     );
 }
+
+#[test]
+fn release_workflows_bake_matching_update_channel_defaults() {
+    let root = workspace_root();
+    for (workflow_name, channel) in [
+        (".github/workflows/nightly.yml", "nightly"),
+        (".github/workflows/stable.yml", "stable"),
+    ] {
+        let workflow = fs::read_to_string(root.join(workflow_name))
+            .unwrap_or_else(|e| panic!("read {workflow_name}: {e}"));
+        let baked = format!("CLIPLINE_DEFAULT_UPDATE_CHANNEL: {channel}");
+        assert_eq!(
+            workflow.matches(&baked).count(),
+            2,
+            "{workflow_name} must bake the {channel} channel default into both the regular and standalone installer builds"
+        );
+        assert_eq!(
+            workflow.matches("CLIPLINE_DEFAULT_UPDATE_CHANNEL:").count(),
+            2,
+            "{workflow_name} must not bake any other channel default"
+        );
+    }
+}
