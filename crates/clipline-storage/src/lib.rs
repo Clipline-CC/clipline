@@ -171,7 +171,12 @@ pub fn delete_all_managed_media(dir: &Path) -> io::Result<()> {
     }
 
     let mut first_error = None;
-    for clip in inventory(dir, None)? {
+    for mut clip in inventory(dir, None)? {
+        if clip.recording {
+            let sidecar_clip =
+                recording_final_path(&clip.path).unwrap_or_else(|| clip.path.clone());
+            (clip.sidecars, clip.sidecar_bytes) = clip_sidecars(&sidecar_clip)?;
+        }
         if let Err(error) = delete_inventoried_clip(&clip, dir, &|_| false) {
             first_error.get_or_insert(error);
         }
@@ -320,8 +325,11 @@ fn collect_clips(dir: &Path, include: Option<&Path>, clips: &mut Vec<ClipFile>) 
         if !meta.is_file() {
             continue;
         }
-        let sidecar_clip = recording_final_path(&path).unwrap_or_else(|| path.clone());
-        let (sidecars, sidecar_bytes) = clip_sidecars(&sidecar_clip)?;
+        let (sidecars, sidecar_bytes) = if recording {
+            (Vec::new(), 0)
+        } else {
+            clip_sidecars(&path)?
+        };
         clips.push(ClipFile {
             path,
             sidecars,
