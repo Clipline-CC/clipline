@@ -19,6 +19,7 @@ function fillCloudSettings(cloud) {
   $("cloud-disconnect").disabled = !connected;
   $("cloud-connect-status").textContent = "";
   syncRailProfile(cloud);
+  syncCloudSignedInChrome(cloud);
 }
 
 function cloudDisplayName(cloud) {
@@ -194,6 +195,22 @@ function cloudSettings() {
 function cloudConnected() {
   const cloud = cloudSettings();
   return Boolean(cloud.connected_user_id && cloud.credential_target);
+}
+
+function cloudUploadControlVisible(uploaded) {
+  return cloudConnected() || Boolean(uploaded);
+}
+
+function syncCloudSignedInChrome(cloud = cloudSettings()) {
+  const connected = Boolean(cloud.connected_user_id && cloud.credential_target);
+  const tabs = $("gallery-source-tabs");
+  if (tabs) tabs.hidden = !connected;
+  if (!connected && gallerySource === "cloud") {
+    gallerySource = "local";
+    renderClips();
+    return;
+  }
+  syncUploadClipButton();
 }
 
 function cloudUploadRecordForPath(path) {

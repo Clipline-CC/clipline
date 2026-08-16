@@ -164,6 +164,7 @@ $("gallery-search-menu").addEventListener("click", (ev) => {
 $("gallery-source-tabs").addEventListener("click", (ev) => {
   const tab = ev.target.closest(".source-tab");
   if (!tab) return;
+  if (tab.dataset.gallerySource === "cloud" && !cloudConnected()) return;
   gallerySource = tab.dataset.gallerySource === "cloud" ? "cloud" : "local";
   if (gallerySource === "cloud") {
     exitSelectMode();

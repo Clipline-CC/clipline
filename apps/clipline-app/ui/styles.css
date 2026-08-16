@@ -3270,6 +3270,7 @@ button.primary.settings-save-glow {
   border-radius: 8px;
   background: var(--panel-2);
 }
+.gallery-source-tabs[hidden] { display: none; }
 .source-tab {
   height: 26px;
   min-width: 0;

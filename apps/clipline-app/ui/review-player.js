@@ -5,19 +5,19 @@ var renameFileDialogClip = null;
 var renameFilePending = false;
 
 // Sync the review-header upload button to the current clip's cloud state:
-// disabled when no clip is open or cloud is disconnected (and not yet uploaded),
-// a link icon once uploaded. Mirrors the per-row cloud button in clipRow().
+// hidden when signed out unless this clip is already uploaded; a link icon
+// once uploaded.
 function syncUploadClipButton() {
   const btn = $("upload-clip");
   if (!btn) return;
   const clip = currentClip;
-  btn.hidden = false;
   if (isCloudOnlyReviewClip(clip)) {
     const shareable = !!(
       clip.cloud_remote_url
       && String(clip.cloud_visibility || "") !== "private"
     );
     const uploaded = !!clip.cloud_remote_clip_id;
+    btn.hidden = !cloudUploadControlVisible(uploaded);
     btn.title = shareable
       ? "Copy cloud link"
       : uploaded ? "Open cloud page — no public share link" : "Cloud page unavailable";
@@ -33,6 +33,7 @@ function syncUploadClipButton() {
   const busy = record && ["queued", "uploading", "processing", "retrying"].includes(record.upload_status);
   const uploaded = cloudRecordUploaded(record);
   const shareable = !!cloudShareUrl(record);
+  btn.hidden = !cloudUploadControlVisible(uploaded);
   btn.title = shareable
     ? "Copy cloud link"
     : uploaded ? "Open cloud page — no public share link" : "Upload to Clipline Cloud";

@@ -4296,6 +4296,7 @@ fn library_has_cloud_source_tab() {
     );
     for required in [
         ".gallery-source-tabs",
+        ".gallery-source-tabs[hidden]",
         ".source-tab.active",
         ".cloud-gallery-grid",
         ".cloud-card",
@@ -4314,6 +4315,84 @@ fn library_has_cloud_source_tab() {
     assert!(
         app_rs().contains("crate::cloud::open_cloud_clip"),
         "native command registry must expose open_cloud_clip for Cloud card links"
+    );
+}
+
+#[test]
+fn signed_out_users_do_not_see_cloud_action_chrome() {
+    let html = index_html();
+    let css = styles_css();
+    let cloud = read_ui_js("cloud.js");
+    let library = read_ui_js("library.js");
+    let review = read_ui_js("review-player.js");
+    let main = read_ui_js("main.js");
+
+    let tabs_start = html
+        .find("<nav id=\"gallery-source-tabs\"")
+        .expect("library source tabs");
+    let tabs_end = html[tabs_start..]
+        .find('>')
+        .map(|offset| tabs_start + offset)
+        .expect("library source tabs open tag");
+    assert!(
+        html[tabs_start..=tabs_end].contains("hidden"),
+        "Local/Cloud switcher must start hidden until a cloud session exists"
+    );
+
+    let upload_start = html
+        .find("<button id=\"upload-clip\"")
+        .expect("review upload button");
+    let upload_end = html[upload_start..]
+        .find('>')
+        .map(|offset| upload_start + offset)
+        .expect("review upload button open tag");
+    assert!(
+        html[upload_start..=upload_end].contains("hidden"),
+        "review upload button must start hidden until a cloud session exists"
+    );
+
+    assert!(
+        css.contains(".gallery-source-tabs[hidden] { display: none; }"),
+        "inline-flex Local/Cloud tabs must honor the hidden attribute"
+    );
+
+    let fill = js_function_body(&cloud, "fillCloudSettings");
+    let chrome = js_function_body(&cloud, "syncCloudSignedInChrome");
+    let visible = js_function_body(&cloud, "cloudUploadControlVisible");
+    assert!(
+        fill.contains("syncCloudSignedInChrome(cloud)")
+            && chrome.contains("tabs.hidden = !connected")
+            && chrome.contains("if (!connected && gallerySource === \"cloud\")")
+            && chrome.contains("gallerySource = \"local\"")
+            && visible.contains("cloudConnected() || Boolean(uploaded)"),
+        "cloud session chrome must hide the library source switcher when signed out"
+    );
+
+    let upload_btn = js_function_body(&review, "syncUploadClipButton");
+    assert!(
+        upload_btn.contains("btn.hidden = !cloudUploadControlVisible(uploaded)")
+            && !upload_btn.contains("btn.hidden = false"),
+        "review upload control must hide when signed out unless the clip is already uploaded"
+    );
+
+    let menu = js_function_body(&library, "showClipContextMenu");
+    assert!(
+        menu.contains("upload.hidden = !cloudUploadControlVisible(uploaded)")
+            && !menu.contains("upload.hidden = false"),
+        "library Upload menu item must hide when signed out unless the clip is already uploaded"
+    );
+
+    let click_start = main
+        .find("$(\"gallery-source-tabs\").addEventListener(\"click\"")
+        .expect("gallery source tabs must have a click handler");
+    let click_end = main[click_start..]
+        .find("$(\"gallery-select-toggle\")")
+        .map(|offset| click_start + offset)
+        .expect("gallery source handler must precede the selection handler");
+    assert!(
+        main[click_start..click_end]
+            .contains("tab.dataset.gallerySource === \"cloud\" && !cloudConnected()"),
+        "Cloud tab clicks must no-op while signed out"
     );
 }
 
