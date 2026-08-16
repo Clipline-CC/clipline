@@ -46,7 +46,7 @@ const LOW_REPLAY_CACHE_DISK_RESERVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const REPLAY_SAVE_QUOTA_RESERVE_BYTES: u64 = 4 * 1024 * 1024;
 const FULL_SESSION_QUOTA_RESERVE_BYTES: u64 = 64 * 1024 * 1024;
 const REPLAY_CACHE_RUN_PREFIX: &str = clipline_storage::REPLAY_CACHE_RUN_PREFIX;
-const REPLAY_CACHE_OWNER_FILE: &str = ".clipline-run.json";
+const REPLAY_CACHE_OWNER_FILE: &str = clipline_storage::REPLAY_CACHE_OWNER_FILE;
 const AMBIGUOUS_REPLAY_CACHE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 #[path = "service/media_root.rs"]
 mod media_root;

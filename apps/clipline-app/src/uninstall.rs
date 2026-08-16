@@ -239,10 +239,17 @@ fn collect_replay_run_dirs(root: &Path, output: &mut Vec<PathBuf>) {
         let Ok(metadata) = fs::symlink_metadata(&path) else {
             continue;
         };
-        if clipline_storage::is_replay_cache_run_name(name)
-            && metadata.is_dir()
-            && !is_link_or_reparse_point(&metadata)
+        if !clipline_storage::is_replay_cache_run_name(name)
+            || !metadata.is_dir()
+            || is_link_or_reparse_point(&metadata)
         {
+            continue;
+        }
+        let Ok(owner) = fs::symlink_metadata(path.join(clipline_storage::REPLAY_CACHE_OWNER_FILE))
+        else {
+            continue;
+        };
+        if owner.is_file() && !is_link_or_reparse_point(&owner) {
             output.push(path);
         }
     }
@@ -540,6 +547,11 @@ mod tests {
         let replay = root.path().join("Replay");
         let replay_run = replay.join("clipline-replay-cache-123-456-0");
         fs::create_dir_all(&replay_run).unwrap();
+        fs::write(
+            replay_run.join(clipline_storage::REPLAY_CACHE_OWNER_FILE),
+            b"{}",
+        )
+        .unwrap();
         fs::create_dir_all(&layout.config_dir).unwrap();
         fs::write(layout.config_dir.join("settings.json"), b"not json").unwrap();
         fs::write(
@@ -584,6 +596,11 @@ mod tests {
         let media = root.path().join("Media");
         let replay_run = media.join("clipline-replay-cache-123-456-0");
         fs::create_dir_all(&replay_run).unwrap();
+        fs::write(
+            replay_run.join(clipline_storage::REPLAY_CACHE_OWNER_FILE),
+            b"{}",
+        )
+        .unwrap();
         write_settings(
             &layout,
             &format!(
@@ -609,8 +626,11 @@ mod tests {
         let layout = layout(root.path());
         let replay = root.path().join("Replay");
         let valid = replay.join("clipline-replay-cache-123-456-0");
+        let unowned = replay.join("clipline-replay-cache-123-457-0");
         let unrelated = replay.join("clipline-replay-cache-backup");
         fs::create_dir_all(&valid).unwrap();
+        fs::write(valid.join(clipline_storage::REPLAY_CACHE_OWNER_FILE), b"{}").unwrap();
+        fs::create_dir_all(&unowned).unwrap();
         fs::create_dir_all(&unrelated).unwrap();
         write_settings(
             &layout,
@@ -623,6 +643,7 @@ mod tests {
         let plan = build_cleanup_plan(&layout, false);
 
         assert!(contains_path(&plan.replay_trees, &valid));
+        assert!(!contains_path(&plan.replay_trees, &unowned));
         assert!(!contains_path(&plan.replay_trees, &unrelated));
     }
 

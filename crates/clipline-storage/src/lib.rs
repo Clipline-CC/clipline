@@ -11,6 +11,7 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const REPLAY_CACHE_RUN_PREFIX: &str = "clipline-replay-cache-";
+pub const REPLAY_CACHE_OWNER_FILE: &str = ".clipline-run.json";
 
 pub fn is_replay_cache_run_name(name: &str) -> bool {
     let Some(suffix) = name.strip_prefix(REPLAY_CACHE_RUN_PREFIX) else {
