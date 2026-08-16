@@ -159,6 +159,26 @@ pub fn recover_recording_files(dir: &Path) -> io::Result<RecordingRecoveryReport
     Ok(report)
 }
 
+/// Delete every Clipline-owned saved or in-progress clip below `dir` while
+/// preserving unrelated files and the media root itself.
+pub fn delete_all_managed_media(dir: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(dir)?;
+    if is_link_or_reparse_point(&metadata) {
+        return Err(io::Error::new(
+            ErrorKind::PermissionDenied,
+            "refusing to delete media through a link or reparse point",
+        ));
+    }
+
+    let mut first_error = None;
+    for clip in inventory(dir, None)? {
+        if let Err(error) = delete_inventoried_clip(&clip, dir, &|_| false) {
+            first_error.get_or_insert(error);
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
 pub fn enforce_quota(
     dir: &Path,
     quota_bytes: Option<u64>,
@@ -300,11 +320,8 @@ fn collect_clips(dir: &Path, include: Option<&Path>, clips: &mut Vec<ClipFile>) 
         if !meta.is_file() {
             continue;
         }
-        let (sidecars, sidecar_bytes) = if recording {
-            (Vec::new(), 0)
-        } else {
-            clip_sidecars(&path)?
-        };
+        let sidecar_clip = recording_final_path(&path).unwrap_or_else(|| path.clone());
+        let (sidecars, sidecar_bytes) = clip_sidecars(&sidecar_clip)?;
         clips.push(ClipFile {
             path,
             sidecars,
@@ -1111,6 +1128,78 @@ mod tests {
             "emptied session folder must disappear with its session metadata"
         );
         assert!(keep.exists());
+    }
+
+    #[test]
+    fn delete_all_managed_media_removes_owned_clips_recordings_and_sidecars_only() {
+        let dir = TestDir::new("clipline-storage", "delete-all-managed");
+        let saved = write_owned(&dir, "saved.mp4", 10);
+        let saved_markers = dir.write("saved.markers.json", 2);
+        let saved_osu = dir.write("saved.osu-enrichment.json", 3);
+        let saved_poster = dir.write("saved.poster.jpg", 4);
+        let recording = dir.write("2026-08-16/active.mp4.recording", 20);
+        mark_owned(&recording);
+        let recording_markers = dir.write("2026-08-16/active.markers.json", 2);
+        let recording_osu = dir.write("2026-08-16/active.osu-enrichment.json", 3);
+        let recording_poster = dir.write("2026-08-16/active.poster.jpg", 4);
+        let session = dir.write("2026-08-16/clipline-session.json", 5);
+        let legacy = dir.write("clip_1786900000.mp4", 7);
+        let legacy_recording = dir.write("session_1786900001_1.mp4.recording", 8);
+        let foreign = dir.write("foreign.mp4", 30);
+        let foreign_poster = dir.write("foreign.poster.jpg", 6);
+
+        delete_all_managed_media(dir.path()).unwrap();
+
+        for removed in [
+            saved,
+            saved_markers,
+            saved_osu,
+            saved_poster,
+            recording,
+            recording_markers,
+            recording_osu,
+            recording_poster,
+            session,
+            legacy,
+            legacy_recording,
+        ] {
+            assert!(
+                !removed.exists(),
+                "managed file was left behind: {removed:?}"
+            );
+        }
+        assert!(foreign.exists(), "unmarked MP4s are user files");
+        assert!(
+            foreign_poster.exists(),
+            "a poster alone does not prove Clipline ownership"
+        );
+        assert!(dir.path().exists(), "the media root belongs to the caller");
+    }
+
+    #[test]
+    fn delete_all_managed_media_does_not_follow_linked_session_directories() {
+        let root = TestDir::new("clipline-storage", "delete-all-symlink-root");
+        let outside = TestDir::new("clipline-storage", "delete-all-symlink-outside");
+        let external = write_owned(&outside, "external.mp4", 90);
+        let link = root.path().join("linked-session");
+        let linked = {
+            #[cfg(windows)]
+            {
+                std::os::windows::fs::symlink_dir(outside.path(), &link)
+            }
+            #[cfg(unix)]
+            {
+                std::os::unix::fs::symlink(outside.path(), &link)
+            }
+        };
+        if let Err(error) = linked {
+            eprintln!("skipping symlink containment test: {error}");
+            return;
+        }
+
+        delete_all_managed_media(root.path()).unwrap();
+
+        assert!(external.exists());
     }
 
     #[test]
