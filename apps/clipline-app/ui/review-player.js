@@ -1837,11 +1837,8 @@ function updateUpToDateStatus(update) {
   return `${update.channel_label}${version} is up to date`;
 }
 
-function updateNotesPreview(notes) {
-  const text = String(notes || "").trim();
-  if (!text) return "";
-  return text.length > 220 ? `${text.slice(0, 217)}...` : text;
-}
+// The full notes live on the official changelog page — the dialog links there
+// ("What's new?") rather than inlining a truncated preview here.
 
 // Reveal the rail button rather than seizing the window. A modal that opens on
 // its own interrupts whatever the user came here to do, and Clipline runs for
@@ -1864,7 +1861,6 @@ function showUpdateDialog(update) {
   $("update-dialog-title").textContent = `${update.channel_label} update available`;
   $("update-dialog-body").textContent =
     `Clipline ${update.version} is available. Current version: ${update.current_version}.`;
-  $("update-dialog-notes").textContent = updateNotesPreview(update.notes);
   $("update-dialog").showModal();
 }
 

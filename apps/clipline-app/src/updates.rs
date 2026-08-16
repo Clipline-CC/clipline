@@ -14,6 +14,10 @@ pub const NIGHTLY_STANDALONE_UPDATE_ENDPOINT: &str =
 pub const STABLE_STANDALONE_UPDATE_ENDPOINT: &str =
     "https://github.com/dain98/clipline/releases/latest/download/latest-standalone.json";
 
+/// Official human-readable changelog for both channels. The update dialog
+/// links here instead of inlining a truncated notes preview.
+pub const CHANGELOG_URL: &str = "https://clipline.cc/changelog";
+
 // Stable GitHub releases publish latest.json as a non-prerelease asset.
 pub const STABLE_CHANNEL_ENABLED: bool = true;
 

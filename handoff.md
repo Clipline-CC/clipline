@@ -4,6 +4,16 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+
+## Checkpoint (2026-08-16): Update dialog links the official changelog
+
+The update dialog's truncated inline notes preview (mostly auto-generated Nightly boilerplate) is
+gone. A **What's new?** button now opens `https://clipline.cc/changelog` (constant
+`CHANGELOG_URL` in `updates.rs`, `open_changelog` command via the existing `open_with_shell`
+helper — no new plugin). It sits left of the Install/Not Now pair via `margin-right: auto`.
+`UpdateCheckResult.notes` and `updateNotesPreview` were deleted with it. The install warning
+hint stays.
+
 ## Checkpoint (2026-08-16): Nightly 1.0.1
 
 Plan: `docs/superpowers/plans/2026-08-16-nightly-1.0.1.md`.

@@ -752,6 +752,27 @@ fn update_dialog_body_can_drag_frameless_window() {
         css.contains(".update-dialog-drag") && css.contains("cursor: move"),
         "the draggable update dialog body should advertise that it can move the window"
     );
+    let js = main_js();
+    assert!(
+        dialog.contains("<button id=\"update-whats-new\""),
+        "the update dialog must link the changelog page instead of inlining truncated notes"
+    );
+    let install = dialog.find("id=\"update-install\"").expect("install button");
+    let cancel = dialog.find("id=\"update-cancel\"").expect("cancel button");
+    let whats_new = dialog.find("id=\"update-whats-new\"").expect("what's new button");
+    assert!(
+        install < cancel && cancel < whats_new,
+        "Install stays first in DOM so showModal() focuses the primary action, not the changelog link"
+    );
+    let listener = js
+        .split("$(\"update-whats-new\").addEventListener")
+        .nth(1)
+        .expect("update-whats-new click listener exists");
+    let listener_body = &listener[..listener.find("});").unwrap_or(0)];
+    assert!(
+        listener_body.contains("invoke(\"open_changelog\")"),
+        "the What's new button must invoke the registered changelog command"
+    );
 }
 
 #[test]
@@ -1105,6 +1126,7 @@ fn review_player_owns_all_controls() {
         "id=\"update-dialog\"",
         "id=\"update-install\"",
         "id=\"update-cancel\"",
+        "id=\"update-whats-new\"",
         "id=\"update-dialog-title\"",
         "id=\"update-dialog-body\"",
         "id=\"settings-page\"",

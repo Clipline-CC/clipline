@@ -233,6 +233,14 @@ $("choose-media-folder").addEventListener("click", chooseMediaFolder);
 $("choose-replay-cache-folder").addEventListener("click", chooseReplayCacheFolder);
 $("check-updates").addEventListener("click", () => checkForUpdates({ manual: true }));
 $("update-install").addEventListener("click", installPendingUpdate);
+$("update-whats-new").addEventListener("click", async () => {
+  // The dialog stays open so the user can still install right after reading.
+  try {
+    await invoke("open_changelog");
+  } catch (e) {
+    console.warn("open changelog failed:", e);
+  }
+});
 $("update-cancel").addEventListener("click", () => {
   // Keep `pendingUpdate`: the rail button reopens this dialog from it, and the
   // background poller stops after its first find, so clearing it here would
