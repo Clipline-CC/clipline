@@ -757,9 +757,21 @@ fn update_dialog_body_can_drag_frameless_window() {
         dialog.contains("<button id=\"update-whats-new\""),
         "the update dialog must link the changelog page instead of inlining truncated notes"
     );
+    let install = dialog.find("id=\"update-install\"").expect("install button");
+    let cancel = dialog.find("id=\"update-cancel\"").expect("cancel button");
+    let whats_new = dialog.find("id=\"update-whats-new\"").expect("what's new button");
     assert!(
-        js.contains("open_changelog"),
-        "What's new must open the official changelog through the native shell"
+        install < cancel && cancel < whats_new,
+        "Install stays first in DOM so showModal() focuses the primary action, not the changelog link"
+    );
+    let listener = js
+        .split("$(\"update-whats-new\").addEventListener")
+        .nth(1)
+        .expect("update-whats-new click listener exists");
+    let listener_body = &listener[..listener.find("});").unwrap_or(0)];
+    assert!(
+        listener_body.contains("invoke(\"open_changelog\")"),
+        "the What's new button must invoke the registered changelog command"
     );
 }
 
