@@ -2150,10 +2150,23 @@ pub(crate) fn validate_clip_path(
 #[tauri::command]
 pub fn reveal_clip(path: String, settings: tauri::State<StorageSettings>) -> Result<(), String> {
     let target = validate_clip_path(&settings, &path)?;
-    let dir = target
-        .parent()
-        .ok_or_else(|| "clip has no containing folder".to_string())?;
-    open_folder_path(dir)
+    select_path_in_explorer(&target)
+}
+
+fn select_path_in_explorer(target: &Path) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    let canonical = target.display().to_string();
+    // Explorer's `/select` rejects verbatim (`\\?\`) paths from `canonicalize`.
+    let displayable = if let Some(rest) = canonical.strip_prefix(r"\\?\UNC\") {
+        std::borrow::Cow::Owned(format!(r"\\{rest}"))
+    } else {
+        std::borrow::Cow::Borrowed(canonical.strip_prefix(r"\\?\").unwrap_or(canonical.as_str()))
+    };
+    std::process::Command::new("explorer.exe")
+        .raw_arg(format!("/select,\"{displayable}\""))
+        .spawn()
+        .map_err(|e| format!("open explorer: {e}"))?;
+    Ok(())
 }
 
 #[tauri::command]
