@@ -1998,7 +1998,7 @@ function showClipContextMenu(ev, clip) {
   $("clip-menu-copy").hidden = false;
   $("clip-menu-copy-shareable").hidden = false;
   const upload = $("clip-menu-upload");
-  upload.hidden = false;
+  upload.hidden = !cloudUploadControlVisible(uploaded);
   upload.textContent = shareable ? "Copy cloud link" : uploaded ? "Open cloud page" : "Upload";
   upload.disabled = busy || (uploaded ? !record.remote_clip_id : !cloudConnected());
   $("clip-menu-rename").hidden = false;
