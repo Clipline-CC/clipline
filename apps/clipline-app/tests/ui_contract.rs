@@ -752,6 +752,15 @@ fn update_dialog_body_can_drag_frameless_window() {
         css.contains(".update-dialog-drag") && css.contains("cursor: move"),
         "the draggable update dialog body should advertise that it can move the window"
     );
+    let js = main_js();
+    assert!(
+        dialog.contains("<button id=\"update-whats-new\""),
+        "the update dialog must link the changelog page instead of inlining truncated notes"
+    );
+    assert!(
+        js.contains("open_changelog"),
+        "What's new must open the official changelog through the native shell"
+    );
 }
 
 #[test]
@@ -1105,6 +1114,7 @@ fn review_player_owns_all_controls() {
         "id=\"update-dialog\"",
         "id=\"update-install\"",
         "id=\"update-cancel\"",
+        "id=\"update-whats-new\"",
         "id=\"update-dialog-title\"",
         "id=\"update-dialog-body\"",
         "id=\"settings-page\"",

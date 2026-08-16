@@ -3843,6 +3843,8 @@ button.primary.settings-save-glow {
   gap: 8px;
   padding: 0 18px 16px;
 }
+/* Informational link sits left; Install/Not Now stay as the right-aligned pair. */
+#update-whats-new { margin-right: auto; }
 .upload-body { gap: 8px; }
 .upload-body label {
   display: block;
