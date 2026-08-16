@@ -4,6 +4,31 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-16): Nightly 1.0.1
+
+Plan: `docs/superpowers/plans/2026-08-16-nightly-1.0.1.md`.
+
+Nightly 1.0.1 ships the post-Stable fixes: the update dialog installs the update it shows (not a
+later rail payload), Manual Check honors an unsaved channel selection, tray left click opens the
+app with the menu kept on right click (#169), and reveal-in-Explorer selects the revealed clip
+(#170). Both PRs landed with green Ubuntu and Windows checks.
+
+The WebView2 Fixed Version pin stays at **151.0.4129.86** for x64. The live Fixed Version selector
+still names that build. Re-reviewed today; `reviewed_on` / `review_due_on` are current through
+2026-09-15.
+
+The release commit advances only Clipline/Tauri version metadata, WebView2 review dates, and the
+unticked release plan from CI-green merge `1a839ff4`. The version-bump push to `develop` gets no
+CI checks (`ci.yml` runs on `main`/PRs only); gates were verified locally — workspace tests green,
+warning-denied Clippy clean after `cargo clean -p clipline-app`, and
+`scripts/verify-webview2-runtime.ps1` passed.
+
+Published from immutable tag `nightly-v1.0.1` at release commit `d990884d`
+([Nightly run 31965947741](https://github.com/dain98/clipline/actions/runs/31965947741)). The
+rolling [`nightly`](https://github.com/dain98/clipline/releases/tag/nightly) prerelease targets
+that commit, exposes exactly seven assets, and both `latest.json` and `latest-standalone.json`
+advertise 1.0.1 installer URLs. The action's public-download verification passed.
+
 ## Checkpoint (2026-08-16): Manual Check honors unsaved channel; tray left click opens app
 
 Two fixes, no plan doc (small same-day bugs):
