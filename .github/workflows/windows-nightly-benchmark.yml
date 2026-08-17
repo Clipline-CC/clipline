@@ -1,0 +1,233 @@
+name: Windows Nightly Benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: Exact 40-character commit SHA selected by the workflow ref
+        required: true
+        type: string
+      provider:
+        description: Provider to run; all includes only configured runner labels
+        required: true
+        default: all
+        type: choice
+        options: [all, github, namespace, depot, blacksmith]
+      cache_strategy:
+        description: Rust cache experiment
+        required: true
+        default: rust-cache
+        type: choice
+        options: [rust-cache, deps-only, sccache, none]
+      tauri_cli:
+        description: Pinned Tauri CLI installation strategy
+        required: true
+        default: source
+        type: choice
+        options: [source, prebuilt]
+      cache_epoch:
+        description: Reuse for warm repetitions; change for a cold-ish seed
+        required: true
+        default: benchmark-v1
+        type: string
+      expected_cache:
+        description: Annotation only; the measured hit/miss remains authoritative
+        required: true
+        default: cold
+        type: choice
+        options: [cold, warm]
+      repetition:
+        description: Repetition number; excluded from cache keys
+        required: true
+        default: "1"
+        type: string
+  push:
+    branches:
+      - benchmark-clipline-windows-nightly-runner
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: windows-nightly-benchmark-${{ github.sha }}-${{ inputs.cache_strategy || 'rust-cache' }}
+  cancel-in-progress: false
+
+jobs:
+  github:
+    if: github.event_name == 'push' || inputs.provider == 'all' || inputs.provider == 'github'
+    uses: ./.github/workflows/_windows-nightly-benchmark-job.yml
+    with:
+      provider: github
+      runner: ${{ vars.CI_BENCH_GITHUB_WINDOWS_RUNNER || 'windows-latest' }}
+      commit: ${{ inputs.commit || github.sha }}
+      cache_strategy: ${{ inputs.cache_strategy || 'rust-cache' }}
+      tauri_cli: ${{ inputs.tauri_cli || 'source' }}
+      cache_epoch: ${{ inputs.cache_epoch || 'benchmark-v1' }}
+      expected_cache: ${{ inputs.expected_cache || 'cold' }}
+      repetition: ${{ inputs.repetition || '1' }}
+    secrets: inherit
+
+  namespace:
+    if: >-
+      vars.CI_BENCH_NAMESPACE_WINDOWS_RUNNER != '' &&
+      (github.event_name == 'push' || inputs.provider == 'all' || inputs.provider == 'namespace')
+    uses: ./.github/workflows/_windows-nightly-benchmark-job.yml
+    with:
+      provider: namespace
+      runner: ${{ vars.CI_BENCH_NAMESPACE_WINDOWS_RUNNER }}
+      commit: ${{ inputs.commit || github.sha }}
+      cache_strategy: ${{ inputs.cache_strategy || 'rust-cache' }}
+      tauri_cli: ${{ inputs.tauri_cli || 'source' }}
+      cache_epoch: ${{ inputs.cache_epoch || 'benchmark-v1' }}
+      expected_cache: ${{ inputs.expected_cache || 'cold' }}
+      repetition: ${{ inputs.repetition || '1' }}
+    secrets: inherit
+
+  depot:
+    if: >-
+      vars.CI_BENCH_DEPOT_WINDOWS_RUNNER != '' &&
+      (github.event_name == 'push' || inputs.provider == 'all' || inputs.provider == 'depot')
+    uses: ./.github/workflows/_windows-nightly-benchmark-job.yml
+    with:
+      provider: depot
+      runner: ${{ vars.CI_BENCH_DEPOT_WINDOWS_RUNNER }}
+      commit: ${{ inputs.commit || github.sha }}
+      cache_strategy: ${{ inputs.cache_strategy || 'rust-cache' }}
+      tauri_cli: ${{ inputs.tauri_cli || 'source' }}
+      cache_epoch: ${{ inputs.cache_epoch || 'benchmark-v1' }}
+      expected_cache: ${{ inputs.expected_cache || 'cold' }}
+      repetition: ${{ inputs.repetition || '1' }}
+    secrets: inherit
+
+  blacksmith:
+    if: >-
+      vars.CI_BENCH_BLACKSMITH_WINDOWS_RUNNER != '' &&
+      (github.event_name == 'push' || inputs.provider == 'all' || inputs.provider == 'blacksmith')
+    uses: ./.github/workflows/_windows-nightly-benchmark-job.yml
+    with:
+      provider: blacksmith
+      runner: ${{ vars.CI_BENCH_BLACKSMITH_WINDOWS_RUNNER }}
+      commit: ${{ inputs.commit || github.sha }}
+      cache_strategy: ${{ inputs.cache_strategy || 'rust-cache' }}
+      tauri_cli: ${{ inputs.tauri_cli || 'source' }}
+      cache_epoch: ${{ inputs.cache_epoch || 'benchmark-v1' }}
+      expected_cache: ${{ inputs.expected_cache || 'cold' }}
+      repetition: ${{ inputs.repetition || '1' }}
+    secrets: inherit
+
+  aggregate:
+    if: always()
+    needs: [github, namespace, depot, blacksmith]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Download raw benchmark reports
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: windows-nightly-benchmark-timing-*
+          path: reports
+          merge-multiple: false
+
+      - name: Aggregate Actions and command timings
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID" |
+            ConvertFrom-Json
+          $jobs = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID/jobs?per_page=100" |
+            ConvertFrom-Json
+          $reports = @(Get-ChildItem reports -Filter benchmark.json -Recurse -File |
+            ForEach-Object { Get-Content $_.FullName -Raw | ConvertFrom-Json })
+          $rows = foreach ($report in $reports) {
+            $provider = $report.system.provider
+            $job = $jobs.jobs | Where-Object name -Match "benchmark \($provider /" | Select-Object -First 1
+            if (-not $job) { throw "Missing Actions job metadata for $provider." }
+            $steps = foreach ($step in $job.steps) {
+              [ordered]@{
+                name = $step.name
+                conclusion = $step.conclusion
+                started_utc = $step.started_at
+                completed_utc = $step.completed_at
+                duration_seconds = [Math]::Round(
+                  ([DateTimeOffset]$step.completed_at - [DateTimeOffset]$step.started_at).TotalSeconds,
+                  3
+                )
+              }
+            }
+            [ordered]@{
+              provider = $provider
+              runner_label = $report.system.runner_label
+              runner_name = $job.runner_name
+              cache_strategy = $report.system.cache_strategy
+              cache_hit = $report.cache.hit
+              tauri_cli = '${{ inputs.tauri_cli || 'source' }}'
+              repetition = $report.system.repetition
+              run_to_job_start_seconds = [Math]::Round(
+                ([DateTimeOffset]$job.started_at - [DateTimeOffset]$run.created_at).TotalSeconds,
+                3
+              )
+              total_job_seconds = [Math]::Round(
+                ([DateTimeOffset]$job.completed_at - [DateTimeOffset]$job.started_at).TotalSeconds,
+                3
+              )
+              steps = @($steps)
+              raw = $report
+            }
+          }
+          $aggregate = [ordered]@{
+            schema_version = 1
+            repository = $env:GITHUB_REPOSITORY
+            run_id = $env:GITHUB_RUN_ID
+            run_attempt = $env:GITHUB_RUN_ATTEMPT
+            commit = '${{ inputs.commit || github.sha }}'
+            created_utc = $run.created_at
+            note = 'run_to_job_start_seconds includes GitHub orchestration plus provider queue/provisioning.'
+            results = @($rows)
+          }
+          $aggregate | ConvertTo-Json -Depth 20 |
+            Set-Content -LiteralPath windows-nightly-benchmark.json -Encoding utf8NoBOM
+
+          function StepSeconds($row, [string]$pattern) {
+            $step = $row.steps | Where-Object name -Match $pattern | Select-Object -First 1
+            if ($step) { return [Math]::Round($step.duration_seconds, 1) }
+            return '-'
+          }
+          @(
+            '## Windows Nightly benchmark aggregate'
+            ''
+            "Commit: ``${{ inputs.commit || github.sha }}`` · run: ``$env:GITHUB_RUN_ID/$env:GITHUB_RUN_ATTEMPT``"
+            ''
+            '| Provider | Cache | Queue/start | Checkout | Rust | Restore | Test | Clippy | Tauri CLI | Regular | Stage | Standalone | Artifact | Cache save | Total |'
+            '|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|'
+          ) | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+          foreach ($row in $rows) {
+            $values = @(
+              $row.provider
+              "$($row.cache_strategy)/$($row.cache_hit)"
+              [Math]::Round($row.run_to_job_start_seconds, 1)
+              (StepSeconds $row 'Checkout exact')
+              (StepSeconds $row 'Set up stable Rust')
+              (StepSeconds $row '^Restore Rust cache$')
+              (StepSeconds $row '^Test$')
+              (StepSeconds $row '^Clippy$')
+              (StepSeconds $row 'Install .*Tauri CLI')
+              (StepSeconds $row '^Build regular')
+              (StepSeconds $row '^Stage standalone')
+              (StepSeconds $row '^Build standalone')
+              (StepSeconds $row '^Upload verified release')
+              (StepSeconds $row '^Post Restore Rust cache$')
+              [Math]::Round($row.total_job_seconds, 1)
+            )
+            "| $($values -join ' | ') |" | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+          }
+
+      - name: Upload aggregate machine-readable report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-nightly-benchmark-aggregate-${{ github.sha }}-${{ github.run_attempt }}
+          path: windows-nightly-benchmark.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 90

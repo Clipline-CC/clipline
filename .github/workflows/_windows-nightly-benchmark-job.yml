@@ -1,0 +1,306 @@
+name: Reusable Windows Nightly Benchmark Job
+
+on:
+  workflow_call:
+    inputs:
+      provider:
+        required: true
+        type: string
+      runner:
+        required: true
+        type: string
+      commit:
+        required: true
+        type: string
+      cache_strategy:
+        required: true
+        type: string
+      cache_epoch:
+        required: true
+        type: string
+      expected_cache:
+        required: true
+        type: string
+      repetition:
+        required: true
+        type: string
+      tauri_cli:
+        required: true
+        type: string
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY:
+        required: true
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
+        required: true
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  benchmark:
+    name: benchmark (${{ inputs.provider }} / ${{ inputs.cache_strategy }} / ${{ inputs.expected_cache }} r${{ inputs.repetition }})
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 120
+    env:
+      CARGO_TERM_COLOR: always
+      BENCHMARK_PROVIDER: ${{ inputs.provider }}
+      BENCHMARK_RUNNER_LABEL: ${{ inputs.runner }}
+      BENCHMARK_CACHE_STRATEGY: ${{ inputs.cache_strategy }}
+      BENCHMARK_CACHE_EPOCH: ${{ inputs.cache_epoch }}
+      BENCHMARK_EXPECTED_CACHE: ${{ inputs.expected_cache }}
+      BENCHMARK_REPETITION: ${{ inputs.repetition }}
+    steps:
+      - name: Record runner ready time
+        shell: pwsh
+        run: |
+          $benchmarkDir = Join-Path $env:RUNNER_TEMP 'clipline-nightly-benchmark'
+          "BENCHMARK_DIR=$benchmarkDir" >> $env:GITHUB_ENV
+          New-Item -ItemType Directory -Path $benchmarkDir -Force | Out-Null
+          [DateTimeOffset]::UtcNow.ToString('O') |
+            Set-Content -LiteralPath (Join-Path $benchmarkDir 'runner-ready.txt') -Encoding utf8NoBOM
+
+      - name: Checkout exact benchmark commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate exact commit and release inputs
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ('${{ inputs.commit }}' -cnotmatch '^[0-9a-f]{40}$') {
+            throw 'commit must be a complete lowercase Git SHA.'
+          }
+          if ((git rev-parse HEAD) -cne '${{ inputs.commit }}') {
+            throw 'Checkout does not match the requested benchmark commit.'
+          }
+          $version = (Get-Content apps/clipline-app/tauri.conf.json -Raw | ConvertFrom-Json).version
+          .\scripts\prepare-nightly-assets.ps1 `
+            -Tag "nightly-v$version" `
+            -Commit '${{ inputs.commit }}' `
+            -ValidateOnly
+
+          git fetch --no-tags origin develop:refs/remotes/origin/develop
+          git merge-base --is-ancestor '${{ inputs.commit }}' origin/develop
+          $containedInDevelop = $LASTEXITCODE -eq 0
+          if (-not $containedInDevelop) {
+            # Benchmark branches may add only this harness on top of develop.
+            git merge-base --is-ancestor origin/develop '${{ inputs.commit }}'
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Benchmark commit must be contained in, or descend directly from, develop.'
+            }
+          }
+
+          $releaseJson = gh release view nightly --json tagName 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            New-Item -ItemType Directory -Path current-nightly | Out-Null
+            gh release download nightly --pattern latest.json --dir current-nightly
+            if ($LASTEXITCODE -ne 0) { throw 'Could not inspect the current Nightly manifest.' }
+            $current = Get-Content current-nightly/latest.json -Raw | ConvertFrom-Json
+            if ([version]$current.version -gt [version]$version) {
+              throw "Benchmark version $version regresses from published version $($current.version)."
+            }
+          }
+          $global:LASTEXITCODE = 0
+
+      - name: Initialize machine report
+        shell: pwsh
+        run: .\scripts\benchmark-windows-nightly.ps1 -Action Initialize -WorkingDirectory $env:GITHUB_WORKSPACE
+
+      - name: Set up stable Rust and Clippy
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master (stable toolchain)
+        with:
+          toolchain: stable
+          components: clippy
+
+      - name: Restore Rust cache
+        id: rust_cache
+        if: inputs.cache_strategy != 'none'
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          prefix-key: clipline-windows-benchmark
+          shared-key: ${{ inputs.provider }}-${{ inputs.runner }}-${{ inputs.cache_strategy }}-${{ inputs.cache_epoch }}
+          key: tauri-${{ inputs.tauri_cli }}
+          add-job-id-key: false
+          cache-targets: ${{ inputs.cache_strategy == 'rust-cache' }}
+          cache-bin: ${{ inputs.tauri_cli == 'source' }}
+
+      - name: Install pinned sccache
+        if: inputs.cache_strategy == 'sccache'
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.17.0
+
+      - name: Enable isolated sccache backend
+        if: inputs.cache_strategy == 'sccache'
+        shell: pwsh
+        run: |
+          "RUSTC_WRAPPER=sccache" >> $env:GITHUB_ENV
+          "CARGO_INCREMENTAL=0" >> $env:GITHUB_ENV
+          "SCCACHE_GHA_ENABLED=true" >> $env:GITHUB_ENV
+          "SCCACHE_GHA_VERSION=clipline-${{ inputs.provider }}-${{ inputs.runner }}-${{ inputs.cache_epoch }}" >> $env:GITHUB_ENV
+          "SCCACHE_BASEDIRS=$env:GITHUB_WORKSPACE" >> $env:GITHUB_ENV
+          sccache --zero-stats
+
+      - name: Record cache restore result
+        shell: pwsh
+        run: |
+          [ordered]@{
+            strategy = '${{ inputs.cache_strategy }}'
+            hit = '${{ steps.rust_cache.outputs.cache-hit }}'
+            expected = '${{ inputs.expected_cache }}'
+            epoch = '${{ inputs.cache_epoch }}'
+          } | ConvertTo-Json | Set-Content `
+            -LiteralPath (Join-Path $env:BENCHMARK_DIR 'cache.json') -Encoding utf8NoBOM
+
+      - name: Test
+        shell: pwsh
+        run: cargo test --workspace
+
+      - name: Clippy
+        shell: pwsh
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Install pinned Tauri CLI from source
+        if: inputs.tauri_cli == 'source'
+        shell: pwsh
+        run: cargo install tauri-cli --version 2.11.2 --locked
+
+      - name: Install official pinned Tauri CLI binary
+        if: inputs.tauri_cli == 'prebuilt'
+        shell: pwsh
+        run: .\scripts\benchmark-windows-nightly.ps1 -Action InstallTauriCli -WorkingDirectory $env:GITHUB_WORKSPACE
+
+      - name: Verify reviewed WebView2 configuration
+        shell: pwsh
+        run: .\scripts\verify-webview2-runtime.ps1
+
+      - name: Build regular installer
+        shell: pwsh
+        working-directory: apps/clipline-app
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          CLIPLINE_BUG_REPORT_ENDPOINT: https://support.dain.cafe/api/v1/reports
+          CLIPLINE_DEFAULT_UPDATE_CHANNEL: nightly
+        run: |
+          # Release command: cargo tauri build
+          ..\..\scripts\benchmark-windows-nightly.ps1 `
+            -Action Measure `
+            -Name regular-tauri-build `
+            -Executable cargo `
+            -CommandArguments @('tauri', 'build') `
+            -WorkingDirectory (Get-Location).Path `
+            -MonitorProcess makensis
+
+      - name: Preserve regular updater assets
+        shell: pwsh
+        run: |
+          $version = (Get-Content apps/clipline-app/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $name = "Clipline_${version}_x64-setup.exe"
+          $source = Join-Path target/release/bundle/nsis $name
+          New-Item -ItemType Directory -Path dist | Out-Null
+          Copy-Item -LiteralPath $source -Destination (Join-Path dist $name)
+          Copy-Item -LiteralPath "$source.sig" -Destination (Join-Path dist "$name.sig")
+
+      - name: Stage standalone runtimes
+        shell: pwsh
+        run: |
+          .\scripts\stage-webview2-runtime.ps1
+          $manifest = Get-Content apps/clipline-app/ffmpeg-runtime.json -Raw | ConvertFrom-Json
+          $inputRoot = Join-Path $env:RUNNER_TEMP 'clipline-ffmpeg-inputs'
+          New-Item -ItemType Directory -Path $inputRoot -Force | Out-Null
+          $archive = Join-Path $inputRoot $manifest.archive_name
+          Invoke-WebRequest -UseBasicParsing -Uri $manifest.archive_url -OutFile $archive
+          .\scripts\stage-ffmpeg-resource.ps1 -ArchivePath $archive
+          .\scripts\verify-ffmpeg-resource.ps1
+
+      - name: Record staged resource sizes
+        shell: pwsh
+        run: .\scripts\benchmark-windows-nightly.ps1 -Action Snapshot -Name staged-resources -WorkingDirectory $env:GITHUB_WORKSPACE
+
+      - name: Build standalone installer
+        shell: pwsh
+        working-directory: apps/clipline-app
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          CLIPLINE_BUG_REPORT_ENDPOINT: https://support.dain.cafe/api/v1/reports
+          CLIPLINE_DEFAULT_UPDATE_CHANNEL: nightly
+        run: |
+          # Release command: cargo tauri build --config tauri.standalone.conf.json
+          ..\..\scripts\benchmark-windows-nightly.ps1 `
+            -Action Measure `
+            -Name standalone-tauri-build `
+            -Executable cargo `
+            -CommandArguments @('tauri', 'build', '--config', 'tauri.standalone.conf.json') `
+            -WorkingDirectory (Get-Location).Path `
+            -MonitorProcess makensis
+
+      - name: Rename and re-sign standalone installer
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          $version = (Get-Content apps/clipline-app/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $source = "target/release/bundle/nsis/Clipline_${version}_x64-setup.exe"
+          $standalone = "dist/Clipline_${version}_x64-standalone-setup.exe"
+          Copy-Item -LiteralPath $source -Destination $standalone
+          cargo tauri signer sign -p "" $standalone
+
+      - name: Generate updater manifests
+        shell: pwsh
+        run: |
+          $notes = Join-Path $env:RUNNER_TEMP 'benchmark-notes.md'
+          [System.IO.File]::WriteAllText(
+            $notes,
+            "Unpublished Windows runner benchmark for ${{ inputs.commit }}.`n",
+            [System.Text.UTF8Encoding]::new($false)
+          )
+          $version = (Get-Content apps/clipline-app/tauri.conf.json -Raw | ConvertFrom-Json).version
+          .\scripts\prepare-nightly-assets.ps1 `
+            -Tag "nightly-v$version" `
+            -Commit '${{ inputs.commit }}' `
+            -Repository $env:GITHUB_REPOSITORY `
+            -ReleaseDirectory dist `
+            -NotesPath $notes
+
+      - name: Record package sizes
+        shell: pwsh
+        run: .\scripts\benchmark-windows-nightly.ps1 -Action Snapshot -Name packages -WorkingDirectory $env:GITHUB_WORKSPACE
+
+      - name: Collect sccache statistics
+        if: inputs.cache_strategy == 'sccache'
+        shell: pwsh
+        run: |
+          sccache --show-stats --stats-format json |
+            Set-Content -LiteralPath (Join-Path $env:BENCHMARK_DIR 'sccache.json') -Encoding utf8NoBOM
+
+      - name: Write benchmark job summary
+        if: always()
+        shell: pwsh
+        run: .\scripts\benchmark-windows-nightly.ps1 -Action Summary -WorkingDirectory $env:GITHUB_WORKSPACE
+
+      - name: Upload verified release transaction for timing
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-nightly-benchmark-release-${{ inputs.provider }}-${{ inputs.cache_strategy }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: dist/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+
+      - name: Upload raw benchmark report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-nightly-benchmark-timing-${{ inputs.provider }}-${{ inputs.cache_strategy }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}\clipline-nightly-benchmark\*.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30

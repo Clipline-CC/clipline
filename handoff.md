@@ -4691,6 +4691,22 @@ the existing instant preview, save/discard transaction, shared logo tint, and co
 palette contract. Burgundy surfaces and rose controls keep recording red, success teal, and
 warm-gold Session markers visually distinct without adding theme-specific component logic.
 
+## Checkpoint (2026-08-17): Windows Nightly runner benchmark
+
+The production Nightly workflow is unchanged while a provider-neutral benchmark runs the exact
+signed Windows release workload on one commit. `.github/workflows/windows-nightly-benchmark.yml`
+uses optional repository runner-label variables for Namespace, Depot, and Blacksmith, records
+machine/step/cache/resource/NSIS timing as JSON plus job summaries, and supports isolated full
+target, dependencies-only, sccache, and no-cache experiments. The benchmark also verifies Tauri's
+official 2.11.2 Windows CLI archive by exact size, SHA-256, and reported version.
+
+Historical evidence is in `docs/ci-windows-nightly-benchmark.md`: immutable Nightly tags cannot
+reuse sibling-tag GitHub caches, the latest 1.568 GB cache save cost 2m35s, the official prebuilt
+Tauri CLI removes about 9m48s of source compilation, the two current application binaries differ
+because fixed WebView mode is compiled in, and standalone NSIS spends 7m25s applying solid LZMA to
+about 823 MiB of WebView2/FFmpeg/application input. Do not change production caching, duplicate
+builds, or NSIS compression until the documented cold/warm repetitions and installer proofs exist.
+
 ## What's next (rough value order; each gets its own plan)
 
 1. **Auto-clip on importance** (ddoc §5): `importance ≥ threshold` → auto-save; marker kinds
