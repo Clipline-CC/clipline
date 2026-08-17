@@ -38,10 +38,10 @@ function Get-PathStats {
     }
 
     $item = Get-Item -LiteralPath $Path
-    $files = if ($item.PSIsContainer) {
-        @(Get-ChildItem -LiteralPath $Path -Recurse -File)
+    if ($item.PSIsContainer) {
+        $files = @(Get-ChildItem -LiteralPath $Path -Recurse -File)
     } else {
-        @($item)
+        $files = @($item)
     }
     [ordered]@{
         path = $Path
@@ -331,6 +331,10 @@ switch ($Action) {
         Set-Content -LiteralPath (Join-Path $testRoot 'two') -Value '45' -NoNewline
         $stats = Get-PathStats $testRoot
         if ($stats.files -ne 2 -or $stats.bytes -ne 5) { throw 'Path statistics self-test failed.' }
+        $fileStats = Get-PathStats (Join-Path $testRoot 'one')
+        if ($fileStats.files -ne 1 -or $fileStats.bytes -ne 3) {
+            throw 'Single-file statistics self-test failed.'
+        }
         $originalOutput = $OutputDirectory
         $OutputDirectory = $testRoot
         Invoke-MeasuredProcess -StepName self-test -FilePath $env:ComSpec `
