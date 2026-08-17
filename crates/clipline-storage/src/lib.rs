@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub const REPLAY_CACHE_RUN_PREFIX: &str = "clipline-replay-cache-";
 pub const REPLAY_CACHE_OWNER_FILE: &str = ".clipline-run.json";
 
-pub fn replay_cache_run_pid(name: &str) -> Option<u32> {
+pub fn replay_cache_run_identity(name: &str) -> Option<(u128, u32)> {
     let suffix = name.strip_prefix(REPLAY_CACHE_RUN_PREFIX)?;
     let mut parts = suffix.split('-');
     let created_at = parts.next()?;
@@ -26,18 +26,25 @@ pub fn replay_cache_run_pid(name: &str) -> Option<u32> {
     {
         return None;
     }
-    pid.parse().ok()
+    let created_at = created_at.parse().ok()?;
+    let pid = pid.parse().ok()?;
+    attempt.parse::<u32>().ok()?;
+    Some((created_at, pid))
 }
 
 pub fn is_replay_cache_run_name(name: &str) -> bool {
-    replay_cache_run_pid(name).is_some()
+    replay_cache_run_identity(name).is_some()
 }
 
 pub fn replay_cache_owner_pid(process_instance_id: &str) -> Option<u32> {
     let (pid, creation_time) = process_instance_id.split_once(':')?;
-    if creation_time.is_empty() || !creation_time.bytes().all(|byte| byte.is_ascii_digit()) {
+    if [pid, creation_time]
+        .iter()
+        .any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
         return None;
     }
+    creation_time.parse::<u64>().ok()?;
     pid.parse().ok()
 }
 
@@ -742,8 +749,8 @@ mod tests {
     fn replay_cache_run_names_require_three_numeric_components() {
         assert!(is_replay_cache_run_name("clipline-replay-cache-123-456-0"));
         assert_eq!(
-            replay_cache_run_pid("clipline-replay-cache-123-456-0"),
-            Some(456)
+            replay_cache_run_identity("clipline-replay-cache-123-456-0"),
+            Some((123, 456))
         );
         assert!(!is_replay_cache_run_name("clipline-replay-cache-backup"));
         assert!(!is_replay_cache_run_name(
@@ -751,6 +758,7 @@ mod tests {
         ));
         assert_eq!(replay_cache_owner_pid("456:789"), Some(456));
         assert_eq!(replay_cache_owner_pid("456:not-a-time"), None);
+        assert_eq!(replay_cache_owner_pid("456:18446744073709551616"), None);
     }
 
     #[test]

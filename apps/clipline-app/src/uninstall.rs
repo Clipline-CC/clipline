@@ -251,7 +251,9 @@ fn collect_replay_run_dirs(root: &Path, output: &mut Vec<PathBuf>) {
 }
 
 fn has_valid_replay_cache_owner(run_dir: &Path, run_name: &str) -> bool {
-    let Some(run_pid) = clipline_storage::replay_cache_run_pid(run_name) else {
+    let Some((run_created_at_nanos, run_pid)) =
+        clipline_storage::replay_cache_run_identity(run_name)
+    else {
         return false;
     };
     let owner_path = run_dir.join(clipline_storage::REPLAY_CACHE_OWNER_FILE);
@@ -273,7 +275,7 @@ fn has_valid_replay_cache_owner(run_dir: &Path, run_name: &str) -> bool {
     owner
         .get("created_at_unix")
         .and_then(serde_json::Value::as_u64)
-        .is_some()
+        .is_some_and(|created_at| run_created_at_nanos / 1_000_000_000 == u128::from(created_at))
         && owner
             .get("process_instance_id")
             .and_then(serde_json::Value::as_str)
@@ -571,7 +573,7 @@ mod tests {
         let layout = layout(root.path());
         let media = root.path().join("Media");
         let replay = root.path().join("Replay");
-        let replay_run = replay.join("clipline-replay-cache-123-456-0");
+        let replay_run = replay.join("clipline-replay-cache-123000000000-456-0");
         fs::create_dir_all(&replay_run).unwrap();
         fs::write(
             replay_run.join(clipline_storage::REPLAY_CACHE_OWNER_FILE),
@@ -620,7 +622,7 @@ mod tests {
         let root = TestDir::new("clipline-uninstall", "replay-media-overlap");
         let layout = layout(root.path());
         let media = root.path().join("Media");
-        let replay_run = media.join("clipline-replay-cache-123-456-0");
+        let replay_run = media.join("clipline-replay-cache-123000000000-456-0");
         fs::create_dir_all(&replay_run).unwrap();
         fs::write(
             replay_run.join(clipline_storage::REPLAY_CACHE_OWNER_FILE),
@@ -651,15 +653,22 @@ mod tests {
         let root = TestDir::new("clipline-uninstall", "strict-replay-run-name");
         let layout = layout(root.path());
         let replay = root.path().join("Replay");
-        let valid = replay.join("clipline-replay-cache-123-456-0");
-        let unowned = replay.join("clipline-replay-cache-123-457-0");
-        let malformed = replay.join("clipline-replay-cache-123-458-0");
-        let mismatched = replay.join("clipline-replay-cache-123-459-0");
+        let valid = replay.join("clipline-replay-cache-123000000000-456-0");
+        let unowned = replay.join("clipline-replay-cache-123000000000-457-0");
+        let malformed = replay.join("clipline-replay-cache-123000000000-458-0");
+        let mismatched = replay.join("clipline-replay-cache-123000000000-459-0");
+        let wrong_timestamp = replay.join("clipline-replay-cache-123000000000-460-0");
         let unrelated = replay.join("clipline-replay-cache-backup");
         fs::create_dir_all(&valid).unwrap();
         fs::write(
             valid.join(clipline_storage::REPLAY_CACHE_OWNER_FILE),
             br#"{"process_instance_id":"456:789","created_at_unix":123}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(&wrong_timestamp).unwrap();
+        fs::write(
+            wrong_timestamp.join(clipline_storage::REPLAY_CACHE_OWNER_FILE),
+            br#"{"process_instance_id":"460:789","created_at_unix":999}"#,
         )
         .unwrap();
         fs::create_dir_all(&unowned).unwrap();
@@ -690,6 +699,7 @@ mod tests {
         assert!(!contains_path(&plan.replay_trees, &unowned));
         assert!(!contains_path(&plan.replay_trees, &malformed));
         assert!(!contains_path(&plan.replay_trees, &mismatched));
+        assert!(!contains_path(&plan.replay_trees, &wrong_timestamp));
         assert!(!contains_path(&plan.replay_trees, &unrelated));
     }
 

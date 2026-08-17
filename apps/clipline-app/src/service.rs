@@ -2012,10 +2012,10 @@ fn prepare_replay_storage(opts: &ServiceOptions) -> Result<PreparedReplayStorage
             }
             let current_process_instance_id =
                 crate::windows::process_instance_id(std::process::id())?;
-            let stamp = SystemTime::now()
+            let created_at = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
+                .unwrap_or_default();
+            let stamp = created_at.as_nanos();
             let run_dir = (0u32..1024)
                 .find_map(|attempt| {
                     let candidate = dir.join(format!(
@@ -2035,7 +2035,7 @@ fn prepare_replay_storage(opts: &ServiceOptions) -> Result<PreparedReplayStorage
                 })?;
             let owner = ReplayCacheOwner {
                 process_instance_id: current_process_instance_id,
-                created_at_unix: now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
+                created_at_unix: created_at.as_secs(),
             };
             if let Err(error) = write_replay_cache_owner(&run_dir, &owner) {
                 let _ = std::fs::remove_dir_all(&run_dir);
