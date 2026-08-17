@@ -819,6 +819,7 @@ fn windows_nightly_benchmark_keeps_release_work_identical_and_reviewable() {
         "cache_epoch",
         "expected_cache",
         "repetition",
+        "$_.conclusion -ne 'skipped'",
     ] {
         assert!(
             dispatcher.contains(contract),

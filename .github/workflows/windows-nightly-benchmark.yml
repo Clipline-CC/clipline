@@ -199,7 +199,9 @@ jobs:
             Set-Content -LiteralPath windows-nightly-benchmark.json -Encoding utf8NoBOM
 
           function StepSeconds($row, [string]$pattern) {
-            $step = $row.steps | Where-Object name -Match $pattern | Select-Object -First 1
+            $step = $row.steps | Where-Object {
+              $_.name -Match $pattern -and $_.conclusion -ne 'skipped'
+            } | Select-Object -First 1
             if ($step) { return [Math]::Round($step.duration_seconds, 1) }
             return '-'
           }
