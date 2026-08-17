@@ -31,7 +31,7 @@ on:
       TAURI_SIGNING_PRIVATE_KEY:
         required: true
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
-        required: true
+        required: false
 
 permissions:
   actions: read
