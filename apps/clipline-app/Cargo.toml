@@ -39,7 +39,7 @@ tauri-plugin-updater = "2"
 webview2-com = "0.38"
 # Must match the windows-core that webview2-com-sys 0.38 resolves (0.61), or
 # `Interface::cast` is called against a different COM type system.
-windows-core = "0.61"
+windows-core = "0.62"
 chrono = "0.4.45"
 rfd = "0.15"
 png = "0.17"
