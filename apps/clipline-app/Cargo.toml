@@ -47,7 +47,7 @@ base64 = "0.22"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json"] }
 uuid = { version = "1", features = ["v4", "serde"] }
-zip = { version = "4", default-features = false, features = ["deflate"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }
 rodio = { version = "0.17", default-features = false, features = ["vorbis"] }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
