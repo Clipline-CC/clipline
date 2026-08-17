@@ -46,6 +46,11 @@ on:
         required: true
         default: false
         type: boolean
+      benchmark_parallel_checks:
+        description: Also compare cold test and Clippy jobs with the serial workload
+        required: true
+        default: false
+        type: boolean
   push:
     branches:
       - benchmark-clipline-windows-nightly-runner
@@ -125,9 +130,56 @@ jobs:
       benchmark_zlib: ${{ inputs.benchmark_zlib || false }}
     secrets: inherit
 
+  parallel-checks:
+    if: >-
+      inputs.benchmark_parallel_checks &&
+      (inputs.provider == 'all' || inputs.provider == 'github')
+    name: parallel ${{ matrix.check }}
+    strategy:
+      fail-fast: false
+      matrix:
+        check: [test, clippy]
+    runs-on: ${{ vars.CI_BENCH_GITHUB_WINDOWS_RUNNER || 'windows-latest' }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.commit }}
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master (stable toolchain)
+        with:
+          toolchain: stable
+          components: clippy
+
+      - name: Run cold ${{ matrix.check }}
+        shell: pwsh
+        env:
+          BENCHMARK_DIR: ${{ runner.temp }}\clipline-parallel-benchmark
+        run: |
+          $arguments = if ('${{ matrix.check }}' -eq 'test') {
+            @('test', '--workspace')
+          } else {
+            @('clippy', '--workspace', '--all-targets', '--', '-D', 'warnings')
+          }
+          .\scripts\benchmark-windows-nightly.ps1 `
+            -Action Measure `
+            -Name 'parallel-${{ matrix.check }}' `
+            -Executable cargo `
+            -CommandArguments $arguments `
+            -WorkingDirectory $env:GITHUB_WORKSPACE
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-nightly-benchmark-timing-parallel-${{ matrix.check }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}\clipline-parallel-benchmark\timing-parallel-${{ matrix.check }}.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
   aggregate:
     if: always()
-    needs: [github, namespace, depot, blacksmith]
+    needs: [github, namespace, depot, blacksmith, parallel-checks]
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
@@ -148,6 +200,8 @@ jobs:
           $jobs = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID/jobs?per_page=100" |
             ConvertFrom-Json
           $reports = @(Get-ChildItem reports -Filter benchmark.json -Recurse -File |
+            ForEach-Object { Get-Content $_.FullName -Raw | ConvertFrom-Json })
+          $parallelChecks = @(Get-ChildItem reports -Filter 'timing-parallel-*.json' -Recurse -File |
             ForEach-Object { Get-Content $_.FullName -Raw | ConvertFrom-Json })
           $rows = foreach ($report in $reports) {
             $provider = $report.system.provider
@@ -194,6 +248,7 @@ jobs:
             created_utc = $run.created_at
             note = 'run_to_job_start_seconds includes GitHub orchestration plus provider queue/provisioning.'
             results = @($rows)
+            parallel_checks = $parallelChecks
           }
           $aggregate | ConvertTo-Json -Depth 20 |
             Set-Content -LiteralPath windows-nightly-benchmark.json -Encoding utf8NoBOM
@@ -232,6 +287,15 @@ jobs:
               [Math]::Round($row.total_job_seconds, 1)
             )
             "| $($values -join ' | ') |" | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+          }
+          if ($parallelChecks.Count) {
+            $serial = $rows | Where-Object provider -eq 'github' | Select-Object -First 1
+            $serialSeconds = (StepSeconds $serial '^Test$') + (StepSeconds $serial '^Clippy$')
+            $criticalSeconds = ($parallelChecks.duration_seconds | Measure-Object -Maximum).Maximum
+            @(
+              ''
+              "Cold checks: serial test + Clippy ${serialSeconds}s; parallel critical path $([Math]::Round($criticalSeconds, 1))s; parallel compiler work $([Math]::Round(($parallelChecks.duration_seconds | Measure-Object -Sum).Sum, 1))s."
+            ) | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
           }
 
       - name: Upload aggregate machine-readable report
