@@ -4,6 +4,31 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-16): Nightly 1.0.2
+
+Plan: `docs/superpowers/plans/2026-08-16-nightly-1.0.2.md`.
+
+Nightly 1.0.2 ships everything since 1.0.1: the NSIS uninstaller with its replay-ownership and
+credential-scope hardening (#174), recording sidecars leaving quota totals plus delete-all-managed
+media, the install-package default update channel (#172), the update-dialog changelog link (#171),
+and hidden cloud actions while signed out (#173). All four PRs landed with green Ubuntu and Windows
+checks.
+
+The WebView2 Fixed Version pin stays at **151.0.4129.86** for x64; re-reviewed during the 1.0.1
+cycle earlier today, so `reviewed_on` / `review_due_on` are current through 2026-09-15 and needed
+no change.
+
+The release commit advances only the three version strings (Cargo, lockfile, Tauri) and the unticked
+release plan from CI-green merge `d1d98208`. The version-bump push to `develop` gets no CI checks
+(`ci.yml` runs on `main`/PRs only); gates were verified locally — workspace tests green (32 suites),
+warning-denied Clippy clean, and `scripts/verify-webview2-runtime.ps1` passed.
+
+Published from immutable tag `nightly-v1.0.2` at release commit `4e7f2f48`
+([Nightly run 31984119935](https://github.com/dain98/clipline/actions/runs/31984119935)). The
+rolling [`nightly`](https://github.com/dain98/clipline/releases/tag/nightly) prerelease targets
+that commit, exposes exactly seven assets, and the public `latest.json` advertises 1.0.2
+installer URLs. The action's public-download verification passed.
+
 ## Checkpoint (2026-08-16): Clean Windows NSIS uninstall
 
 Plan: `docs/superpowers/plans/2026-08-16-nsis-uninstaller.md`.
