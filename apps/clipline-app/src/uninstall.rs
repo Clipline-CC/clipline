@@ -297,7 +297,7 @@ fn execute_cleanup_plan_with<'a, I>(
         }
     }
     for path in &plan.replay_trees {
-        remove_tree_best_effort(path);
+        remove_replay_run_best_effort(path);
     }
     for path in &plan.remove_trees {
         remove_tree_best_effort_except(path, &plan.media_dirs);
@@ -324,8 +324,45 @@ fn execute_cleanup_plan_with<'a, I>(
     }
 }
 
-fn remove_tree_best_effort(path: &Path) {
-    remove_tree_best_effort_except(path, &[]);
+fn remove_replay_run_best_effort(path: &Path) {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return;
+    };
+    if !metadata.is_dir() || is_link_or_reparse_point(&metadata) {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(path) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let entry_path = entry.path();
+        let Some(name) = entry_path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if name != clipline_storage::REPLAY_CACHE_OWNER_FILE && !is_replay_segment_file_name(name) {
+            continue;
+        }
+        let Ok(metadata) = fs::symlink_metadata(&entry_path) else {
+            continue;
+        };
+        if metadata.is_file() && !is_link_or_reparse_point(&metadata) {
+            let _ = fs::remove_file(entry_path);
+        }
+    }
+    let _ = fs::remove_dir(path);
+}
+
+fn is_replay_segment_file_name(name: &str) -> bool {
+    let Some(stem) = name
+        .strip_suffix(".bin")
+        .or_else(|| name.strip_suffix(".tmp"))
+    else {
+        return false;
+    };
+    let Some(id) = stem.strip_prefix("seg_") else {
+        return false;
+    };
+    id.len() >= 8 && id.bytes().all(|byte| byte.is_ascii_digit()) && id.parse::<u64>().is_ok()
 }
 
 fn remove_tree_best_effort_except(path: &Path, protected_roots: &[PathBuf]) {
@@ -701,6 +738,51 @@ mod tests {
         assert!(!contains_path(&plan.replay_trees, &mismatched));
         assert!(!contains_path(&plan.replay_trees, &wrong_timestamp));
         assert!(!contains_path(&plan.replay_trees, &unrelated));
+    }
+
+    #[test]
+    fn replay_cleanup_never_recursively_deletes_unknown_files() {
+        let root = TestDir::new("clipline-uninstall", "replay-foreign-file");
+        let layout = layout(root.path());
+        let replay = root.path().join("Replay");
+        let run = replay.join("clipline-replay-cache-123000000000-456-0");
+        let owned_only_run = replay.join("clipline-replay-cache-123000000000-457-0");
+        let segment = run.join("seg_00000000.bin");
+        let temporary_segment = run.join("seg_00000001.tmp");
+        let foreign = run.join("keep-me.txt");
+        fs::create_dir_all(&run).unwrap();
+        fs::write(
+            run.join(clipline_storage::REPLAY_CACHE_OWNER_FILE),
+            br#"{"process_instance_id":"456:789","created_at_unix":123}"#,
+        )
+        .unwrap();
+        fs::write(&segment, b"owned").unwrap();
+        fs::write(&temporary_segment, b"owned").unwrap();
+        fs::write(&foreign, b"foreign").unwrap();
+        fs::create_dir_all(&owned_only_run).unwrap();
+        fs::write(
+            owned_only_run.join(clipline_storage::REPLAY_CACHE_OWNER_FILE),
+            br#"{"process_instance_id":"457:789","created_at_unix":123}"#,
+        )
+        .unwrap();
+        fs::write(owned_only_run.join("seg_00000000.bin"), b"owned").unwrap();
+        write_settings(
+            &layout,
+            &format!(
+                r#"{{"replay_storage":{{"mode":"disk","disk_dir":{:?}}}}}"#,
+                replay.display().to_string(),
+            ),
+        );
+
+        let plan = build_cleanup_plan(&layout, false);
+        execute_cleanup_plan_with(&plan, [], |_| Ok(()), |_| Ok(()));
+
+        assert!(!segment.exists());
+        assert!(!temporary_segment.exists());
+        assert!(!run.join(clipline_storage::REPLAY_CACHE_OWNER_FILE).exists());
+        assert!(foreign.exists());
+        assert!(run.exists());
+        assert!(!owned_only_run.exists());
     }
 
     #[test]

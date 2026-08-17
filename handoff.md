@@ -22,7 +22,8 @@ removed. Replay cleanup requires both the runtime's generated three-number run n
 ownership record whose timestamp and process ID match the run directory, persisted credential
 targets are restricted to Clipline namespaces, and
 unreadable media siblings do not block deletion of accessible owned clips. Cleanup planning uses
-injected roots in tests, never
+injected roots in tests, and replay cleanup removes only generated segment files and the ownership
+record before removing an empty run directory. It never
 broad-deletes the current-user install root, and does not follow media symlinks or reparse points.
 The Tauri NSIS bundle reached `makensis` successfully; the local debug build stopped afterward only
 because release signing keys were intentionally absent.
