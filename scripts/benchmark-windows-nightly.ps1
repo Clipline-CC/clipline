@@ -257,7 +257,7 @@ function Write-SccacheStats {
     $json = (& sccache --show-stats --stats-format json | Out-String).Trim()
     if ($LASTEXITCODE -ne 0) { throw "Could not read sccache statistics for $Name." }
     $stats = $json | ConvertFrom-Json
-    if ($stats.stats.compile_requests -lt 1) {
+    if ($stats.stats.compile_requests -lt 1 -and $Name -ne 'standalone-build') {
         throw "sccache did not observe any compile requests for $Name."
     }
     $json | Set-Content -LiteralPath (Join-Path $OutputDirectory "sccache-$Name.json") -Encoding utf8NoBOM

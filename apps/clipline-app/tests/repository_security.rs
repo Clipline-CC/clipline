@@ -834,6 +834,8 @@ fn windows_nightly_benchmark_keeps_release_work_identical_and_reviewable() {
         "TAURI_SIGNING_PRIVATE_KEY",
         "Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4",
         "mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba",
+        "compression = 'zlib'",
+        "payloads_identical",
         "compression-level: 0",
     ] {
         assert!(

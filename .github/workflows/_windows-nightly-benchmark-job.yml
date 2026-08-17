@@ -281,6 +281,15 @@ jobs:
           CLIPLINE_BUG_REPORT_ENDPOINT: https://support.dain.cafe/api/v1/reports
           CLIPLINE_DEFAULT_UPDATE_CHANNEL: nightly
         run: |
+          $configPath = Join-Path (Get-Location) 'tauri.standalone.zlib.benchmark.json'
+          $config = Get-Content tauri.standalone.conf.json -Raw | ConvertFrom-Json
+          $config.bundle.windows | Add-Member -NotePropertyName nsis `
+            -NotePropertyValue ([pscustomobject]@{ compression = 'zlib' }) -Force
+          [IO.File]::WriteAllText(
+            $configPath,
+            ($config | ConvertTo-Json -Depth 20),
+            [Text.UTF8Encoding]::new($false)
+          )
           ..\..\scripts\benchmark-windows-nightly.ps1 `
             -Action Measure `
             -Name standalone-zlib-bundle `
@@ -289,9 +298,7 @@ jobs:
               'tauri',
               'bundle',
               '--config',
-              'tauri.standalone.conf.json',
-              '--config',
-              '{"bundle":{"windows":{"nsis":{"compression":"zlib"}}}}'
+              $configPath
             ) `
             -WorkingDirectory (Get-Location).Path `
             -MonitorProcess makensis
