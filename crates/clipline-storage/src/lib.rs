@@ -10,6 +10,43 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub const REPLAY_CACHE_RUN_PREFIX: &str = "clipline-replay-cache-";
+pub const REPLAY_CACHE_OWNER_FILE: &str = ".clipline-run.json";
+
+pub fn replay_cache_run_identity(name: &str) -> Option<(u128, u32)> {
+    let suffix = name.strip_prefix(REPLAY_CACHE_RUN_PREFIX)?;
+    let mut parts = suffix.split('-');
+    let created_at = parts.next()?;
+    let pid = parts.next()?;
+    let attempt = parts.next()?;
+    if parts.next().is_some()
+        || [created_at, pid, attempt]
+            .iter()
+            .any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return None;
+    }
+    let created_at = created_at.parse().ok()?;
+    let pid = pid.parse().ok()?;
+    attempt.parse::<u32>().ok()?;
+    Some((created_at, pid))
+}
+
+pub fn is_replay_cache_run_name(name: &str) -> bool {
+    replay_cache_run_identity(name).is_some()
+}
+
+pub fn replay_cache_owner_identity(process_instance_id: &str) -> Option<(u32, u64)> {
+    let (pid, creation_time) = process_instance_id.split_once(':')?;
+    if [pid, creation_time]
+        .iter()
+        .any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return None;
+    }
+    Some((pid.parse().ok()?, creation_time.parse().ok()?))
+}
+
 /// Serializes quota collectors so overlapping recorder generations (and any
 /// concurrent app-side GC) cannot inventory the same over-quota library and
 /// over-delete while another collector's deletions are in flight.
@@ -157,6 +194,73 @@ pub fn recover_recording_files(dir: &Path) -> io::Result<RecordingRecoveryReport
         Ok(())
     })?;
     Ok(report)
+}
+
+/// Delete every Clipline-owned saved or in-progress clip below `dir` while
+/// preserving unrelated files and the media root itself.
+pub fn delete_all_managed_media(dir: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(dir)?;
+    if is_link_or_reparse_point(&metadata) {
+        return Err(io::Error::new(
+            ErrorKind::PermissionDenied,
+            "refusing to delete media through a link or reparse point",
+        ));
+    }
+
+    let mut clips = Vec::new();
+    let mut first_error = None;
+    if let Err(error) = collect_clips(dir, None, &mut clips) {
+        first_error.get_or_insert(error);
+    }
+    match fs::read_dir(dir) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        first_error.get_or_insert(error);
+                        continue;
+                    }
+                };
+                let path = entry.path();
+                let metadata = match fs::symlink_metadata(&path) {
+                    Ok(metadata) => metadata,
+                    Err(error) => {
+                        first_error.get_or_insert(error);
+                        continue;
+                    }
+                };
+                if metadata.is_dir() && !is_link_or_reparse_point(&metadata) {
+                    if let Err(error) = collect_clips(&path, None, &mut clips) {
+                        first_error.get_or_insert(error);
+                    }
+                }
+            }
+        }
+        Err(error) => {
+            first_error.get_or_insert(error);
+        }
+    }
+
+    for mut clip in clips {
+        if clip.recording {
+            let sidecar_clip =
+                recording_final_path(&clip.path).unwrap_or_else(|| clip.path.clone());
+            match clip_sidecars(&sidecar_clip) {
+                Ok((sidecars, sidecar_bytes)) => {
+                    clip.sidecars = sidecars;
+                    clip.sidecar_bytes = sidecar_bytes;
+                }
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        if let Err(error) = delete_inventoried_clip(&clip, dir, &|_| false) {
+            first_error.get_or_insert(error);
+        }
+    }
+    first_error.map_or(Ok(()), Err)
 }
 
 pub fn enforce_quota(
@@ -641,6 +745,25 @@ mod tests {
     }
 
     #[test]
+    fn replay_cache_run_names_require_three_numeric_components() {
+        assert!(is_replay_cache_run_name("clipline-replay-cache-123-456-0"));
+        assert_eq!(
+            replay_cache_run_identity("clipline-replay-cache-123-456-0"),
+            Some((123, 456))
+        );
+        assert!(!is_replay_cache_run_name("clipline-replay-cache-backup"));
+        assert!(!is_replay_cache_run_name(
+            "clipline-replay-cache-123-456-0-extra"
+        ));
+        assert_eq!(replay_cache_owner_identity("456:789"), Some((456, 789)));
+        assert_eq!(replay_cache_owner_identity("456:not-a-time"), None);
+        assert_eq!(
+            replay_cache_owner_identity("456:18446744073709551616"),
+            None
+        );
+    }
+
+    #[test]
     fn status_counts_clip_metadata_and_other_sidecars() {
         let dir = TestDir::new("clipline-storage", "status-counts");
         dir.write("a.mp4", 10);
@@ -1111,6 +1234,99 @@ mod tests {
             "emptied session folder must disappear with its session metadata"
         );
         assert!(keep.exists());
+    }
+
+    #[test]
+    fn delete_all_managed_media_removes_owned_clips_recordings_and_sidecars_only() {
+        let dir = TestDir::new("clipline-storage", "delete-all-managed");
+        let saved = write_owned(&dir, "saved.mp4", 10);
+        let saved_markers = dir.write("saved.markers.json", 2);
+        let saved_osu = dir.write("saved.osu-enrichment.json", 3);
+        let saved_poster = dir.write("saved.poster.jpg", 4);
+        let recording = dir.write("2026-08-16/active.mp4.recording", 20);
+        mark_owned(&recording);
+        let recording_markers = dir.write("2026-08-16/active.markers.json", 2);
+        let recording_osu = dir.write("2026-08-16/active.osu-enrichment.json", 3);
+        let recording_poster = dir.write("2026-08-16/active.poster.jpg", 4);
+        let session = dir.write("2026-08-16/clipline-session.json", 5);
+        let legacy = dir.write("clip_1786900000.mp4", 7);
+        let legacy_recording = dir.write("session_1786900001_1.mp4.recording", 8);
+        let foreign = dir.write("foreign.mp4", 30);
+        let foreign_poster = dir.write("foreign.poster.jpg", 6);
+
+        delete_all_managed_media(dir.path()).unwrap();
+
+        for removed in [
+            saved,
+            saved_markers,
+            saved_osu,
+            saved_poster,
+            recording,
+            recording_markers,
+            recording_osu,
+            recording_poster,
+            session,
+            legacy,
+            legacy_recording,
+        ] {
+            assert!(
+                !removed.exists(),
+                "managed file was left behind: {removed:?}"
+            );
+        }
+        assert!(foreign.exists(), "unmarked MP4s are user files");
+        assert!(
+            foreign_poster.exists(),
+            "a poster alone does not prove Clipline ownership"
+        );
+        assert!(dir.path().exists(), "the media root belongs to the caller");
+    }
+
+    #[test]
+    fn delete_all_managed_media_does_not_follow_linked_session_directories() {
+        let root = TestDir::new("clipline-storage", "delete-all-symlink-root");
+        let outside = TestDir::new("clipline-storage", "delete-all-symlink-outside");
+        let external = write_owned(&outside, "external.mp4", 90);
+        let link = root.path().join("linked-session");
+        let linked = {
+            #[cfg(windows)]
+            {
+                std::os::windows::fs::symlink_dir(outside.path(), &link)
+            }
+            #[cfg(unix)]
+            {
+                std::os::unix::fs::symlink(outside.path(), &link)
+            }
+        };
+        if let Err(error) = linked {
+            eprintln!("skipping symlink containment test: {error}");
+            return;
+        }
+
+        delete_all_managed_media(root.path()).unwrap();
+
+        assert!(external.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_all_managed_media_continues_past_an_unreadable_session_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = TestDir::new("clipline-storage", "delete-all-unreadable-session");
+        let owned = write_owned(&root, "owned.mp4", 10);
+        let unreadable = root.path().join("unreadable-session");
+        fs::create_dir_all(&unreadable).unwrap();
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = delete_all_managed_media(root.path());
+
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(result.is_err(), "the partial failure remains observable");
+        assert!(
+            !owned.exists(),
+            "accessible managed clips are still deleted"
+        );
     }
 
     #[test]

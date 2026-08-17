@@ -4,6 +4,30 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-16): Clean Windows NSIS uninstall
+
+Plan: `docs/superpowers/plans/2026-08-16-nsis-uninstaller.md`.
+
+Interactive Add/Remove Programs uninstalls now stop Clipline and run the executable's
+`--uninstall-cleanup` path before NSIS removes it. App settings, caches, logs, credentials,
+autostart values, FFmpeg staging, and app-owned WebView2 data are removed best-effort. The shared
+Evergreen WebView2 runtime is never touched. Silent, passive updater, and `/UPDATE` flows skip the
+cleanup prompt.
+
+Recordings remain by default. Opting in deletes only Clipline-owned clips, in-progress recordings,
+and their sidecars through the shared storage inventory; foreign files and custom media-directory
+roots remain. Both the configured media root and the default fallback root are checked, and a
+custom media tree nested below an app-residue folder is protected while surrounding residue is
+removed. Replay cleanup requires both the runtime's generated three-number run name and a valid
+ownership record whose timestamp and process ID match the run directory and whose Windows process
+creation time predates it, persisted credential targets are restricted to Clipline namespaces, and
+unreadable media siblings do not block deletion of accessible owned clips. Cleanup planning uses
+injected roots in tests, and replay cleanup removes only generated segment files and the ownership
+record before removing an empty run directory. It never
+broad-deletes the current-user install root, and does not follow media symlinks or reparse points.
+The Tauri NSIS bundle reached `makensis` successfully; the local debug build stopped afterward only
+because release signing keys were intentionally absent.
+
 ## Checkpoint (2026-08-16): Install package decides the default update channel
 
 Fresh installs no longer always start on Nightly. Each release workflow bakes

@@ -7,7 +7,9 @@ use std::ffi::{c_void, OsStr};
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 
-pub(crate) use credential_store::CredentialStore;
+pub(crate) use credential_store::{
+    targets_with_prefixes as credential_targets_with_prefixes, CredentialStore,
+};
 pub(crate) use webview_memory::{set_memory_target, MemoryTarget};
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_INVALID_PARAMETER, FILETIME, HANDLE,
@@ -17,6 +19,9 @@ use windows_sys::Win32::Security::{
 };
 use windows_sys::Win32::Storage::FileSystem::{
     GetDiskFreeSpaceExW, MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+};
+use windows_sys::Win32::System::Registry::{
+    RegCloseKey, RegDeleteValueW, RegOpenKeyExW, HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE,
 };
 use windows_sys::Win32::System::Threading::{
     GetProcessTimes, OpenProcess, OpenProcessToken, WaitForSingleObject, INFINITE,
@@ -30,6 +35,10 @@ const PROCESS_SYNCHRONIZE: u32 = 0x0010_0000;
 const PROCESS_COMMAND_LINE_INFORMATION: u32 = 60;
 const STATUS_SUCCESS: i32 = 0;
 const STATUS_INFO_LENGTH_MISMATCH: i32 = -1073741820; // 0xC000_0004
+const AUTOSTART_KEYS: [&str; 2] = [
+    r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
+    r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run",
+];
 
 #[link(name = "ntdll")]
 extern "system" {
@@ -64,6 +73,62 @@ impl Drop for OwnedHandle {
                 CloseHandle(self.0);
             }
         }
+    }
+}
+
+struct OwnedRegistryKey(HKEY);
+
+impl Drop for OwnedRegistryKey {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                RegCloseKey(self.0);
+            }
+        }
+    }
+}
+
+pub(crate) fn delete_autostart_value(value_name: &str) -> Result<(), String> {
+    let value_name = wide_null_checked(OsStr::new(value_name), "autostart value")?;
+    let mut first_error = None;
+    for subkey in AUTOSTART_KEYS {
+        if let Err(error) = delete_registry_value(subkey, &value_name) {
+            first_error.get_or_insert(error);
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
+fn delete_registry_value(subkey: &str, value_name: &[u16]) -> Result<(), String> {
+    let subkey_w = wide_null_checked(OsStr::new(subkey), "registry subkey")?;
+    let mut key = std::ptr::null_mut();
+    let opened = unsafe {
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            subkey_w.as_ptr(),
+            0,
+            KEY_SET_VALUE,
+            &mut key,
+        )
+    };
+    if opened == windows_sys::Win32::Foundation::ERROR_FILE_NOT_FOUND {
+        return Ok(());
+    }
+    if opened != windows_sys::Win32::Foundation::ERROR_SUCCESS {
+        return Err(format!(
+            "open autostart registry key {subkey}: Windows error {opened}"
+        ));
+    }
+    let key = OwnedRegistryKey(key);
+    let deleted = unsafe { RegDeleteValueW(key.0, value_name.as_ptr()) };
+    if deleted == windows_sys::Win32::Foundation::ERROR_SUCCESS
+        || deleted == windows_sys::Win32::Foundation::ERROR_FILE_NOT_FOUND
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "delete autostart registry value in {subkey}: Windows error {deleted}"
+        ))
     }
 }
 
