@@ -2091,8 +2091,8 @@ fn sweep_replay_cache_runs(
         let definitively_stale = owner
             .as_ref()
             .and_then(|owner| {
-                clipline_storage::replay_cache_owner_pid(&owner.process_instance_id)
-                    .map(|pid| (owner, pid))
+                clipline_storage::replay_cache_owner_identity(&owner.process_instance_id)
+                    .map(|(pid, _)| (owner, pid))
             })
             .and_then(|(owner, pid)| {
                 process_instance_id(pid)

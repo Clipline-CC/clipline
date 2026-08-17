@@ -272,15 +272,28 @@ fn has_valid_replay_cache_owner(run_dir: &Path, run_name: &str) -> bool {
     let Ok(owner) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
         return false;
     };
-    owner
-        .get("created_at_unix")
-        .and_then(serde_json::Value::as_u64)
-        .is_some_and(|created_at| run_created_at_nanos / 1_000_000_000 == u128::from(created_at))
+    let Some((owner_pid, process_created_at)) = owner
+        .get("process_instance_id")
+        .and_then(serde_json::Value::as_str)
+        .and_then(clipline_storage::replay_cache_owner_identity)
+    else {
+        return false;
+    };
+    owner_pid == run_pid
+        && process_creation_predates_run(process_created_at, run_created_at_nanos)
         && owner
-            .get("process_instance_id")
-            .and_then(serde_json::Value::as_str)
-            .and_then(clipline_storage::replay_cache_owner_pid)
-            == Some(run_pid)
+            .get("created_at_unix")
+            .and_then(serde_json::Value::as_u64)
+            .is_some_and(|created_at| {
+                run_created_at_nanos / 1_000_000_000 == u128::from(created_at)
+            })
+}
+
+fn process_creation_predates_run(process_created_at: u64, run_created_at_nanos: u128) -> bool {
+    const WINDOWS_TO_UNIX_EPOCH_TICKS: u64 = 116_444_736_000_000_000;
+    process_created_at
+        .checked_sub(WINDOWS_TO_UNIX_EPOCH_TICKS)
+        .is_some_and(|ticks| u128::from(ticks) * 100 <= run_created_at_nanos)
 }
 
 fn execute_cleanup_plan_with<'a, I>(
@@ -614,7 +627,7 @@ mod tests {
         fs::create_dir_all(&replay_run).unwrap();
         fs::write(
             replay_run.join(clipline_storage::REPLAY_CACHE_OWNER_FILE),
-            br#"{"process_instance_id":"456:789","created_at_unix":123}"#,
+            br#"{"process_instance_id":"456:116444737220000000","created_at_unix":123}"#,
         )
         .unwrap();
         fs::create_dir_all(&layout.config_dir).unwrap();
@@ -663,7 +676,7 @@ mod tests {
         fs::create_dir_all(&replay_run).unwrap();
         fs::write(
             replay_run.join(clipline_storage::REPLAY_CACHE_OWNER_FILE),
-            br#"{"process_instance_id":"456:789","created_at_unix":123}"#,
+            br#"{"process_instance_id":"456:116444737220000000","created_at_unix":123}"#,
         )
         .unwrap();
         write_settings(
@@ -695,17 +708,24 @@ mod tests {
         let malformed = replay.join("clipline-replay-cache-123000000000-458-0");
         let mismatched = replay.join("clipline-replay-cache-123000000000-459-0");
         let wrong_timestamp = replay.join("clipline-replay-cache-123000000000-460-0");
+        let impossible_process_time = replay.join("clipline-replay-cache-123000000000-461-0");
         let unrelated = replay.join("clipline-replay-cache-backup");
         fs::create_dir_all(&valid).unwrap();
         fs::write(
             valid.join(clipline_storage::REPLAY_CACHE_OWNER_FILE),
-            br#"{"process_instance_id":"456:789","created_at_unix":123}"#,
+            br#"{"process_instance_id":"456:116444737220000000","created_at_unix":123}"#,
         )
         .unwrap();
         fs::create_dir_all(&wrong_timestamp).unwrap();
         fs::write(
             wrong_timestamp.join(clipline_storage::REPLAY_CACHE_OWNER_FILE),
-            br#"{"process_instance_id":"460:789","created_at_unix":999}"#,
+            br#"{"process_instance_id":"460:116444737220000000","created_at_unix":999}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(&impossible_process_time).unwrap();
+        fs::write(
+            impossible_process_time.join(clipline_storage::REPLAY_CACHE_OWNER_FILE),
+            br#"{"process_instance_id":"461:116444737240000000","created_at_unix":123}"#,
         )
         .unwrap();
         fs::create_dir_all(&unowned).unwrap();
@@ -718,7 +738,7 @@ mod tests {
         fs::create_dir_all(&mismatched).unwrap();
         fs::write(
             mismatched.join(clipline_storage::REPLAY_CACHE_OWNER_FILE),
-            br#"{"process_instance_id":"999:789","created_at_unix":123}"#,
+            br#"{"process_instance_id":"999:116444737220000000","created_at_unix":123}"#,
         )
         .unwrap();
         fs::create_dir_all(&unrelated).unwrap();
@@ -737,6 +757,7 @@ mod tests {
         assert!(!contains_path(&plan.replay_trees, &malformed));
         assert!(!contains_path(&plan.replay_trees, &mismatched));
         assert!(!contains_path(&plan.replay_trees, &wrong_timestamp));
+        assert!(!contains_path(&plan.replay_trees, &impossible_process_time));
         assert!(!contains_path(&plan.replay_trees, &unrelated));
     }
 
@@ -753,7 +774,7 @@ mod tests {
         fs::create_dir_all(&run).unwrap();
         fs::write(
             run.join(clipline_storage::REPLAY_CACHE_OWNER_FILE),
-            br#"{"process_instance_id":"456:789","created_at_unix":123}"#,
+            br#"{"process_instance_id":"456:116444737220000000","created_at_unix":123}"#,
         )
         .unwrap();
         fs::write(&segment, b"owned").unwrap();
@@ -762,7 +783,7 @@ mod tests {
         fs::create_dir_all(&owned_only_run).unwrap();
         fs::write(
             owned_only_run.join(clipline_storage::REPLAY_CACHE_OWNER_FILE),
-            br#"{"process_instance_id":"457:789","created_at_unix":123}"#,
+            br#"{"process_instance_id":"457:116444737220000000","created_at_unix":123}"#,
         )
         .unwrap();
         fs::write(owned_only_run.join("seg_00000000.bin"), b"owned").unwrap();

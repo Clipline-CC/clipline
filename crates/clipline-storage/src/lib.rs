@@ -36,7 +36,7 @@ pub fn is_replay_cache_run_name(name: &str) -> bool {
     replay_cache_run_identity(name).is_some()
 }
 
-pub fn replay_cache_owner_pid(process_instance_id: &str) -> Option<u32> {
+pub fn replay_cache_owner_identity(process_instance_id: &str) -> Option<(u32, u64)> {
     let (pid, creation_time) = process_instance_id.split_once(':')?;
     if [pid, creation_time]
         .iter()
@@ -44,8 +44,7 @@ pub fn replay_cache_owner_pid(process_instance_id: &str) -> Option<u32> {
     {
         return None;
     }
-    creation_time.parse::<u64>().ok()?;
-    pid.parse().ok()
+    Some((pid.parse().ok()?, creation_time.parse().ok()?))
 }
 
 /// Serializes quota collectors so overlapping recorder generations (and any
@@ -756,9 +755,12 @@ mod tests {
         assert!(!is_replay_cache_run_name(
             "clipline-replay-cache-123-456-0-extra"
         ));
-        assert_eq!(replay_cache_owner_pid("456:789"), Some(456));
-        assert_eq!(replay_cache_owner_pid("456:not-a-time"), None);
-        assert_eq!(replay_cache_owner_pid("456:18446744073709551616"), None);
+        assert_eq!(replay_cache_owner_identity("456:789"), Some((456, 789)));
+        assert_eq!(replay_cache_owner_identity("456:not-a-time"), None);
+        assert_eq!(
+            replay_cache_owner_identity("456:18446744073709551616"),
+            None
+        );
     }
 
     #[test]
