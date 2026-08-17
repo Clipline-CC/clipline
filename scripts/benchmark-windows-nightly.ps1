@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('Initialize', 'InstallTauriCli', 'Measure', 'Snapshot', 'Summary', 'SelfTest')]
+    [ValidateSet('Initialize', 'InstallTauriCli', 'Measure', 'Snapshot', 'SccacheStats', 'Summary', 'SelfTest')]
     [string]$Action,
 
     [string]$Name,
@@ -251,6 +251,29 @@ function Write-Snapshot {
     Write-JsonFile $snapshot (Join-Path $OutputDirectory "snapshot-$Name.json")
 }
 
+function Write-SccacheStats {
+    if (-not $Name) { throw 'SccacheStats requires -Name.' }
+    New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
+    $json = (& sccache --show-stats --stats-format json | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0) { throw "Could not read sccache statistics for $Name." }
+    $stats = $json | ConvertFrom-Json
+    if ($stats.stats.compile_requests -lt 1) {
+        throw "sccache did not observe any compile requests for $Name."
+    }
+    $json | Set-Content -LiteralPath (Join-Path $OutputDirectory "sccache-$Name.json") -Encoding utf8NoBOM
+    & sccache --stop-server | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw "Could not stop sccache after $Name." }
+}
+
+function Get-SccacheCount {
+    param([Parameter(Mandatory)][array]$Phases, [Parameter(Mandatory)][string]$Field)
+
+    $values = @($Phases | ForEach-Object {
+        $_.stats.$Field.counts.PSObject.Properties | ForEach-Object Value
+    })
+    [long](($values | Measure-Object -Sum).Sum ?? 0)
+}
+
 function Complete-Benchmark {
     $systemPath = Join-Path $OutputDirectory 'system.json'
     if (-not (Test-Path -LiteralPath $systemPath)) {
@@ -266,8 +289,22 @@ function Complete-Benchmark {
     $cache = if (Test-Path -LiteralPath (Join-Path $OutputDirectory 'cache.json')) {
         Get-Content -Raw -LiteralPath (Join-Path $OutputDirectory 'cache.json') | ConvertFrom-Json
     } else { $null }
-    $sccache = if (Test-Path -LiteralPath (Join-Path $OutputDirectory 'sccache.json')) {
-        Get-Content -Raw -LiteralPath (Join-Path $OutputDirectory 'sccache.json') | ConvertFrom-Json
+    $sccachePhases = @(Get-ChildItem -LiteralPath $OutputDirectory -Filter 'sccache-*.json' -File |
+        ForEach-Object { Get-Content -Raw -LiteralPath $_.FullName | ConvertFrom-Json })
+    $sccache = if ($sccachePhases.Count) {
+        [ordered]@{
+            phases = $sccachePhases
+            totals = [ordered]@{
+                compile_requests = ($sccachePhases.stats.compile_requests | Measure-Object -Sum).Sum
+                cache_hits = Get-SccacheCount $sccachePhases 'cache_hits'
+                cache_misses = Get-SccacheCount $sccachePhases 'cache_misses'
+                cache_writes = ($sccachePhases.stats.cache_writes | Measure-Object -Sum).Sum
+                cache_errors = Get-SccacheCount $sccachePhases 'cache_errors'
+            }
+        }
+    } else { $null }
+    $nsisExperiment = if (Test-Path -LiteralPath (Join-Path $OutputDirectory 'nsis-zlib.json')) {
+        Get-Content -Raw -LiteralPath (Join-Path $OutputDirectory 'nsis-zlib.json') | ConvertFrom-Json
     } else { $null }
     $report = [ordered]@{
         schema_version = 1
@@ -276,6 +313,7 @@ function Complete-Benchmark {
         commands = $timings
         snapshots = $snapshots
         sccache = $sccache
+        nsis_experiment = $nsisExperiment
         note = 'GitHub action and post-job timings are added by the aggregate report.'
     }
     Write-JsonFile $report (Join-Path $OutputDirectory 'benchmark.json')
@@ -303,6 +341,13 @@ function Complete-Benchmark {
             "| $($timing.name) | $([Math]::Round($timing.duration_seconds, 1))s | ${nsisCpu}s | $coreEquivalent | $hostCpu% |" |
                 Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
         }
+        if ($sccache) {
+            $totals = $sccache.totals
+            @(
+                ''
+                "sccache: $($totals.cache_hits) hits / $($totals.cache_misses) misses / $($totals.compile_requests) requests; $($totals.cache_writes) writes; $($totals.cache_errors) errors."
+            ) | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+        }
         @(
             ''
             'Action setup/restore/upload/save and total job timings appear in the aggregate summary after all providers finish.'
@@ -323,6 +368,7 @@ switch ($Action) {
         New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
         Write-Snapshot
     }
+    'SccacheStats' { Write-SccacheStats }
     'Summary' { Complete-Benchmark }
     'SelfTest' {
         $testRoot = Join-Path ([System.IO.Path]::GetTempPath()) "clipline-benchmark-$([Guid]::NewGuid())"
