@@ -747,6 +747,8 @@ fn nightly_tags_publish_both_verified_updater_variants_transactionally() {
         "cancel-in-progress: false",
         "cargo test --workspace",
         "cargo clippy --workspace --all-targets -- -D warnings",
+        "save-if: false",
+        "-Action InstallTauriCli",
         "scripts\\stage-webview2-runtime.ps1",
         "scripts\\stage-ffmpeg-resource.ps1",
         "cargo tauri build --config tauri.standalone.conf.json",
@@ -762,6 +764,11 @@ fn nightly_tags_publish_both_verified_updater_variants_transactionally() {
             "Nightly workflow is missing contract: {contract}"
         );
     }
+
+    assert!(
+        !workflow.contains("cargo install tauri-cli"),
+        "Nightly must use the verified pinned Tauri CLI binary instead of compiling it"
+    );
 
     let regular_build = workflow
         .find("cargo tauri build\n")
