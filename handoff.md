@@ -4,6 +4,36 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-17): Stable 1.0.2
+
+Plan: `docs/superpowers/plans/2026-08-17-stable-1.0.2.md`.
+
+Stable 1.0.2 promotes the Nightly 1.0.2 content to the Stable channel with the Stable
+update-channel default baked in. It ships everything since Stable 1.0.0: the update-dialog
+fixes (#169, #170), install-package default update channel (#172), changelog link (#171),
+hidden cloud actions while signed out (#173), the NSIS uninstaller hardening (#174), and the
+storage quota sidecar fix with delete-all-managed-media.
+
+**Version policy settled:** one version sequence feeds both channels. Stable never invents a
+number — it takes develop's at promotion time — so Nightly ≥ Stable always, and equality is
+benign (identical content, per-channel updater manifests). Keeping Stable numerically ahead of
+Nightly is structurally impossible with a shared version triple and was the harmful direction
+anyway (a Stable-ahead install switching to Nightly sees "no update").
+
+`main` was fast-forwarded to the develop release commit `cae0977a` (branches identical; the
+commit only adds the Stable plan doc atop Nightly 1.0.2's recording). Gates for the underlying
+code were verified green during the Nightly 1.0.2 cycle, and the Stable action re-ran tests,
+Clippy, and WebView2 verification itself.
+
+Published from immutable tag `v1.0.2`
+([Stable run 32050866206](https://github.com/dain98/clipline/actions/runs/32050866206)).
+The first publish attempt and two reruns hit GitHub API 503s during a platform degradation
+(Git Operations degraded performance, 2026-08-17 ~18:00–18:45 UTC); the runbook's
+rerun-same-tag path recovered it once the API returned — no version bump or tag movement
+needed. `v1.0.2` is GitHub's latest non-prerelease targeting `cae0977a` with exactly seven
+assets; the action's public-download byte verification passed and
+`/releases/latest/download/latest.json` serves the 1.0.2 manifest built from `main`.
+
 ## Checkpoint (2026-08-16): Nightly 1.0.2
 
 Plan: `docs/superpowers/plans/2026-08-16-nightly-1.0.2.md`.
