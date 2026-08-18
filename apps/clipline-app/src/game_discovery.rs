@@ -364,7 +364,7 @@ fn game_name_from_window(window: &CapturableWindow) -> String {
     window.title.trim().to_owned()
 }
 
-fn is_noise_window(window: &CapturableWindow) -> bool {
+pub(crate) fn is_noise_window(window: &CapturableWindow) -> bool {
     let exe_name = window.exe_name.trim().to_ascii_lowercase();
     let title = window.title.trim().to_ascii_lowercase();
     is_helper_exe_name(&exe_name)
@@ -595,26 +595,7 @@ fn steam_apps_from_roots(steam_roots: &[PathBuf]) -> Result<Vec<SteamApp>, Strin
     let mut apps = Vec::new();
     for library in libraries {
         let steamapps_dir = library.join("steamapps");
-        let Ok(entries) = std::fs::read_dir(&steamapps_dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            if !file_name.starts_with("appmanifest_") || !file_name.ends_with(".acf") {
-                continue;
-            }
-            let Ok(contents) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            let Some(manifest) = parse_vdf(&contents)
-                .ok()
-                .and_then(|entries| steam_app_from_manifest(&entries))
-            else {
-                continue;
-            };
+        for manifest in read_steam_manifests(&steamapps_dir) {
             let install_dir = steamapps_dir
                 .join("common")
                 .join(&manifest.install_dir_name);
@@ -636,6 +617,92 @@ fn steam_apps_from_roots(steam_roots: &[PathBuf]) -> Result<Vec<SteamApp>, Strin
 
     apps.sort_by_key(|app| app.name.to_lowercase());
     Ok(apps)
+}
+
+/// Manifest-only Steam listing for the live game detector: app id, display
+/// name, and install directory. Unlike `steam_apps_from_roots`, this never
+/// infers executable paths — detector lookup is install-dir prefix matching.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SteamLaunchApp {
+    pub(crate) app_id: u32,
+    pub(crate) name: String,
+    pub(crate) install_dir: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SteamLaunchCatalog {
+    pub(crate) apps: Vec<SteamLaunchApp>,
+    /// Every discovered `steamapps\\common` root; used to tell a
+    /// Steam-rooted miss (refresh candidate) from an unrelated window.
+    pub(crate) common_roots: Vec<PathBuf>,
+    pub(crate) loaded_at: std::time::Instant,
+}
+
+impl SteamLaunchCatalog {
+    pub(crate) fn scan() -> Self {
+        Self::scan_from_roots(&steam_install_roots().unwrap_or_default())
+    }
+
+    pub(crate) fn scan_from_roots(roots: &[PathBuf]) -> Self {
+        let mut apps = Vec::new();
+        let mut common_roots = Vec::new();
+        for root in roots {
+            let Ok(libraries) = steam_libraries_from_root(root) else {
+                continue;
+            };
+            for library in libraries {
+                let steamapps_dir = library.join("steamapps");
+                add_unique_path(&mut common_roots, steamapps_dir.join("common"));
+                for manifest in read_steam_manifests(&steamapps_dir) {
+                    apps.push(SteamLaunchApp {
+                        app_id: manifest.app_id,
+                        name: manifest.name,
+                        install_dir: steamapps_dir
+                            .join("common")
+                            .join(&manifest.install_dir_name),
+                    });
+                }
+            }
+        }
+        Self {
+            apps,
+            common_roots,
+            loaded_at: std::time::Instant::now(),
+        }
+    }
+
+    /// First catalog app whose install directory contains `exe_path`.
+    pub(crate) fn find_by_exe_path(&self, exe_path: &str) -> Option<&SteamLaunchApp> {
+        self.apps
+            .iter()
+            .find(|app| is_path_within(exe_path, &app.install_dir))
+    }
+
+    pub(crate) fn is_steam_rooted(&self, exe_path: &str) -> bool {
+        self.common_roots
+            .iter()
+            .any(|root| is_path_within(exe_path, root))
+    }
+}
+
+fn read_steam_manifests(steamapps_dir: &Path) -> Vec<SteamAppManifest> {
+    let Ok(entries) = std::fs::read_dir(steamapps_dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("appmanifest_") && name.ends_with(".acf"))
+        })
+        .filter_map(|path| {
+            let contents = std::fs::read_to_string(&path).ok()?;
+            let entries = parse_vdf(&contents).ok()?;
+            steam_app_from_manifest(&entries)
+        })
+        .collect()
 }
 
 fn steam_libraries_from_root(root: &Path) -> Result<Vec<PathBuf>, String> {
@@ -996,6 +1063,47 @@ mod tests {
             library.join("steamapps/common/SlayTheSpire")
         );
         assert_eq!(apps[0].exe_name.as_deref(), Some("SlayTheSpire.exe"));
+    }
+
+    #[test]
+    fn steam_launch_catalog_is_manifest_only_and_matches_nested_executables() {
+        let dir = TestDir::new("clipline-game-discovery", "launch-catalog");
+        let steam_root = dir.path().join("Steam");
+        std::fs::create_dir_all(steam_root.join("steamapps/common/Friendslop")).unwrap();
+        std::fs::write(
+            steam_root.join("steamapps/libraryfolders.vdf"),
+            format!(
+                r#""libraryfolders" {{ "0" {{ "path" "{}" }} }}"#,
+                vdf_path(&steam_root)
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            steam_root.join("steamapps/appmanifest_427520.acf"),
+            r#""AppState" { "appid" "427520" "name" "Friendslop" "installdir" "Friendslop" }"#,
+        )
+        .unwrap();
+        // No .exe files exist on disk: the detector catalog never infers them.
+
+        let catalog = SteamLaunchCatalog::scan_from_roots(std::slice::from_ref(&steam_root));
+        let exe = steam_root.join("steamapps/common/Friendslop/Friendslop/Binaries/Win64/FriendslopGame.exe");
+        let app = catalog
+            .find_by_exe_path(&exe.to_string_lossy())
+            .expect("install-dir prefix should match a nested executable");
+        assert_eq!(app.app_id, 427520);
+        assert_eq!(app.name, "Friendslop");
+        assert_eq!(
+            app.install_dir,
+            steam_root.join("steamapps/common/Friendslop")
+        );
+        assert!(catalog.is_steam_rooted(
+            &steam_root
+                .join("steamapps/common/OtherGame/OtherGame.exe")
+                .to_string_lossy()
+        ));
+        assert!(!catalog.is_steam_rooted(
+            &dir.path().join("Elsewhere/Game.exe").to_string_lossy()
+        ));
     }
 
     #[test]

@@ -4,6 +4,24 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-18): Auto-detect newly launched Steam games
+
+Plan: `docs/superpowers/plans/2026-08-17-auto-detect-steam-launches.md`.
+
+The 500 ms detector now falls back to Steam installs: after enabled built-ins and enabled
+custom games miss, a visible titled window whose `exe_path` lives under a cached
+`steamapps\\common\\...` install dir starts a `replays_only` session under the
+session-only identity `steam-{appid}` (never a `custom-` id). `GameIdentity::DiscoveredSteam`
+stays configured while both auto-detect flags are on, so it survives detector ticks without
+being written to Custom games; the `game-detection` event grew a `discovered_steam: bool`
+(no exe_path on the event). The toast `Recording {name}` + `Always add` action persists a
+normal custom game through the new `add_discovered_steam_game` command (live
+`DetectedGame` rebuild + existing save/dedupe; already-added is a no-op). The manifest-only
+`SteamLaunchCatalog` reuses the Detect Games VDF/manifest readers without exe inference and
+refreshes at most every 30 s on a Steam-rooted miss only. Built-ins (even disabled plugins,
+via the plugin-window skip) and enabled custom games still win. Setting default on;
+exclusive fullscreen and other stores remain out of scope.
+
 ## Checkpoint (2026-08-17): Stable 1.0.2
 
 Plan: `docs/superpowers/plans/2026-08-17-stable-1.0.2.md`.

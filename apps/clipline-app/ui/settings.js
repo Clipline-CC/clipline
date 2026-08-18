@@ -233,6 +233,7 @@ function fillSettings(s) {
   renderCaptureTargetSelect();
   $("set-games-auto-detect").checked = !!games.auto_detect;
   $("set-games-pause-when-empty").checked = !!games.pause_when_no_game;
+  $("set-games-auto-detect-steam").checked = !!games.auto_detect_steam_launches;
   $("set-output-enabled").checked = !!audio.output_enabled;
   $("set-audio-split-output").checked = audio.split_output_by_process === true;
   $("set-output-volume").value = String(Number.isFinite(audio.output_volume) ? audio.output_volume : 1);
@@ -315,6 +316,7 @@ function readSettings() {
     games: {
       auto_detect: $("set-games-auto-detect").checked,
       pause_when_no_game: $("set-games-pause-when-empty").checked,
+      auto_detect_steam_launches: $("set-games-auto-detect-steam").checked,
       plugins: readGamePluginSettings(),
       custom_games: customGames.map((game) => ({ ...game })),
     },
@@ -468,6 +470,7 @@ function defaultGameSettings() {
   return {
     auto_detect: true,
     pause_when_no_game: false,
+    auto_detect_steam_launches: true,
     plugins: {},
     custom_games: [],
   };

@@ -7,6 +7,9 @@ use crate::game_identity::GameIdentity;
 use crate::game_plugins::{self, GamePluginInfo};
 use crate::settings::{CustomGameSettings, GameRecordingMode, GameSettings};
 
+use std::sync::Mutex;
+use std::time::Duration;
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct GameWindowInfo {
     pub title: String,
@@ -67,6 +70,16 @@ pub fn detect_active_game_from_windows(
     settings: &GameSettings,
     windows: Vec<CapturableWindow>,
 ) -> Option<DetectedGame> {
+    let mut steam = steam_detector_state();
+    let steam = steam.get_or_insert_with(SteamDetectorState::live);
+    detect_active_game_from_windows_with_steam(settings, windows, steam)
+}
+
+pub(crate) fn detect_active_game_from_windows_with_steam(
+    settings: &GameSettings,
+    windows: Vec<CapturableWindow>,
+    steam: &mut SteamDetectorState,
+) -> Option<DetectedGame> {
     if !settings.auto_detect {
         return None;
     }
@@ -87,7 +100,145 @@ pub fn detect_active_game_from_windows(
             });
         }
     }
+    if settings.auto_detect_steam_launches {
+        return detect_steam_game_from_windows(windows, steam);
+    }
     None
+}
+
+/// Upper bound on Steam manifest rescans while a Steam-rooted window misses
+/// the catalog. Refreshes only ever happen on such a miss, never on the
+/// plain 500 ms tick.
+const STEAM_CATALOG_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Detector-owned Steam catalog cache. `live` states lazily scan the disk;
+/// `fixed` states are injected test fixtures and never touch the filesystem.
+pub(crate) struct SteamDetectorState {
+    catalog: Option<crate::game_discovery::SteamLaunchCatalog>,
+    live: bool,
+}
+
+impl SteamDetectorState {
+    fn live() -> Self {
+        Self {
+            catalog: None,
+            live: true,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fixed(catalog: crate::game_discovery::SteamLaunchCatalog) -> Self {
+        Self {
+            catalog: Some(catalog),
+            live: false,
+        }
+    }
+
+    fn catalog_mut(&mut self) -> &mut crate::game_discovery::SteamLaunchCatalog {
+        self.catalog.get_or_insert_with(|| crate::game_discovery::SteamLaunchCatalog {
+            apps: Vec::new(),
+            common_roots: Vec::new(),
+            loaded_at: std::time::Instant::now(),
+        })
+    }
+}
+
+// ponytail: one shared cache for the single detector thread; move into
+// spawn_game_detector state if a second detector ever exists.
+static STEAM_DETECTOR_STATE: Mutex<Option<SteamDetectorState>> = Mutex::new(None);
+
+fn steam_detector_state() -> std::sync::MutexGuard<'static, Option<SteamDetectorState>> {
+    STEAM_DETECTOR_STATE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn detect_steam_game_from_windows(
+    windows: Vec<CapturableWindow>,
+    steam: &mut SteamDetectorState,
+) -> Option<DetectedGame> {
+    // Cheap gate before touching the catalog: a Steam install path always
+    // contains `steamapps\common`, so non-Steam ticks stay off the disk.
+    let mut candidates: Vec<_> = windows
+        .into_iter()
+        .filter(|window| {
+            window
+                .exe_path
+                .as_deref()
+                .is_some_and(|path| path.to_ascii_lowercase().contains(r"steamapps\common"))
+        })
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+    // A window any registered plugin would match stays plugin-owned even
+    // while that plugin is disabled, so this path can never revive it.
+    for plugin in game_plugins::all() {
+        let matched_handle = plugin.match_window(&candidates).map(|window| window.handle);
+        if let Some(handle) = matched_handle {
+            candidates.retain(|window| window.handle != handle);
+        }
+    }
+    candidates.retain(|window| !crate::game_discovery::is_noise_window(window));
+
+    let live = steam.live;
+    let catalog = steam.catalog_mut();
+    let mut matched = find_best_steam_match(catalog, &candidates);
+    if matched.is_none()
+        && live
+        && catalog.loaded_at.elapsed() >= STEAM_CATALOG_REFRESH_INTERVAL
+        && candidates.iter().any(|window| {
+            window
+                .exe_path
+                .as_deref()
+                .is_some_and(|path| catalog.is_steam_rooted(path))
+        })
+    {
+        // Refresh only on a Steam-rooted miss so a browser or Explorer
+        // window can never trigger a manifest scan, and at most once per
+        // interval. A Steam install appearing after an empty first scan
+        // stays unnoticed until some root exists; rescan on a timer if that
+        // ever matters.
+        *catalog = crate::game_discovery::SteamLaunchCatalog::scan();
+        matched = find_best_steam_match(catalog, &candidates);
+    }
+
+    let (app, window) = matched?;
+    let name = if app.name.trim().is_empty() {
+        window
+            .exe_name
+            .trim()
+            .strip_suffix(".exe")
+            .unwrap_or(window.exe_name.trim())
+            .to_owned()
+    } else {
+        app.name.clone()
+    };
+    Some(DetectedGame {
+        identity: GameIdentity::discovered_steam(app.app_id),
+        name,
+        hwnd: window.handle,
+        window_title: window.title.clone(),
+        process_id: window.process_id,
+        exe_name: window.exe_name.clone(),
+        exe_path: window.exe_path.clone(),
+        recording_mode: GameRecordingMode::ReplaysOnly,
+    })
+}
+
+fn find_best_steam_match<'a>(
+    catalog: &'a crate::game_discovery::SteamLaunchCatalog,
+    candidates: &'a [CapturableWindow],
+) -> Option<(&'a crate::game_discovery::SteamLaunchApp, &'a CapturableWindow)> {
+    candidates
+        .iter()
+        .filter_map(|window| {
+            let path = window.exe_path.as_deref()?;
+            catalog.find_by_exe_path(path).map(|app| (app, window))
+        })
+        // Several windows can share one Steam exe (game + splash); the
+        // longest title is the actual gameplay window.
+        .max_by_key(|(_, window)| window.title.len())
 }
 
 pub fn built_in_game_still_configured(settings: &GameSettings, identity: &GameIdentity) -> bool {
@@ -145,7 +296,8 @@ fn best_window_for_game<'a>(
 
 fn has_enabled_games(settings: &GameSettings) -> bool {
     settings.auto_detect
-        && (game_plugins::all()
+        && (settings.auto_detect_steam_launches
+            || game_plugins::all()
             .iter()
             .any(|plugin| plugin.settings(settings).enabled)
             || settings.custom_games.iter().any(|game| game.enabled))
@@ -412,18 +564,28 @@ mod tests {
         assert!(!has_enabled_games(&GameSettings {
             auto_detect: true,
             pause_when_no_game: false,
+            auto_detect_steam_launches: false,
             plugins: settings_with_all_plugins_disabled().plugins,
             custom_games: Vec::new(),
         }));
         assert!(!has_enabled_games(&GameSettings {
             auto_detect: true,
             pause_when_no_game: false,
+            auto_detect_steam_launches: false,
             plugins: settings_with_all_plugins_disabled().plugins,
             custom_games: vec![CustomGameSettings {
                 enabled: false,
                 ..game()
             }],
         }));
+        assert!(
+            has_enabled_games(&GameSettings {
+                auto_detect: true,
+                custom_games: Vec::new(),
+                ..GameSettings::default()
+            }),
+            "Steam launch detection alone must count as an enabled source"
+        );
         assert!(has_enabled_games(&GameSettings {
             auto_detect: true,
             custom_games: Vec::new(),
@@ -594,6 +756,7 @@ mod tests {
         let settings = GameSettings {
             auto_detect: true,
             pause_when_no_game: false,
+            auto_detect_steam_launches: false,
             plugins: settings_with_league(false, GameRecordingMode::FullSession).plugins,
             custom_games: vec![game()],
         };
@@ -663,5 +826,241 @@ mod tests {
                 && plugin.default_review == crate::settings::GamePluginReviewSettings::default()
                 && plugin.event_markers
         }));
+    }
+
+    fn steam_catalog() -> crate::game_discovery::SteamLaunchCatalog {
+        crate::game_discovery::SteamLaunchCatalog {
+            apps: vec![crate::game_discovery::SteamLaunchApp {
+                app_id: 427520,
+                name: "Friendslop".into(),
+                install_dir: std::path::PathBuf::from(r"C:\Steam\steamapps\common\Friendslop"),
+            }],
+            common_roots: vec![std::path::PathBuf::from(r"C:\Steam\steamapps\common")],
+            loaded_at: std::time::Instant::now(),
+        }
+    }
+
+    fn detect_with_catalog(
+        settings: &GameSettings,
+        windows: Vec<CapturableWindow>,
+    ) -> Option<DetectedGame> {
+        let mut steam = super::SteamDetectorState::fixed(steam_catalog());
+        super::detect_active_game_from_windows_with_steam(settings, windows, &mut steam)
+    }
+
+    #[test]
+    fn unmatched_steam_window_becomes_replays_only_discovered_game() {
+        let detected = detect_with_catalog(
+            &GameSettings::default(),
+            vec![window(
+                11,
+                "Friendslop",
+                "Friendslop.exe",
+                Some(r"C:\Steam\steamapps\common\Friendslop\Friendslop.exe"),
+            )],
+        )
+        .expect("unlisted Steam install should be detected");
+
+        assert_eq!(detected.identity.id(), "steam-427520");
+        assert_eq!(detected.name, "Friendslop");
+        assert_eq!(detected.hwnd, 11);
+        assert_eq!(detected.recording_mode, GameRecordingMode::ReplaysOnly);
+        assert_eq!(
+            detected.exe_path.as_deref(),
+            Some(r"C:\Steam\steamapps\common\Friendslop\Friendslop.exe")
+        );
+    }
+
+    #[test]
+    fn built_in_plugin_still_wins_over_steam_path() {
+        let detected = detect_with_catalog(
+            &GameSettings::default(),
+            vec![
+                window(
+                    2,
+                    "League of Legends (TM) Client",
+                    "League of Legends.exe",
+                    Some(r"C:\Steam\steamapps\common\League of Legends\League of Legends.exe"),
+                ),
+                window(
+                    1,
+                    "Friendslop",
+                    "Friendslop.exe",
+                    Some(r"C:\Steam\steamapps\common\Friendslop\Friendslop.exe"),
+                ),
+            ],
+        )
+        .expect("League window should match first");
+
+        assert_eq!(
+            detected.identity.id(),
+            crate::game_plugins::LEAGUE_OF_LEGENDS_ID
+        );
+        assert_eq!(detected.hwnd, 2);
+    }
+
+    #[test]
+    fn disabled_plugin_window_is_not_revived_by_steam_path() {
+        // A League-shaped window that happens to live under a Steam library
+        // must stay plugin-owned even while the plugin is disabled.
+        let settings = GameSettings {
+            auto_detect: true,
+            pause_when_no_game: false,
+            auto_detect_steam_launches: true,
+            plugins: settings_with_league(false, GameRecordingMode::FullSession).plugins,
+            custom_games: Vec::new(),
+        };
+        let catalog = crate::game_discovery::SteamLaunchCatalog {
+            apps: vec![crate::game_discovery::SteamLaunchApp {
+                app_id: 1,
+                name: "League of Legends".into(),
+                install_dir: std::path::PathBuf::from(
+                    r"C:\Steam\steamapps\common\League of Legends",
+                ),
+            }],
+            common_roots: vec![std::path::PathBuf::from(r"C:\Steam\steamapps\common")],
+            loaded_at: std::time::Instant::now(),
+        };
+        let mut steam = super::SteamDetectorState::fixed(catalog);
+
+        assert!(super::detect_active_game_from_windows_with_steam(
+            &settings,
+            vec![window(
+                7,
+                "League of Legends (TM) Client",
+                "League of Legends.exe",
+                Some(r"C:\Steam\steamapps\common\League of Legends\League of Legends.exe"),
+            )],
+            &mut steam,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn enabled_custom_game_still_wins_over_steam_path() {
+        let settings = GameSettings {
+            auto_detect: true,
+            custom_games: vec![CustomGameSettings {
+                id: "custom-friendslop".into(),
+                exe_name: "Friendslop.exe".into(),
+                process_path: Some(
+                    r"C:\Steam\steamapps\common\Friendslop\Friendslop.exe".into(),
+                ),
+                window_title: "Friendslop".into(),
+                recording_mode: GameRecordingMode::FullSession,
+                ..game()
+            }],
+            ..GameSettings::default()
+        };
+
+        let detected = detect_with_catalog(
+            &settings,
+            vec![window(
+                3,
+                "Friendslop",
+                "Friendslop.exe",
+                Some(r"C:\Steam\steamapps\common\Friendslop\Friendslop.exe"),
+            )],
+        )
+        .expect("enabled custom rule should win");
+
+        assert_eq!(detected.identity.id(), "custom-friendslop");
+        assert_eq!(detected.recording_mode, GameRecordingMode::FullSession);
+    }
+
+    #[test]
+    fn steam_helpers_launchers_and_client_are_ignored() {
+        for (title, exe, path) in [
+            (
+                "Friendslop Crash",
+                "UnityCrashHandler64.exe",
+                r"C:\Steam\steamapps\common\Friendslop\UnityCrashHandler64.exe",
+            ),
+            (
+                "Friendslop Launcher",
+                "FriendslopLauncher.exe",
+                r"C:\Steam\steamapps\common\Friendslop\FriendslopLauncher.exe",
+            ),
+            ("Steam", "steam.exe", r"C:\Steam\steam.exe"),
+            (
+                "Friendslop - Store",
+                "steamwebhelper.exe",
+                r"C:\Steam\steamapps\common\Friendslop\steamwebhelper.exe",
+            ),
+        ] {
+            assert!(
+                detect_with_catalog(
+                    &GameSettings::default(),
+                    vec![window(4, title, exe, Some(path))],
+                )
+                .is_none(),
+                "{exe} should be ignored as Steam noise"
+            );
+        }
+    }
+
+    #[test]
+    fn steam_launch_detection_setting_and_master_switch_gate_the_match() {
+        let windows = vec![window(
+            5,
+            "Friendslop",
+            "Friendslop.exe",
+            Some(r"C:\Steam\steamapps\common\Friendslop\Friendslop.exe"),
+        )];
+
+        let setting_off = GameSettings {
+            auto_detect_steam_launches: false,
+            ..GameSettings::default()
+        };
+        assert!(detect_with_catalog(&setting_off, windows.clone()).is_none());
+
+        let master_off = GameSettings {
+            auto_detect: false,
+            ..GameSettings::default()
+        };
+        assert!(detect_with_catalog(&master_off, windows).is_none());
+    }
+
+    #[test]
+    fn path_under_install_dir_matches_even_when_exe_is_not_the_folder_exe() {
+        // Unity/Unreal layout: the running exe is nested and named nothing
+        // like the install folder. Lookup is install-dir prefix only.
+        let detected = detect_with_catalog(
+            &GameSettings::default(),
+            vec![window(
+                8,
+                "Friendslop",
+                "FriendslopGame.exe",
+                Some(r"C:\Steam\steamapps\common\Friendslop\Friendslop\Binaries\Win64\FriendslopGame.exe"),
+            )],
+        )
+        .expect("nested exe under the install dir should match");
+
+        assert_eq!(detected.identity.id(), "steam-427520");
+        assert_eq!(detected.name, "Friendslop");
+    }
+
+    #[test]
+    fn longest_title_wins_when_windows_share_one_steam_exe() {
+        let detected = detect_with_catalog(
+            &GameSettings::default(),
+            vec![
+                window(
+                    1,
+                    "Friendslop",
+                    "Friendslop.exe",
+                    Some(r"C:\Steam\steamapps\common\Friendslop\Friendslop.exe"),
+                ),
+                window(
+                    2,
+                    "Friendslop - In Game (Ranked)",
+                    "Friendslop.exe",
+                    Some(r"C:\Steam\steamapps\common\Friendslop\Friendslop.exe"),
+                ),
+            ],
+        )
+        .expect("shared Steam exe should still pick a window");
+
+        assert_eq!(detected.hwnd, 2);
     }
 }

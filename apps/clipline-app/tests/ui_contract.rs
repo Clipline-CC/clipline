@@ -4691,6 +4691,41 @@ fn games_ui_wires_detection_commands() {
 }
 
 #[test]
+fn steam_launch_detection_wires_settings_checkbox_and_always_add() {
+    let html = index_html();
+    for required in [
+        "id=\"set-games-auto-detect-steam\"",
+        "data-settings-key=\"games.auto_detect_steam_launches\"",
+    ] {
+        assert!(
+            html.contains(required),
+            "games settings are missing required control {required}"
+        );
+    }
+
+    let settings = read_ui_js("settings.js");
+    assert!(
+        settings.contains("auto_detect_steam_launches: true"),
+        "default game settings must opt into Steam launch detection"
+    );
+    assert!(settings.contains("auto_detect_steam_launches: $(\"set-games-auto-detect-steam\").checked"));
+
+    let main = main_js();
+    for required in [
+        "\"set-games-auto-detect-steam\"",
+        "discovered_steam",
+        "invoke(\"add_discovered_steam_game\"",
+        "setDeckStatusAction(\"Always add\"",
+        "discoveredSteamToastKeys",
+    ] {
+        assert!(
+            main.contains(required),
+            "game detection UI is missing required wiring {required}"
+        );
+    }
+}
+
+#[test]
 fn deck_status_success_toasts_auto_clear() {
     let js = main_js();
 

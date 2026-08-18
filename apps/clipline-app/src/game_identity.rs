@@ -16,6 +16,7 @@ const MAX_CUSTOM_ID_LEN: usize = 96;
 pub enum GameIdentity {
     BuiltInPlugin(&'static str),
     Custom(String),
+    DiscoveredSteam { app_id: u32, id: String },
 }
 
 impl GameIdentity {
@@ -27,10 +28,18 @@ impl GameIdentity {
         Self::Custom(id.into())
     }
 
+    pub fn discovered_steam(app_id: u32) -> Self {
+        Self::DiscoveredSteam {
+            app_id,
+            id: format!("steam-{app_id}"),
+        }
+    }
+
     pub fn id(&self) -> &str {
         match self {
             Self::BuiltInPlugin(id) => id,
             Self::Custom(id) => id,
+            Self::DiscoveredSteam { id, .. } => id,
         }
     }
 
@@ -38,6 +47,7 @@ impl GameIdentity {
         match self {
             Self::BuiltInPlugin(id) => Some(*id),
             Self::Custom(_) => None,
+            Self::DiscoveredSteam { .. } => None,
         }
     }
 
@@ -141,5 +151,16 @@ mod tests {
         assert!(validate_custom_game_id("custom-osu-123").is_ok());
         assert!(GameIdentity::custom(OSU_ID).plugin_id().is_none());
         assert!(!GameIdentity::custom("unknown").is_built_in_plugin("unknown"));
+    }
+
+    #[test]
+    fn discovered_steam_id_is_stable_and_outside_custom_namespace() {
+        let identity = GameIdentity::discovered_steam(427520);
+        assert_eq!(identity.id(), "steam-427520");
+        assert!(identity.plugin_id().is_none());
+        assert!(!identity.is_built_in_plugin("steam-427520"));
+        assert!(validate_custom_game_id(identity.id()).is_err());
+        assert!(validate_custom_game_id("steam-427520").is_err());
+        assert_ne!(identity, GameIdentity::custom("steam-427520"));
     }
 }

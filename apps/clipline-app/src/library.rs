@@ -4059,6 +4059,28 @@ mod tests {
     }
 
     #[test]
+    fn list_clips_treats_discovered_steam_game_meta_as_opaque_strings() {
+        let dir = TestDir::new("clipline-library", "discovered-steam-meta");
+        let media = dir.path().join("media");
+        let session = media.join("friendslop-session");
+        touch_mp4(&session.join("session_1.mp4"));
+        std::fs::write(
+            session.join("clipline-session.json"),
+            r#"{"id":"steam-427520","name":"Friendslop"}"#,
+        )
+        .unwrap();
+
+        let clips = list_clips_from_dir(media).unwrap().clips;
+        let game = clips[0]
+            .game
+            .as_ref()
+            .expect("discovered Steam session meta should surface a game");
+        assert_eq!(game.id, "steam-427520");
+        assert_eq!(game.name, "Friendslop");
+        assert!(game.queue.is_none());
+    }
+
+    #[test]
     fn local_library_scan_keeps_readable_sessions_and_warns_about_denied_children() {
         let dir = TestDir::new("clipline-library", "partial-session-scan");
         let media = dir.path().join("media");

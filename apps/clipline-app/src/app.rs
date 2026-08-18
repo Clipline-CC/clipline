@@ -317,6 +317,7 @@ struct GameDetectionEvent {
     exe_name: Option<String>,
     recording_mode: Option<GameRecordingMode>,
     elevated_hotkeys_blocked: bool,
+    discovered_steam: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -378,6 +379,10 @@ impl GameDetectionEvent {
                     exe_name: Some(game.exe_name.clone()),
                     recording_mode: Some(game.recording_mode),
                     elevated_hotkeys_blocked,
+                    discovered_steam: matches!(
+                        game.identity,
+                        crate::game_identity::GameIdentity::DiscoveredSteam { .. }
+                    ),
                 }
             }
             None => Self {
@@ -389,6 +394,7 @@ impl GameDetectionEvent {
                 exe_name: None,
                 recording_mode: None,
                 elevated_hotkeys_blocked: false,
+                discovered_steam: false,
             },
         }
     }
@@ -2270,6 +2276,9 @@ fn active_game_still_configured(settings: &AppSettings, active: Option<&Detected
             .custom_games
             .iter()
             .any(|game| game.enabled && game.id == *id),
+        crate::game_identity::GameIdentity::DiscoveredSteam { .. } => {
+            settings.games.auto_detect_steam_launches
+        }
     }
 }
 
@@ -3096,6 +3105,83 @@ fn list_game_plugins() -> Vec<GamePluginInfo> {
     crate::games::game_plugin_catalog()
 }
 
+/// Persist the currently discovered Steam launch as a normal custom game.
+/// The rule is rebuilt on the backend from the live `DetectedGame` — the
+/// frontend never sends an executable path — and goes through the normal
+/// save transaction so dedupe and runtime side effects match manual adds.
+#[tauri::command(async)]
+fn add_discovered_steam_game<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<RuntimeState>,
+    first_run_state: tauri::State<FirstRunState>,
+    tray_items: tauri::State<TrayItems<R>>,
+    storage_settings: tauri::State<crate::library::StorageSettings>,
+    media_folder_authorization: tauri::State<NativeMediaFolderAuthorization>,
+) -> Result<bool, String> {
+    let new_game = {
+        let inner = state.0.lock().map_err(|_| "runtime state lock poisoned")?;
+        let game = inner
+            .active_game
+            .as_ref()
+            .ok_or("no game is currently detected")?;
+        let crate::game_identity::GameIdentity::DiscoveredSteam { app_id, .. } = &game.identity
+        else {
+            return Err("the detected game is not a discovered Steam launch".into());
+        };
+        let exe_path = game
+            .exe_path
+            .clone()
+            .filter(|path| !path.trim().is_empty())
+            .ok_or("the detected Steam window has no executable path")?;
+        CustomGameSettings {
+            id: format!("custom-steam-{app_id}"),
+            legacy_ids: Vec::new(),
+            name: game.name.clone(),
+            enabled: true,
+            exe_name: game.exe_name.clone(),
+            process_path: Some(exe_path.clone()),
+            window_title: game.window_title.clone(),
+            recording_mode: game.recording_mode,
+            icon: crate::game_icon::extract_exe_icon_data_url(&exe_path),
+        }
+    };
+
+    let mut settings = state.settings();
+    let path_key = crate::games::path_key(new_game.process_path.as_deref().unwrap_or_default());
+    if settings.games.custom_games.iter().any(|game| {
+        game.process_path
+            .as_deref()
+            .is_some_and(|existing| crate::games::path_key(existing) == path_key)
+    }) {
+        return Ok(false);
+    }
+
+    let occupied: std::collections::HashSet<String> = settings
+        .games
+        .custom_games
+        .iter()
+        .map(|existing| existing.id.clone())
+        .collect();
+    let mut game = new_game;
+    let base = game.id.clone();
+    let mut suffix = 2;
+    while occupied.contains(&game.id) {
+        game.id = format!("{base}-{suffix}");
+        suffix += 1;
+    }
+    settings.games.custom_games.push(game);
+    save_settings(
+        app,
+        state,
+        first_run_state,
+        tray_items,
+        storage_settings,
+        media_folder_authorization,
+        settings,
+    )
+    .map(|_| true)
+}
+
 /// The frontend reports which codecs WebView2 can decode (canPlayType) so
 /// Automatic selection never records a clip the review player can't show.
 /// Takes effect on the next recorder (re)start.
@@ -3659,6 +3745,7 @@ pub fn run() {
             list_game_plugins,
             list_game_windows,
             detect_installed_games,
+            add_discovered_steam_game,
             extract_window_icon,
             memory_status,
             frontend_ready,
@@ -6020,6 +6107,87 @@ mod tests {
             },
         );
         assert!(!active_game_still_configured(&settings, Some(&active)));
+    }
+
+    fn discovered_steam_game(hwnd: isize) -> DetectedGame {
+        DetectedGame {
+            identity: crate::game_identity::GameIdentity::discovered_steam(427520),
+            name: "Friendslop".into(),
+            hwnd,
+            window_title: "Friendslop".into(),
+            process_id: hwnd as u32,
+            exe_name: "Friendslop.exe".into(),
+            exe_path: Some(r"C:\Steam\steamapps\common\Friendslop\Friendslop.exe".into()),
+            recording_mode: GameRecordingMode::ReplaysOnly,
+        }
+    }
+
+    #[test]
+    fn discovered_steam_game_stays_configured_only_while_both_flags_are_on() {
+        let mut settings = AppSettings::default();
+        assert!(active_game_still_configured(
+            &settings,
+            Some(&discovered_steam_game(42))
+        ));
+
+        settings.games.auto_detect_steam_launches = false;
+        assert!(!active_game_still_configured(
+            &settings,
+            Some(&discovered_steam_game(42))
+        ));
+
+        settings.games.auto_detect_steam_launches = true;
+        settings.games.auto_detect = false;
+        assert!(!active_game_still_configured(
+            &settings,
+            Some(&discovered_steam_game(42))
+        ));
+    }
+
+    #[test]
+    fn games_only_capture_follows_discovered_steam_window_lifecycle() {
+        let (tx, _rx) = mpsc::channel();
+        let mut settings = AppSettings::default();
+        settings.games.pause_when_no_game = true;
+        let state = RuntimeState::with_sender(tx, settings, None);
+        let mut inner = state.0.lock().unwrap();
+        inner.recording_desired = true;
+
+        let waiting = RuntimeState::prepare_service_restart(&mut inner).unwrap();
+        assert!(waiting.waiting_for_game, "games-only must wait before a game appears");
+        assert!(waiting.replacement.is_none());
+
+        let (prepared, emit, event) =
+            RuntimeState::plan_detection_transition(&mut inner, Some(discovered_steam_game(41)), None)
+                .unwrap();
+        assert!(emit);
+        assert!(event.discovered_steam);
+        let (options, _) = prepared
+            .expect("detection always prepares a restart")
+            .replacement
+            .expect("discovered Steam game must start window capture");
+        assert!(matches!(
+            options.capture_source,
+            service::CaptureSource::WindowHandle { hwnd: 41, .. }
+        ));
+        assert_eq!(options.recording_mode, service::RecordingMode::ReplaysOnly);
+
+        let (prepared, emit, event) =
+            RuntimeState::plan_detection_transition(&mut inner, Some(discovered_steam_game(41)), None)
+                .unwrap();
+        assert!(!emit, "same-window re-detect must not re-emit");
+        assert!(event.discovered_steam);
+        assert!(prepared.is_none());
+
+        let (prepared, _, event) =
+            RuntimeState::plan_detection_transition(&mut inner, None, None).unwrap();
+        assert!(!event.discovered_steam);
+        let prepared = prepared.expect("game exit must prepare a restart");
+        assert!(
+            prepared.waiting_for_game,
+            "games-only must return to waiting"
+        );
+        assert!(prepared.replacement.is_none());
     }
 
     #[test]
