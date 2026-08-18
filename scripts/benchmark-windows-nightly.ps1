@@ -18,11 +18,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$tauriVersion = '2.11.2'
-$tauriArchiveName = 'cargo-tauri-x86_64-pc-windows-msvc.zip'
-$tauriArchiveSize = 7414116
-$tauriArchiveSha256 = 'b6844470bcbf1da6e5dbf01990ae317d4d7969171628bb8badbdbff2e3d06d23'
-$tauriArchiveUrl = "https://github.com/tauri-apps/tauri/releases/download/tauri-cli-v$tauriVersion/$tauriArchiveName"
+$installTauriCliScript = Join-Path $PSScriptRoot 'install-pinned-tauri-cli.ps1'
 
 function Write-JsonFile {
     param([Parameter(Mandatory)]$Value, [Parameter(Mandatory)][string]$Path)
@@ -186,41 +182,19 @@ function Initialize-Benchmark {
 
 function Install-TauriCli {
     New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
-    $started = [DateTimeOffset]::UtcNow
-    $archive = Join-Path $OutputDirectory $tauriArchiveName
-    $destination = Join-Path $OutputDirectory 'tauri-cli'
-    Invoke-WebRequest -UseBasicParsing -Uri $tauriArchiveUrl -OutFile $archive
-    $download = Get-Item -LiteralPath $archive
-    if ($download.Length -ne $tauriArchiveSize) {
-        throw "Tauri CLI archive size mismatch: expected $tauriArchiveSize, got $($download.Length)."
-    }
-    $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($actualHash -cne $tauriArchiveSha256) {
-        throw "Tauri CLI archive SHA-256 mismatch: expected $tauriArchiveSha256, got $actualHash."
-    }
-    Expand-Archive -LiteralPath $archive -DestinationPath $destination -Force
-    $binaries = @(Get-ChildItem -LiteralPath $destination -Recurse -Filter cargo-tauri.exe -File)
-    if ($binaries.Count -ne 1) {
-        throw "Expected exactly one cargo-tauri.exe in the pinned Tauri CLI archive."
-    }
-    $versionOutput = (& $binaries[0].FullName --version | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0 -or $versionOutput -cne "tauri-cli $tauriVersion") {
-        throw "Expected tauri-cli $tauriVersion, got '$versionOutput'."
-    }
-    $binaries[0].DirectoryName | Add-Content -LiteralPath $env:GITHUB_PATH
-    $completed = [DateTimeOffset]::UtcNow
+    $result = (& $installTauriCliScript -OutputDirectory $OutputDirectory | Out-String | ConvertFrom-Json)
     Write-Timing ([ordered]@{
         type = 'command'
         name = 'tauri-cli-prebuilt'
-        command = $tauriArchiveUrl
+        command = $result.archive_url
         working_directory = $WorkingDirectory
-        started_utc = $started.ToString('O')
-        completed_utc = $completed.ToString('O')
-        duration_seconds = [Math]::Round(($completed - $started).TotalSeconds, 3)
+        started_utc = $result.started_utc
+        completed_utc = $result.completed_utc
+        duration_seconds = $result.duration_seconds
         exit_code = 0
-        archive_bytes = $download.Length
-        archive_sha256 = $actualHash
-        version_output = $versionOutput
+        archive_bytes = $result.archive_bytes
+        archive_sha256 = $result.archive_sha256
+        version_output = $result.version_output
         monitored_processes = @()
     })
 }

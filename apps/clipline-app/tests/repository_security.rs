@@ -748,7 +748,7 @@ fn nightly_tags_publish_both_verified_updater_variants_transactionally() {
         "cargo test --workspace",
         "cargo clippy --workspace --all-targets -- -D warnings",
         "save-if: false",
-        "-Action InstallTauriCli",
+        "scripts\\install-pinned-tauri-cli.ps1",
         "scripts\\stage-webview2-runtime.ps1",
         "scripts\\stage-ffmpeg-resource.ps1",
         "cargo tauri build --config tauri.standalone.conf.json",
@@ -768,6 +768,10 @@ fn nightly_tags_publish_both_verified_updater_variants_transactionally() {
     assert!(
         !workflow.contains("cargo install tauri-cli"),
         "Nightly must use the verified pinned Tauri CLI binary instead of compiling it"
+    );
+    assert!(
+        !workflow.contains("benchmark-windows-nightly"),
+        "Nightly must own its tooling; benchmark harness scripts are benchmark-only"
     );
 
     let regular_build = workflow
@@ -858,7 +862,16 @@ fn windows_nightly_benchmark_keeps_release_work_identical_and_reviewable() {
     assert!(harness.contains("makensis"));
     assert!(harness.contains("TotalProcessorTime"));
     assert!(harness.contains("$env:GITHUB_STEP_SUMMARY"));
-    assert!(harness.contains("b6844470bcbf1da6e5dbf01990ae317d4d7969171628bb8badbdbff2e3d06d23"));
+    assert!(harness.contains("install-pinned-tauri-cli.ps1"));
+
+    let installer = fs::read_to_string(root.join("scripts/install-pinned-tauri-cli.ps1"))
+        .expect("read pinned Tauri CLI installer");
+    for pin in [
+        "7414116",
+        "b6844470bcbf1da6e5dbf01990ae317d4d7969171628bb8badbdbff2e3d06d23",
+    ] {
+        assert!(installer.contains(pin), "Tauri CLI installer must pin {pin}");
+    }
 }
 
 #[test]

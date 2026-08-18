@@ -4696,7 +4696,8 @@ warm-gold Session markers visually distinct without adding theme-specific compon
 Branch `benchmark-clipline-windows-nightly-runner` measured the exact signed Windows release
 workload on one commit across caching/tooling variants; full evidence and run links are in
 `docs/ci-windows-nightly-benchmark.md`. Production Nightly changed only in commit `420b85f`
-(present on the branch): install the official Tauri CLI 2.11.2 binary pinned by URL, exact
+(present on the branch) plus the follow-up extraction commit: install the official Tauri CLI 2.11.2
+binary pinned by URL, exact
 7,414,116-byte size, SHA-256, and reported version (measured 1–3s versus 10m04s source compile),
 and make the Nightly rust-cache restore-only (`save-if: false`) because immutable sibling tags can
 never restore one another's caches and the 1.568 GB save cost 2m35–3m18s. That pair reduces the
@@ -4714,9 +4715,12 @@ impossible because the generated `uninstall.exe` embeds the compressor — LZMA 
 size tradeoff is accepted. The full-target warm median (17m43s) is a same-ref-only GitHub result.
 
 Namespace, Depot, and Blacksmith remain unmeasured because no account runner label is configured;
-the workflow skips them correctly and the ranking is pending those variables. Do not merge the
-branch or production-enable sccache/zlib/build reuse/parallel checks without the follow-up
-evidence the report describes.
+the workflow skips them correctly and the ranking is pending those variables. The production
+verification now lives in `scripts/install-pinned-tauri-cli.ps1` (extracted from the benchmark
+harness so the Nightly workflow no longer depends on benchmark machinery; the harness delegates to
+it and still records the provenance JSON). The branch was merged to develop after review; do not
+production-enable sccache/zlib/build reuse/parallel checks without the follow-up evidence the
+report describes.
 
 ## What's next (rough value order; each gets its own plan)
 

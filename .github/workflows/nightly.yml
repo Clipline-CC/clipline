@@ -83,7 +83,7 @@ jobs:
       - name: Install pinned Tauri CLI
         if: steps.release_state.outputs.already_published != 'true'
         shell: pwsh
-        run: .\scripts\benchmark-windows-nightly.ps1 -Action InstallTauriCli
+        run: .\scripts\install-pinned-tauri-cli.ps1
 
       - name: Verify reviewed WebView2 configuration
         if: steps.release_state.outputs.already_published != 'true'
