@@ -32,6 +32,9 @@ jobs:
           components: clippy
 
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          # Immutable Nightly tags cannot reuse caches saved by sibling tags.
+          save-if: false
 
       - name: Validate tag, version, and develop ancestry
         shell: pwsh
@@ -79,7 +82,8 @@ jobs:
 
       - name: Install pinned Tauri CLI
         if: steps.release_state.outputs.already_published != 'true'
-        run: cargo install tauri-cli --version 2.11.2 --locked
+        shell: pwsh
+        run: .\scripts\install-pinned-tauri-cli.ps1
 
       - name: Verify reviewed WebView2 configuration
         if: steps.release_state.outputs.already_published != 'true'

@@ -4691,6 +4691,37 @@ the existing instant preview, save/discard transaction, shared logo tint, and co
 palette contract. Burgundy surfaces and rose controls keep recording red, success teal, and
 warm-gold Session markers visually distinct without adding theme-specific component logic.
 
+## Checkpoint (2026-08-17): Windows Nightly runner benchmark
+
+Branch `benchmark-clipline-windows-nightly-runner` measured the exact signed Windows release
+workload on one commit across caching/tooling variants; full evidence and run links are in
+`docs/ci-windows-nightly-benchmark.md`. Production Nightly changed only in commit `420b85f`
+(present on the branch) plus the follow-up extraction commit: install the official Tauri CLI 2.11.2
+binary pinned by URL, exact
+7,414,116-byte size, SHA-256, and reported version (measured 1–3s versus 10m04s source compile),
+and make the Nightly rust-cache restore-only (`save-if: false`) because immutable sibling tags can
+never restore one another's caches and the 1.568 GB save cost 2m35–3m18s. That pair reduces the
+43m22s baseline to roughly 31 minutes. Every signing/updater/provenance/transactional/public-byte
+verification is unchanged, and actions stay pinned to full SHAs.
+
+Measured negatives that must not be re-tried blindly: dependencies-only and sccache did not beat
+no-cache (complete warm sccache 26m56s at 88.7% hits, 1.468 GB across 1,582 cache objects; a
+second warm dispatch reproduced the exact hit/miss counts but failed its post-build
+`sccache --stop-server` bookkeeping); the two installers need two compilations because fixed
+WebView2 runtime selection is compiled into the binary (executables differ); splitting tests from
+Clippy duplicated 117s of compiler work for 146s of critical path. One paired NSIS zlib sample
+saved ~4m50s of `makensis` time for +92 MB per download, and byte-identical packages are
+impossible because the generated `uninstall.exe` embeds the compressor — LZMA stays unless the
+size tradeoff is accepted. The full-target warm median (17m43s) is a same-ref-only GitHub result.
+
+Namespace, Depot, and Blacksmith remain unmeasured because no account runner label is configured;
+the workflow skips them correctly and the ranking is pending those variables. The production
+verification now lives in `scripts/install-pinned-tauri-cli.ps1` (extracted from the benchmark
+harness so the Nightly workflow no longer depends on benchmark machinery; the harness delegates to
+it and still records the provenance JSON). The branch was merged to develop after review; do not
+production-enable sccache/zlib/build reuse/parallel checks without the follow-up evidence the
+report describes.
+
 ## What's next (rough value order; each gets its own plan)
 
 1. **Auto-clip on importance** (ddoc §5): `importance ≥ threshold` → auto-save; marker kinds
