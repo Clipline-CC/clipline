@@ -4693,19 +4693,30 @@ warm-gold Session markers visually distinct without adding theme-specific compon
 
 ## Checkpoint (2026-08-17): Windows Nightly runner benchmark
 
-The production Nightly workflow is unchanged while a provider-neutral benchmark runs the exact
-signed Windows release workload on one commit. `.github/workflows/windows-nightly-benchmark.yml`
-uses optional repository runner-label variables for Namespace, Depot, and Blacksmith, records
-machine/step/cache/resource/NSIS timing as JSON plus job summaries, and supports isolated full
-target, dependencies-only, sccache, and no-cache experiments. The benchmark also verifies Tauri's
-official 2.11.2 Windows CLI archive by exact size, SHA-256, and reported version.
+Branch `benchmark-clipline-windows-nightly-runner` measured the exact signed Windows release
+workload on one commit across caching/tooling variants; full evidence and run links are in
+`docs/ci-windows-nightly-benchmark.md`. Production Nightly changed only in commit `420b85f`
+(present on the branch): install the official Tauri CLI 2.11.2 binary pinned by URL, exact
+7,414,116-byte size, SHA-256, and reported version (measured 1–3s versus 10m04s source compile),
+and make the Nightly rust-cache restore-only (`save-if: false`) because immutable sibling tags can
+never restore one another's caches and the 1.568 GB save cost 2m35–3m18s. That pair reduces the
+43m22s baseline to roughly 31 minutes. Every signing/updater/provenance/transactional/public-byte
+verification is unchanged, and actions stay pinned to full SHAs.
 
-Historical evidence is in `docs/ci-windows-nightly-benchmark.md`: immutable Nightly tags cannot
-reuse sibling-tag GitHub caches, the latest 1.568 GB cache save cost 2m35s, the official prebuilt
-Tauri CLI removes about 9m48s of source compilation, the two current application binaries differ
-because fixed WebView mode is compiled in, and standalone NSIS spends 7m25s applying solid LZMA to
-about 823 MiB of WebView2/FFmpeg/application input. Do not change production caching, duplicate
-builds, or NSIS compression until the documented cold/warm repetitions and installer proofs exist.
+Measured negatives that must not be re-tried blindly: dependencies-only and sccache did not beat
+no-cache (complete warm sccache 26m56s at 88.7% hits, 1.468 GB across 1,582 cache objects; a
+second warm dispatch reproduced the exact hit/miss counts but failed its post-build
+`sccache --stop-server` bookkeeping); the two installers need two compilations because fixed
+WebView2 runtime selection is compiled into the binary (executables differ); splitting tests from
+Clippy duplicated 117s of compiler work for 146s of critical path. One paired NSIS zlib sample
+saved ~4m50s of `makensis` time for +92 MB per download, and byte-identical packages are
+impossible because the generated `uninstall.exe` embeds the compressor — LZMA stays unless the
+size tradeoff is accepted. The full-target warm median (17m43s) is a same-ref-only GitHub result.
+
+Namespace, Depot, and Blacksmith remain unmeasured because no account runner label is configured;
+the workflow skips them correctly and the ranking is pending those variables. Do not merge the
+branch or production-enable sccache/zlib/build reuse/parallel checks without the follow-up
+evidence the report describes.
 
 ## What's next (rough value order; each gets its own plan)
 
