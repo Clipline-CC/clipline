@@ -33,7 +33,18 @@ jobs:
 
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          # Immutable Nightly tags cannot reuse caches saved by sibling tags.
+          # Immutable Nightly tags cannot reuse caches saved by sibling tags, so
+          # this never saves. It can still restore, and GitHub falls back to the
+          # default branch on a miss -- so the key must match what ci.yml saves
+          # on main. shared-key replaces the job-id component that otherwise
+          # made this look for v0-rust-build-* while main only held
+          # v0-rust-test-*, with every other component already identical.
+          #
+          # EXPERIMENT: whether a tag ref can actually read a main-scoped cache
+          # is undocumented and untested here -- the previous miss is fully
+          # explained by the key mismatch alone. Check the "Restore Rust cache"
+          # step on the next nightly-v* run: a hit confirms the fallback works.
+          shared-key: clipline-shared
           save-if: false
 
       - name: Validate tag, version, and develop ancestry
