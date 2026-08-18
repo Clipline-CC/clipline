@@ -135,6 +135,9 @@ impl SteamDetectorState {
     }
 
     fn catalog_mut(&mut self) -> &mut crate::game_discovery::SteamLaunchCatalog {
+        if self.catalog.is_none() && self.live {
+            self.catalog = Some(crate::game_discovery::SteamLaunchCatalog::scan());
+        }
         self.catalog.get_or_insert_with(|| crate::game_discovery::SteamLaunchCatalog {
             apps: Vec::new(),
             common_roots: Vec::new(),
@@ -196,9 +199,8 @@ fn detect_steam_game_from_windows(
     {
         // Refresh only on a Steam-rooted miss so a browser or Explorer
         // window can never trigger a manifest scan, and at most once per
-        // interval. A Steam install appearing after an empty first scan
-        // stays unnoticed until some root exists; rescan on a timer if that
-        // ever matters.
+        // interval. A Steam library added after the first scan stays
+        // unnoticed until restart; rescan on a timer if that ever matters.
         *catalog = crate::game_discovery::SteamLaunchCatalog::scan();
         matched = find_best_steam_match(catalog, &candidates);
     }
@@ -1019,6 +1021,23 @@ mod tests {
             ..GameSettings::default()
         };
         assert!(detect_with_catalog(&master_off, windows).is_none());
+    }
+
+    #[test]
+    fn live_steam_catalog_initializes_from_a_real_scan() {
+        if std::env::var_os("CI").is_some() {
+            // Device test: proves the live init path scans this machine's
+            // Steam instead of installing the empty stub that broke the
+            // refresh gate. CI runners have no Steam install to observe.
+            return;
+        }
+        let mut state = SteamDetectorState::live();
+        assert!(state.catalog.is_none(), "construction stays lazy");
+        let catalog = state.catalog_mut();
+        assert!(
+            !catalog.common_roots.is_empty() || !catalog.apps.is_empty(),
+            "live init must populate the catalog via scan(), not an empty stub"
+        );
     }
 
     #[test]
