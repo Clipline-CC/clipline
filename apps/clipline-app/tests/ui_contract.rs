@@ -2054,6 +2054,14 @@ fn cloud_upload_completion_preserves_equivalent_paths_and_reports_local_deletion
         !refresh_clips.contains("clip.path === currentPath"),
         "active clip reconciliation must not use raw path-string equality"
     );
+    let review = read_ui_js("review-player.js");
+    let apply_deletion = js_function_body(&review, "applyDeletion");
+    assert!(
+        apply_deletion.contains("GalleryWindowCore.clipPathKey")
+            && !apply_deletion.contains("removed.has(currentClip.path)")
+            && !apply_deletion.contains("removed.has(clip.path)"),
+        "deleting the preserved Review path must also evict an equivalent cached Windows path"
+    );
     assert!(
         refresh_clips.contains("currentClip = { ...fresh, path: currentPath };"),
         "Library reconciliation must preserve the active path spelling while merging fresh metadata"
