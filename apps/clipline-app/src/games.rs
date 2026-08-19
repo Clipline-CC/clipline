@@ -101,7 +101,21 @@ pub(crate) fn detect_active_game_from_windows_with_steam(
         }
     }
     if settings.auto_detect_steam_launches {
-        return detect_steam_game_from_windows(windows, steam);
+        // A disabled custom rule still owns its windows: the Steam fallback
+        // must not revive a game the user turned off (mirrors the plugin skip).
+        let steam_windows: Vec<_> = windows
+            .into_iter()
+            .filter(|window| {
+                !settings
+                    .custom_games
+                    .iter()
+                    .filter(|game| !game.enabled)
+                    .any(|game| {
+                        best_window_for_game(game, std::slice::from_ref(window)).is_some()
+                    })
+            })
+            .collect();
+        return detect_steam_game_from_windows(steam_windows, steam);
     }
     None
 }
@@ -110,12 +124,16 @@ pub(crate) fn detect_active_game_from_windows_with_steam(
 /// the catalog. Refreshes only ever happen on such a miss, never on the
 /// plain 500 ms tick.
 const STEAM_CATALOG_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+/// Ceiling for the no-change refresh backoff so a permanently unmatched
+/// Steam-rooted window still costs at most one rescan every 10 minutes.
+const STEAM_CATALOG_REFRESH_MAX_BACKOFF: Duration = Duration::from_secs(600);
 
 /// Detector-owned Steam catalog cache. `live` states lazily scan the disk;
 /// `fixed` states are injected test fixtures and never touch the filesystem.
 pub(crate) struct SteamDetectorState {
     catalog: Option<crate::game_discovery::SteamLaunchCatalog>,
     live: bool,
+    refresh_wait: Duration,
 }
 
 impl SteamDetectorState {
@@ -123,6 +141,7 @@ impl SteamDetectorState {
         Self {
             catalog: None,
             live: true,
+            refresh_wait: STEAM_CATALOG_REFRESH_INTERVAL,
         }
     }
 
@@ -131,6 +150,7 @@ impl SteamDetectorState {
         Self {
             catalog: Some(catalog),
             live: false,
+            refresh_wait: STEAM_CATALOG_REFRESH_INTERVAL,
         }
     }
 
@@ -184,28 +204,11 @@ fn detect_steam_game_from_windows(
     }
     candidates.retain(|window| !crate::game_discovery::is_noise_window(window));
 
-    let live = steam.live;
-    let catalog = steam.catalog_mut();
-    let mut matched = find_best_steam_match(catalog, &candidates);
-    if matched.is_none()
-        && live
-        && catalog.loaded_at.elapsed() >= STEAM_CATALOG_REFRESH_INTERVAL
-        && candidates.iter().any(|window| {
-            window
-                .exe_path
-                .as_deref()
-                .is_some_and(|path| catalog.is_steam_rooted(path))
-        })
-    {
-        // Refresh only on a Steam-rooted miss so a browser or Explorer
-        // window can never trigger a manifest scan, and at most once per
-        // interval. A Steam library added after the first scan stays
-        // unnoticed until restart; rescan on a timer if that ever matters.
-        *catalog = crate::game_discovery::SteamLaunchCatalog::scan();
-        matched = find_best_steam_match(catalog, &candidates);
+    if find_best_steam_match(steam.catalog_mut(), &candidates).is_none() {
+        maybe_refresh_steam_catalog(steam, &candidates);
     }
+    let (app, window) = find_best_steam_match(steam.catalog_mut(), &candidates)?;
 
-    let (app, window) = matched?;
     let name = if app.name.trim().is_empty() {
         window
             .exe_name
@@ -226,6 +229,54 @@ fn detect_steam_game_from_windows(
         exe_path: window.exe_path.clone(),
         recording_mode: GameRecordingMode::ReplaysOnly,
     })
+}
+
+/// Refresh only on a Steam-rooted miss so a browser or Explorer window can
+/// never trigger a manifest scan, and at most once per `refresh_wait`. The
+/// wait doubles after each refresh that finds no new manifest, so a
+/// permanently unmatched Steam-rooted window cannot force a rescan every
+/// 30 s forever. A Steam library added after the first scan stays unnoticed
+/// until restart; rescan on a timer if that ever matters.
+fn maybe_refresh_steam_catalog(
+    steam: &mut SteamDetectorState,
+    candidates: &[CapturableWindow],
+) {
+    if !steam.live {
+        return;
+    }
+    let wait = steam.refresh_wait;
+    let due = {
+        let catalog = steam.catalog_mut();
+        catalog.loaded_at.elapsed() >= wait
+            && candidates.iter().any(|window| {
+                window
+                    .exe_path
+                    .as_deref()
+                    .is_some_and(|path| catalog.is_steam_rooted(path))
+            })
+    };
+    if !due {
+        return;
+    }
+    let refreshed = crate::game_discovery::SteamLaunchCatalog::scan();
+    let changed = {
+        let catalog = steam.catalog_mut();
+        let changed = refreshed
+            .apps
+            .iter()
+            .any(|app| !catalog.apps.iter().any(|old| old.app_id == app.app_id));
+        *catalog = refreshed;
+        changed
+    };
+    steam.refresh_wait = next_refresh_wait(wait, changed);
+}
+
+fn next_refresh_wait(current: Duration, changed: bool) -> Duration {
+    if changed {
+        STEAM_CATALOG_REFRESH_INTERVAL
+    } else {
+        (current * 2).min(STEAM_CATALOG_REFRESH_MAX_BACKOFF)
+    }
 }
 
 fn find_best_steam_match<'a>(
@@ -1021,6 +1072,68 @@ mod tests {
             ..GameSettings::default()
         };
         assert!(detect_with_catalog(&master_off, windows).is_none());
+    }
+
+    #[test]
+    fn disabled_custom_rule_is_not_revived_by_steam_path() {
+        let settings = GameSettings {
+            custom_games: vec![CustomGameSettings {
+                id: "custom-friendslop-off".into(),
+                enabled: false,
+                exe_name: "Friendslop.exe".into(),
+                process_path: Some(
+                    r"C:\Steam\steamapps\common\Friendslop\Friendslop.exe".into(),
+                ),
+                window_title: "Friendslop".into(),
+                recording_mode: GameRecordingMode::ReplaysOnly,
+                ..game()
+            }],
+            ..GameSettings::default()
+        };
+        let windows = vec![window(
+            6,
+            "Friendslop",
+            "Friendslop.exe",
+            Some(r"C:\Steam\steamapps\common\Friendslop\Friendslop.exe"),
+        )];
+
+        assert!(
+            detect_with_catalog(&settings, windows.clone()).is_none(),
+            "a disabled custom rule must keep owning its Steam-path window"
+        );
+
+        let unrelated = GameSettings {
+            custom_games: vec![CustomGameSettings {
+                id: "custom-other-off".into(),
+                enabled: false,
+                exe_name: "OtherGame.exe".into(),
+                process_path: Some(r"C:\Steam\steamapps\common\OtherGame\OtherGame.exe".into()),
+                window_title: "Other Game".into(),
+                ..game()
+            }],
+            ..GameSettings::default()
+        };
+        assert!(
+            detect_with_catalog(&unrelated, windows).is_some(),
+            "an unrelated disabled rule must not block the Steam fallback"
+        );
+    }
+
+    #[test]
+    fn steam_refresh_backoff_doubles_until_a_change_resets_it() {
+        let mut wait = next_refresh_wait(STEAM_CATALOG_REFRESH_INTERVAL, false);
+        assert_eq!(wait, Duration::from_secs(60));
+        wait = next_refresh_wait(wait, false);
+        assert_eq!(wait, Duration::from_secs(120));
+        wait = next_refresh_wait(wait, false);
+        assert_eq!(wait, Duration::from_secs(240));
+        wait = next_refresh_wait(wait, false);
+        wait = next_refresh_wait(wait, false);
+        assert_eq!(wait, STEAM_CATALOG_REFRESH_MAX_BACKOFF);
+        assert_eq!(
+            next_refresh_wait(wait, true),
+            STEAM_CATALOG_REFRESH_INTERVAL
+        );
     }
 
     #[test]
