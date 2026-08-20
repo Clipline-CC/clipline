@@ -1796,11 +1796,13 @@ function deletionNotice(count) {
 }
 
 async function applyDeletion(removedPaths) {
-  const removed = new Set(removedPaths || []);
+  const removed = new Set((removedPaths || []).map(GalleryWindowCore.clipPathKey).filter(Boolean));
   if (!removed.size) return;
-  const wasCurrent = currentClip && removed.has(currentClip.path);
+  const wasCurrent = currentClip && removed.has(GalleryWindowCore.clipPathKey(currentClip.path));
   invalidateLocalClipsRefresh();
-  clipsCache = clipsCache.filter((clip) => !removed.has(clip.path));
+  clipsCache = clipsCache.filter(
+    (clip) => !removed.has(GalleryWindowCore.clipPathKey(clip.path)),
+  );
   if (wasCurrent) closeReview();
   else renderClips();
   await refreshStorage();
