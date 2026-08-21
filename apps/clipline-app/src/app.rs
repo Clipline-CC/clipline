@@ -1907,10 +1907,13 @@ impl RuntimeState {
         let Ok(inner) = self.0.lock() else {
             return false;
         };
-        inner
-            .settings
+        let settings = &inner.settings;
+        settings
             .hotkeys()
             .into_iter()
+            .chain(settings.screenshot_region_hotkeys())
+            .chain(settings.screenshot_screen_hotkeys())
+            .chain(settings.screenshot_window_hotkeys())
             .filter_map(|raw| parse_global_hotkey(raw).ok().flatten())
             .any(|active| &active == shortcut)
     }
@@ -3259,6 +3262,36 @@ fn parse_global_hotkey(raw: &str) -> Result<Option<Shortcut>, String> {
     }
 }
 
+/// Which screenshot action (if any) this registered shortcut belongs to.
+/// Checked before the Save Replay match so a PrintScreen bind never falls
+/// through to the replay path.
+fn screenshot_shortcut_mode(
+    state: &tauri::State<'_, RuntimeState>,
+    shortcut: &Shortcut,
+) -> Option<ScreenshotMode> {
+    let inner = state.0.lock().ok()?;
+    let settings = &inner.settings;
+    let matches_mode = |raws: Vec<&str>, mode: ScreenshotMode| {
+        raws.into_iter()
+            .filter_map(|raw| parse_global_hotkey(raw).ok().flatten())
+            .any(|active| &active == shortcut)
+            .then_some(mode)
+    };
+    crate::hotkeys::actions_paused().then_some(())?;
+    matches_mode(
+        settings.screenshot_region_hotkeys(),
+        ScreenshotMode::Region,
+    )
+    .or(matches_mode(
+        settings.screenshot_screen_hotkeys(),
+        ScreenshotMode::Screen,
+    ))
+    .or(matches_mode(
+        settings.screenshot_window_hotkeys(),
+        ScreenshotMode::Window,
+    ))
+}
+
 /// The configured Save Replay keybinds that go through the OS global-shortcut
 /// registry (mouse and modified keyboard binds use the low-level hook instead).
 fn global_hotkeys(settings: &AppSettings) -> Result<Vec<Shortcut>, String> {
@@ -3388,10 +3421,16 @@ fn rollback_settings_side_effects<R: Runtime>(
         let save = old.hotkeys();
         let recording = old.recording_hotkeys();
         let bookmark = old.bookmark_hotkeys();
+        let screenshot_region = old.screenshot_region_hotkeys();
+        let screenshot_screen = old.screenshot_screen_hotkeys();
+        let screenshot_window = old.screenshot_window_hotkeys();
         if let Err(error) = crate::hotkeys::set_hotkeys(crate::hotkeys::HookHotkeys {
             save: &save,
             recording: &recording,
             bookmark: &bookmark,
+            screenshot_region: &screenshot_region,
+            screenshot_screen: &screenshot_screen,
+            screenshot_window: &screenshot_window,
         }) {
             errors.push(format!("restore low-level hotkeys: {error}"));
         }
@@ -3480,10 +3519,16 @@ fn save_settings<R: Runtime>(
     let new_save_hotkeys = settings.hotkeys();
     let new_recording_hotkeys = settings.recording_hotkeys();
     let new_bookmark_hotkeys = settings.bookmark_hotkeys();
+    let new_screenshot_region_hotkeys = settings.screenshot_region_hotkeys();
+    let new_screenshot_screen_hotkeys = settings.screenshot_screen_hotkeys();
+    let new_screenshot_window_hotkeys = settings.screenshot_window_hotkeys();
     if let Err(primary) = crate::hotkeys::set_hotkeys(crate::hotkeys::HookHotkeys {
         save: &new_save_hotkeys,
         recording: &new_recording_hotkeys,
         bookmark: &new_bookmark_hotkeys,
+        screenshot_region: &new_screenshot_region_hotkeys,
+        screenshot_screen: &new_screenshot_screen_hotkeys,
+        screenshot_window: &new_screenshot_window_hotkeys,
     }) {
         let rollback = rollback_settings_side_effects(
             &app,
@@ -3693,7 +3738,10 @@ pub fn run() {
                 .with_handler(move |_app, shortcut, event| {
                     if event.state() == ShortcutState::Pressed {
                         let state = _app.state::<RuntimeState>();
-                        if state.active_shortcut_matches(shortcut) {
+                        let screenshot_mode = screenshot_shortcut_mode(&state, shortcut);
+                        if let Some(mode) = screenshot_mode {
+                            state.request_screenshot(_app, mode);
+                        } else if state.active_shortcut_matches(shortcut) {
                             state.request_save_or_show_quota(_app);
                         }
                     }
@@ -3793,11 +3841,17 @@ pub fn run() {
             let startup_save_hotkeys = settings.hotkeys();
             let startup_recording_hotkeys = settings.recording_hotkeys();
             let startup_bookmark_hotkeys = settings.bookmark_hotkeys();
+            let startup_screenshot_region_hotkeys = settings.screenshot_region_hotkeys();
+            let startup_screenshot_screen_hotkeys = settings.screenshot_screen_hotkeys();
+            let startup_screenshot_window_hotkeys = settings.screenshot_window_hotkeys();
             if let Err(e) = crate::hotkeys::install_hotkey_hook(
                 crate::hotkeys::HookHotkeys {
                     save: &startup_save_hotkeys,
                     recording: &startup_recording_hotkeys,
                     bookmark: &startup_bookmark_hotkeys,
+                    screenshot_region: &startup_screenshot_region_hotkeys,
+                    screenshot_screen: &startup_screenshot_screen_hotkeys,
+                    screenshot_window: &startup_screenshot_window_hotkeys,
                 },
                 {
                 let app = app.handle().clone();
@@ -3816,6 +3870,18 @@ pub fn run() {
                     crate::hotkeys::HookAction::Bookmark => {
                         app.state::<RuntimeState>()
                             .request_bookmark(&app, trigger.pressed_at);
+                    }
+                    crate::hotkeys::HookAction::ScreenshotRegion => {
+                        app.state::<RuntimeState>()
+                            .request_screenshot(&app, ScreenshotMode::Region);
+                    }
+                    crate::hotkeys::HookAction::ScreenshotScreen => {
+                        app.state::<RuntimeState>()
+                            .request_screenshot(&app, ScreenshotMode::Screen);
+                    }
+                    crate::hotkeys::HookAction::ScreenshotWindow => {
+                        app.state::<RuntimeState>()
+                            .request_screenshot(&app, ScreenshotMode::Window);
                     }
                 }
             },

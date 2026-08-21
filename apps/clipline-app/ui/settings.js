@@ -271,6 +271,12 @@ function fillSettings(s) {
   $("set-recording-hotkey-2").value = s.recording_hotkey_secondary || "";
   $("set-bookmark-hotkey").value = s.bookmark_hotkey || "";
   $("set-bookmark-hotkey-2").value = s.bookmark_hotkey_secondary || "";
+  $("set-screenshot-region-hotkey").value = s.screenshot_region_hotkey || "";
+  $("set-screenshot-region-hotkey-2").value = s.screenshot_region_hotkey_secondary || "";
+  $("set-screenshot-screen-hotkey").value = s.screenshot_screen_hotkey || "";
+  $("set-screenshot-screen-hotkey-2").value = s.screenshot_screen_hotkey_secondary || "";
+  $("set-screenshot-window-hotkey").value = s.screenshot_window_hotkey || "";
+  $("set-screenshot-window-hotkey-2").value = s.screenshot_window_hotkey_secondary || "";
   updateHotkeyLabels(s.hotkey, s.hotkey_secondary || "");
   $("set-open-on-startup").checked = !!s.open_on_startup;
   $("set-close-to-tray").checked = s.close_to_tray !== false;
@@ -375,6 +381,15 @@ function readHotkeySettings() {
   const bookmarkKeybinds = ["set-bookmark-hotkey", "set-bookmark-hotkey-2"]
     .map((fieldId) => $(fieldId).value.trim())
     .filter(Boolean);
+  const screenshotRegionKeybinds = ["set-screenshot-region-hotkey", "set-screenshot-region-hotkey-2"]
+    .map((fieldId) => $(fieldId).value.trim())
+    .filter(Boolean);
+  const screenshotScreenKeybinds = ["set-screenshot-screen-hotkey", "set-screenshot-screen-hotkey-2"]
+    .map((fieldId) => $(fieldId).value.trim())
+    .filter(Boolean);
+  const screenshotWindowKeybinds = ["set-screenshot-window-hotkey", "set-screenshot-window-hotkey-2"]
+    .map((fieldId) => $(fieldId).value.trim())
+    .filter(Boolean);
   return {
     hotkey: keybinds[0] || "",
     hotkey_secondary: keybinds[1] || null,
@@ -384,6 +399,12 @@ function readHotkeySettings() {
     // reverting to the default keybind on the next load.
     bookmark_hotkey: bookmarkKeybinds[0] || null,
     bookmark_hotkey_secondary: bookmarkKeybinds[1] || null,
+    screenshot_region_hotkey: screenshotRegionKeybinds[0] || null,
+    screenshot_region_hotkey_secondary: screenshotRegionKeybinds[1] || null,
+    screenshot_screen_hotkey: screenshotScreenKeybinds[0] || null,
+    screenshot_screen_hotkey_secondary: screenshotScreenKeybinds[1] || null,
+    screenshot_window_hotkey: screenshotWindowKeybinds[0] || null,
+    screenshot_window_hotkey_secondary: screenshotWindowKeybinds[1] || null,
   };
 }
 
@@ -1833,12 +1854,21 @@ const HOTKEY_FIELD_IDS = [
   "set-recording-hotkey-2",
   "set-bookmark-hotkey",
   "set-bookmark-hotkey-2",
+  "set-screenshot-region-hotkey",
+  "set-screenshot-region-hotkey-2",
+  "set-screenshot-screen-hotkey",
+  "set-screenshot-screen-hotkey-2",
+  "set-screenshot-window-hotkey",
+  "set-screenshot-window-hotkey-2",
 ];
 const HOTKEY_IDLE_MESSAGE = "Click a field to record a shortcut. Esc clears it.";
 
 function hotkeyStatusId(fieldId) {
   if (fieldId.startsWith("set-recording-hotkey")) return "recording-hotkey-status";
   if (fieldId.startsWith("set-bookmark-hotkey")) return "bookmark-hotkey-status";
+  if (fieldId.startsWith("set-screenshot-region-hotkey")) return "screenshot-region-hotkey-status";
+  if (fieldId.startsWith("set-screenshot-screen-hotkey")) return "screenshot-screen-hotkey-status";
+  if (fieldId.startsWith("set-screenshot-window-hotkey")) return "screenshot-window-hotkey-status";
   return "hotkey-status";
 }
 

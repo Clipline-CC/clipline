@@ -203,6 +203,30 @@ impl AppSettings {
             },
             bookmark_hotkey_secondary: string_field(object, "bookmark_hotkey_secondary")
                 .and_then(|raw| normalize_hotkey(&raw).ok()),
+            // Raw reads first: defaults are applied after every explicit
+            // binding is known, so a user-chosen chord always beats a default
+            // regardless of which field appears first in the file.
+            screenshot_region_hotkey: string_field(object, "screenshot_region_hotkey")
+                .and_then(|raw| normalize_hotkey(&raw).ok()),
+            screenshot_region_hotkey_secondary: string_field(
+                object,
+                "screenshot_region_hotkey_secondary",
+            )
+            .and_then(|raw| normalize_hotkey(&raw).ok()),
+            screenshot_screen_hotkey: string_field(object, "screenshot_screen_hotkey")
+                .and_then(|raw| normalize_hotkey(&raw).ok()),
+            screenshot_screen_hotkey_secondary: string_field(
+                object,
+                "screenshot_screen_hotkey_secondary",
+            )
+            .and_then(|raw| normalize_hotkey(&raw).ok()),
+            screenshot_window_hotkey: string_field(object, "screenshot_window_hotkey")
+                .and_then(|raw| normalize_hotkey(&raw).ok()),
+            screenshot_window_hotkey_secondary: string_field(
+                object,
+                "screenshot_window_hotkey_secondary",
+            )
+            .and_then(|raw| normalize_hotkey(&raw).ok()),
             open_on_startup: bool_field(object, "open_on_startup")
                 .unwrap_or(defaults.open_on_startup),
             close_to_tray: bool_field(object, "close_to_tray").unwrap_or(defaults.close_to_tray),
@@ -272,6 +296,86 @@ impl AppSettings {
         {
             settings.bookmark_hotkey_secondary = None;
         }
+        // Screenshot defaults follow the same rule: a binding the user already
+        // had wins, so an upgrade never steals or duplicates a keybind. Each
+        // slot is checked in order and dropped if it collides with anything
+        // bound before it (including earlier screenshot slots).
+        let mut claimed: Vec<String> = [
+            Some(settings.hotkey.clone()),
+            settings.hotkey_secondary.clone(),
+            settings.recording_hotkey.clone(),
+            settings.recording_hotkey_secondary.clone(),
+            settings.bookmark_hotkey.clone(),
+            settings.bookmark_hotkey_secondary.clone(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        // Explicit screenshot bindings claim their chords first and win over
+        // any default, regardless of field order; secondaries are dropped
+        // when blank or colliding.
+        for (primary, secondary) in [
+            (
+                &mut settings.screenshot_region_hotkey,
+                &mut settings.screenshot_region_hotkey_secondary,
+            ),
+            (
+                &mut settings.screenshot_screen_hotkey,
+                &mut settings.screenshot_screen_hotkey_secondary,
+            ),
+            (
+                &mut settings.screenshot_window_hotkey,
+                &mut settings.screenshot_window_hotkey_secondary,
+            ),
+        ] {
+            if primary
+                .as_deref()
+                .is_some_and(|hotkey| claimed.iter().any(|taken| taken == hotkey))
+            {
+                *primary = None;
+            }
+            if let Some(hotkey) = primary.as_deref() {
+                claimed.push(hotkey.to_string());
+            }
+            if secondary
+                .as_deref()
+                .is_some_and(|hotkey| {
+                    hotkey.trim().is_empty()
+                        || claimed.iter().any(|taken| taken == hotkey)
+                })
+            {
+                *secondary = None;
+            }
+            if let Some(hotkey) = secondary.as_deref() {
+                claimed.push(hotkey.to_string());
+            }
+        }
+        // Absent fields predate screenshots and get their default, but never
+        // at the cost of a chord the user already bound anywhere else.
+        for (key, primary, default) in [
+            (
+                "screenshot_region_hotkey",
+                &mut settings.screenshot_region_hotkey,
+                super::default_screenshot_region_hotkey(),
+            ),
+            (
+                "screenshot_screen_hotkey",
+                &mut settings.screenshot_screen_hotkey,
+                super::default_screenshot_screen_hotkey(),
+            ),
+            (
+                "screenshot_window_hotkey",
+                &mut settings.screenshot_window_hotkey,
+                super::default_screenshot_window_hotkey(),
+            ),
+        ] {
+            if !object.contains_key(key)
+                && primary.is_none()
+                && !claimed.iter().any(|taken| Some(taken.as_str()) == default.as_deref())
+            {
+                *primary = default;
+            }
+        }
         settings.buffer_seconds = super::compatibility_buffer_seconds(&settings);
         settings.bitrate_mbps = settings.effective_bitrate_mbps();
         if matches!(settings.capture_mode, CaptureMode::WindowTitle)
@@ -306,6 +410,33 @@ impl AppSettings {
             Some(raw) if !raw.trim().is_empty() => Some(normalize_hotkey(raw)?),
             _ => None,
         };
+        settings.screenshot_region_hotkey = match settings.screenshot_region_hotkey.as_deref() {
+            Some(raw) if !raw.trim().is_empty() => Some(normalize_hotkey(raw)?),
+            _ => None,
+        };
+        settings.screenshot_region_hotkey_secondary =
+            match settings.screenshot_region_hotkey_secondary.as_deref() {
+                Some(raw) if !raw.trim().is_empty() => Some(normalize_hotkey(raw)?),
+                _ => None,
+            };
+        settings.screenshot_screen_hotkey = match settings.screenshot_screen_hotkey.as_deref() {
+            Some(raw) if !raw.trim().is_empty() => Some(normalize_hotkey(raw)?),
+            _ => None,
+        };
+        settings.screenshot_screen_hotkey_secondary =
+            match settings.screenshot_screen_hotkey_secondary.as_deref() {
+                Some(raw) if !raw.trim().is_empty() => Some(normalize_hotkey(raw)?),
+                _ => None,
+            };
+        settings.screenshot_window_hotkey = match settings.screenshot_window_hotkey.as_deref() {
+            Some(raw) if !raw.trim().is_empty() => Some(normalize_hotkey(raw)?),
+            _ => None,
+        };
+        settings.screenshot_window_hotkey_secondary =
+            match settings.screenshot_window_hotkey_secondary.as_deref() {
+                Some(raw) if !raw.trim().is_empty() => Some(normalize_hotkey(raw)?),
+                _ => None,
+            };
         settings.games.normalize();
         settings.cloud.normalize();
         settings.osu.normalize();

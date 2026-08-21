@@ -2819,6 +2819,59 @@ fn bookmark_hotkey_drops_a_user_placed_timeline_marker() {
 }
 
 #[test]
+fn screenshot_hotkeys_capture_region_screen_and_window() {
+    let html = index_html();
+    let js = main_js();
+    let app = app_rs();
+
+    for required in [
+        "id=\"set-screenshot-region-hotkey\"",
+        "id=\"set-screenshot-region-hotkey-2\"",
+        "id=\"set-screenshot-screen-hotkey\"",
+        "id=\"set-screenshot-screen-hotkey-2\"",
+        "id=\"set-screenshot-window-hotkey\"",
+        "id=\"set-screenshot-window-hotkey-2\"",
+        "id=\"screenshot-region-hotkey-status\"",
+        "id=\"screenshot-screen-hotkey-status\"",
+        "id=\"screenshot-window-hotkey-status\"",
+        "data-settings-key=\"screenshot_region_hotkey screenshot_region_hotkey_secondary\"",
+        "data-settings-key=\"screenshot_screen_hotkey screenshot_screen_hotkey_secondary\"",
+        "data-settings-key=\"screenshot_window_hotkey screenshot_window_hotkey_secondary\"",
+    ] {
+        assert!(
+            html.contains(required),
+            "screenshot keybind settings need `{required}`"
+        );
+    }
+    for required in [
+        "const screenshotRegionKeybinds = [\"set-screenshot-region-hotkey\", \"set-screenshot-region-hotkey-2\"]",
+        "const screenshotScreenKeybinds = [\"set-screenshot-screen-hotkey\", \"set-screenshot-screen-hotkey-2\"]",
+        "const screenshotWindowKeybinds = [\"set-screenshot-window-hotkey\", \"set-screenshot-window-hotkey-2\"]",
+        "screenshot_region_hotkey: screenshotRegionKeybinds[0] || null",
+        "screenshot_region_hotkey_secondary: screenshotRegionKeybinds[1] || null",
+        "screenshot_screen_hotkey: screenshotScreenKeybinds[0] || null",
+        "screenshot_screen_hotkey_secondary: screenshotScreenKeybinds[1] || null",
+        "screenshot_window_hotkey: screenshotWindowKeybinds[0] || null",
+        "screenshot_window_hotkey_secondary: screenshotWindowKeybinds[1] || null",
+        "\"set-screenshot-region-hotkey\",",
+        "\"set-screenshot-screen-hotkey\",",
+        "\"set-screenshot-window-hotkey\",",
+        "if (fieldId.startsWith(\"set-screenshot-region-hotkey\")) return \"screenshot-region-hotkey-status\";",
+        "if (fieldId.startsWith(\"set-screenshot-screen-hotkey\")) return \"screenshot-screen-hotkey-status\";",
+        "if (fieldId.startsWith(\"set-screenshot-window-hotkey\")) return \"screenshot-window-hotkey-status\";",
+    ] {
+        assert!(js.contains(required), "screenshot UI must include `{required}`");
+    }
+    assert!(
+        app.contains("HookAction::ScreenshotRegion")
+            && app.contains("HookAction::ScreenshotScreen")
+            && app.contains("HookAction::ScreenshotWindow")
+            && app.contains("fn request_screenshot"),
+        "the native shell must route screenshot hotkeys to RuntimeState"
+    );
+}
+
+#[test]
 fn hotkey_capture_pauses_live_actions_until_blur() {
     let js = main_js();
     let app = app_rs();

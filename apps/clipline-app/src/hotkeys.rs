@@ -40,6 +40,9 @@ pub(crate) enum HookAction {
     SaveReplay,
     ToggleRecording,
     Bookmark,
+    ScreenshotRegion,
+    ScreenshotScreen,
+    ScreenshotWindow,
 }
 
 /// A matched hotkey press, with the moment the hook saw the key go down.
@@ -59,6 +62,9 @@ pub struct HookHotkeys<'a> {
     pub save: &'a [&'a str],
     pub recording: &'a [&'a str],
     pub bookmark: &'a [&'a str],
+    pub screenshot_region: &'a [&'a str],
+    pub screenshot_screen: &'a [&'a str],
+    pub screenshot_window: &'a [&'a str],
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -329,6 +335,21 @@ fn parse_hook_bindings(hotkeys: HookHotkeys<'_>) -> Result<Vec<HookBinding>, Str
     for (raws, action, label) in [
         (hotkeys.recording, HookAction::ToggleRecording, "recording"),
         (hotkeys.bookmark, HookAction::Bookmark, "bookmark"),
+        (
+            hotkeys.screenshot_region,
+            HookAction::ScreenshotRegion,
+            "screenshot region",
+        ),
+        (
+            hotkeys.screenshot_screen,
+            HookAction::ScreenshotScreen,
+            "screenshot screen",
+        ),
+        (
+            hotkeys.screenshot_window,
+            HookAction::ScreenshotWindow,
+            "screenshot window",
+        ),
     ] {
         for raw in raws.iter().copied().filter(|raw| !raw.trim().is_empty()) {
             let hotkey = parse_hook_hotkey(raw)?;
@@ -700,6 +721,7 @@ mod tests {
                     save: &["Alt+F10"],
                     recording: &["Ctrl+Mouse5", "Alt+F9"],
                     bookmark: &[],
+                    ..Default::default()
                 })
                 .unwrap(),
             ),
@@ -731,6 +753,7 @@ mod tests {
                     save: &["F6"],
                     recording: &["Alt+F9"],
                     bookmark: &["F7", "Ctrl+Mouse5"],
+                    ..Default::default()
                 })
                 .unwrap(),
             ),
@@ -754,6 +777,74 @@ mod tests {
     }
 
     #[test]
+    fn screenshot_bindings_dispatch_their_own_actions() {
+        let (trigger_tx, trigger_rx) = mpsc::channel();
+        let state = HookState {
+            bindings: Mutex::new(
+                parse_hook_bindings(HookHotkeys {
+                    save: &["F6"],
+                    recording: &["Alt+F9"],
+                    bookmark: &["F7"],
+                    screenshot_region: &["Ctrl+Mouse5"],
+                    screenshot_screen: &["Ctrl+Shift+F8"],
+                    screenshot_window: &["Ctrl+Alt+F7"],
+                })
+                .unwrap(),
+            ),
+            down_keys: Mutex::new(BTreeSet::new()),
+            trigger_tx,
+            keyboard_hook: None,
+            mouse_hook: Mutex::new(None),
+            paused: AtomicBool::new(false),
+        };
+
+        assert!(state.on_key_down(VK_XBUTTON2_CODE, true, false, false));
+        assert_eq!(recv_action(&trigger_rx), Ok(HookAction::ScreenshotRegion));
+        state.on_key_up(VK_XBUTTON2_CODE);
+
+        assert!(state.on_key_down(VK_F1_CODE + 7, true, false, true));
+        assert_eq!(recv_action(&trigger_rx), Ok(HookAction::ScreenshotScreen));
+        state.on_key_up(VK_F1_CODE + 7);
+
+        assert!(state.on_key_down(VK_F1_CODE + 6, true, true, false));
+        assert_eq!(recv_action(&trigger_rx), Ok(HookAction::ScreenshotWindow));
+    }
+
+    #[test]
+    fn a_screenshot_hotkey_cannot_shadow_another_action() {
+        assert!(parse_hook_bindings(HookHotkeys {
+            save: &["F6"],
+            recording: &["Alt+F9"],
+            bookmark: &["F7"],
+            screenshot_region: &["F6"],
+            screenshot_screen: &[],
+            screenshot_window: &[],
+        })
+        .is_err());
+
+        assert!(parse_hook_bindings(HookHotkeys {
+            save: &["F6"],
+            recording: &["Alt+F9"],
+            bookmark: &["F7"],
+            screenshot_region: &[],
+            screenshot_screen: &["F7"],
+            screenshot_window: &[],
+        })
+        .is_err());
+
+        // Blank entries stay unbound rather than erroring.
+        assert!(parse_hook_bindings(HookHotkeys {
+            save: &["F6"],
+            recording: &["Alt+F9"],
+            bookmark: &["F7"],
+            screenshot_region: &[""],
+            screenshot_screen: &["", ""],
+            screenshot_window: &[],
+        })
+        .is_ok());
+    }
+
+    #[test]
     fn paused_hook_does_not_dispatch_the_live_save_bind() {
         let (trigger_tx, trigger_rx) = mpsc::channel();
         let state = HookState {
@@ -762,6 +853,7 @@ mod tests {
                     save: &["F6"],
                     recording: &["Alt+F9"],
                     bookmark: &["F7"],
+                    ..Default::default()
                 })
                 .unwrap(),
             ),
@@ -790,6 +882,7 @@ mod tests {
                 save: &["F6"],
                 recording: &["Alt+F9"],
                 bookmark,
+                ..Default::default()
             })
             .is_err());
         }
@@ -798,6 +891,7 @@ mod tests {
             save: &["F6"],
             recording: &["Alt+F9"],
             bookmark: &["F7", "F7"],
+            ..Default::default()
         })
         .is_err());
 
@@ -805,6 +899,7 @@ mod tests {
             save: &["F6"],
             recording: &["Alt+F9"],
             bookmark: &["F7", ""],
+            ..Default::default()
         })
         .is_ok());
     }
@@ -871,6 +966,7 @@ mod tests {
                     save: &["Alt+F10"],
                     recording: &["Ctrl+R"],
                     bookmark: &["F7"],
+                    ..Default::default()
                 }),
                 Ok(())
             );

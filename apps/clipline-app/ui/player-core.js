@@ -1885,7 +1885,9 @@ const PlayerCore = (() => {
     const key = functionKeyNumber(ev);
     let hotkeyKey = null;
     let needsModifier = false;
-    if (key) {
+    if (String(ev.code) === "PrintScreen") {
+      hotkeyKey = "PrintScreen";
+    } else if (key) {
       if (key === 12) {
         return { kind: "invalid", message: "F12 is reserved by Windows for debuggers." };
       }
