@@ -402,6 +402,19 @@ Tasks 1-11 are implemented on `investigate-sharex`: WGC still capture, PNG encod
 clipboard copy, hotkeys + PrintScreen bind, Snipping Tool conflict handling, library cards,
 lightbox, quota accounting, and the confirmation sound/toast.
 
+Task 12 (region overlay) is also implemented (`21956bf2`). Region mode now freezes the cursor
+monitor into a temp PNG, opens a hidden borderless webview placed in **physical** pixels over
+that monitor (builder logical sizes misplace on >100% scale), shows the frozen frame, and lets
+the user drag a selection. Esc, a click without drag, or losing focus cancels; the temp PNG is
+deleted on every path. The crop reuses `BgraImage::crop` clamping, so virtual-desktop selection
+coords pass straight through. Selection math lives in DOM-free `ui/region-core.js`, tested by
+`tests/region_core.rs` through Boa; the overlay itself is a dedicated minimal `region.html` +
+`region.js` so main.js bootstrap never runs in the overlay window. Keypress-to-overlay latency
+is logged as the `region_overlay_opened` tracing event with `elapsed_ms`; if it exceeds ~150 ms
+on real hardware, the follow-up is a native layered window (do not hand-roll before measuring).
+Snap candidates are currently the single top-level window under the cursor at open time via
+DWM frame bounds (`window_rect_at_cursor`); multi-window snap lists are a possible follow-up.
+
 `shutter.ogg` is an 83 ms two-click shutter: a short white-noise tick followed by a softer pink-noise
 tail, quieter than `soundeffect.ogg` and noise-based so it cannot be mistaken for the bookmark blip.
 rodio is built `default-features = false, features = ["vorbis"]`, so it must stay Ogg Vorbis.
