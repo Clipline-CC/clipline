@@ -120,7 +120,8 @@ fn poster_command(ffmpeg: &Path, clip: &Path, seek_s: f64) -> Command {
     if !is_png {
         cmd.args(["-ss", &seek_arg(seek_s)]);
     }
-    cmd.arg(clip)
+    cmd.arg("-i")
+        .arg(clip)
         .args([
             "-frames:v",
             "1",
@@ -365,6 +366,11 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|pair| pair[0] == "-c:v" && pair[1] == "mjpeg"));
+        assert!(
+            args.windows(2).any(|pair| pair[0] == "-i"
+                && pair[1] == clip.to_string_lossy()),
+            "the clip path must be an input, never an output file"
+        );
         assert!(args
             .windows(2)
             .any(|pair| pair[0] == "-f" && pair[1] == "image2pipe"));
