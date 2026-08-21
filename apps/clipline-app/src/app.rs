@@ -41,6 +41,7 @@ mod support;
 use diagnostics::{diagnostic_log_path, log_diagnostic};
 
 const MAIN_WINDOW_LABEL: &str = "main";
+const REGION_WINDOW_LABEL: &str = "screenshot-region";
 const WEBVIEW_READY_TIMEOUT: Duration = Duration::from_secs(5);
 const GAME_DETECTOR_INTERVAL: Duration = Duration::from_millis(500);
 const WINDOW_LIFECYCLE_EVENT: &str = "window-lifecycle";
@@ -1666,6 +1667,10 @@ impl RuntimeState {
     /// the recorder command loop: screenshots must work while recording is
     /// idle, and a WGC still grab must never block save/stop handling.
     fn request_screenshot<R: Runtime>(&self, app: &AppHandle<R>, mode: ScreenshotMode) {
+        if mode == ScreenshotMode::Region {
+            self.begin_region_overlay(app);
+            return;
+        }
         let app = app.clone();
         let app_for_spawn_error = app.clone();
         std::thread::Builder::new()
@@ -1703,6 +1708,100 @@ impl RuntimeState {
                 tracing::warn!(event = "screenshot_worker_spawn_failed", %message);
                 let _ = app_for_spawn_error.emit("error", message);
             });
+    }
+
+    /// Region flow: freeze the cursor monitor into a temp PNG, then open a
+    /// fullscreen overlay on that monitor for the drag selection. The frame
+    /// stays in managed state so completion never re-decodes the PNG.
+    fn begin_region_overlay<R: Runtime>(&self, app: &AppHandle<R>) {
+        let started = std::time::Instant::now();
+        let result = self.open_region_overlay(app);
+        match result {
+            Ok(()) => tracing::info!(
+                event = "region_overlay_opened",
+                elapsed_ms = started.elapsed().as_millis() as u64
+            ),
+            Err(error) => {
+                tracing::warn!(event = "region_overlay_failed", %error);
+                let _ = app.emit("error", error);
+            }
+        }
+    }
+
+    fn open_region_overlay<R: Runtime>(&self, app: &AppHandle<R>) -> Result<(), String> {
+        // Reuse the existing worker-thread pattern: the WGC grab must not
+        // block the main thread, but the window must be built on it.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("region-frame".into())
+            .spawn(move || {
+                let frame = screenshot::capture_frame(ScreenshotMode::Region);
+                let _ = tx.send(frame);
+            })
+            .map_err(|error| format!("start region frame worker: {error}"))?;
+        let image = rx
+            .recv()
+            .map_err(|_| "region frame worker died".to_string())?
+            .map_err(|error| format!("grab region frame: {error}"))?;
+
+        let Some(monitor) = clipline_capture::windows::still::monitor_at_cursor() else {
+            return Err("no monitor found under the mouse cursor".into());
+        };
+        let dpi = clipline_capture::windows::still::dpi_at_cursor();
+
+        // Freeze the frame to a temp PNG so the overlay webview can display
+        // it through the asset protocol; deleted on every exit path below.
+        let png = crate::image::encode_rgba_png(image.width(), image.height(), &image.to_rgba())
+            .ok_or_else(|| "encode region preview PNG".to_string())?;
+        let temp_path = std::env::temp_dir()
+            .join(format!("clipline-region-frame-{}.png", std::process::id()));
+        std::fs::write(&temp_path, &png)
+            .map_err(|error| format!("write region preview: {error}"))?;
+        let canonical_temp = temp_path.canonicalize().unwrap_or_else(|_| temp_path.clone());
+        if let Err(error) = app.asset_protocol_scope().allow_file(&canonical_temp) {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(format!("scope region preview: {error}"));
+        }
+
+        let state = app.state::<RegionOverlayState>();
+        *state
+            .0
+            .lock()
+            .map_err(|_| "region state poisoned".to_string())? = Some(RegionOverlay {
+            frame: image,
+            monitor,
+            dpi,
+            temp_path: temp_path.clone(),
+        });
+
+        let build = tauri::WebviewWindowBuilder::new(
+            app,
+            REGION_WINDOW_LABEL,
+            tauri::WebviewUrl::App("region.html".into()),
+        )
+        .title("Clipline Region")
+        .decorations(false)
+        .resizable(false)
+        .maximizable(false)
+        .minimizable(false)
+        .skip_taskbar(true)
+        .focused(true)
+        .visible(false);
+        let window = match build.build() {
+            Ok(window) => window,
+            Err(error) => {
+            cleanup_region_overlay(app);
+            return Err(format!("open region overlay: {error}"));
+            }
+        };
+        // Physical-pixel placement: builder sizes are logical, which breaks
+        // on monitors above 100% scale. Build hidden, place physically, show.
+        use tauri::{PhysicalPosition, PhysicalSize};
+        let _ = window.set_position(PhysicalPosition::new(monitor.x, monitor.y));
+        let _ = window.set_size(PhysicalSize::new(monitor.width, monitor.height));
+        let _ = window.show();
+        let _ = window.set_focus();
+        Ok(())
     }
 
     fn request_save_or_show_quota<R: Runtime>(&self, app: &AppHandle<R>) -> bool {
@@ -2338,6 +2437,139 @@ fn take_screenshot<R: Runtime>(
         other => return Err(format!("unknown screenshot mode: {other}")),
     };
     state.request_screenshot(&app, mode);
+    Ok(())
+}
+
+/// Managed state for the region overlay: the frozen frame plus everything
+/// the overlay window and completion command need. `None` when no overlay.
+#[derive(Default)]
+struct RegionOverlayState(std::sync::Mutex<Option<RegionOverlay>>);
+
+struct RegionOverlay {
+    frame: clipline_capture::still::BgraImage,
+    monitor: clipline_capture::still::PlacedRect,
+    dpi: Option<u32>,
+    temp_path: std::path::PathBuf,
+}
+
+fn cleanup_region_overlay<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(state) = app.try_state::<RegionOverlayState>() {
+        if let Ok(mut slot) = state.0.lock() {
+            if let Some(overlay) = slot.take() {
+                let _ = std::fs::remove_file(&overlay.temp_path);
+            }
+        }
+    }
+}
+
+fn close_region_window<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(window) = app.get_webview_window(REGION_WINDOW_LABEL) {
+        let _ = window.close();
+    }
+}
+
+/// Payload for get_region_overlay_state; serializable view of RegionOverlay.
+#[derive(serde::Serialize)]
+struct RegionOverlayInfo {
+    frame_path: String,
+    monitor_x: i32,
+    monitor_y: i32,
+    monitor_width: u32,
+    monitor_height: u32,
+    dpi: Option<u32>,
+    snap_candidates: Vec<SnapCandidate>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SnapCandidate {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
+#[tauri::command]
+fn get_region_overlay_state<R: Runtime>(app: AppHandle<R>) -> Result<Option<RegionOverlayInfo>, String> {
+    let state = app.state::<RegionOverlayState>();
+    let slot = state
+        .0
+        .lock()
+        .map_err(|_| "region state poisoned".to_string())?;
+    let Some(overlay) = slot.as_ref() else {
+        return Ok(None);
+    };
+    Ok(Some(RegionOverlayInfo {
+        frame_path: overlay.temp_path.display().to_string(),
+        monitor_x: overlay.monitor.x,
+        monitor_y: overlay.monitor.y,
+        monitor_width: overlay.monitor.width,
+        monitor_height: overlay.monitor.height,
+        dpi: overlay.dpi,
+        snap_candidates: crate::windows::window_rect_at_cursor()
+            .into_iter()
+            .map(|rect| SnapCandidate { x: rect.x, y: rect.y, width: rect.width, height: rect.height })
+            .collect(),
+    }))
+}
+
+#[tauri::command]
+fn complete_region_screenshot<R: Runtime>(
+    app: AppHandle<R>,
+    selection: SnapCandidate,
+) -> Result<(), String> {
+    let frame = {
+        let state = app.state::<RegionOverlayState>();
+        let slot = state
+            .0
+            .lock()
+            .map_err(|_| "region state poisoned".to_string())?;
+        let Some(overlay) = slot.as_ref() else {
+            return Err("no active region selection".into());
+        };
+        overlay.frame.clone()
+    };
+    let media_root = app.state::<crate::library::StorageSettings>().media_dir();
+    let saved = screenshot::save_frame(
+        &media_root,
+        ScreenshotMode::Region,
+        &frame,
+        Some(clipline_capture::still::PlacedRect {
+            x: selection.x,
+            y: selection.y,
+            width: selection.width,
+            height: selection.height,
+        }),
+    );
+    close_region_window(&app);
+    // The Destroyed handler clears state and deletes the temp file; but if
+    // the window is already gone, do it here so the PNG never lingers.
+    if app.get_webview_window(REGION_WINDOW_LABEL).is_none() {
+        cleanup_region_overlay(&app);
+    }
+    let saved = saved?;
+    crate::sound::play_screenshot_taken();
+    if let Err(error) = crate::library::copy_screenshot_to_clipboard(
+        &saved.path,
+        &saved.rgba,
+        saved.width,
+        saved.height,
+    ) {
+        tracing::warn!(event = "screenshot_clipboard_failed", %error);
+        let _ = app.emit("error", format!("clipboard copy failed: {error}"));
+    }
+    let _ = app.emit(
+        "screenshot-saved",
+        serde_json::json!({ "mode": ScreenshotMode::Region.label(), "path": saved.path.display().to_string() }),
+    );
+    Ok(())
+}
+
+#[tauri::command]
+fn cancel_region_screenshot<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    close_region_window(&app);
+    if app.get_webview_window(REGION_WINDOW_LABEL).is_none() {
+        cleanup_region_overlay(&app);
+    }
     Ok(())
 }
 
@@ -3746,6 +3978,7 @@ pub fn run() {
         .manage(NativeMediaFolderAuthorization::default())
         .manage(crate::library::StorageSettings::new(quota_bytes, media_dir))
         .manage(crate::library::ClipboardExportState::default())
+        .manage(RegionOverlayState::default())
         .plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
             let launched_by_autostart = args.iter().any(|arg| arg == "--autostart");
             log_diagnostic(format!(
@@ -3781,6 +4014,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             save_replay,
             take_screenshot,
+            get_region_overlay_state,
+            complete_region_screenshot,
+            cancel_region_screenshot,
             recheck_storage_quota,
             restart_as_administrator,
             set_recording,

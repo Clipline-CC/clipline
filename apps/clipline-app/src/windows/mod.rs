@@ -29,7 +29,9 @@ use windows_sys::Win32::System::Threading::{
     PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
-use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SW_SHOWNORMAL};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    GetCursorPos, GetForegroundWindow, SW_SHOWNORMAL,
+};
 
 const ELEVATED_AFTER_ARGUMENT: &str = "--clipline-elevated-after";
 const PROCESS_SYNCHRONIZE: u32 = 0x0010_0000;
@@ -235,6 +237,38 @@ pub fn foreground_window() -> Option<isize> {
     // SAFETY: plain query returning a handle that may be null.
     let hwnd = unsafe { GetForegroundWindow() } as isize;
     (hwnd != 0).then_some(hwnd)
+}
+
+/// Cursor position in virtual-desktop pixels. `None` when the query fails.
+pub fn cursor_point_screen() -> Option<(i32, i32)> {
+    let mut point = windows_sys::Win32::Foundation::POINT { x: 0, y: 0 };
+    // SAFETY: out-pointer is a valid POINT; plain cursor query.
+    let ok = unsafe { GetCursorPos(&mut point) };
+    (ok != 0).then_some((point.x, point.y))
+}
+
+/// DWM frame bounds of the top-level window under the cursor, for region-snap
+/// candidates. Skips Clipline main-window handles so the overlay never snaps
+/// to itself. `None` when no capturable window contains the cursor.
+pub fn window_rect_at_cursor() -> Option<clipline_capture::still::PlacedRect> {
+    let (x, y) = cursor_point_screen()?;
+    for window in clipline_capture::windows::enumerate_capturable_windows() {
+        if Some(window.handle) == current_main_window() {
+            continue;
+        }
+        let Some(rect) =
+            clipline_capture::windows::window_from_raw_handle(window.handle)
+                .and_then(clipline_capture::windows::window_frame_bounds)
+        else {
+            continue;
+        };
+        let right = rect.x + rect.width as i32;
+        let bottom = rect.y + rect.height as i32;
+        if x >= rect.x && x < right && y >= rect.y && y < bottom {
+            return Some(rect);
+        }
+    }
+    None
 }
 
 /// Raw HWND of Clipline's own main window, so window mode can refuse to
