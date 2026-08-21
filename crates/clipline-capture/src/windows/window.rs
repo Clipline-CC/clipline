@@ -69,6 +69,19 @@ pub fn window_from_raw_handle(raw: isize) -> Option<HWND> {
     }
 }
 
+/// DWM extended frame bounds (GetWindowRect fallback) as a placed rect in
+/// virtual-desktop pixels — what a whole-window still grab covers.
+pub fn window_frame_bounds(hwnd: HWND) -> Option<crate::still::PlacedRect> {
+    // SAFETY: hwnd is a borrowed OS handle; read-only DWM/User32 queries.
+    let frame = unsafe { window_frame_rect(hwnd)? };
+    Some(crate::still::PlacedRect {
+        x: frame.left,
+        y: frame.top,
+        width: (frame.right - frame.left).max(0) as u32,
+        height: (frame.bottom - frame.top).max(0) as u32,
+    })
+}
+
 pub fn enumerate_capturable_windows() -> Vec<CapturableWindow> {
     let mut windows = Vec::new();
     // SAFETY: the callback only runs during this call; lparam points at
