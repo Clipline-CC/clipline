@@ -1,7 +1,7 @@
 //! Screenshot orchestration: one-shot grab, optional crop, PNG encode,
-//! atomic publish into the media root. Runs on its own worker thread so a
-//! screenshot works while the recorder is idle; results reach the UI through
-//! Tauri events, mirroring the service event pump.
+//! atomic publish into the media root's Screenshots folder. Runs on its own
+//! worker thread so a screenshot works while the recorder is idle; results
+//! reach the UI through Tauri events, mirroring the service event pump.
 
 use std::path::{Path, PathBuf};
 
@@ -39,6 +39,11 @@ pub fn screenshot_file_name(epoch_s: i64) -> String {
     name
 }
 
+/// Screenshots live in this folder under the media root so they never mix
+/// with session clips. The library scan already recurses one level, and
+/// validate_clip_path accepts clips one folder deep.
+pub const SCREENSHOT_DIR_NAME: &str = "Screenshots";
+
 /// Grab the target for mode and return the raw BGRA frame. Region mode
 /// currently publishes the full cursor monitor; the crop arrives with the
 /// Task 12 region overlay.
@@ -72,7 +77,7 @@ pub struct SavedScreenshot {
 }
 
 /// Full pipeline for a completed frame: optional crop, PNG encode, atomic
-/// publish beside the clips.
+/// publish into the media root's Screenshots folder.
 pub fn save_frame(
     media_root: &Path,
     mode: ScreenshotMode,
@@ -108,7 +113,7 @@ fn normalize_path(path: &Path) -> PathBuf {
     }
 }
 
-/// Publish an RGBA frame as shot_<epoch>.png inside media_root.
+/// Publish an RGBA frame as shot_<epoch>.png inside media_root\Screenshots.
 /// Refuses destinations outside the root and surfaces unwritable roots as
 /// errors instead of silently dropping the shot (m21 rules).
 pub fn publish_screenshot(
@@ -118,9 +123,10 @@ pub fn publish_screenshot(
     height: u32,
     rgba: &[u8],
 ) -> Result<PathBuf, String> {
-    std::fs::create_dir_all(media_root)
-        .map_err(|error| format!("create media folder {}: {error}", media_root.display()))?;
-    let destination = media_root.join(screenshot_file_name(epoch_s));
+    let target_dir = media_root.join(SCREENSHOT_DIR_NAME);
+    std::fs::create_dir_all(&target_dir)
+        .map_err(|error| format!("create screenshot folder {}: {error}", target_dir.display()))?;
+    let destination = target_dir.join(screenshot_file_name(epoch_s));
     let normalized_root = normalize_path(media_root);
     if !normalize_path(&destination).starts_with(&normalized_root) {
         return Err(format!(
@@ -133,10 +139,9 @@ pub fn publish_screenshot(
     let mut temp = SiblingTemp::reserve(&destination)?;
     temp.write_all(&png)?;
     temp.publish(&destination)?;
-    // Mark ownership so the storage quota and auto-delete can see (and
-    // reclaim) screenshots; an unmarked PNG would be invisible disk use.
-    clipline_storage::ensure_clip_owned(&destination)
-        .map_err(|error| format!("mark screenshot owned: {error}"))?;
+    // Screenshots deliberately get no ownership marker: users found the
+    // per-shot .json sidecars confusing. They are therefore invisible to the
+    // storage quota and never auto-deleted or removed by uninstall cleanup.
     Ok(destination)
 }
 
@@ -187,7 +192,7 @@ mod tests {
         let dir = TestDir::new("shot-publish");
         let rgba = vec![10u8, 20, 30, 255, 40, 50, 60, 255];
         let path = publish_screenshot(&dir.0, 777, 2, 1, &rgba).expect("publish");
-        assert_eq!(path.parent(), Some(dir.0.as_path()));
+        assert_eq!(path.parent(), Some(&dir.0.join(SCREENSHOT_DIR_NAME) as &Path));
         assert_eq!(
             path.file_name().and_then(|n| n.to_str()),
             Some("shot_777.png")
@@ -209,7 +214,7 @@ mod tests {
         let error = publish_screenshot(&root, 9, 1, 1, &[0, 0, 0, 255])
             .expect_err("unwritable root must be an actionable error");
         assert!(
-            error.contains("not writable") || error.contains("create media folder"),
+            error.contains("not writable") || error.contains("create screenshot folder"),
             "actionable error, got: {error}"
         );
     }
