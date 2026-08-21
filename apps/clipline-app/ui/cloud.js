@@ -197,7 +197,13 @@ function cloudConnected() {
   return Boolean(cloud.connected_user_id && cloud.credential_target);
 }
 
+// Uploads are temporarily disabled: the backend cannot accept screenshots,
+// and clips are blocked too while that gap exists. Every upload entry point
+// (card menu, review header) checks this, so flipping it re-enables them.
+var UPLOADS_TEMPORARILY_DISABLED = true;
+
 function cloudUploadControlVisible(uploaded) {
+  if (UPLOADS_TEMPORARILY_DISABLED) return false;
   return cloudConnected() || Boolean(uploaded);
 }
 
