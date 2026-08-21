@@ -4,6 +4,35 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-21): screenshot QoL pass — thumbnails, Screenshots folder, overlay latency, uploads off
+
+Follow-up on `investigate-sharex` after the PrintScreen dispatch fixes were verified by the
+user. Four commits:
+
+- **Broken thumbnails fixed (`36848325`).** The screenshot milestone's `poster_command`
+  rework accidentally dropped ffmpeg's `-i`, so every new poster extraction failed with
+  `poster_extraction_failed kind=media_or_codec` (the path became an *output* file).
+  Videos kept stale cached posters; screenshots never got one. Reproduced outside the app
+  with the exact argv before fixing.
+- **Screenshots save into `<media root>\Screenshots` with no sidecars (`29644f48`).**
+  Library scan recursion + `validate_clip_path` already accepted one folder deep, so no
+  validation changes were needed. The per-shot `.clipline.json` ownership marker is gone:
+  screenshots are now invisible to the storage quota and are never auto-deleted or removed
+  by uninstall cleanup (documented tradeoff).
+- **Region overlay reuse (`e8004aa`).** Keypress-to-overlay measured 2430 ms; building a
+  fresh WebView2 window dominated. The overlay window is now hidden instead of destroyed
+  and reused: reposition → refresh frozen-frame temp PNG (stable path) → wake JS via
+  `region-overlay-shown` → show. Overlay JS arms per wake so blur cancels only live
+  selections (`region-overlay-hidden` disarms before parking). Full-screen shots log
+  `screenshot_captured` latency and shutter-sound before clipboard copy.
+- **Uploads temporarily disabled (`9f98c63`).** Single switch `UPLOADS_TEMPORARILY_DISABLED`
+  in `ui/cloud.js` inside `cloudUploadControlVisible`; hides the library Upload menu item
+  and review header button while keeping the ui_contract-pinned wiring intact.
+
+Gates: workspace tests green (incl. 125 ui-contract), warning-denied clippy clean, node
+syntax check on region.js, app rebuilt and relaunched. Old shots at the media root still
+list (root PNGs stay valid); they regain thumbnails via the `-i` fix.
+
 ## Checkpoint (2026-08-21): PrintScreen screenshot dispatch + registration recovery fix
 
 Branch: `investigate-sharex` (screenshot-capture milestone debugging).
