@@ -1675,10 +1675,19 @@ impl RuntimeState {
                 let result = screenshot::capture_frame(mode)
                     .and_then(|image| screenshot::save_frame(&media_root, mode, &image, None));
                 match result {
-                    Ok(path) => {
+                    Ok(saved) => {
+                        if let Err(error) = crate::library::copy_screenshot_to_clipboard(
+                            &saved.path,
+                            &saved.rgba,
+                            saved.width,
+                            saved.height,
+                        ) {
+                            tracing::warn!(event = "screenshot_clipboard_failed", %error);
+                            let _ = app.emit("error", format!("clipboard copy failed: {error}"));
+                        }
                         let _ = app.emit(
                             "screenshot-saved",
-                            serde_json::json!({ "mode": mode.label(), "path": path.display().to_string() }),
+                            serde_json::json!({ "mode": mode.label(), "path": saved.path.display().to_string() }),
                         );
                     }
                     Err(error) => {

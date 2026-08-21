@@ -62,21 +62,36 @@ pub fn capture_frame(mode: ScreenshotMode) -> Result<BgraImage, String> {
     }
 }
 
+/// What one screenshot produced: the published file plus the exact pixels
+/// that went into it (the clipboard needs them without re-decoding).
+pub struct SavedScreenshot {
+    pub path: PathBuf,
+    pub rgba: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+}
+
 /// Full pipeline for a completed frame: optional crop, PNG encode, atomic
-/// publish beside the clips. Returns the saved path.
+/// publish beside the clips.
 pub fn save_frame(
     media_root: &Path,
     mode: ScreenshotMode,
     image: &BgraImage,
     selection: Option<PlacedRect>,
-) -> Result<PathBuf, String> {
+) -> Result<SavedScreenshot, String> {
     let rgba = crop_to_rgba(image, selection)?;
     let (width, height) = match selection {
         Some(rect) => (rect.width, rect.height),
         None => (image.width(), image.height()),
     };
-    publish_screenshot(media_root, crate::util::unix_now_i64(), width, height, &rgba)
-        .map_err(|error| format!("{} screenshot: {error}", mode.label()))
+    let path = publish_screenshot(media_root, crate::util::unix_now_i64(), width, height, &rgba)
+        .map_err(|error| format!("{} screenshot: {error}", mode.label()))?;
+    Ok(SavedScreenshot {
+        path,
+        rgba,
+        width,
+        height,
+    })
 }
 
 /// Canonicalize without the \\?\ verbatim prefix Windows adds, so two

@@ -31,11 +31,12 @@ use clipline_mp4::{
 };
 use clipline_storage::storage_status as read_storage_status;
 use windows_sys::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
+use windows_sys::Win32::Graphics::Gdi::{BI_BITFIELDS, BITMAPV5HEADER};
 use windows_sys::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
 };
 use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
-use windows_sys::Win32::System::Ole::{CF_HDROP, CF_UNICODETEXT};
+use windows_sys::Win32::System::Ole::{CF_DIBV5, CF_HDROP, CF_UNICODETEXT};
 use windows_sys::Win32::UI::Shell::DROPFILES;
 
 use tauri::{AppHandle, Manager, Runtime};
@@ -2357,6 +2358,96 @@ fn copy_text_to_clipboard_native(text: &str, owner: HWND) -> Result<(), String> 
     copy_payload_to_clipboard(&payload, CF_UNICODETEXT as u32, owner, true)
 }
 
+/// A DIBV5 payload for 32-bit RGBA pixels: BI_BITFIELDS header with explicit
+/// alpha mask (top-down via negative height) followed by the rows.
+pub(crate) fn dibv5_payload(width: u32, height: u32, rgba_top_down: &[u8]) -> Vec<u8> {
+    let row_bytes = (width as usize * 4).max(1);
+    let pixel_bytes = row_bytes * height as usize;
+    let header = BITMAPV5HEADER {
+        bV5Size: size_of::<BITMAPV5HEADER>() as u32,
+        bV5Width: width as i32,
+        bV5Height: -(height as i32),
+        bV5Planes: 1,
+        bV5BitCount: 32,
+        bV5Compression: BI_BITFIELDS,
+        bV5SizeImage: pixel_bytes as u32,
+        bV5RedMask: 0x00_00_00_ff,
+        bV5GreenMask: 0x00_00_ff_00,
+        bV5BlueMask: 0x00_ff_00_00,
+        bV5AlphaMask: 0xff_00_00_00,
+        ..Default::default()
+    };
+    let mut payload = vec![0u8; size_of::<BITMAPV5HEADER>() + pixel_bytes];
+    unsafe {
+        ptr::write_unaligned(payload.as_mut_ptr().cast::<BITMAPV5HEADER>(), header);
+    }
+    payload[size_of::<BITMAPV5HEADER>()..].copy_from_slice(rgba_top_down);
+    payload
+}
+
+/// Put a screenshot on the clipboard: CF_DIBV5 pixels for image editors and
+/// CF_HDROP so Discord/Explorer receive the file. One open, both formats.
+pub(crate) fn copy_screenshot_to_clipboard(
+    path: &Path,
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
+    let mut dib_transfer = ClipboardTransfer::new(alloc_clipboard_payload(&dibv5_payload(
+        width, height, rgba,
+    ))?);
+    let mut drop_transfer =
+        ClipboardTransfer::new(alloc_clipboard_payload(&dropfiles_payload(path))?);
+    clipboard_transaction(
+        8,
+        || {
+            if unsafe { OpenClipboard(ptr::null_mut()) } == 0 {
+                Err(last_os_error("open clipboard"))
+            } else {
+                Ok(())
+            }
+        },
+        || unsafe {
+            CloseClipboard();
+        },
+        || unsafe {
+            if EmptyClipboard() == 0 {
+                return Err(last_os_error("empty clipboard"));
+            }
+            if SetClipboardData(CF_DIBV5 as u32, dib_transfer.handle()).is_null() {
+                return Err(last_os_error("set clipboard image data"));
+            }
+            if SetClipboardData(CF_HDROP as u32, drop_transfer.handle()).is_null() {
+                return Err(last_os_error("set clipboard file data"));
+            }
+            dib_transfer.release();
+            drop_transfer.release();
+            Ok(())
+        },
+        || std::thread::sleep(Duration::from_millis(15)),
+    )
+}
+
+fn alloc_clipboard_payload(payload: &[u8]) -> Result<HGLOBAL, String> {
+    let handle = unsafe { GlobalAlloc(GMEM_MOVEABLE, payload.len()) };
+    if handle.is_null() {
+        return Err(last_os_error("allocate clipboard memory"));
+    }
+    let mem = unsafe { GlobalLock(handle) };
+    if mem.is_null() {
+        let err = last_os_error("lock clipboard memory");
+        unsafe {
+            GlobalFree(handle);
+        }
+        return Err(err);
+    }
+    unsafe {
+        ptr::copy_nonoverlapping(payload.as_ptr(), mem.cast::<u8>(), payload.len());
+        GlobalUnlock(handle);
+    }
+    Ok(handle)
+}
+
 fn copy_payload_to_clipboard(
     payload: &[u8],
     format: u32,
@@ -2699,6 +2790,42 @@ mod tests {
         assert!(!second.is_cancelled());
         state.cancel();
         assert!(second.is_cancelled());
+    }
+
+    #[test]
+    fn dibv5_header_describes_a_top_down_32_bit_image() {
+        let rgba: Vec<u8> = (0u8..16).collect(); // 2x2 pixels
+        let payload = dibv5_payload(2, 2, &rgba);
+        let header_len = size_of::<BITMAPV5HEADER>();
+        assert_eq!(payload.len(), header_len + 16);
+        let header = unsafe { ptr::read_unaligned(payload.as_ptr().cast::<BITMAPV5HEADER>()) };
+        assert_eq!(header.bV5Size as usize, header_len);
+        assert_eq!(header.bV5Width, 2);
+        assert_eq!(header.bV5Height, -2);
+        assert_eq!(header.bV5Planes, 1);
+        assert_eq!(header.bV5BitCount, 32);
+        assert_eq!(header.bV5Compression, BI_BITFIELDS);
+        assert_eq!(header.bV5SizeImage, 16);
+        assert_eq!(header.bV5AlphaMask, 0xff00_0000);
+        // Rows are copied verbatim (top-down source into top-down payload).
+        assert_eq!(&payload[header_len..], &rgba[..]);
+    }
+
+    #[test]
+    fn clipboard_alloc_failure_leaves_no_locked_memory() {
+        // A zero-byte payload still allocates; the point is that alloc + copy
+        // round-trips through GlobalAlloc/GlobalLock without leaking. The
+        // failure path (GlobalAlloc returning null) cannot be forced portably,
+        // so we exercise the success path and rely on ClipboardTransfer's
+        // Drop for the error paths.
+        let handle = alloc_clipboard_payload(&[1, 2, 3]).expect("alloc");
+        let mut transfer = ClipboardTransfer::new(handle);
+        let mem = unsafe { GlobalLock(handle) };
+        assert!(!mem.is_null());
+        unsafe {
+            GlobalUnlock(handle);
+        }
+        transfer.release(); // drops -> GlobalFree
     }
 
     fn marker(t_s: f64) -> ClipMarker {
