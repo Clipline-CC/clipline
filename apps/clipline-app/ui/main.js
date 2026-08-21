@@ -71,6 +71,14 @@ listen("osu-enrichment-updated", () => {
 
 listen("error", (e) => { $("error").textContent = e.payload; });
 
+// The shutter sound is the real confirmation; this is the visible echo naming
+// what was captured and where it landed.
+listen("screenshot-saved", (e) => {
+  const s = e.payload || {};
+  const name = String(s.path || "").split(/[\\\\/]/).pop();
+  setNotice("screenshot (" + s.mode + ") saved " + name, { transient: true });
+});
+
 listen("mic-test", (e) => {
   if (!micTestRunning) return;
   const result = e.payload || {};

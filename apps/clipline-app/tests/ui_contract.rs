@@ -2869,6 +2869,16 @@ fn screenshot_hotkeys_capture_region_screen_and_window() {
             && app.contains("fn request_screenshot"),
         "the native shell must route screenshot hotkeys to RuntimeState"
     );
+    assert!(
+        app.contains("play_screenshot_taken") && app.contains("\"screenshot-saved\""),
+        "a taken screenshot must confirm audibly and tell the UI where it landed"
+    );
+    for required in [
+        "listen(\"screenshot-saved\"",
+        "\"screenshot (\" + s.mode + \") saved \" + name",
+    ] {
+        assert!(js.contains(required), "screenshot UI must include `{required}`");
+    }
 }
 
 #[test]

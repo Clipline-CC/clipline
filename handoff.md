@@ -394,6 +394,26 @@ rail, labels, and chapter-marker export.
 
 ## Checkpoint (2026-08-12): Nightly 0.1.53
 
+## Screenshot capture (2026-08-20 plan)
+
+Plan: `docs/superpowers/plans/2026-08-20-screenshot-capture.md`.
+
+Tasks 1-11 are implemented on `investigate-sharex`: WGC still capture, PNG encode/publish,
+clipboard copy, hotkeys + PrintScreen bind, Snipping Tool conflict handling, library cards,
+lightbox, quota accounting, and the confirmation sound/toast.
+
+`shutter.ogg` is an 83 ms two-click shutter: a short white-noise tick followed by a softer pink-noise
+tail, quieter than `soundeffect.ogg` and noise-based so it cannot be mistaken for the bookmark blip.
+rodio is built `default-features = false, features = ["vorbis"]`, so it must stay Ogg Vorbis.
+Regenerate or replace it with the bundled ffmpeg:
+
+```sh
+ffmpeg -y -f lavfi -i "anoisesrc=color=white:duration=0.03:amplitude=0.35" \
+  -f lavfi -i "anoisesrc=color=pink:duration=0.055:amplitude=0.25" \
+  -filter_complex "[0:a]highpass=f=1200,lowpass=f=6000,afade=t=out:st=0.012:d=0.018[a0];[1:a]lowpass=f=3000,adelay=28|28,afade=t=in:d=0.004,afade=t=out:st=0.02:d=0.035[a1];[a0][a1]amix=inputs=2:normalize=0,aformat=sample_rates=48000:channel_layouts=mono" \
+  -c:a libvorbis -q:a 3 shutter.ogg
+```
+
 Plan: `docs/superpowers/plans/2026-08-12-nightly-0.1.53.md`.
 
 Nightly 0.1.53 publishes the user bookmark hotkey (**#160**) on top of Nightly 0.1.52. It is the

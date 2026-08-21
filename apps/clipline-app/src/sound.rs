@@ -8,6 +8,9 @@ const SOUND_EFFECT_OGG: &[u8] = include_bytes!("../../../soundeffect.ogg");
 /// acknowledgement mid-game, and the two must not be mistaken for each other.
 /// rodio is built with the `vorbis` feature only, so assets stay Ogg Vorbis.
 const BOOKMARK_OGG: &[u8] = include_bytes!("../../../bookmark.ogg");
+/// A camera-shutter click: shorter and quieter than the replay-save sound, and
+/// noise-based so it cannot be mistaken for the bookmark's two-tone blip.
+const SHUTTER_OGG: &[u8] = include_bytes!("../../../shutter.ogg");
 
 pub fn play_replay_saved() {
     play_asset(
@@ -22,6 +25,14 @@ pub fn play_bookmark_added() {
         "clipline-bookmark-sound",
         BOOKMARK_OGG,
         "bookmark_sound_failed",
+    );
+}
+
+pub fn play_screenshot_taken() {
+    play_asset(
+        "clipline-shutter-sound",
+        SHUTTER_OGG,
+        "screenshot_sound_failed",
     );
 }
 
@@ -70,7 +81,19 @@ mod tests {
     }
 
     #[test]
+    fn embedded_shutter_sound_decodes() {
+        let mut decoder = Decoder::new(Cursor::new(SHUTTER_OGG)).expect("decode shutter sound");
+        assert!(decoder.next().is_some(), "shutter sound must contain samples");
+    }
+
+    #[test]
     fn bookmark_sound_is_distinct_from_the_save_sound() {
         assert_ne!(BOOKMARK_OGG, SOUND_EFFECT_OGG);
+    }
+
+    #[test]
+    fn shutter_sound_is_distinct_from_the_other_sounds() {
+        assert_ne!(SHUTTER_OGG, SOUND_EFFECT_OGG);
+        assert_ne!(SHUTTER_OGG, BOOKMARK_OGG);
     }
 }

@@ -1676,6 +1676,7 @@ impl RuntimeState {
                     .and_then(|image| screenshot::save_frame(&media_root, mode, &image, None));
                 match result {
                     Ok(saved) => {
+                        crate::sound::play_screenshot_taken();
                         if let Err(error) = crate::library::copy_screenshot_to_clipboard(
                             &saved.path,
                             &saved.rgba,
