@@ -277,6 +277,7 @@ function fillSettings(s) {
   $("set-screenshot-screen-hotkey-2").value = s.screenshot_screen_hotkey_secondary || "";
   $("set-screenshot-window-hotkey").value = s.screenshot_window_hotkey || "";
   $("set-screenshot-window-hotkey-2").value = s.screenshot_window_hotkey_secondary || "";
+  refreshSnippingToolStatus();
   updateHotkeyLabels(s.hotkey, s.hotkey_secondary || "");
   $("set-open-on-startup").checked = !!s.open_on_startup;
   $("set-close-to-tray").checked = s.close_to_tray !== false;
@@ -1796,6 +1797,41 @@ function updateHotkeyLabels(hotkey = saveHotkeyLabel(), secondary = saveSecondar
   $("rail-hotkey").title = `Save Replay: ${full}`;
   $("rail-save").title = `Save Replay (${full})`;
 }
+
+async function refreshSnippingToolStatus() {
+  const status = $("snipping-tool-status");
+  const button = $("snipping-tool-disable");
+  if (!status || !button) return;
+  try {
+    const state = await invoke("snipping_tool_printscreen_status");
+    if (state === "disabled") {
+      status.textContent = "PrintScreen is free for Clipline shortcuts. If a screenshot bind still opens Snipping Tool, sign out and back in (or restart Explorer) first.";
+      button.hidden = true;
+    } else {
+      status.textContent = "Windows currently gives the PrintScreen key to Snipping Tool, so PrintScreen binds will not reach Clipline.";
+      button.hidden = false;
+    }
+  } catch (e) {
+    status.textContent = `Could not check the PrintScreen setting: ${e}`;
+    button.hidden = true;
+  }
+}
+
+$("snipping-tool-disable").addEventListener("click", async () => {
+  const confirmed = await confirmDeleteDialog(
+    "Give PrintScreen to Clipline?",
+    "This changes a Windows setting so Snipping Tool no longer owns the PrintScreen key. Windows may need a sign-out or an Explorer restart before it takes effect.",
+    "Change setting"
+  );
+  if (!confirmed) return;
+  const status = $("snipping-tool-status");
+  try {
+    await invoke("disable_snipping_tool_printscreen");
+    await refreshSnippingToolStatus();
+  } catch (e) {
+    status.textContent = `Could not update the PrintScreen setting: ${e}`;
+  }
+});
 
 function fallbackCaptureSourceLabel(settings) {
   if (settings && settings.capture_mode === "display_region") {

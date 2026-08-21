@@ -1766,16 +1766,20 @@ function confirmBulkDelete(count) {
   return confirmDeleteDialog(`Delete ${count} clips?`, "This cannot be undone.");
 }
 
-function confirmDeleteDialog(title, detail) {
+function confirmDeleteDialog(title, detail, acceptLabel) {
   return new Promise((resolve) => {
     const dlg = $("confirm-dialog");
     const titleEl = $("confirm-title");
+    const acceptEl = $("confirm-accept");
+    const defaultAcceptLabel = acceptEl.textContent;
     titleEl.textContent = title;
     $("confirm-detail").textContent = detail;
+    if (acceptLabel) acceptEl.textContent = acceptLabel;
     const finish = (ok) => {
       dlg.removeEventListener("close", onClose);
       if (dlg.open) dlg.close();
       titleEl.textContent = DEFAULT_DELETE_CONFIRM_TITLE;
+      acceptEl.textContent = defaultAcceptLabel;
       resolve(ok);
     };
     const onClose = () => finish(false); // Esc / backdrop paths

@@ -3262,6 +3262,23 @@ fn parse_global_hotkey(raw: &str) -> Result<Option<Shortcut>, String> {
     }
 }
 
+#[tauri::command]
+fn snipping_tool_printscreen_status() -> Result<String, String> {
+    match crate::windows::snipping_tool_printscreen_state()? {
+        crate::windows::SnippingToolState::Enabled => Ok("enabled".to_string()),
+        crate::windows::SnippingToolState::Disabled => Ok("disabled".to_string()),
+    }
+}
+
+#[tauri::command]
+fn disable_snipping_tool_printscreen() -> Result<String, String> {
+    crate::windows::disable_snipping_tool_printscreen(true)?;
+    match crate::windows::snipping_tool_printscreen_state()? {
+        crate::windows::SnippingToolState::Disabled => Ok("disabled".to_string()),
+        crate::windows::SnippingToolState::Enabled => Ok("enabled".to_string()),
+    }
+}
+
 /// Which screenshot action (if any) this registered shortcut belongs to.
 /// Checked before the Save Replay match so a PrintScreen bind never falls
 /// through to the replay path.
@@ -3292,13 +3309,25 @@ fn screenshot_shortcut_mode(
     ))
 }
 
-/// The configured Save Replay keybinds that go through the OS global-shortcut
-/// registry (mouse and modified keyboard binds use the low-level hook instead).
+/// The configured keybinds that go through the OS global-shortcut registry:
+/// Save Replay plus every screenshot bind (mouse and modified keyboard binds
+/// use the low-level hook instead).
 fn global_hotkeys(settings: &AppSettings) -> Result<Vec<Shortcut>, String> {
     let mut shortcuts = Vec::new();
     for raw in settings.hotkeys() {
         if let Some(shortcut) = parse_global_hotkey(raw)? {
             shortcuts.push(shortcut);
+        }
+    }
+    for raws in [
+        settings.screenshot_region_hotkeys(),
+        settings.screenshot_screen_hotkeys(),
+        settings.screenshot_window_hotkeys(),
+    ] {
+        for raw in raws {
+            if let Some(shortcut) = parse_global_hotkey(raw)? {
+                shortcuts.push(shortcut);
+            }
         }
     }
     Ok(shortcuts)
@@ -3818,6 +3847,8 @@ pub fn run() {
             crate::library::copy_clip_to_clipboard,
             crate::library::copy_text_to_clipboard,
             crate::library::open_media_folder,
+            snipping_tool_printscreen_status,
+            disable_snipping_tool_printscreen,
             crate::library::storage_status
         ])
         .setup(move |app| {
@@ -4729,6 +4760,18 @@ mod tests {
         assert!(
             live.contains(&parse_hotkey("F6").unwrap()),
             "the default Save Replay bind must be an OS global shortcut"
+        );
+        assert!(
+            live.contains(&parse_hotkey("PrintScreen").unwrap()),
+            "the default screenshot screen bind is a PrintScreen global shortcut"
+        );
+        assert!(
+            live.contains(&parse_hotkey("Ctrl+PrintScreen").unwrap()),
+            "the default screenshot region bind is an OS global shortcut"
+        );
+        assert!(
+            live.contains(&parse_hotkey("Alt+PrintScreen").unwrap()),
+            "the default screenshot window bind is an OS global shortcut"
         );
         assert!(
             effective_global_hotkeys(&settings, true)

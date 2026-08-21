@@ -21,7 +21,8 @@ use windows_sys::Win32::Storage::FileSystem::{
     GetDiskFreeSpaceExW, MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
 };
 use windows_sys::Win32::System::Registry::{
-    RegCloseKey, RegDeleteValueW, RegOpenKeyExW, HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE,
+    RegCloseKey, RegDeleteValueW, RegGetValueW, RegOpenKeyExW, RegSetValueW, HKEY,
+    HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, RRF_RT_REG_DWORD, REG_DWORD,
 };
 use windows_sys::Win32::System::Threading::{
     GetProcessTimes, OpenProcess, OpenProcessToken, WaitForSingleObject, INFINITE,
@@ -39,6 +40,99 @@ const AUTOSTART_KEYS: [&str; 2] = [
     r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
     r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run",
 ];
+const SNIPPING_TOOL_KEY: &str = r"Control Panel\Keyboard";
+const SNIPPING_TOOL_VALUE: &str = "PrintScreenKeyForSnippingEnabled";
+
+/// What Windows will do with a bare PrintScreen press right now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SnippingToolState {
+    /// The OS value is absent or non-zero: Snipping Tool owns PrintScreen.
+    Enabled,
+    /// The OS value is 0: PrintScreen is free for global shortcuts.
+    Disabled,
+}
+
+pub(crate) fn snipping_tool_printscreen_state() -> Result<SnippingToolState, String> {
+    read_snipping_tool_state(HKEY_CURRENT_USER)
+}
+
+/// Writes PrintScreenKeyForSnippingEnabled = 0. Refuses to run without
+/// explicit consent; Windows may need a sign-out or Explorer restart before
+/// the change takes effect, so callers must have told the user that.
+pub(crate) fn disable_snipping_tool_printscreen(consent: bool) -> Result<(), String> {
+    write_snipping_tool_consent_gate(consent, HKEY_CURRENT_USER)
+}
+
+fn write_snipping_tool_consent_gate(consent: bool, root: HKEY) -> Result<(), String> {
+    if !consent {
+        return Err("snipping tool override requires explicit user consent".into());
+    }
+    let subkey_w = wide_null_checked(OsStr::new(SNIPPING_TOOL_KEY), "registry subkey")?;
+    let value_w = wide_null_checked(OsStr::new(SNIPPING_TOOL_VALUE), "registry value")?;
+    let mut key = std::ptr::null_mut();
+    let opened =
+        unsafe { RegOpenKeyExW(root, subkey_w.as_ptr(), 0, KEY_SET_VALUE, &mut key) };
+    if opened != windows_sys::Win32::Foundation::ERROR_SUCCESS {
+        return Err(format!(
+            "open {SNIPPING_TOOL_KEY} for write: Windows error {opened}"
+        ));
+    }
+    let key = OwnedRegistryKey(key);
+    let zero: u32 = 0;
+    let set = unsafe {
+        RegSetValueW(
+            key.0,
+            value_w.as_ptr(),
+            REG_DWORD,
+            (&zero as *const u32).cast(),
+            std::mem::size_of::<u32>() as u32,
+        )
+    };
+    if set == windows_sys::Win32::Foundation::ERROR_SUCCESS {
+        Ok(())
+    } else {
+        Err(format!("write {SNIPPING_TOOL_VALUE}: Windows error {set}"))
+    }
+}
+
+fn read_snipping_tool_state(root: HKEY) -> Result<SnippingToolState, String> {
+    let subkey_w = wide_null_checked(OsStr::new(SNIPPING_TOOL_KEY), "registry subkey")?;
+    let value_w = wide_null_checked(OsStr::new(SNIPPING_TOOL_VALUE), "registry value")?;
+    let mut key = std::ptr::null_mut();
+    let opened =
+        unsafe { RegOpenKeyExW(root, subkey_w.as_ptr(), 0, KEY_QUERY_VALUE, &mut key) };
+    if opened == windows_sys::Win32::Foundation::ERROR_FILE_NOT_FOUND {
+        return Ok(SnippingToolState::Enabled);
+    }
+    if opened != windows_sys::Win32::Foundation::ERROR_SUCCESS {
+        return Err(format!("open {SNIPPING_TOOL_KEY}: Windows error {opened}"));
+    }
+    let key = OwnedRegistryKey(key);
+    let mut dword: u32 = 0;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    let read = unsafe {
+        RegGetValueW(
+            key.0,
+            std::ptr::null(),
+            value_w.as_ptr(),
+            RRF_RT_REG_DWORD,
+            std::ptr::null_mut(),
+            (&mut dword as *mut u32).cast(),
+            &mut size,
+        )
+    };
+    if read == windows_sys::Win32::Foundation::ERROR_FILE_NOT_FOUND {
+        return Ok(SnippingToolState::Enabled);
+    }
+    if read != windows_sys::Win32::Foundation::ERROR_SUCCESS {
+        return Err(format!("read {SNIPPING_TOOL_VALUE}: Windows error {read}"));
+    }
+    if dword == 0 {
+        Ok(SnippingToolState::Disabled)
+    } else {
+        Ok(SnippingToolState::Enabled)
+    }
+}
 
 #[link(name = "ntdll")]
 extern "system" {
@@ -506,6 +600,29 @@ fn last_error(context: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows_sys::Win32::System::Registry::HKEY_CLASSES_ROOT;
+
+    #[test]
+    fn snipping_tool_probe_reads_the_real_hku_value() {
+        // Whatever the dev machine has set, the probe must not error.
+        snipping_tool_printscreen_state().expect("probe PrintScreenKeyForSnippingEnabled");
+    }
+
+    #[test]
+    fn snipping_tool_probe_treats_a_missing_key_as_enabled() {
+        assert_eq!(
+            read_snipping_tool_state(HKEY_CLASSES_ROOT).unwrap(),
+            SnippingToolState::Enabled
+        );
+    }
+
+    #[test]
+    fn snipping_tool_write_is_a_no_op_without_consent() {
+        // HKEY_CLASSES_ROOT cannot be written by a normal process, so a bug
+        // that ignored the consent gate would fail here instead of silently
+        // succeeding.
+        assert!(write_snipping_tool_consent_gate(false, HKEY_CLASSES_ROOT).is_err());
+    }
 
     #[test]
     fn elevated_restart_argument_round_trips_parent_process_instance() {
