@@ -154,19 +154,7 @@ unsafe fn color_bitmap_to_png(
         }
     }
 
-    encode_rgba_png(width as u32, height as u32, &buf)
-}
-
-pub fn encode_rgba_png(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
-    let mut out = Vec::new();
-    {
-        let mut encoder = png::Encoder::new(&mut out, width, height);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder.write_header().ok()?;
-        writer.write_image_data(rgba).ok()?;
-    }
-    Some(out)
+    crate::image::encode_rgba_png(width as u32, height as u32, &buf)
 }
 
 #[cfg(test)]

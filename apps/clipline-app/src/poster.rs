@@ -4,11 +4,9 @@
 //! loads these through the asset protocol, the same path clips play back
 //! through, so no new scope is needed.
 
-use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -21,7 +19,6 @@ const POSTER_WIDTH: u32 = 480;
 const POSTER_EXTRACTION_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_POSTER_STDOUT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_POSTER_STDERR_BYTES: usize = 64 * 1024;
-static NEXT_POSTER_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 static POSTER_FFMPEG: OnceLock<PathBuf> = OnceLock::new();
 
 /// The cached poster path for a clip: `clip.mp4` -> `clip.poster.jpg`. Mirrors
@@ -105,7 +102,7 @@ fn publish_poster_output(poster: &Path, stdout: BoundedPipeOutput) -> Result<(),
     // need to grant the independently distributed ffmpeg child write access
     // to the user's media folder. Publishing through a sibling temp keeps the
     // existing crash-safe atomic replacement.
-    let mut tmp = PosterTemp::reserve(poster)?;
+    let mut tmp = crate::image::SiblingTemp::reserve(poster)?;
     tmp.write_all(&stdout.bytes)?;
     tmp.publish(poster)
 }
@@ -283,82 +280,6 @@ fn read_bounded(mut reader: impl Read, max_bytes: usize) -> io::Result<BoundedPi
     }
 }
 
-struct PosterTemp {
-    path: PathBuf,
-    file: Option<File>,
-    armed: bool,
-}
-
-impl PosterTemp {
-    fn reserve(poster: &Path) -> Result<Self, String> {
-        let file_name = poster
-            .file_name()
-            .ok_or_else(|| "poster path has no file name".to_string())?;
-        for _ in 0..64 {
-            let id = NEXT_POSTER_TEMP_ID.fetch_add(1, Ordering::Relaxed);
-            let mut temp_name = file_name.to_os_string();
-            temp_name.push(format!(".tmp.{}.{id}", std::process::id()));
-            let path = poster.with_file_name(temp_name);
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(file) => {
-                    return Ok(Self {
-                        path,
-                        file: Some(file),
-                        armed: true,
-                    });
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(error) => return Err(format!("reserve poster temp: {error}")),
-            }
-        }
-        Err("reserve poster temp: unique-name attempts exhausted".to_string())
-    }
-
-    #[cfg(test)]
-    fn path(&self) -> &Path {
-        &self.path
-    }
-
-    fn write_all(&mut self, jpeg: &[u8]) -> Result<(), String> {
-        let file = self
-            .file
-            .as_mut()
-            .ok_or_else(|| "poster temp is already closed".to_string())?;
-        file.write_all(jpeg)
-            .and_then(|()| file.flush())
-            .map_err(|error| format!("write poster temp: {error}"))
-    }
-
-    fn publish(mut self, poster: &Path) -> Result<(), String> {
-        // Close the handle before the atomic rename; publishing must not
-        // depend on the platform's sharing flags for an open Rust File.
-        drop(self.file.take());
-        atomic_replace_file(&self.path, poster)
-            .map_err(|error| format!("finalize poster: {error}"))?;
-        self.armed = false;
-        Ok(())
-    }
-}
-
-impl Drop for PosterTemp {
-    fn drop(&mut self) {
-        drop(self.file.take());
-        if self.armed {
-            let _ = std::fs::remove_file(&self.path);
-        }
-    }
-}
-
-#[cfg(windows)]
-fn atomic_replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
-    crate::windows::replace_file(from, to)
-}
-
-#[cfg(not(windows))]
-fn atomic_replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
-    std::fs::rename(from, to)
-}
-
 /// `-ss` value: seconds with millisecond precision, never negative.
 fn seek_arg(seek_s: f64) -> String {
     format!("{:.3}", seek_s.max(0.0))
@@ -371,6 +292,7 @@ fn scale_filter() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     use std::cell::Cell;
 
     #[test]
@@ -494,8 +416,8 @@ mod tests {
     fn concurrent_poster_temps_have_independent_owned_paths() {
         let dir = test_dir("owned-temp");
         let poster = dir.join("clip.poster.jpg");
-        let first = PosterTemp::reserve(&poster).unwrap();
-        let second = PosterTemp::reserve(&poster).unwrap();
+        let first = crate::image::SiblingTemp::reserve(&poster).unwrap();
+        let second = crate::image::SiblingTemp::reserve(&poster).unwrap();
         let first_path = first.path().to_path_buf();
         let second_path = second.path().to_path_buf();
 
@@ -518,7 +440,7 @@ mod tests {
         let dir = test_dir("atomic-publish");
         let poster = dir.join("clip.poster.jpg");
         std::fs::write(&poster, b"stale").unwrap();
-        let mut temp = PosterTemp::reserve(&poster).unwrap();
+        let mut temp = crate::image::SiblingTemp::reserve(&poster).unwrap();
         let temp_path = temp.path().to_path_buf();
         temp.write_all(b"complete jpeg").unwrap();
 
