@@ -3569,19 +3569,23 @@ fn disable_snipping_tool_printscreen() -> Result<String, String> {
 /// Which screenshot action (if any) this registered shortcut belongs to.
 /// Checked before the Save Replay match so a PrintScreen bind never falls
 /// through to the replay path.
-fn screenshot_shortcut_mode(
-    state: &tauri::State<'_, RuntimeState>,
+fn screenshot_mode_for_settings(
+    settings: &AppSettings,
     shortcut: &Shortcut,
+    actions_paused: bool,
 ) -> Option<ScreenshotMode> {
-    let inner = state.0.lock().ok()?;
-    let settings = &inner.settings;
+    // While a keybind field is capturing, its shortcuts are unregistered, so
+    // this dispatch cannot legitimately fire; the check only closes the race
+    // where a press lands between the unregister and the field taking over.
+    if actions_paused {
+        return None;
+    }
     let matches_mode = |raws: Vec<&str>, mode: ScreenshotMode| {
         raws.into_iter()
             .filter_map(|raw| parse_global_hotkey(raw).ok().flatten())
             .any(|active| &active == shortcut)
             .then_some(mode)
     };
-    crate::hotkeys::actions_paused().then_some(())?;
     matches_mode(
         settings.screenshot_region_hotkeys(),
         ScreenshotMode::Region,
@@ -3594,6 +3598,47 @@ fn screenshot_shortcut_mode(
         settings.screenshot_window_hotkeys(),
         ScreenshotMode::Window,
     ))
+}
+
+fn screenshot_shortcut_mode(
+    state: &tauri::State<'_, RuntimeState>,
+    shortcut: &Shortcut,
+) -> Option<ScreenshotMode> {
+    let inner = state.0.lock().ok()?;
+    screenshot_mode_for_settings(&inner.settings, shortcut, crate::hotkeys::actions_paused())
+}
+
+#[cfg(test)]
+mod screenshot_shortcut_tests {
+    use super::*;
+
+    #[test]
+    fn printscreen_binds_map_to_screenshot_modes_when_actions_are_live() {
+        let settings = AppSettings::default();
+        for (raw, expected) in [
+            ("PrintScreen", ScreenshotMode::Screen),
+            ("Ctrl+PrintScreen", ScreenshotMode::Region),
+            ("Alt+PrintScreen", ScreenshotMode::Window),
+        ] {
+            let shortcut = parse_global_hotkey(raw).unwrap().unwrap();
+            assert_eq!(
+                screenshot_mode_for_settings(&settings, &shortcut, false),
+                Some(expected),
+                "{raw} must dispatch as a screenshot, never fall through to save replay"
+            );
+        }
+    }
+
+    #[test]
+    fn paused_keybind_capture_blocks_screenshot_dispatch() {
+        let settings = AppSettings::default();
+        let shortcut = parse_global_hotkey("PrintScreen").unwrap().unwrap();
+        assert_eq!(
+            screenshot_mode_for_settings(&settings, &shortcut, true),
+            None,
+            "while a keybind field captures, dispatch must stay blocked"
+        );
+    }
 }
 
 /// The configured keybinds that go through the OS global-shortcut registry:
