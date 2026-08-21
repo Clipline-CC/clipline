@@ -1671,6 +1671,7 @@ impl RuntimeState {
             self.begin_region_overlay(app);
             return;
         }
+        let started = std::time::Instant::now();
         let app = app.clone();
         let app_for_spawn_error = app.clone();
         std::thread::Builder::new()
@@ -1679,15 +1680,26 @@ impl RuntimeState {
                 let media_root = app.state::<crate::library::StorageSettings>().media_dir();
                 let result = screenshot::capture_frame(mode)
                     .and_then(|image| screenshot::save_frame(&media_root, mode, &image, None));
+                tracing::info!(
+                    event = "screenshot_captured",
+                    mode = mode.label(),
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    ok = result.is_ok()
+                );
                 match result {
                     Ok(saved) => {
-                        crate::sound::play_screenshot_taken();
-                        if let Err(error) = crate::library::copy_screenshot_to_clipboard(
-                            &saved.path,
-                            &saved.rgba,
-                            saved.width,
-                            saved.height,
-                        ) {
+                        // The shot is already on disk; clipboard copy must not
+                        // delay the shutter feedback.
+                        let feedback = {
+                            crate::sound::play_screenshot_taken();
+                            crate::library::copy_screenshot_to_clipboard(
+                                &saved.path,
+                                &saved.rgba,
+                                saved.width,
+                                saved.height,
+                            )
+                        };
+                        if let Err(error) = feedback {
                             tracing::warn!(event = "screenshot_clipboard_failed", %error);
                             let _ = app.emit("error", format!("clipboard copy failed: {error}"));
                         }
@@ -1729,20 +1741,30 @@ impl RuntimeState {
     }
 
     fn open_region_overlay<R: Runtime>(&self, app: &AppHandle<R>) -> Result<(), String> {
-        // Reuse the existing worker-thread pattern: the WGC grab must not
-        // block the main thread, but the window must be built on it.
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::Builder::new()
-            .name("region-frame".into())
-            .spawn(move || {
-                let frame = screenshot::capture_frame(ScreenshotMode::Region);
-                let _ = tx.send(frame);
-            })
-            .map_err(|error| format!("start region frame worker: {error}"))?;
-        let image = rx
-            .recv()
-            .map_err(|_| "region frame worker died".to_string())?
-            .map_err(|error| format!("grab region frame: {error}"))?;
+        // A previous overlay's hidden webview is reused when present: building
+        // a fresh WebView2 window costs seconds; showing an existing one is
+        // near-instant. The frozen temp PNG is refreshed every time so the
+        // reused webview re-reads current pixels from the same path.
+        let reuse = app.get_webview_window(REGION_WINDOW_LABEL);
+
+        let image = if reuse.is_some() {
+            screenshot::capture_frame(ScreenshotMode::Region)
+                .map_err(|error| format!("grab region frame: {error}"))?
+        } else {
+            // Reuse the existing worker-thread pattern: the WGC grab must not
+            // block the main thread, but the window must be built on it.
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::Builder::new()
+                .name("region-frame".into())
+                .spawn(move || {
+                    let frame = screenshot::capture_frame(ScreenshotMode::Region);
+                    let _ = tx.send(frame);
+                })
+                .map_err(|error| format!("start region frame worker: {error}"))?;
+            rx.recv()
+                .map_err(|_| "region frame worker died".to_string())?
+                .map_err(|error| format!("grab region frame: {error}"))?
+        };
 
         let Some(monitor) = clipline_capture::windows::still::monitor_at_cursor() else {
             return Err("no monitor found under the mouse cursor".into());
@@ -1750,29 +1772,50 @@ impl RuntimeState {
         let dpi = clipline_capture::windows::still::dpi_at_cursor();
 
         // Freeze the frame to a temp PNG so the overlay webview can display
-        // it through the asset protocol; deleted on every exit path below.
-        let png = crate::image::encode_rgba_png(image.width(), image.height(), &image.to_rgba())
-            .ok_or_else(|| "encode region preview PNG".to_string())?;
-        let temp_path = std::env::temp_dir()
-            .join(format!("clipline-region-frame-{}.png", std::process::id()));
-        std::fs::write(&temp_path, &png)
-            .map_err(|error| format!("write region preview: {error}"))?;
+        // it through the asset protocol; the path is stable across opens and
+        // the file is deleted when the overlay state is torn down.
+        let png =
+            crate::image::encode_rgba_png(image.width(), image.height(), &image.to_rgba())
+                .ok_or_else(|| "encode region preview PNG".to_string())?;
+        let temp_path =
+            std::env::temp_dir().join(format!("clipline-region-frame-{}.png", std::process::id()));
+        std::fs::write(&temp_path, &png).map_err(|error| format!("write region preview: {error}"))?;
         let canonical_temp = temp_path.canonicalize().unwrap_or_else(|_| temp_path.clone());
         if let Err(error) = app.asset_protocol_scope().allow_file(&canonical_temp) {
             let _ = std::fs::remove_file(&temp_path);
             return Err(format!("scope region preview: {error}"));
         }
 
-        let state = app.state::<RegionOverlayState>();
-        *state
-            .0
-            .lock()
-            .map_err(|_| "region state poisoned".to_string())? = Some(RegionOverlay {
-            frame: image,
-            monitor,
-            dpi,
-            temp_path: temp_path.clone(),
-        });
+        {
+            let state = app.state::<RegionOverlayState>();
+            let mut slot = state
+                .0
+                .lock()
+                .map_err(|_| "region state poisoned".to_string())?;
+            *slot = Some(RegionOverlay {
+                frame: image,
+                monitor,
+                dpi,
+                temp_path,
+            });
+        }
+
+        if let Some(window) = reuse {
+            // Re-position for a possibly moved/changed monitor, then wake the
+            // overlay JS so it reloads the frozen frame before becoming
+            // visible.
+            use tauri::{PhysicalPosition, PhysicalSize};
+            let _ = window.set_position(PhysicalPosition::new(monitor.x, monitor.y));
+            let _ = window.set_size(PhysicalSize::new(monitor.width, monitor.height));
+            let _ = app.emit_to(
+                REGION_WINDOW_LABEL,
+                "region-overlay-shown",
+                serde_json::json!({ "frame_path": canonical_temp.display().to_string() }),
+            );
+            let _ = window.show();
+            let _ = window.set_focus();
+            return Ok(());
+        }
 
         let build = tauri::WebviewWindowBuilder::new(
             app,
@@ -2453,6 +2496,8 @@ struct RegionOverlay {
 }
 
 fn cleanup_region_overlay<R: Runtime>(app: &AppHandle<R>) {
+    // Drop the frozen frame and delete the temp PNG. The overlay webview
+    // itself stays alive (hidden) for reuse; it dies with the process.
     if let Some(state) = app.try_state::<RegionOverlayState>() {
         if let Ok(mut slot) = state.0.lock() {
             if let Some(overlay) = slot.take() {
@@ -2463,8 +2508,18 @@ fn cleanup_region_overlay<R: Runtime>(app: &AppHandle<R>) {
 }
 
 fn close_region_window<R: Runtime>(app: &AppHandle<R>) {
+    // Hide instead of destroy: rebuilding the overlay webview costs seconds
+    // and was the dominant region-screenshot delay. The hidden window is
+    // reused by the next open; it dies with the process on quit.
     if let Some(window) = app.get_webview_window(REGION_WINDOW_LABEL) {
-        let _ = window.close();
+        // Disarm before parking so the webview's own blur (hiding steals
+        // focus) cannot fire a cancel command back at us.
+        let _ = app.emit_to(
+            REGION_WINDOW_LABEL,
+            "region-overlay-hidden",
+            serde_json::json!({}),
+        );
+        let _ = window.hide();
     }
 }
 
@@ -2541,11 +2596,7 @@ fn complete_region_screenshot<R: Runtime>(
         }),
     );
     close_region_window(&app);
-    // The Destroyed handler clears state and deletes the temp file; but if
-    // the window is already gone, do it here so the PNG never lingers.
-    if app.get_webview_window(REGION_WINDOW_LABEL).is_none() {
-        cleanup_region_overlay(&app);
-    }
+    cleanup_region_overlay(&app);
     let saved = saved?;
     crate::sound::play_screenshot_taken();
     if let Err(error) = crate::library::copy_screenshot_to_clipboard(
@@ -2567,9 +2618,7 @@ fn complete_region_screenshot<R: Runtime>(
 #[tauri::command]
 fn cancel_region_screenshot<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     close_region_window(&app);
-    if app.get_webview_window(REGION_WINDOW_LABEL).is_none() {
-        cleanup_region_overlay(&app);
-    }
+    cleanup_region_overlay(&app);
     Ok(())
 }
 

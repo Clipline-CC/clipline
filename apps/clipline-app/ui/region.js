@@ -3,6 +3,7 @@
 // translates DOM events into core calls and Tauri commands.
 (function () {
   const { invoke, convertFileSrc } = window.__TAURI__.core;
+  const { listen } = window.__TAURI__.event;
 
   const overlay = document.getElementById("region-overlay");
   const frame = document.getElementById("region-overlay-frame");
@@ -37,6 +38,27 @@
       }
     });
   }
+
+  // The backend reuses this hidden webview across selections. Each wake
+  // carries a fresh frozen-frame path; reload it before the window shows.
+  // `armed` distinguishes a live selection from the parked (hidden) state:
+  // blur only cancels while armed, so parking the window cannot cancel it.
+  var armed = false;
+  listen("region-overlay-shown", function (event) {
+    var payload = event.payload || {};
+    if (payload.frame_path) {
+      stateInfo = { frame_path: payload.frame_path };
+      frame.src = convertFileSrc(payload.frame_path) + "?t=" + Date.now();
+    }
+    hideSelection();
+    dragStart = null;
+    armed = true;
+  }).catch(function (e) {
+    console.error("region overlay listen failed", e);
+  });
+  listen("region-overlay-hidden", function () {
+    armed = false;
+  }).catch(function () {});
 
   function cssRectToPhysical(rect) {
     return {
@@ -119,7 +141,7 @@
   });
 
   window.addEventListener("blur", function () {
-    cancel();
+    if (armed) cancel();
   });
 
   init();
