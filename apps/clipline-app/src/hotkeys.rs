@@ -350,6 +350,12 @@ fn parse_hook_hotkey(raw: &str) -> Result<HookHotkey, String> {
         HotkeyKey::Keyboard(key) => {
             keyboard_key_vk_code(key).ok_or_else(|| format!("unsupported hotkey key: {key}"))?
         }
+        // PrintScreen is OS-registered via the global-shortcut plugin, never
+        // routed through the low-level hook (the hook filter would also have to
+        // swallow it OS-wide, which we do not want).
+        HotkeyKey::PrintScreen => {
+            return Err("PrintScreen is registered as a global shortcut, not a hook key".into())
+        }
         HotkeyKey::Middle => VK_MBUTTON_CODE,
         HotkeyKey::Mouse4 => VK_XBUTTON1_CODE,
         HotkeyKey::Mouse5 => VK_XBUTTON2_CODE,
@@ -653,6 +659,12 @@ mod tests {
     #[test]
     fn rejects_reserved_f12_through_shared_normalizer() {
         assert!(parse_hook_hotkey("F12").is_err());
+    }
+
+    #[test]
+    fn hook_does_not_claim_printscreen() {
+        assert!(parse_hook_hotkey("PrintScreen").is_err());
+        assert!(parse_hook_hotkey("Ctrl+PrintScreen").is_err());
     }
 
     #[test]

@@ -1,5 +1,6 @@
-//! Hotkey parsing: optional Ctrl/Alt/Shift + F1-F11/F13-F24 or selected mouse buttons.
-//! F12 is reserved by Windows for debuggers.
+//! Hotkey parsing: optional Ctrl/Alt/Shift + F1-F11/F13-F24, PrintScreen, or
+//! selected mouse buttons. F12 is reserved by Windows for debuggers; PrintScreen
+//! and F-keys are OS-registered global shortcuts, never low-level-hook keys.
 
 use tauri_plugin_global_shortcut::Shortcut;
 
@@ -12,7 +13,7 @@ pub fn parse_hotkey(raw: &str) -> Result<Shortcut, String> {
 pub fn is_global_shortcut_hotkey(raw: &str) -> Result<bool, String> {
     Ok(matches!(
         parse_hotkey_spec(raw)?.key,
-        HotkeyKey::Function(_)
+        HotkeyKey::Function(_) | HotkeyKey::PrintScreen
     ))
 }
 
@@ -58,13 +59,15 @@ pub(crate) fn parse_hotkey_spec(raw: &str) -> Result<HotkeySpec, String> {
                 if key.is_some() {
                     return Err("hotkey has more than one key".into());
                 }
-                if let Some(mouse) = mouse_key_from_token(other) {
+                if matches!(other, "printscreen" | "prtsc" | "prtscn") {
+                    key = Some(HotkeyKey::PrintScreen);
+                } else if let Some(mouse) = mouse_key_from_token(other) {
                     key = Some(mouse);
                 } else if let Some(keyboard) = keyboard_key_from_token(other) {
                     key = Some(HotkeyKey::Keyboard(keyboard));
                 } else {
                     return Err(
-                        "hotkey must use F1-F11, F13-F24, Middle, Mouse4, Mouse5, or Ctrl/Alt/Shift plus a keyboard key".into(),
+                        "hotkey must use F1-F11, F13-F24, PrintScreen, Middle, Mouse4, Mouse5, or Ctrl/Alt/Shift plus a keyboard key".into(),
                     );
                 }
             }
@@ -137,6 +140,7 @@ fn validate_hotkey_combination(
 pub(crate) enum HotkeyKey {
     Function(u8),
     Keyboard(String),
+    PrintScreen,
     Middle,
     Mouse4,
     Mouse5,
@@ -147,6 +151,7 @@ impl HotkeyKey {
         match self {
             Self::Function(n) => format!("F{n}"),
             Self::Keyboard(label) => label.clone(),
+            Self::PrintScreen => "PrintScreen".to_string(),
             Self::Middle => "Middle".to_string(),
             Self::Mouse4 => "Mouse4".to_string(),
             Self::Mouse5 => "Mouse5".to_string(),

@@ -1568,6 +1568,35 @@ fn parses_plain_function_key_hotkey() {
 }
 
 #[test]
+fn parses_printscreen_hotkey_tokens() {
+    for token in ["PrintScreen", "prtsc", "PrtScn"] {
+        assert_eq!(normalize_hotkey(token).unwrap(), "PrintScreen");
+        assert_eq!(
+            normalize_hotkey(&format!("ctrl+{token}")).unwrap(),
+            "Ctrl+PrintScreen"
+        );
+        assert_eq!(
+            normalize_hotkey(&format!("alt+shift+{token}")).unwrap(),
+            "Alt+Shift+PrintScreen"
+        );
+    }
+}
+
+#[test]
+fn printscreen_parses_bare_and_is_always_global_shortcut_routed() {
+    assert!(parse_hotkey("PrintScreen").is_ok());
+    for raw in [
+        "PrintScreen",
+        "Ctrl+PrintScreen",
+        "Alt+PrintScreen",
+        "Shift+PrintScreen",
+        "Ctrl+Alt+Shift+PrintScreen",
+    ] {
+        assert!(is_global_shortcut_hotkey(raw).unwrap(), "{raw}");
+    }
+}
+
+#[test]
 fn quota_zero_disables_quota_lock() {
     assert_eq!(quota_bytes_from_gb(0.0).unwrap(), None);
     assert_eq!(quota_bytes_from_gb(0.5).unwrap(), Some(512 * 1024 * 1024));
