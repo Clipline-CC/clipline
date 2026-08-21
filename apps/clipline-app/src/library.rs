@@ -370,7 +370,11 @@ fn push_clips_from(
     for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
         let Ok(entry) = entry else { continue };
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("mp4") {
+        let is_screenshot = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("png"));
+        if !is_screenshot && path.extension().and_then(|e| e.to_str()) != Some("mp4") {
             continue;
         }
         let meta = entry.metadata().ok();
@@ -386,13 +390,22 @@ fn push_clips_from(
         let size_mb = meta
             .map(|m| m.len() as f64 / (1024.0 * 1024.0))
             .unwrap_or(0.0);
-        let raw_markers = util::read_markers_raw(&path).map(filter_review_markers);
+        // Screenshots carry no markers or duration; never probe them as MP4s.
+        let raw_markers = if is_screenshot {
+            None
+        } else {
+            util::read_markers_raw(&path).map(filter_review_markers)
+        };
         let clip_metadata = read_clip_metadata(&path).unwrap_or_default();
         let duration_s = raw_markers
             .as_ref()
             .map(|markers| markers.duration_s)
             .filter(|duration| duration.is_finite() && *duration >= 0.0);
-        let markers = util::markers_with_inferred_audio_tracks(&path, raw_markers);
+        let markers = if is_screenshot {
+            None
+        } else {
+            util::markers_with_inferred_audio_tracks(&path, raw_markers)
+        };
         let title = clip_title_from_metadata(&clip_metadata);
         let kind = clip_kind_from_metadata(&path, &clip_metadata).to_string();
         // Prefer the session sidecar; fall back to the game named in markers
@@ -610,7 +623,7 @@ fn allow_local_clip_asset<R: Runtime>(
     root: &Path,
     clip: &Path,
 ) -> Result<(), String> {
-    allow_local_media_asset(app, root, clip, &["mp4"])
+    allow_local_media_asset(app, root, clip, &["mp4", "png"])
 }
 
 fn allow_local_clip_asset_from_canonical_root<R: Runtime>(
@@ -618,7 +631,7 @@ fn allow_local_clip_asset_from_canonical_root<R: Runtime>(
     canonical_root: &Path,
     clip: &Path,
 ) -> Result<(), String> {
-    allow_local_media_asset_from_canonical_root(app, canonical_root, clip, &["mp4"])
+    allow_local_media_asset_from_canonical_root(app, canonical_root, clip, &["mp4", "png"])
 }
 
 fn allow_local_poster_asset<R: Runtime>(
@@ -1169,6 +1182,7 @@ fn prepare_clip_audio_sidecars_file_with_extractor_and_limits(
     max_cache_bytes: u64,
     mut extract_audio_sidecars: impl FnMut(&Path, &[AudioTrackSidecarOutput]) -> Result<(), String>,
 ) -> Result<PreparedAudioSidecarBatch, String> {
+    ensure_movie(&source)?;
     let resolved_tracks = resolve_audio_sidecar_tracks(&source, &selected_audio_track_ids)?;
     let source_meta = std::fs::metadata(&source).map_err(|e| format!("read clip metadata: {e}"))?;
     std::fs::create_dir_all(&preview_dir)
@@ -1957,6 +1971,7 @@ fn export_clip_file(
     title: Option<String>,
     include_markers: bool,
 ) -> Result<ExportedClipInfo, String> {
+    ensure_movie(&source)?;
     let tmp = unique_temp_export_path(&source)?;
     let info = match trim_keyframe_aligned_file(&source, &tmp, start_s, end_s) {
         Ok(info) => info,
@@ -2141,10 +2156,27 @@ pub(crate) fn validate_clip_path(
     // Legacy clips sit at the root; session clips one folder down.
     let parent_ok = target.parent() == Some(dir.as_path())
         || target.parent().and_then(Path::parent) == Some(dir.as_path());
-    if !parent_ok || target.extension().and_then(|e| e.to_str()) != Some("mp4") {
+    let ext_ok = target
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("mp4") || e.eq_ignore_ascii_case("png"));
+    if !parent_ok || !ext_ok {
         return Err("refusing to access a clip outside the clips directory".into());
     }
     Ok(target)
+}
+
+/// Movie-only commands (trim/export, audio sidecars) refuse screenshots.
+fn ensure_movie(path: &Path) -> Result<(), String> {
+    if path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("mp4"))
+    {
+        Ok(())
+    } else {
+        Err("screenshots are not video clips".into())
+    }
 }
 
 #[tauri::command]
@@ -2315,7 +2347,7 @@ fn clip_kind_from_metadata<'a>(path: &'a Path, metadata: &'a ClipMetadata) -> &'
         .kind
         .as_deref()
         .map(str::trim)
-        .filter(|value| matches!(*value, "replay" | "session" | "trim"))
+        .filter(|value| matches!(*value, "replay" | "session" | "trim" | "screenshot"))
         .unwrap_or_else(|| inferred_clip_kind_for_path(path))
 }
 
@@ -4508,6 +4540,33 @@ mod tests {
             inferred_clip_kind_for_path(Path::new("session_1781377615.mp4")),
             "session"
         );
+        assert_eq!(
+            inferred_clip_kind_for_path(Path::new("shot.png")),
+            "screenshot"
+        );
+        assert_eq!(
+            inferred_clip_kind_for_path(Path::new("shot.PNG")),
+            "screenshot"
+        );
+    }
+
+    #[test]
+    fn list_clips_includes_png_screenshots_without_duration_or_probes() {
+        let dir = TestDir::new("clipline-library", "list-screenshots");
+        let media = dir.path().join("media");
+        let session = media.join("ranked-match");
+        std::fs::create_dir_all(&session).unwrap();
+        let shot = session.join("session_123.png");
+        std::fs::write(&shot, b"png").unwrap();
+        touch_mp4(&session.join("session_456.mp4"));
+
+        let clips = list_clips_from_dir(media).unwrap().clips;
+
+        let shot = clips.iter().find(|c| c.name == "session_123.png").unwrap();
+        assert_eq!(shot.kind, "screenshot");
+        assert_eq!(shot.duration_s, None);
+        assert!(shot.markers.is_none());
+        assert!(clips.iter().any(|c| c.name == "session_456.mp4"));
     }
 
     #[test]
@@ -5145,6 +5204,59 @@ mod tests {
         let not_mp4 = root.join("clip.txt");
         touch_mp4(&not_mp4);
         assert!(validate_clip_path(&settings, not_mp4.to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn validate_clip_path_accepts_png_screenshots_in_the_media_root() {
+        let dir = TestDir::new("clipline-library", "validate-screenshot");
+        let root = dir.path().join("media");
+        std::fs::create_dir_all(&root).unwrap();
+        let settings = StorageSettings::new(None, root.clone());
+
+        let shot = root.join("shot.png");
+        std::fs::write(&shot, b"png").unwrap();
+        assert!(validate_clip_path(&settings, shot.to_str().unwrap()).is_ok());
+
+        // Unlisted extension stays refused.
+        let gif = root.join("shot.gif");
+        std::fs::write(&gif, b"gif").unwrap();
+        assert!(validate_clip_path(&settings, gif.to_str().unwrap()).is_err());
+
+        // Outside the media root stays refused even with a png extension.
+        let outside = dir.path().join("elsewhere").join("shot.png");
+        std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
+        std::fs::write(&outside, b"png").unwrap();
+        assert!(validate_clip_path(&settings, outside.to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn movie_only_commands_reject_screenshots() {
+        let dir = TestDir::new("clipline-library", "movie-gate");
+        let root = dir.path().join("media");
+        std::fs::create_dir_all(&root).unwrap();
+        let shot = root.join("shot.png");
+        std::fs::write(&shot, b"png").unwrap();
+
+        assert!(export_clip_file(shot.clone(), 0.0, 1.0, None, false).is_err());
+        assert!(prepare_clip_audio_sidecars_file(shot, Vec::new(), Vec::new()).is_err());
+    }
+
+    #[test]
+    fn rename_clip_file_keeps_a_screenshots_extension() {
+        let dir = TestDir::new("clipline-library", "rename-screenshot");
+        let source = dir.path().join("session_1.png");
+        std::fs::write(&source, b"png").unwrap();
+
+        let renamed = rename_clip_files(
+            source.clone(),
+            source.display().to_string(),
+            normalized_clip_file_name("My best shot.png").unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(renamed.name, "My best shot.png");
+        assert!(!source.exists());
+        assert!(dir.path().join("My best shot.png").exists());
     }
 
     #[test]

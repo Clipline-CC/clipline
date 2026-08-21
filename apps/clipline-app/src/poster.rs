@@ -110,9 +110,17 @@ fn publish_poster_output(poster: &Path, stdout: BoundedPipeOutput) -> Result<(),
 fn poster_command(ffmpeg: &Path, clip: &Path, seek_s: f64) -> Command {
     let mut cmd = Command::new(ffmpeg);
     suppress_console(&mut cmd);
-    // Input-side `-ss` is a fast keyframe seek — fine for a thumbnail.
-    cmd.args(["-hide_banner", "-nostdin", "-ss", &seek_arg(seek_s), "-i"])
-        .arg(clip)
+    // Input-side seek is a fast keyframe seek — fine for a thumbnail.
+    // PNG screenshots are single-frame: seeking past frame 1 yields no output.
+    let is_png = clip
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("png"));
+    cmd.args(["-hide_banner", "-nostdin"]);
+    if !is_png {
+        cmd.args(["-ss", &seek_arg(seek_s)]);
+    }
+    cmd.arg(clip)
         .args([
             "-frames:v",
             "1",
@@ -367,6 +375,21 @@ mod tests {
         assert!(
             !args.iter().any(|arg| arg.ends_with(".poster.jpg")),
             "ffmpeg must never receive a path beside the user's clip"
+        );
+    }
+
+    #[test]
+    fn png_poster_command_skips_the_seek_so_a_single_frame_survives() {
+        let clip = Path::new(r"C:\clips\shot.png");
+        let command = poster_command(Path::new(r"C:\tools\ffmpeg.exe"), clip, 2.5);
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(
+            !args.iter().any(|arg| arg == "-ss"),
+            "a still image has one frame; seeking past it yields no output"
         );
     }
 

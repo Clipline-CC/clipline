@@ -6,6 +6,12 @@ pub(super) fn inferred_clip_kind_for_path(path: &Path) -> &'static str {
         .and_then(|value| value.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
+    if std::path::Path::new(&name)
+        .extension()
+        .is_some_and(|ext| ext == "png")
+    {
+        return "screenshot";
+    }
     if name.contains("_trim_") {
         "trim"
     } else if name.starts_with("session_") {
@@ -41,10 +47,14 @@ pub(super) fn normalized_clip_file_name(input: &str) -> Result<String, String> {
         return Err("clip name contains a character Windows cannot use in filenames".into());
     }
 
-    let suffix = trimmed
-        .get(trimmed.len().saturating_sub(4)..)
-        .filter(|suffix| suffix.eq_ignore_ascii_case(".mp4"));
-    let stem = if suffix.is_some() {
+    // Keep an explicit .png suffix (screenshots); anything else becomes .mp4.
+    let lower = trimmed.to_ascii_lowercase();
+    let suffix = if lower.ends_with(".mp4") || lower.ends_with(".png") {
+        &lower[lower.len() - 4..]
+    } else {
+        ".mp4"
+    };
+    let stem = if lower.ends_with(".mp4") || lower.ends_with(".png") {
         &trimmed[..trimmed.len() - 4]
     } else {
         trimmed
@@ -59,7 +69,7 @@ pub(super) fn normalized_clip_file_name(input: &str) -> Result<String, String> {
     if is_reserved_windows_file_name(stem) {
         return Err("clip name is reserved by Windows".into());
     }
-    Ok(format!("{stem}.mp4"))
+    Ok(format!("{stem}{suffix}"))
 }
 
 pub(crate) fn is_reserved_windows_file_name(stem: &str) -> bool {

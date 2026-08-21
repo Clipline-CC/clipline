@@ -3590,6 +3590,22 @@ button.primary.settings-save-glow {
 .card-kind.replay { background: var(--accent); color: #14100c; }
 .card-kind.session { background: var(--session); color: #14100c; }
 .card-kind.trim { background: var(--ok); color: #14100c; }
+.card-kind.screenshot { background: #d8d4ca; color: #14100c; }
+
+.screenshot-lightbox {
+  border: none;
+  padding: 0;
+  background: transparent;
+  max-width: min(92vw, 1600px);
+  max-height: 92vh;
+}
+.screenshot-lightbox::backdrop { background: rgb(0 0 0 / 0.75); }
+.screenshot-lightbox img {
+  display: block;
+  max-width: 100%;
+  max-height: 92vh;
+  border-radius: 8px;
+}
 
 .card-dur {
   position: absolute; bottom: 8px; right: 8px; z-index: 2;

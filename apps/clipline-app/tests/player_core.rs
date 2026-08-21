@@ -2304,6 +2304,14 @@ fn clip_kind_distinguishes_trims_from_replays() {
         eval(&mut ctx, "PlayerCore.clipKind('session_1781377615.mp4')"),
         "session"
     );
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.clipKind({ name: 'shot.png', kind: 'screenshot' })"
+        ),
+        "screenshot"
+    );
+    assert_eq!(eval(&mut ctx, "PlayerCore.clipKind('shot.png')"), "screenshot");
     assert_eq!(eval(&mut ctx, "PlayerCore.clipKind('')"), "replay");
 }
 

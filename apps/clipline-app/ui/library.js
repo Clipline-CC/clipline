@@ -249,11 +249,14 @@ const CLIP_KIND_ICONS = {
     '<svg viewBox="0 0 24 24"><path d="M3 5h18v14H3V5zM5 6v2h2v-2zM9 6v2h2v-2zM13 6v2h2v-2zM17 6v2h2v-2zM5 16v2h2v-2zM9 16v2h2v-2zM13 16v2h2v-2zM17 16v2h2v-2z"/></svg>',
   trim:
     '<svg viewBox="0 0 24 24"><path d="M9.64 7.64c.23-.5.36-1.05.36-1.64 0-2.21-1.79-4-4-4S2 3.79 2 6s1.79 4 4 4c.59 0 1.14-.13 1.64-.36L10 12l-2.36 2.36C7.14 14.13 6.59 14 6 14c-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4c0-.59-.13-1.14-.36-1.64L12 14l7 7h3v-1L9.64 7.64zM6 8c-1.1 0-2-.89-2-2s.9-2 2-2 2 .89 2 2-.9 2-2 2zm0 12c-1.1 0-2-.89-2-2s.9-2 2-2 2 .89 2 2-.9 2-2 2zm6-7.5c-.28 0-.5-.22-.5-.5s.22-.5.5-.5.5.22.5.5-.22.5-.5.5zM19 3l-6 6 2 2 7-7V3z"/></svg>',
+  screenshot:
+    '<svg viewBox="0 0 24 24"><path d="M9 3 7.2 5H4a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-3.2L15 3H9zm3 5.5A4.5 4.5 0 1 1 7.5 13 4.5 4.5 0 0 1 12 8.5zm0 2A2.5 2.5 0 1 0 14.5 13 2.5 2.5 0 0 0 12 10.5z"/></svg>',
 };
 const CLIP_KIND_LABELS = {
   replay: "Buffered replay",
   session: "Full session",
   trim: "Trimmed export",
+  screenshot: "Screenshot",
 };
 const CLOUD_VISIBILITY_ICONS = {
   public:
@@ -924,8 +927,32 @@ function cloudClipCard(entry) {
   return el;
 }
 
+/* ---- screenshot lightbox ---- */
+function openScreenshotLightbox(clip) {
+  const dialog = document.getElementById("screenshot-lightbox");
+  const img = document.getElementById("screenshot-lightbox-img");
+  if (!dialog || !img) return;
+  img.src = convertFileSrc(clip.path);
+  img.alt = clipDisplayTitle(clip) || clip.name;
+  dialog.showModal();
+}
+(function initScreenshotLightbox() {
+  const dialog = document.getElementById("screenshot-lightbox");
+  if (!dialog) return;
+  // Clicking the dimmed backdrop closes; clicking the photo keeps it open.
+  // Esc closes natively via the dialog cancel event.
+  dialog.addEventListener("click", (ev) => {
+    if (ev.target === dialog) dialog.close();
+  });
+})();
+
 // Clip names come from disk; build rows with textContent, never innerHTML.
-const CARD_KIND_LABELS = { replay: "Replay", session: "Session", trim: "Trim" };
+const CARD_KIND_LABELS = {
+  replay: "Replay",
+  session: "Session",
+  trim: "Trim",
+  screenshot: "Screenshot",
+};
 // Marker categories → tint var, matching the timeline glyph colors.
 const MARKER_CATEGORY_TICK_VARS = {
   kill: "--mc-kill",
@@ -1258,6 +1285,7 @@ function clipCard(c) {
       return;
     }
     if (currentClip && currentClip.path === c.path) closeReview();
+    else if (kind === "screenshot") openScreenshotLightbox(c);
     else openClip(c);
   });
   el.addEventListener("contextmenu", (ev) => showClipContextMenu(ev, c));
