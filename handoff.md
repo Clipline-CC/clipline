@@ -4587,6 +4587,12 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
 **Tauri (v2)**
 - The webview **silently no-ops** (no events, no invoke) without
   `capabilities/default.json` granting `core:default`.
+- A global shortcut that fails to register at startup (another process still owns it — a dying
+  instance, ShareX, etc.) used to stay dead until relaunch. Startup now retries busy-failed
+  registrations at 2s/5s/15s/30s/60s and aborts if the bind is removed meanwhile. Remember:
+  while any process holds a registered hotkey, Windows swallows the key system-wide, so it also
+  never reaches the settings-page keybind recorder — "can't set PrintScreen" and "PrintScreen
+  bind doesn't fire" are usually the same root cause.
 - The assetProtocol scope **does not resolve `$VIDEO`** — use plain globs. With configurable
   media folders the scope is currently `**/*.mp4`; diagnose media errors via a `video.onerror`
   handler because error code 4 usually means the scope rejected the request, not a codec problem.

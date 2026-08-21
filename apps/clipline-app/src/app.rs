@@ -3495,6 +3495,60 @@ fn parse_global_hotkey(raw: &str) -> Result<Option<Shortcut>, String> {
     }
 }
 
+/// How often to re-attempt a startup shortcut that another process still
+/// owned when we launched (a dying instance, ShareX, Snipping Tool...).
+const HOTKEY_REGISTRATION_RETRY_DELAYS_MS: &[u64] = &[2_000, 5_000, 15_000, 30_000, 60_000];
+
+/// The plugin flattens every registration failure to a string; this is the
+/// Win32 ERROR_HOTKEY_ALREADY_REGISTERED case, where the owner may release
+/// the key later and a retry can succeed.
+fn hotkey_registration_is_busy(error: &str) -> bool {
+    error.to_ascii_lowercase().contains("already registered")
+}
+
+/// True while `shortcut` is still part of the live configuration; stops a
+/// late retry from resurrecting a bind the user removed meanwhile.
+fn hotkey_still_wanted<R: Runtime>(app: &AppHandle<R>, shortcut: Shortcut) -> bool {
+    let state = app.state::<RuntimeState>();
+    let settings = state.settings();
+    matches!(
+        effective_global_hotkeys(&settings, crate::hotkeys::actions_paused()),
+        Ok(shortcuts) if shortcuts.contains(&shortcut)
+    )
+}
+
+/// Re-tries a shortcut that failed to register because another process still
+/// owned it at startup. The owner (a dying instance, ShareX, Snipping Tool)
+/// usually releases the key within seconds; without this the bind stays dead
+/// until the app restarts.
+fn spawn_hotkey_registration_retry<R: Runtime>(app: &AppHandle<R>, shortcut: Shortcut) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        for delay_ms in HOTKEY_REGISTRATION_RETRY_DELAYS_MS {
+            tokio::time::sleep(std::time::Duration::from_millis(*delay_ms)).await;
+            if !hotkey_still_wanted(&app, shortcut) {
+                return;
+            }
+            let shortcuts = app.global_shortcut();
+            if shortcuts.is_registered(shortcut) {
+                return;
+            }
+            match shortcuts.register(shortcut) {
+                Ok(()) => {
+                    tracing::info!(event = "global_hotkey_registration_recovered", ?shortcut);
+                    return;
+                }
+                Err(e) if hotkey_registration_is_busy(&e.to_string()) => continue,
+                Err(e) => {
+                    tracing::warn!(event = "global_hotkey_retry_failed", ?shortcut, error = %e);
+                    return;
+                }
+            }
+        }
+        tracing::warn!(event = "global_hotkey_retry_exhausted", ?shortcut);
+    });
+}
+
 #[tauri::command]
 fn snipping_tool_printscreen_status() -> Result<String, String> {
     match crate::windows::snipping_tool_printscreen_state()? {
@@ -4100,10 +4154,17 @@ pub fn run() {
             });
             for hotkey in &startup_global_hotkeys {
                 if let Err(e) = app.global_shortcut().register(*hotkey) {
-                    let message =
-                        format!("global save hotkey unavailable; continuing without it: {e}");
-                    tracing::warn!(event = "global_hotkey_registration_failed", message = %message);
-                    let _ = app.handle().emit("error", message);
+                    if hotkey_registration_is_busy(&e.to_string()) {
+                        // Another process still owns the key; it usually
+                        // releases it shortly after we start. Retry instead of
+                        // leaving the bind dead until the next launch.
+                        spawn_hotkey_registration_retry(app.handle(), *hotkey);
+                    } else {
+                        let message =
+                            format!("global save hotkey unavailable; continuing without it: {e}");
+                        tracing::warn!(event = "global_hotkey_registration_failed", message = %message);
+                        let _ = app.handle().emit("error", message);
+                    }
                 }
             }
             let startup_save_hotkeys = settings.hotkeys();
