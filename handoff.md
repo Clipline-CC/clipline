@@ -4,7 +4,7 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
-## Checkpoint (2026-08-21): PrintScreen screenshot dispatch fix
+## Checkpoint (2026-08-21): PrintScreen screenshot dispatch + registration recovery fix
 
 Branch: `investigate-sharex` (screenshot-capture milestone debugging).
 
@@ -17,15 +17,18 @@ PrintScreen screenshot binds did nothing at runtime. Two stacked causes:
    triggered an invisible save-replay attempt instead of a screenshot. Fixed by
    extracting `screenshot_mode_for_settings(settings, shortcut, actions_paused)`
    with the gate corrected; covered by unit tests that would have caught it.
-2. **Silently lost registrations**: clicking a keybind field unregisters all
+2. **Silently lost registrations** (fixed): clicking a keybind field unregisters all
    global shortcuts; if the window hid before the blur-driven resume ran, the
    binds stayed dead until restart (ownership probe showed all three combos
    free mid-session). Holding an unbound PrintScreen then hits Windows' legacy
    full-screen-clipboard path on every auto-repeat — the reported cursor lag.
-   Startup busy-retries (previous checkpoint) do not cover this path; a
-   periodic re-sync is the known follow-up if it recurs.
+   Fixed by calling resume_hotkeys_after_ui_gone from
+   publish_background_window — the chokepoint every background transition
+   (minimize-to-taskbar, native-minimize, close-to-tray) routes through. The
+   helper self-no-ops when binds are not paused.
 
-Gates: workspace tests + clippy clean; app rebuilt for manual verification.
+Gates: workspace tests green (657), clippy clean; app rebuilt and relaunched;
+ownership probe confirms bare/Ctrl/Alt PrintScreen all TAKEN by Clipline.
 
 ## Checkpoint (2026-08-17): Stable 1.0.2
 

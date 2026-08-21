@@ -2864,6 +2864,10 @@ fn publish_window_lifecycle<R: Runtime>(
 
 fn publish_background_window<R: Runtime>(app: &AppHandle<R>, mode: WindowLifecycleMode) {
     app.state::<MicTestState>().stop();
+    // Keybind capture unregisters every global shortcut; if the UI goes away
+    // before the webview can resume them (minimize instead of blur/close),
+    // the binds would stay dead until restart.
+    resume_hotkeys_after_ui_gone(app);
     if matches!(
         mode,
         WindowLifecycleMode::Destroying | WindowLifecycleMode::Destroyed
