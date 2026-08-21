@@ -73,6 +73,21 @@ pub fn grab_window_with_timeout(raw_hwnd: isize, timeout: Duration) -> Result<Bg
 /// The monitor containing the cursor, as a placed rect in virtual-desktop
 /// coordinates. Entire-screen mode captures this monitor, not the union.
 pub fn monitor_at_cursor() -> Option<PlacedRect> {
+    cursor_display().map(|display| PlacedRect {
+            x: display.x,
+            y: display.y,
+            width: display.width,
+            height: display.height,
+        })
+}
+
+/// Device id of the monitor containing the cursor, ready for grab_monitor.
+/// None when the cursor sits outside every display.
+pub fn cursor_monitor_id() -> Option<String> {
+    cursor_display().map(|display| display.id)
+}
+
+fn cursor_display() -> Option<crate::windows::display::DisplayInfo> {
     let point = cursor_point()?;
     enumerate_displays()
         .ok()?
@@ -81,12 +96,6 @@ pub fn monitor_at_cursor() -> Option<PlacedRect> {
             let right = display.x + display.width as i32;
             let bottom = display.y + display.height as i32;
             point.x >= display.x && point.x < right && point.y >= display.y && point.y < bottom
-        })
-        .map(|display| PlacedRect {
-            x: display.x,
-            y: display.y,
-            width: display.width,
-            height: display.height,
         })
 }
 

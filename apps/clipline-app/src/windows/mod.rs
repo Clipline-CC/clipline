@@ -28,7 +28,7 @@ use windows_sys::Win32::System::Threading::{
     PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
-use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SW_SHOWNORMAL};
 
 const ELEVATED_AFTER_ARGUMENT: &str = "--clipline-elevated-after";
 const PROCESS_SYNCHRONIZE: u32 = 0x0010_0000;
@@ -134,6 +134,30 @@ fn delete_registry_value(subkey: &str, value_name: &[u16]) -> Result<(), String>
 
 pub fn current_process_is_elevated() -> Result<bool, String> {
     process_is_elevated(std::process::id())
+}
+
+/// Raw HWND of the foreground window, if any. Window screenshots target this.
+pub fn foreground_window() -> Option<isize> {
+    // SAFETY: plain query returning a handle that may be null.
+    let hwnd = unsafe { GetForegroundWindow() } as isize;
+    (hwnd != 0).then_some(hwnd)
+}
+
+/// Raw HWND of Clipline's own main window, so window mode can refuse to
+/// screenshot itself. None when the window is closed or not yet created.
+pub fn current_main_window() -> Option<isize> {
+    let hwnd = (*MAIN_WINDOW_HWND.lock().ok()?)?;
+    (hwnd != 0).then_some(hwnd)
+}
+
+static MAIN_WINDOW_HWND: std::sync::Mutex<Option<isize>> = std::sync::Mutex::new(None);
+
+/// Record or clear the main window handle. Called from app setup and window
+/// lifecycle events; a stale value only risks one refused self-shot.
+pub fn set_main_window_hwnd(hwnd: Option<isize>) {
+    if let Ok(mut slot) = MAIN_WINDOW_HWND.lock() {
+        *slot = hwnd;
+    }
 }
 
 pub fn process_is_elevated(process_id: u32) -> Result<bool, String> {

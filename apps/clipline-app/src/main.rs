@@ -61,6 +61,8 @@ mod poster;
 #[cfg(windows)]
 mod service;
 #[cfg(windows)]
+mod screenshot;
+#[cfg(windows)]
 mod settings;
 #[cfg(windows)]
 mod sound;

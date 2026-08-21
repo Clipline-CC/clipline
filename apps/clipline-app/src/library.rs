@@ -4,10 +4,9 @@
 
 #[path = "library/naming.rs"]
 mod naming;
-use naming::{
-    inferred_clip_kind_for_path, is_reserved_windows_file_name, normalized_clip_file_name,
-    normalized_clip_title,
-};
+use naming::{inferred_clip_kind_for_path, normalized_clip_file_name, normalized_clip_title};
+// Screenshots validate their generated file name against the same rule.
+pub(crate) use naming::is_reserved_windows_file_name;
 
 use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::hash::{Hash, Hasher};

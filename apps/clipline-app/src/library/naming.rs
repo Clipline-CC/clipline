@@ -62,7 +62,7 @@ pub(super) fn normalized_clip_file_name(input: &str) -> Result<String, String> {
     Ok(format!("{stem}.mp4"))
 }
 
-pub(super) fn is_reserved_windows_file_name(stem: &str) -> bool {
+pub(crate) fn is_reserved_windows_file_name(stem: &str) -> bool {
     let base = stem
         .split('.')
         .next()

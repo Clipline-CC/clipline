@@ -25,6 +25,7 @@ use crate::game_discovery::DetectedGameCandidate;
 use crate::game_plugins::GamePluginInfo;
 use crate::games::{DetectedGame, GameWindowInfo};
 use crate::osu_enrichment::OsuTitleEvent;
+use crate::screenshot::{self, ScreenshotMode};
 use crate::service::{self, Cmd, Event, ServiceOptions};
 use crate::settings::{
     is_global_shortcut_hotkey, parse_hotkey, quota_bytes_from_gb, AppSettings, CaptureMode,
@@ -1661,6 +1662,39 @@ impl RuntimeState {
         false
     }
 
+    /// Take a screenshot on a worker thread. Deliberately not routed through
+    /// the recorder command loop: screenshots must work while recording is
+    /// idle, and a WGC still grab must never block save/stop handling.
+    fn request_screenshot<R: Runtime>(&self, app: &AppHandle<R>, mode: ScreenshotMode) {
+        let app = app.clone();
+        let app_for_spawn_error = app.clone();
+        std::thread::Builder::new()
+            .name("screenshot".into())
+            .spawn(move || {
+                let media_root = app.state::<crate::library::StorageSettings>().media_dir();
+                let result = screenshot::capture_frame(mode)
+                    .and_then(|image| screenshot::save_frame(&media_root, mode, &image, None));
+                match result {
+                    Ok(path) => {
+                        let _ = app.emit(
+                            "screenshot-saved",
+                            serde_json::json!({ "mode": mode.label(), "path": path.display().to_string() }),
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(event = "screenshot_failed", mode = mode.label(), %error);
+                        let _ = app.emit("error", error);
+                    }
+                }
+            })
+            .map(|_| ())
+            .unwrap_or_else(|error| {
+                let message = format!("start screenshot worker: {error}");
+                tracing::warn!(event = "screenshot_worker_spawn_failed", %message);
+                let _ = app_for_spawn_error.emit("error", message);
+            });
+    }
+
     fn request_save_or_show_quota<R: Runtime>(&self, app: &AppHandle<R>) -> bool {
         if self.request_save() {
             return true;
@@ -2276,6 +2310,22 @@ fn active_game_still_configured(settings: &AppSettings, active: Option<&Detected
 #[tauri::command]
 fn save_replay<R: Runtime>(app: AppHandle<R>, state: tauri::State<RuntimeState>) {
     state.request_save_or_show_quota(&app);
+}
+
+#[tauri::command]
+fn take_screenshot<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<RuntimeState>,
+    mode: String,
+) -> Result<(), String> {
+    let mode = match mode.as_str() {
+        "region" => ScreenshotMode::Region,
+        "screen" => ScreenshotMode::Screen,
+        "window" => ScreenshotMode::Window,
+        other => return Err(format!("unknown screenshot mode: {other}")),
+    };
+    state.request_screenshot(&app, mode);
+    Ok(())
 }
 
 #[tauri::command]
@@ -3643,6 +3693,7 @@ pub fn run() {
         )
         .invoke_handler(tauri::generate_handler![
             save_replay,
+            take_screenshot,
             recheck_storage_quota,
             restart_as_administrator,
             set_recording,
@@ -4060,6 +4111,9 @@ fn build_main_window<R: Runtime>(
         .map_err(|e| e.to_string())?
         .build()
         .map_err(|e| e.to_string())?;
+    if let Ok(hwnd) = window.hwnd() {
+        crate::windows::set_main_window_hwnd(Some(hwnd.0 as isize));
+    }
     let generation = app.state::<FrontendReadinessState>().begin_generation();
     log_diagnostic(format!(
         "build_main_window ready label={label} generation={generation} webviews={}",
