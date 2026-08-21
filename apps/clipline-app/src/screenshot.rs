@@ -133,6 +133,10 @@ pub fn publish_screenshot(
     let mut temp = SiblingTemp::reserve(&destination)?;
     temp.write_all(&png)?;
     temp.publish(&destination)?;
+    // Mark ownership so the storage quota and auto-delete can see (and
+    // reclaim) screenshots; an unmarked PNG would be invisible disk use.
+    clipline_storage::ensure_clip_owned(&destination)
+        .map_err(|error| format!("mark screenshot owned: {error}"))?;
     Ok(destination)
 }
 

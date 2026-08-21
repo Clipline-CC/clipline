@@ -95,10 +95,10 @@ pub fn clip_ownership_marker_path(path: &Path) -> io::Result<PathBuf> {
     } else {
         path.to_path_buf()
     };
-    if !is_mp4(&clip) {
+    if !is_mp4(&clip) && !is_png(&clip) {
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
-            "clip ownership markers require an MP4 path",
+            "clip ownership markers require an MP4 or PNG path",
         ));
     }
     Ok(clip.with_extension("clipline.json"))
@@ -357,7 +357,7 @@ struct ClipFile {
     /// the clip during quota GC so a leftover never keeps an emptied session
     /// folder alive.
     sidecars: Vec<PathBuf>,
-    mp4_bytes: u64,
+    media_bytes: u64,
     sidecar_bytes: u64,
     modified: SystemTime,
     recording: bool,
@@ -365,7 +365,7 @@ struct ClipFile {
 
 impl ClipFile {
     fn total_bytes(&self) -> u64 {
-        self.mp4_bytes + self.sidecar_bytes
+        self.media_bytes + self.sidecar_bytes
     }
 
     fn can_delete(
@@ -393,7 +393,7 @@ fn collect_clips(dir: &Path, include: Option<&Path>, clips: &mut Vec<ClipFile>) 
         let entry = entry?;
         let path = entry.path();
         let recording = is_recording_mp4(&path);
-        if !is_mp4(&path) && !recording {
+        if !is_mp4(&path) && !is_png(&path) && !recording {
             continue;
         }
         if !is_managed_clip(&path) && !include.is_some_and(|candidate| same_path(&path, candidate))
@@ -412,7 +412,7 @@ fn collect_clips(dir: &Path, include: Option<&Path>, clips: &mut Vec<ClipFile>) 
         clips.push(ClipFile {
             path,
             sidecars,
-            mp4_bytes: meta.len(),
+            media_bytes: meta.len(),
             sidecar_bytes,
             modified: meta.modified().unwrap_or(UNIX_EPOCH),
             recording,
@@ -433,6 +433,12 @@ fn is_mp4(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
         .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"))
+}
+
+fn is_png(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("png"))
 }
 
 fn is_recording_mp4(path: &Path) -> bool {
@@ -638,7 +644,9 @@ fn is_link_or_reparse_point(metadata: &fs::Metadata) -> bool {
 fn session_dir_has_managed_clips(dir: &Path) -> io::Result<bool> {
     for entry in fs::read_dir(dir)? {
         let path = entry?.path();
-        if (is_mp4(&path) || is_recording_mp4(&path)) && is_managed_clip(&path) {
+        if (is_mp4(&path) || is_png(&path) || is_recording_mp4(&path))
+            && is_managed_clip(&path)
+        {
             return Ok(true);
         }
     }
@@ -818,6 +826,61 @@ mod tests {
 
         assert_eq!(status.clip_count, 1);
         assert_eq!(status.total_bytes, 4);
+    }
+
+    #[test]
+    fn storage_status_counts_owned_screenshots() {
+        let dir = TestDir::new("clipline-storage", "screenshot-status");
+        let shot = dir.write("shot_1755000000.png", 6);
+        mark_owned(&shot);
+
+        let status = storage_status(dir.path(), None).unwrap();
+
+        assert_eq!(status.clip_count, 1);
+        assert_eq!(status.total_bytes, 6);
+    }
+
+    #[test]
+    fn inventory_ignores_unowned_png_files() {
+        let dir = TestDir::new("clipline-storage", "ignore-unowned-png");
+        // A user's own images must never be adopted into the quota.
+        dir.write("vacation.png", 90);
+        let shot = write_owned(&dir, "shot_1755000000.png", 5);
+
+        let status = storage_status(dir.path(), None).unwrap();
+
+        assert_eq!(status.clip_count, 1);
+        assert_eq!(status.total_bytes, 5);
+        assert!(shot.exists());
+    }
+
+    #[test]
+    fn enforce_quota_deletes_the_oldest_screenshot_when_over_budget() {
+        let dir = TestDir::new("clipline-storage", "screenshot-quota");
+        let old_shot = dir.write("shot_1755000000.png", 10);
+        mark_owned(&old_shot);
+        tick_mtime();
+        let fresh_clip = write_owned(&dir, "2026-07-18 12-00/fresh.mp4", 10);
+
+        let report = enforce_quota(dir.path(), Some(15), None).unwrap();
+
+        assert_eq!(report.deleted_clips, 1);
+        assert!(!old_shot.exists());
+        assert!(fresh_clip.exists());
+        assert_eq!(report.status.total_bytes, 10);
+    }
+
+    #[test]
+    fn recovery_leaves_sidecar_less_screenshots_alone() {
+        let dir = TestDir::new("clipline-storage", "recovery-screenshots");
+        let shot = dir.write("shot_1755000000.png", 8);
+        mark_owned(&shot);
+
+        let report = recover_recording_files(dir.path()).unwrap();
+
+        assert!(report.recovered.is_empty());
+        assert_eq!(report.deleted_empty, 0);
+        assert!(shot.exists());
     }
 
     #[test]
@@ -1198,7 +1261,7 @@ mod tests {
         let clip = ClipFile {
             path: old.clone(),
             sidecars: vec![old_meta.clone(), old_markers.clone()],
-            mp4_bytes: 40,
+            media_bytes: 40,
             sidecar_bytes: 3,
             modified: UNIX_EPOCH,
             recording: false,
@@ -1370,7 +1433,7 @@ mod tests {
         let clip = ClipFile {
             path: external.clone(),
             sidecars: Vec::new(),
-            mp4_bytes: 40,
+            media_bytes: 40,
             sidecar_bytes: 0,
             modified: UNIX_EPOCH,
             recording: false,
