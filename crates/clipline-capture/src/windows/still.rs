@@ -3,6 +3,7 @@
 //! The Drop impl on [WgcCapture] closes the session on every path, including
 //! timeouts, so a still never leaks a capture session.
 
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use windows::Win32::Foundation::POINT;
@@ -20,6 +21,25 @@ use crate::windows::wgc::WgcCapture;
 /// updates; a static desktop still gets one initial frame from StartCapture,
 /// so anything past this means the target went away.
 const STILL_GRAB_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// One shared D3D11 device for every still grab. Device creation costs
+/// tens of milliseconds per screenshot; textures stay on one device within
+/// a single grab, which is the only cross-use constraint that matters here.
+fn shared_still_device() -> Result<
+    &'static windows::Win32::Graphics::Direct3D11::ID3D11Device,
+    CaptureError,
+> {
+    static DEVICE: OnceLock<windows::Win32::Graphics::Direct3D11::ID3D11Device> = OnceLock::new();
+    if let Some(device) = DEVICE.get() {
+        return Ok(device);
+    }
+    let (device, _) = crate::windows::d3d11::create_device()
+        .map_err(|e| CaptureError::Init(format!("create D3D11 device: {e}")))?;
+    let _ = DEVICE.set(device);
+    DEVICE
+        .get()
+        .ok_or_else(|| CaptureError::Init("shared still device unavailable".into()))
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum StillGrabError {
@@ -41,14 +61,13 @@ pub fn grab_monitor_with_timeout(
     timeout: Duration,
 ) -> Result<BgraImage, StillGrabError> {
     let display = display_handle_by_id(Some(monitor_id))?;
-    let (device, _) = crate::windows::d3d11::create_device()
-        .map_err(|e| CaptureError::Init(format!("create D3D11 device: {e}")))?;
+    let device = shared_still_device()?;
     let mut capture = WgcCapture::for_monitor_on_without_cursor(
         device.clone(),
         display.handle,
         WgcCapture::new_clock()?,
     )?;
-    pull_readback(&mut capture, &device, timeout)
+    pull_readback(&mut capture, device, timeout)
 }
 
 /// Grab one whole-window frame (DWM extended frame bounds, title bar
@@ -60,14 +79,13 @@ pub fn grab_window(raw_hwnd: isize) -> Result<BgraImage, StillGrabError> {
 pub fn grab_window_with_timeout(raw_hwnd: isize, timeout: Duration) -> Result<BgraImage, StillGrabError> {
     let hwnd = window_from_raw_handle(raw_hwnd)
         .ok_or_else(|| CaptureError::Init("window is gone or not visible".into()))?;
-    let (device, _) = crate::windows::d3d11::create_device()
-        .map_err(|e| CaptureError::Init(format!("create D3D11 device: {e}")))?;
+    let device = shared_still_device()?;
     let mut capture = WgcCapture::for_window_on_without_cursor(
         device.clone(),
         hwnd,
         WgcCapture::new_clock()?,
     )?;
-    pull_readback(&mut capture, &device, timeout)
+    pull_readback(&mut capture, device, timeout)
 }
 
 /// The monitor containing the cursor, as a placed rect in virtual-desktop
