@@ -50,9 +50,8 @@
       openScreenshotLightbox(clip, { items: allShots, index: index });
     });
     el.addEventListener("contextmenu", function (ev) {
-      // Same menu as Library cards; it already gates movie-only actions off
-      // for screenshots (Select / Rename / Copy / Delete apply here).
-      showClipContextMenu(ev, clip);
+      // Stills get their own item set: no Upload / Rename / shareable export.
+      showScreenshotContextMenu(ev, clip);
     });
     return el;
   }

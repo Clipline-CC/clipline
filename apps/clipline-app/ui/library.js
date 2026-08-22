@@ -959,6 +959,13 @@ function updateLightboxNav() {
   next.disabled = nav.index >= nav.items.length - 1;
   counter.textContent =
     nav.items.length > 1 ? `${nav.index + 1} / ${nav.items.length}` : "";
+  // A disabled button cannot hold focus; if the focused arrow just became
+  // disabled, return focus to the dialog so arrow keys keep working.
+  const active = document.activeElement;
+  if (active instanceof HTMLElement && active.disabled
+    && (active === prev || active === next)) {
+    dialog?.focus();
+  }
 }
 
 function stepScreenshotLightbox(delta) {
@@ -970,13 +977,18 @@ function stepScreenshotLightbox(delta) {
   nav.index = nextIndex;
   openScreenshotLightbox(nav.items[nextIndex], nav);
 }
+
 (function initScreenshotLightbox() {
   const dialog = document.getElementById("screenshot-lightbox");
   if (!dialog) return;
-  // Clicking the dimmed backdrop closes; clicking the photo keeps it open.
-  // Esc closes natively via the dialog cancel event.
+  dialog.tabIndex = -1;
+  // Clicking the dimmed backdrop — or any dead space of the oversized
+  // stage/dialog around the image — closes; clicking the photo or controls
+  // keeps it open. Esc closes natively via the dialog cancel event.
   dialog.addEventListener("click", (ev) => {
-    if (ev.target === dialog) dialog.close();
+    if (ev.target === dialog || ev.target.classList?.contains("lightbox-stage")) {
+      dialog.close();
+    }
   });
   document.getElementById("lightbox-prev")?.addEventListener("click", () => {
     stepScreenshotLightbox(-1);
@@ -1356,7 +1368,9 @@ function applySelectionToCard(card, on) {
 }
 
 function findClipCard(path) {
-  for (const card of document.querySelectorAll("#gallery-grid .card[data-clip-path]")) {
+  for (const card of document.querySelectorAll(
+    "#gallery-grid .card[data-clip-path], #screenshots-grid .card[data-clip-path]",
+  )) {
     if (card.dataset.clipPath === path) return card;
   }
   return null;
@@ -1372,7 +1386,7 @@ function toggleClipSelection(path) {
 }
 
 function selectClipFromContext(path) {
-  if (!path || gallerySource !== "local") return;
+  if (!path) return;
   selectMode = true;
   selectedClipPaths.add(path);
   const card = findClipCard(path);
@@ -1382,7 +1396,9 @@ function selectClipFromContext(path) {
 
 function clearSelection() {
   selectedClipPaths.clear();
-  for (const card of document.querySelectorAll("#gallery-grid .card[data-clip-path]")) {
+  for (const card of document.querySelectorAll(
+    "#gallery-grid .card[data-clip-path], #screenshots-grid .card[data-clip-path]",
+  )) {
     applySelectionToCard(card, false);
   }
   syncBulkBar();
@@ -1390,7 +1406,9 @@ function clearSelection() {
 
 function selectAllVisible() {
   selectedClipPaths = new Set(selectedClipPaths);
-  for (const card of document.querySelectorAll("#gallery-grid .card[data-clip-path]")) {
+  for (const card of document.querySelectorAll(
+    "#gallery-grid .card[data-clip-path], #screenshots-grid .card[data-clip-path]",
+  )) {
     if (!card.dataset.clipPath) continue;
     selectedClipPaths.add(card.dataset.clipPath);
     applySelectionToCard(card, true);
@@ -2067,6 +2085,31 @@ function clearHeavyGalleryDom() {
 $("gallery-page-prev").addEventListener("click", () => changeGalleryPage(-1));
 $("gallery-page-next").addEventListener("click", () => changeGalleryPage(1));
 
+function showScreenshotContextMenu(ev, clip) {
+  ev.preventDefault();
+  ev.stopPropagation();
+  hideRegionMenu();
+  clipContextTarget = clip;
+  cloudContextTarget = null;
+  gamePlayContextTarget = null;
+  // Screenshots are stills: only the actions that make sense for a PNG.
+  $("clip-menu-select").hidden = false;
+  $("clip-menu-play").hidden = true;
+  $("clip-menu-open-cloud-page").hidden = true;
+  $("clip-menu-copy-cloud-link").hidden = true;
+  $("clip-menu-export-play").hidden = true;
+  $("clip-menu-upload").hidden = true;
+  $("clip-menu-rename").hidden = true;
+  $("clip-menu-rename-file").hidden = true;
+  $("clip-menu-copy-shareable").hidden = true;
+  $("clip-menu-show-folder").hidden = false;
+  $("clip-menu-copy").textContent = "Copy image";
+  $("clip-menu-delete").hidden = false;
+  const menu = $("clip-context-menu");
+  menu.hidden = false;
+  positionContextMenu(menu, ev.clientX, ev.clientY);
+}
+
 function showClipContextMenu(ev, clip) {
   ev.preventDefault();
   ev.stopPropagation();
@@ -2084,6 +2127,7 @@ function showClipContextMenu(ev, clip) {
   $("clip-menu-copy-cloud-link").hidden = true;
   $("clip-menu-export-play").hidden = true;
   $("clip-menu-copy").hidden = false;
+  $("clip-menu-copy").textContent = "Copy to clipboard";
   $("clip-menu-copy-shareable").hidden = false;
   const upload = $("clip-menu-upload");
   upload.hidden = !cloudUploadControlVisible(uploaded);
