@@ -238,11 +238,12 @@ async function refreshClips(
       closeReview();
     }
   }
-  // Keep the screenshots Gallery current while it is open.
-  if (window.__renderScreenshots && window.__screenshotsGalleryActive?.()) {
-    window.__renderScreenshots();
-  }
+  // Keep the screenshots Gallery current while it is open. It must render
+  // after (not before) renderClips: the Library pass bumps the poster-work
+  // generation, which would otherwise invalidate the Gallery's queued jobs
+  // and leave thumbnails blank until a manual reload.
   renderClips();
+  renderScreenshotsAfterLibraryPass();
   return true;
 }
 // Leading icon per clip kind. Static markup (no clip data) — innerHTML is safe.
@@ -1887,6 +1888,15 @@ function beginBoundedGalleryRender() {
   releaseGalleryRoot($("cloud-gallery-grid"));
 }
 
+// Re-render an open screenshots Gallery AFTER the Library's render pass, so
+// its cards queue posters at the newest generation instead of being skipped
+// by it (renderClips bumps the generation and drops older queued jobs).
+function renderScreenshotsAfterLibraryPass() {
+  if (window.__renderScreenshots && window.__screenshotsGalleryActive?.()) {
+    window.__renderScreenshots();
+  }
+}
+
 function renderClips() {
   if (!captureForegroundWork()) {
     requestWindowRefresh();
@@ -2081,6 +2091,7 @@ function showClipContextMenu(ev, clip) {
   upload.disabled = busy || (uploaded ? !record.remote_clip_id : !cloudConnected());
   $("clip-menu-rename").hidden = false;
   $("clip-menu-rename-file").hidden = false;
+  $("clip-menu-show-folder").hidden = false;
   $("clip-menu-delete").hidden = false;
   const menu = $("clip-context-menu");
   menu.hidden = false;
@@ -2133,6 +2144,7 @@ function showGamePlayContextMenu(ev, play) {
   $("clip-menu-upload").hidden = true;
   $("clip-menu-rename").hidden = true;
   $("clip-menu-rename-file").hidden = true;
+  $("clip-menu-show-folder").hidden = true;
   $("clip-menu-delete").hidden = true;
   const menu = $("clip-context-menu");
   menu.hidden = false;

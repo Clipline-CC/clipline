@@ -1812,10 +1812,9 @@ async function applyDeletion(removedPaths) {
   );
   if (wasCurrent) closeReview();
   else renderClips();
-  // A deleted screenshot must leave the open Gallery immediately.
-  if (window.__renderScreenshots && window.__screenshotsGalleryActive?.()) {
-    window.__renderScreenshots();
-  }
+  // A deleted screenshot must leave the open Gallery immediately (after the
+  // Library pass, same ordering reason as refreshClips).
+  renderScreenshotsAfterLibraryPass();
   await refreshStorage();
 }
 

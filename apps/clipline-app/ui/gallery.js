@@ -49,6 +49,11 @@
       // Arrows navigate the Gallery's current sorted order.
       openScreenshotLightbox(clip, { items: allShots, index: index });
     });
+    el.addEventListener("contextmenu", function (ev) {
+      // Same menu as Library cards; it already gates movie-only actions off
+      // for screenshots (Select / Rename / Copy / Delete apply here).
+      showClipContextMenu(ev, clip);
+    });
     return el;
   }
 

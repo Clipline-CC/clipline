@@ -396,6 +396,14 @@ $("clip-menu-rename-file").addEventListener("click", () => {
   hideClipContextMenu();
   if (clip) openRenameFileDialog(clip);
 });
+$("clip-menu-show-folder").addEventListener("click", () => {
+  const clip = clipContextTarget;
+  hideClipContextMenu();
+  if (!clip) return;
+  invoke("reveal_clip", { path: clip.path }).catch((e) => {
+    $("error").textContent = e;
+  });
+});
 $("clip-menu-delete").addEventListener("click", () => {
   const clip = clipContextTarget;
   hideClipContextMenu();

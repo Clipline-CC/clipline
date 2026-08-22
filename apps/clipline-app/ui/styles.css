@@ -3624,14 +3624,20 @@ button.primary.settings-save-glow {
   padding: 0;
   background: transparent;
   max-width: min(92vw, 1600px);
-  max-height: 92vh;
 }
 .screenshot-lightbox::backdrop { background: rgb(0 0 0 / 0.75); }
-.lightbox-stage { position: relative; }
+.lightbox-stage {
+  position: relative;
+  /* Fixed height: a shorter image loading between taller neighbors must not
+     re-center the nav arrows mid-frame (the reported arrow flash). */
+  height: min(86vh, 1400px);
+  display: grid;
+  place-items: center;
+}
 .screenshot-lightbox img {
   display: block;
   max-width: 100%;
-  max-height: 92vh;
+  max-height: 100%;
   border-radius: 8px;
 }
 .lightbox-nav {
@@ -3646,11 +3652,16 @@ button.primary.settings-save-glow {
 .lightbox-prev { left: 12px; }
 .lightbox-next { right: 12px; }
 .lightbox-nav[disabled] { opacity: 0; pointer-events: none; }
+/* Counter sits in its own row below the image, not over it. */
+.lightbox-footer {
+  display: flex;
+  justify-content: center;
+  padding-top: 10px;
+}
 .lightbox-counter {
-  position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%); z-index: 2;
-  height: 22px; padding: 0 10px; border-radius: 6px; display: inline-flex; align-items: center;
+  height: 24px; padding: 0 12px; border-radius: 6px; display: inline-flex; align-items: center;
   background: rgba(var(--scrim-c-rgb),.74); color: var(--text-strong);
-  font-family: var(--font-mono); font-size: 11px; font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono); font-size: 11.5px; font-variant-numeric: tabular-nums;
 }
 
 .card-dur {
