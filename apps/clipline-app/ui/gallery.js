@@ -87,8 +87,10 @@
   function setActive(next) {
     if (active === next) return;
     active = next;
-    $("screenshots-view").hidden = !next;
     $("rail-gallery").classList.toggle("active", next);
+    // Visibility itself is owned by updateViews (review-player.js); calling
+    // it here is what actually swaps the Library out for the Gallery.
+    updateViews();
     if (next) renderScreenshots();
   }
 

@@ -77,6 +77,9 @@ listen("screenshot-saved", (e) => {
   const s = e.payload || {};
   const name = String(s.path || "").split(/[\\\\/]/).pop();
   setNotice("screenshot (" + s.mode + ") saved " + name, { transient: true });
+  // The Gallery lists screenshots from the clip cache; a fresh shot must
+  // reach it without waiting for an unrelated refresh.
+  requestRefresh();
 });
 
 listen("mic-test", (e) => {
