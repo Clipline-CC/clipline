@@ -4,6 +4,32 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-21): PrintScreen dead-key diagnosis + upload scope fix
+
+User reported PrintScreen dead again after the QoL pass. Diagnosis: the running session had
+every global shortcut registered (ownership probe TAKEN) but dispatch silently ignored —
+consistent with `actions_paused` wedged true, which nothing logged. A fresh launch worked
+immediately (verified with a corrected SendInput injection: vk 0x2C **plus scan 0x37 and the
+extended-key flag**; injections without those never traverse the OS hotkey path and produce
+false negatives — remember this for future hotkey probes). The wedge could not be reproduced;
+if it recurs, grep `hotkey_capture_resumed_after_ui_gone|hotkey_capture_resume_failed`.
+
+Fixes landed:
+
+- **`996251fe`** — `parse_hook_hotkey` treated PrintScreen as a hard error, so every launch
+  with default screenshot binds aborted `install_hotkey_hook` entirely (the recurring
+  `hotkey_hook_install_failed … not a hook key` WARN was this, misread as benign). Mouse binds
+  and all hook dispatch died with it. PrintScreen now parses to `None` and is skipped.
+- **`1866011f`** — the temporary upload kill switch was scoped wrong: it disabled ALL uploads.
+  Intent was screenshot-only (no good cloud support yet). `openUploadDialog` now rejects just
+  screenshots with a message; video uploads work again.
+- **`19eb87d7`** — resume-after-UI-gone logs a one-line INFO when it actually resumes, so a
+  stuck-pause state can never again be invisible in the log.
+
+Gates green (workspace + capture crate explicit, clippy clean); rebuilt and relaunched via WMI
+(Start-Process through the agent shell gets killed by the shell's Job Object when the command
+ends — launch long-lived apps with Invoke-CimMethod Win32_Process Create instead).
+
 ## Checkpoint (2026-08-21): screenshot QoL pass — thumbnails, Screenshots folder, overlay latency, uploads off
 
 Follow-up on `investigate-sharex` after the PrintScreen dispatch fixes were verified by the
