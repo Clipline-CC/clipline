@@ -1277,7 +1277,16 @@
   </dialog>
 
   <dialog id="screenshot-lightbox" class="screenshot-lightbox">
-    <img id="screenshot-lightbox-img" alt="" />
+    <div class="lightbox-stage">
+      <img id="screenshot-lightbox-img" alt="" />
+      <button id="lightbox-prev" class="lightbox-nav lightbox-prev" type="button" aria-label="Previous screenshot" title="Previous (←)">
+        <svg viewBox="0 0 24 24"><path d="M15.5 4.5 8 12l7.5 7.5-1.8 1.8L4.5 12l9.2-9.3z"/></svg>
+      </button>
+      <button id="lightbox-next" class="lightbox-nav lightbox-next" type="button" aria-label="Next screenshot" title="Next (→)">
+        <svg viewBox="0 0 24 24"><path d="M8.5 4.5 16 12l-7.5 7.5 1.8 1.8L19.5 12l-9.2-9.3z"/></svg>
+      </button>
+      <span id="lightbox-counter" class="lightbox-counter"></span>
+    </div>
   </dialog>
 
   <dialog id="quit-dialog">

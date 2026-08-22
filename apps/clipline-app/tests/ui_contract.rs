@@ -2903,7 +2903,7 @@ fn screenshots_gallery_has_rail_button_and_dedicated_view() {
     for required in [
         "function renderScreenshots(",
         "PlayerCore.clipKind(c) === \"screenshot\"",
-        "openScreenshotLightbox(clip)",
+        "openScreenshotLightbox(clip, { items: allShots, index: index });",
         "deleteClip(clip.path)",
         "window.__renderScreenshots",
         "window.__screenshotsGalleryActive",
@@ -2923,6 +2923,41 @@ fn screenshots_gallery_has_rail_button_and_dedicated_view() {
     assert!(
         read_ui_js("review-player.js").contains("\"screenshots-view\""),
         "view arbitration must own the screenshots-view visibility"
+    );
+}
+
+#[test]
+fn screenshot_lightbox_navigates_with_arrows_and_buttons() {
+    let html = index_html();
+    let js = main_js();
+
+    for required in [
+        "id=\"lightbox-prev\"",
+        "id=\"lightbox-next\"",
+        "id=\"lightbox-counter\"",
+    ] {
+        assert!(
+            html.contains(required),
+            "screenshot lightbox must include `{required}`"
+        );
+    }
+
+    for required in [
+        "function stepScreenshotLightbox(",
+        "lightboxNavigation",
+        "\"ArrowLeft\"",
+        "\"ArrowRight\"",
+        "nav.index + 1} / ${nav.items.length}",
+    ] {
+        assert!(js.contains(required), "lightbox JS must include `{required}`");
+    }
+
+    // The Gallery must hand the lightbox its sorted order, so arrows follow
+    // what the grid shows.
+    assert!(
+        read_ui_js("gallery.js")
+            .contains("openScreenshotLightbox(clip, { items: allShots, index: index });"),
+        "Gallery cards must pass their sorted list to the lightbox"
     );
 }
 

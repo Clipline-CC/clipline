@@ -4,7 +4,7 @@
 (function () {
   var active = false;
 
-  function shotCard(clip) {
+  function shotCard(clip, index, allShots) {
     var el = document.createElement("article");
     el.className = "card screenshot-card";
     el.dataset.clipPath = clip.path;
@@ -46,7 +46,8 @@
 
     el.append(thumb, meta);
     el.addEventListener("click", function () {
-      openScreenshotLightbox(clip);
+      // Arrows navigate the Gallery's current sorted order.
+      openScreenshotLightbox(clip, { items: allShots, index: index });
     });
     return el;
   }
@@ -58,19 +59,23 @@
     return span;
   }
 
-  function renderScreenshots() {
-    if (!active) return;
-    var root = $("screenshots-grid");
-    if (!root) return;
-    releaseGalleryRoot(root);
+  function sortedScreenshots() {
     var sort = $("screenshots-sort").value;
-    var shots = clipsCache
+    return clipsCache
       .filter(function (c) { return PlayerCore.clipKind(c) === "screenshot"; })
       .sort(function (a, b) {
         return sort === "old"
           ? a.modified_unix - b.modified_unix
           : b.modified_unix - a.modified_unix;
       });
+  }
+
+  function renderScreenshots() {
+    if (!active) return;
+    var root = $("screenshots-grid");
+    if (!root) return;
+    releaseGalleryRoot(root);
+    var shots = sortedScreenshots();
     $("screenshots-count").textContent = shots.length
       ? shots.length + (shots.length === 1 ? " screenshot" : " screenshots")
       : "";
@@ -81,7 +86,7 @@
       root.appendChild(empty);
       return;
     }
-    for (var i = 0; i < shots.length; i++) root.appendChild(shotCard(shots[i]));
+    for (var i = 0; i < shots.length; i++) root.appendChild(shotCard(shots[i], i, shots));
   }
 
   function setActive(next) {

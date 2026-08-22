@@ -932,13 +932,42 @@ function cloudClipCard(entry) {
 }
 
 /* ---- screenshot lightbox ---- */
-function openScreenshotLightbox(clip) {
+// The Gallery owns navigation state (sorted list + current index) and
+// overrides these hooks; these fallbacks keep the lightbox working when a
+// single screenshot is opened outside the Gallery context.
+var lightboxNavigation = null;
+
+function openScreenshotLightbox(clip, navigation = null) {
   const dialog = document.getElementById("screenshot-lightbox");
   const img = document.getElementById("screenshot-lightbox-img");
   if (!dialog || !img) return;
+  lightboxNavigation = navigation;
   img.src = convertFileSrc(clip.path);
   img.alt = clipDisplayTitle(clip) || clip.name;
+  updateLightboxNav();
   dialog.showModal();
+}
+
+function updateLightboxNav() {
+  const prev = document.getElementById("lightbox-prev");
+  const next = document.getElementById("lightbox-next");
+  const counter = document.getElementById("lightbox-counter");
+  const nav = lightboxNavigation;
+  if (!prev || !next || !counter || !nav) return;
+  prev.disabled = nav.index <= 0;
+  next.disabled = nav.index >= nav.items.length - 1;
+  counter.textContent =
+    nav.items.length > 1 ? `${nav.index + 1} / ${nav.items.length}` : "";
+}
+
+function stepScreenshotLightbox(delta) {
+  const nav = lightboxNavigation;
+  const dialog = document.getElementById("screenshot-lightbox");
+  if (!nav || !dialog || !dialog.open) return;
+  const nextIndex = nav.index + delta;
+  if (nextIndex < 0 || nextIndex >= nav.items.length) return;
+  nav.index = nextIndex;
+  openScreenshotLightbox(nav.items[nextIndex], nav);
 }
 (function initScreenshotLightbox() {
   const dialog = document.getElementById("screenshot-lightbox");
@@ -947,6 +976,21 @@ function openScreenshotLightbox(clip) {
   // Esc closes natively via the dialog cancel event.
   dialog.addEventListener("click", (ev) => {
     if (ev.target === dialog) dialog.close();
+  });
+  document.getElementById("lightbox-prev")?.addEventListener("click", () => {
+    stepScreenshotLightbox(-1);
+  });
+  document.getElementById("lightbox-next")?.addEventListener("click", () => {
+    stepScreenshotLightbox(1);
+  });
+  dialog.addEventListener("keydown", (ev) => {
+    if (ev.key === "ArrowLeft") {
+      ev.preventDefault();
+      stepScreenshotLightbox(-1);
+    } else if (ev.key === "ArrowRight") {
+      ev.preventDefault();
+      stepScreenshotLightbox(1);
+    }
   });
 })();
 

@@ -3627,11 +3627,30 @@ button.primary.settings-save-glow {
   max-height: 92vh;
 }
 .screenshot-lightbox::backdrop { background: rgb(0 0 0 / 0.75); }
+.lightbox-stage { position: relative; }
 .screenshot-lightbox img {
   display: block;
   max-width: 100%;
   max-height: 92vh;
   border-radius: 8px;
+}
+.lightbox-nav {
+  position: absolute; top: 50%; transform: translateY(-50%); z-index: 2;
+  width: 44px; height: 44px; min-width: 0; padding: 0;
+  display: grid; place-items: center; border: 0; border-radius: 8px;
+  background: rgba(var(--scrim-c-rgb),.66); color: var(--text-strong);
+  transition: background 0.12s ease, opacity 0.12s ease;
+}
+.lightbox-nav:hover { background: rgba(var(--scrim-c-rgb),.9); color: #fff; }
+.lightbox-nav svg { display: block; width: 20px; height: 20px; fill: currentColor; }
+.lightbox-prev { left: 12px; }
+.lightbox-next { right: 12px; }
+.lightbox-nav[disabled] { opacity: 0; pointer-events: none; }
+.lightbox-counter {
+  position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%); z-index: 2;
+  height: 22px; padding: 0 10px; border-radius: 6px; display: inline-flex; align-items: center;
+  background: rgba(var(--scrim-c-rgb),.74); color: var(--text-strong);
+  font-family: var(--font-mono); font-size: 11px; font-variant-numeric: tabular-nums;
 }
 
 .card-dur {
