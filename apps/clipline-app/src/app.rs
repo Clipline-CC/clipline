@@ -3775,9 +3775,12 @@ fn resume_hotkeys_after_ui_gone<R: Runtime>(app: &AppHandle<R>) {
     if !crate::hotkeys::actions_paused() {
         return;
     }
-    if let Err(error) = apply_hotkey_capture_active(app, &app.state::<RuntimeState>(), false) {
-        tracing::warn!(event = "hotkey_capture_resume_failed", error = %error);
-        log_diagnostic(format!("resume hotkeys after UI gone: {error}"));
+    match apply_hotkey_capture_active(app, &app.state::<RuntimeState>(), false) {
+        Ok(()) => tracing::info!(event = "hotkey_capture_resumed_after_ui_gone"),
+        Err(error) => {
+            tracing::warn!(event = "hotkey_capture_resume_failed", error = %error);
+            log_diagnostic(format!("resume hotkeys after UI gone: {error}"));
+        }
     }
 }
 
