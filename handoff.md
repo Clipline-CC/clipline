@@ -4,6 +4,23 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-22): screenshot latency verified on release build — milestone closed
+
+User confirmed the screenshot-capture milestone works end to end. Release-build measurements
+(via `screenshot_grab`/`screenshot_encode`/`screenshot_captured` instrumentation):
+
+| Path | keypress → result |
+|---|---|
+| Full-screen PrintScreen | 99 ms (grab 73 + encode 19) |
+| Window Alt+PrintScreen | 60 ms |
+| Region Ctrl+PrintScreen, reused overlay | ~130 ms; first open after launch 289 ms |
+
+Debug builds remain ~15× slower at per-pixel work (1596 ms for the same full-screen shot);
+never judge capture latency from a debug binary. The earlier "delay" was debug overhead plus
+the since-fixed redundant full-frame copy and default-compression encode. Latency watcher
+monitor was removed after verification; re-create it from the log-grep pattern
+`screenshot_(captured|grab|encode)` if regressions are ever suspected.
+
 ## Checkpoint (2026-08-21): PrintScreen dead-key diagnosis + upload scope fix
 
 User reported PrintScreen dead again after the QoL pass. Diagnosis: the running session had
