@@ -824,7 +824,10 @@ function updateViews() {
   $("settings-page").hidden = !settingsOpen;
   $("review-viewer").hidden = !currentClip;
   // Settings is an overlay; gallery/review visibility follows only clip state.
-  $("gallery-view").hidden = !!currentClip;
+  // The screenshots Gallery closes when a clip opens (review wins), and
+  // reopens nothing on its own.
+  $("gallery-view").hidden = !!currentClip || window.__screenshotsGalleryActive?.();
+  $("screenshots-view").hidden = !window.__screenshotsGalleryActive?.() || !!currentClip;
   syncSettingsModalBackground();
 }
 

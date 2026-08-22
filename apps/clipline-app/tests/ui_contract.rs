@@ -20,6 +20,7 @@ const APP_UI_JS: &[&str] = &[
     "app-core.js",
     "settings.js",
     "library.js",
+    "gallery.js",
     "cloud.js",
     "review-player.js",
     "support.js",
@@ -2879,6 +2880,50 @@ fn screenshot_hotkeys_capture_region_screen_and_window() {
     ] {
         assert!(js.contains(required), "screenshot UI must include `{required}`");
     }
+}
+
+#[test]
+fn screenshots_gallery_has_rail_button_and_dedicated_view() {
+    let html = index_html();
+    let js = main_js();
+
+    for required in [
+        "id=\"rail-gallery\"",
+        "id=\"screenshots-view\"",
+        "id=\"screenshots-grid\"",
+        "id=\"screenshots-count\"",
+        "id=\"screenshots-sort\"",
+    ] {
+        assert!(
+            html.contains(required),
+            "screenshots Gallery must include `{required}`"
+        );
+    }
+
+    for required in [
+        "function renderScreenshots(",
+        "PlayerCore.clipKind(c) === \"screenshot\"",
+        "openScreenshotLightbox(clip)",
+        "deleteClip(clip.path)",
+        "window.__renderScreenshots",
+        "window.__screenshotsGalleryActive",
+        "$(\"rail-gallery\").addEventListener(\"click\"",
+    ] {
+        assert!(js.contains(required), "Gallery JS must include `{required}`");
+    }
+
+    // The Library grid must never list screenshots; they belong to the Gallery.
+    let library = read_ui_js("library.js");
+    assert!(
+        library.contains("if (kind === \"screenshot\") continue;"),
+        "the clip Library must exclude screenshots in favor of the Gallery"
+    );
+
+    // Review arbitration must hide the Gallery view while a clip is open.
+    assert!(
+        read_ui_js("review-player.js").contains("\"screenshots-view\""),
+        "view arbitration must own the screenshots-view visibility"
+    );
 }
 
 #[test]

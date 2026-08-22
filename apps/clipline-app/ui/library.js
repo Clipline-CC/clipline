@@ -238,6 +238,10 @@ async function refreshClips(
       closeReview();
     }
   }
+  // Keep the screenshots Gallery current while it is open.
+  if (window.__renderScreenshots && window.__screenshotsGalleryActive?.()) {
+    window.__renderScreenshots();
+  }
   renderClips();
   return true;
 }
@@ -1666,6 +1670,8 @@ function filterGalleryClips(clips) {
   let maxModifiedUnix = 0;
   for (const c of clips) {
     const kind = clipKind(c);
+    // Screenshots live in their own Gallery view, never the clip Library.
+    if (kind === "screenshot") continue;
     if ((galleryFilter === "replay" || galleryFilter === "session" || galleryFilter === "trim")
       && kind !== galleryFilter) continue;
     if (galleryFilter === "marked" && !clipMarkers(c).length) continue;

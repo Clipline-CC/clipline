@@ -3230,6 +3230,33 @@ button.primary.settings-save-glow {
 }
 .gallery-view[hidden] { display: none; }
 
+/* ---- screenshots gallery ---- */
+.screenshots-view {
+  grid-area: 1 / 1;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+  min-width: 0;
+  background: var(--bg);
+}
+.screenshots-view[hidden] { display: none; }
+
+.screenshots-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 14px;
+  align-content: start;
+  padding: 4px 22px 20px;
+  overflow-y: auto;
+}
+.screenshots-grid[hidden] { display: none; }
+
+#rail-gallery {
+  color: var(--muted);
+}
+#rail-gallery:hover { color: var(--text); }
+#rail-gallery.active { color: var(--accent); }
+
 .gallery-head {
   grid-row: 1;
   display: flex;
