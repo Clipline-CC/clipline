@@ -950,7 +950,6 @@ function openScreenshotLightbox(clip, navigation = null) {
 }
 
 function updateLightboxNav() {
-  const dialog = document.getElementById("screenshot-lightbox");
   const prev = document.getElementById("lightbox-prev");
   const next = document.getElementById("lightbox-next");
   const counter = document.getElementById("lightbox-counter");
@@ -960,13 +959,6 @@ function updateLightboxNav() {
   next.disabled = nav.index >= nav.items.length - 1;
   counter.textContent =
     nav.items.length > 1 ? `${nav.index + 1} / ${nav.items.length}` : "";
-  // A disabled button cannot hold focus; if the focused arrow just became
-  // disabled, return focus to the dialog so arrow keys keep working.
-  const active = document.activeElement;
-  if (active instanceof HTMLElement && active.disabled
-    && (active === prev || active === next)) {
-    dialog.focus();
-  }
 }
 
 function stepScreenshotLightbox(delta) {
@@ -997,7 +989,15 @@ function stepScreenshotLightbox(delta) {
   document.getElementById("lightbox-next")?.addEventListener("click", () => {
     stepScreenshotLightbox(1);
   });
-  dialog.addEventListener("keydown", (ev) => {
+  // Arrow keys must work no matter where focus sits inside the open dialog —
+  // including after a disabled arrow drops focus to <body> at either end of
+  // the list, which is exactly why listening only on the dialog failed. When
+  // focus is still inside the dialog (on the dialog itself or a live arrow),
+  // the bubbling handler above already ran; skip to avoid double-stepping.
+  document.addEventListener("keydown", (ev) => {
+    if (!dialog.open) return;
+    const inside = ev.target instanceof HTMLElement && dialog.contains(ev.target);
+    if (inside) return;
     if (ev.key === "ArrowLeft") {
       ev.preventDefault();
       stepScreenshotLightbox(-1);
@@ -1429,7 +1429,8 @@ function syncSelectToggleLabel() {
 }
 
 function syncSelectionControls() {
-  if (gallerySource !== "local" && selectMode) {
+  const galleryOpen = Boolean(window.__screenshotsGalleryActive?.());
+  if (gallerySource !== "local" && !galleryOpen && selectMode) {
     selectMode = false;
     clearSelection();
   }
@@ -1438,6 +1439,12 @@ function syncSelectionControls() {
     toggle.hidden = gallerySource !== "local";
     toggle.classList.toggle("active", selectMode);
     syncSelectToggleLabel();
+  }
+  const shotToggle = $("screenshots-select-toggle");
+  if (shotToggle) {
+    shotToggle.hidden = !galleryOpen;
+    shotToggle.classList.toggle("active", selectMode && galleryOpen);
+    shotToggle.textContent = selectMode ? "Done" : "Select multiple";
   }
   const grid = $("gallery-grid");
   if (grid) grid.classList.toggle("select-mode", selectMode && gallerySource === "local");

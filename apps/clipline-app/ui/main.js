@@ -189,6 +189,11 @@ $("gallery-select-toggle").addEventListener("click", () => {
   if (!selectMode) clearSelection();
   syncSelectionControls();
 });
+$("screenshots-select-toggle").addEventListener("click", () => {
+  selectMode = !selectMode;
+  if (!selectMode) clearSelection();
+  syncSelectionControls();
+});
 $("bulk-select-all").addEventListener("click", selectAllVisible);
 $("bulk-clear").addEventListener("click", clearSelection);
 $("bulk-delete").addEventListener("click", bulkDeleteSelected);
