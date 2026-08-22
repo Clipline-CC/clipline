@@ -67,7 +67,7 @@ pub struct HookHotkeys<'a> {
     pub screenshot_window: &'a [&'a str],
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct HookHotkey {
     ctrl: bool,
     alt: bool,
@@ -318,13 +318,15 @@ fn wait_for_keyboard_hook_ready(
 }
 
 fn parse_hook_hotkeys(raws: &[&str]) -> Result<Vec<HookHotkey>, String> {
-    raws.iter().map(|raw| parse_hook_hotkey(raw)).collect()
+    raws.iter()
+        .map(|raw| parse_hook_hotkey(raw).map(|parsed| parsed.unwrap_or_default()))
+        .collect()
 }
 
 fn parse_hook_bindings(hotkeys: HookHotkeys<'_>) -> Result<Vec<HookBinding>, String> {
     // Save Replay is always bound, so it is parsed strictly and claims its keys
     // first; the optional actions skip blanks and refuse to shadow a key that is
-    // already taken.
+    // already taken. PrintScreen parses to None (plugin-owned) and is skipped.
     let mut bindings = parse_hook_hotkeys(hotkeys.save)?
         .into_iter()
         .map(|hotkey| HookBinding {
@@ -352,7 +354,9 @@ fn parse_hook_bindings(hotkeys: HookHotkeys<'_>) -> Result<Vec<HookBinding>, Str
         ),
     ] {
         for raw in raws.iter().copied().filter(|raw| !raw.trim().is_empty()) {
-            let hotkey = parse_hook_hotkey(raw)?;
+            let Some(hotkey) = parse_hook_hotkey(raw)? else {
+                continue;
+            };
             if bindings.iter().any(|binding| binding.hotkey == hotkey) {
                 return Err(format!("{label} hotkey matches another configured hotkey"));
             }
@@ -362,7 +366,7 @@ fn parse_hook_bindings(hotkeys: HookHotkeys<'_>) -> Result<Vec<HookBinding>, Str
     Ok(bindings)
 }
 
-fn parse_hook_hotkey(raw: &str) -> Result<HookHotkey, String> {
+fn parse_hook_hotkey(raw: &str) -> Result<Option<HookHotkey>, String> {
     use crate::settings::hotkey::{parse_hotkey_spec, HotkeyKey};
 
     let spec = parse_hotkey_spec(raw)?;
@@ -371,22 +375,20 @@ fn parse_hook_hotkey(raw: &str) -> Result<HookHotkey, String> {
         HotkeyKey::Keyboard(key) => {
             keyboard_key_vk_code(key).ok_or_else(|| format!("unsupported hotkey key: {key}"))?
         }
-        // PrintScreen is OS-registered via the global-shortcut plugin, never
-        // routed through the low-level hook (the hook filter would also have to
-        // swallow it OS-wide, which we do not want).
-        HotkeyKey::PrintScreen => {
-            return Err("PrintScreen is registered as a global shortcut, not a hook key".into())
-        }
+        // PrintScreen is registered as an OS global shortcut and dispatched by
+        // the global-shortcut plugin; it must not abort low-level-hook parsing
+        // (a hard error here once killed the whole hook install).
+        HotkeyKey::PrintScreen => return Ok(None),
         HotkeyKey::Middle => VK_MBUTTON_CODE,
         HotkeyKey::Mouse4 => VK_XBUTTON1_CODE,
         HotkeyKey::Mouse5 => VK_XBUTTON2_CODE,
     };
-    Ok(HookHotkey {
+    Ok(Some(HookHotkey {
         ctrl: spec.ctrl,
         alt: spec.alt,
         shift: spec.shift,
         key_vk,
-    })
+    }))
 }
 
 fn run_keyboard_hook(ready_tx: Sender<Result<u32, String>>, start_rx: Receiver<()>) {
@@ -626,7 +628,7 @@ mod tests {
 
     #[test]
     fn parses_function_key_hotkeys_for_hook_matching() {
-        let hotkey = parse_hook_hotkey("Ctrl+Alt+F9").unwrap();
+        let hotkey = parse_hook_hotkey("Ctrl+Alt+F9").unwrap().unwrap();
 
         assert!(hotkey.matches(VK_F1_CODE + 8, true, true, false));
         assert!(!hotkey.matches(VK_F1_CODE + 8, true, true, true));
@@ -635,19 +637,19 @@ mod tests {
 
     #[test]
     fn parses_modified_keyboard_hotkeys_for_hook_matching() {
-        let letter = parse_hook_hotkey("Ctrl+G").unwrap();
+        let letter = parse_hook_hotkey("Ctrl+G").unwrap().unwrap();
         assert!(letter.matches(0x47, true, false, false));
         assert!(!letter.matches(0x47, false, false, false));
 
-        let literal_f = parse_hook_hotkey("Ctrl+Shift+F").unwrap();
+        let literal_f = parse_hook_hotkey("Ctrl+Shift+F").unwrap().unwrap();
         assert!(literal_f.matches(0x46, true, false, true));
         assert!(!literal_f.matches(VK_F1_CODE, true, false, true));
 
-        let arrow = parse_hook_hotkey("Alt+Shift+ArrowLeft").unwrap();
+        let arrow = parse_hook_hotkey("Alt+Shift+ArrowLeft").unwrap().unwrap();
         assert!(arrow.matches(0x25, false, true, true));
         assert!(!arrow.matches(0x25, false, true, false));
 
-        let slash = parse_hook_hotkey("Ctrl+Slash").unwrap();
+        let slash = parse_hook_hotkey("Ctrl+Slash").unwrap().unwrap();
         assert!(slash.matches(0xBF, true, false, false));
     }
 
@@ -655,24 +657,26 @@ mod tests {
     fn function_key_range_keeps_distinct_virtual_keys() {
         assert!(parse_hook_hotkey("F1")
             .unwrap()
+            .unwrap()
             .matches(VK_F1_CODE, false, false, false));
         assert!(parse_hook_hotkey("F24")
+            .unwrap()
             .unwrap()
             .matches(VK_F24_CODE, false, false, false));
     }
 
     #[test]
     fn parses_mouse_button_hotkeys_for_hook_matching() {
-        let hotkey = parse_hook_hotkey("Ctrl+Mouse5").unwrap();
+        let hotkey = parse_hook_hotkey("Ctrl+Mouse5").unwrap().unwrap();
 
         assert!(hotkey.matches(0x06, true, false, false));
         assert!(!hotkey.matches(0x06, false, false, false));
         assert!(!hotkey.matches(0x05, true, false, false));
 
-        let middle = parse_hook_hotkey("Shift+Middle").unwrap();
+        let middle = parse_hook_hotkey("Shift+Middle").unwrap().unwrap();
         assert!(middle.matches(0x04, false, false, true));
 
-        let bare_mouse = parse_hook_hotkey("Mouse4").unwrap();
+        let bare_mouse = parse_hook_hotkey("Mouse4").unwrap().unwrap();
         assert!(bare_mouse.matches(0x05, false, false, false));
         assert!(!bare_mouse.matches(0x05, true, false, false));
     }
@@ -684,8 +688,25 @@ mod tests {
 
     #[test]
     fn hook_does_not_claim_printscreen() {
-        assert!(parse_hook_hotkey("PrintScreen").is_err());
-        assert!(parse_hook_hotkey("Ctrl+PrintScreen").is_err());
+        // PrintScreen binds are plugin-owned: parsing skips them instead of
+        // failing, so one bind can no longer abort the whole hook install.
+        assert!(parse_hook_hotkey("PrintScreen").unwrap().is_none());
+        assert!(parse_hook_hotkey("Ctrl+PrintScreen").unwrap().is_none());
+    }
+
+    #[test]
+    fn printscreen_binds_do_not_abort_hook_binding_setup() {
+        let bindings = parse_hook_bindings(HookHotkeys {
+            save: &["F6"],
+            recording: &[],
+            bookmark: &[],
+            screenshot_region: &["Ctrl+PrintScreen"],
+            screenshot_screen: &["PrintScreen"],
+            screenshot_window: &["Alt+PrintScreen"],
+        })
+        .expect("PrintScreen binds must be skipped, not fatal");
+        assert_eq!(bindings.len(), 1, "only the F6 save bind survives");
+        assert_eq!(bindings[0].action, HookAction::SaveReplay);
     }
 
     #[test]
@@ -912,11 +933,12 @@ mod tests {
 
     #[test]
     fn hook_requirement_tracks_mouse_button_hotkeys() {
-        assert!(!parse_hook_hotkey("Alt+F10").unwrap().requires_mouse_hook());
+        assert!(!parse_hook_hotkey("Alt+F10").unwrap().unwrap().requires_mouse_hook());
         assert!(parse_hook_hotkey("Ctrl+Mouse5")
             .unwrap()
+            .unwrap()
             .requires_mouse_hook());
-        assert!(parse_hook_hotkey("Mouse5").unwrap().requires_mouse_hook());
+        assert!(parse_hook_hotkey("Mouse5").unwrap().unwrap().requires_mouse_hook());
     }
 
     #[test]
