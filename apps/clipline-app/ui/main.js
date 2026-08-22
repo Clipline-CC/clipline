@@ -192,6 +192,10 @@ $("gallery-select-toggle").addEventListener("click", () => {
 $("bulk-select-all").addEventListener("click", selectAllVisible);
 $("bulk-clear").addEventListener("click", clearSelection);
 $("bulk-delete").addEventListener("click", bulkDeleteSelected);
+// The screenshots Gallery mirrors the same bulk actions on its own bar.
+$("bulk-select-all-shot").addEventListener("click", selectAllVisible);
+$("bulk-clear-shot").addEventListener("click", clearSelection);
+$("bulk-delete-shot").addEventListener("click", bulkDeleteSelected);
 $("poster-runtime-install").addEventListener("click", () => {
   void installFfmpegForPosters().catch(() => {});
 });

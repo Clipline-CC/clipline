@@ -950,6 +950,7 @@ function openScreenshotLightbox(clip, navigation = null) {
 }
 
 function updateLightboxNav() {
+  const dialog = document.getElementById("screenshot-lightbox");
   const prev = document.getElementById("lightbox-prev");
   const next = document.getElementById("lightbox-next");
   const counter = document.getElementById("lightbox-counter");
@@ -964,7 +965,7 @@ function updateLightboxNav() {
   const active = document.activeElement;
   if (active instanceof HTMLElement && active.disabled
     && (active === prev || active === next)) {
-    dialog?.focus();
+    dialog.focus();
   }
 }
 
@@ -1440,6 +1441,12 @@ function syncSelectionControls() {
   }
   const grid = $("gallery-grid");
   if (grid) grid.classList.toggle("select-mode", selectMode && gallerySource === "local");
+  // The screenshots Gallery participates in select mode too.
+  const shotGrid = $("screenshots-grid");
+  if (shotGrid) shotGrid.classList.toggle("select-mode", selectMode);
+  window.__gallerySelectMode = function () {
+    return selectMode;
+  };
   syncBulkBar();
 }
 
@@ -1452,6 +1459,14 @@ function syncBulkBar() {
   $("bulk-count").textContent = `${count} selected`;
   const del = $("bulk-delete");
   if (del) del.disabled = count === 0;
+  // Mirror the bulk state onto the screenshots Gallery's own bar.
+  const shotBar = $("screenshots-bulk-bar");
+  if (!shotBar) return;
+  shotBar.hidden = !((selectMode || count > 0)
+    && window.__screenshotsGalleryActive?.());
+  $("bulk-count-shot").textContent = `${count} selected`;
+  const delShot = $("bulk-delete-shot");
+  if (delShot) delShot.disabled = count === 0;
 }
 
 /* ---- gallery: filter / sort / group ---- */

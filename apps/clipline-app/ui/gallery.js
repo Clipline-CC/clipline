@@ -46,6 +46,11 @@
 
     el.append(thumb, meta);
     el.addEventListener("click", function () {
+      // In select mode, clicking toggles the card instead of opening it.
+      if (window.__gallerySelectMode?.()) {
+        toggleClipSelection(clip.path);
+        return;
+      }
       // Arrows navigate the Gallery's current sorted order.
       openScreenshotLightbox(clip, { items: allShots, index: index });
     });
