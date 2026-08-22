@@ -2959,6 +2959,29 @@ fn screenshot_lightbox_navigates_with_arrows_and_buttons() {
             .contains("openScreenshotLightbox(clip, { items: allShots, index: index });"),
         "Gallery cards must pass their sorted list to the lightbox"
     );
+
+    // Regression guard: showModal() autofocuses a button inside the dialog,
+    // so a keydown handler that skips events focused inside it kills the
+    // arrows entirely — which is why listening happens at document level.
+    let lib = read_ui_js("library.js");
+    let init_start = lib
+        .find("(function initScreenshotLightbox()")
+        .expect("screenshot lightbox init must exist");
+    let init_end = lib[init_start..]
+        .find("})();")
+        .map(|offset| init_start + offset)
+        .expect("unterminated screenshot lightbox init");
+    let lightbox_init = &lib[init_start..init_end];
+    for banned in ["dialog.contains(", "if (inside)"] {
+        assert!(
+            !lightbox_init.contains(banned),
+            "lightbox keydown must not skip events focused inside the dialog ({banned})"
+        );
+    }
+    assert!(
+        lightbox_init.contains("document.addEventListener(\"keydown\""),
+        "lightbox arrows must be handled at document level"
+    );
 }
 
 #[test]

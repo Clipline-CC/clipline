@@ -989,15 +989,11 @@ function stepScreenshotLightbox(delta) {
   document.getElementById("lightbox-next")?.addEventListener("click", () => {
     stepScreenshotLightbox(1);
   });
-  // Arrow keys must work no matter where focus sits inside the open dialog —
-  // including after a disabled arrow drops focus to <body> at either end of
-  // the list, which is exactly why listening only on the dialog failed. When
-  // focus is still inside the dialog (on the dialog itself or a live arrow),
-  // the bubbling handler above already ran; skip to avoid double-stepping.
+  // Arrow keys must work no matter where focus sits — showModal() autofocuses
+  // the prev button, and a disabled arrow at either list end drops focus to
+  // <body>, which is why listening only on the dialog failed.
   document.addEventListener("keydown", (ev) => {
     if (!dialog.open) return;
-    const inside = ev.target instanceof HTMLElement && dialog.contains(ev.target);
-    if (inside) return;
     if (ev.key === "ArrowLeft") {
       ev.preventDefault();
       stepScreenshotLightbox(-1);
