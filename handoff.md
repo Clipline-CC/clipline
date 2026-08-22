@@ -4,6 +4,28 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-22): screenshots Gallery view with its own rail button
+
+Screenshots now have a dedicated **Gallery** view behind a new left-rail button
+(`rail-gallery`, below the clips counter). The Library lists video clips only;
+the Gallery lists only screenshots — each surface owns exactly one media type.
+
+- New `ui/gallery.js` controller + `#screenshots-view` section in `index.html`
+  (`#screenshots-grid`, count label, newest/oldest sort). Cards reuse the
+  existing card styling, lazy poster pipeline (`observePoster`), lightbox
+  (`openScreenshotLightbox`), and delete flow (`deleteClip`).
+- `filterGalleryClips` in `library.js` skips `kind === "screenshot"` so the
+  Library grid never shows them.
+- View arbitration stays centralized in `updateViews` (review-player.js): the
+  Gallery hides while a clip is open in Review; `refreshClips` re-renders an
+  open Gallery so new shots appear without manual refresh.
+- Contract-pinned by `screenshots_gallery_has_rail_button_and_dedicated_view`
+  in `tests/ui_contract.rs`; `gallery.js` was also added to the contract's
+  `APP_UI_JS` list so future checks cover it.
+
+Committed as `be3ee98` (feature), `9690649` (missed windows/still.rs companion),
+on top of the latency work in `c021efa`.
+
 ## Checkpoint (2026-08-22): screenshot latency verified on release build — milestone closed
 
 User confirmed the screenshot-capture milestone works end to end. Release-build measurements
