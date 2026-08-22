@@ -83,6 +83,20 @@ impl BgraImage {
         &self.bytes
     }
 
+    /// Consumes the image and returns its pixel buffer without copying.
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+
+    /// In-place BGRA → RGBA swap (alpha preserved). Cheaper than `to_rgba`
+    /// for full-screen frames: no second 30 MB allocation, and the swap
+    /// happens in cache-friendly linear order.
+    pub fn to_rgba_in_place(&mut self) {
+        for px in self.bytes.chunks_exact_mut(4) {
+            px.swap(0, 2);
+        }
+    }
+
     /// Copies the selected region into a new tight image. The selection is
     /// clamped to the image first; empty or fully-outside selections are an
     /// error, never a panic.

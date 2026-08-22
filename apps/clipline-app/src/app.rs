@@ -1677,9 +1677,17 @@ impl RuntimeState {
         std::thread::Builder::new()
             .name("screenshot".into())
             .spawn(move || {
+                let grab_started = std::time::Instant::now();
+                let grabbed = screenshot::capture_frame(mode);
+                tracing::info!(
+                    event = "screenshot_grab",
+                    mode = mode.label(),
+                    elapsed_ms = grab_started.elapsed().as_millis() as u64,
+                    ok = grabbed.is_ok()
+                );
                 let media_root = app.state::<crate::library::StorageSettings>().media_dir();
-                let result = screenshot::capture_frame(mode)
-                    .and_then(|image| screenshot::save_frame(&media_root, mode, &image, None));
+                let result = grabbed
+                    .and_then(|image| screenshot::save_frame(&media_root, mode, image, None));
                 tracing::info!(
                     event = "screenshot_captured",
                     mode = mode.label(),
@@ -1773,10 +1781,15 @@ impl RuntimeState {
 
         // Freeze the frame to a temp PNG so the overlay webview can display
         // it through the asset protocol; the path is stable across opens and
-        // the file is deleted when the overlay state is torn down.
-        let png =
-            crate::image::encode_rgba_png(image.width(), image.height(), &image.to_rgba())
-                .ok_or_else(|| "encode region preview PNG".to_string())?;
+        // the file is deleted when the overlay state is torn down. Fast
+        // compression: this sits on the keypress-to-overlay critical path.
+        let png = crate::image::encode_rgba_png_with(
+            image.width(),
+            image.height(),
+            &image.to_rgba(),
+            png::Compression::Fast,
+        )
+        .ok_or_else(|| "encode region preview PNG".to_string())?;
         let temp_path =
             std::env::temp_dir().join(format!("clipline-region-frame-{}.png", std::process::id()));
         std::fs::write(&temp_path, &png).map_err(|error| format!("write region preview: {error}"))?;
@@ -2587,7 +2600,7 @@ fn complete_region_screenshot<R: Runtime>(
     let saved = screenshot::save_frame(
         &media_root,
         ScreenshotMode::Region,
-        &frame,
+        frame,
         Some(clipline_capture::still::PlacedRect {
             x: selection.x,
             y: selection.y,

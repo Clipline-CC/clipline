@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use clipline_capture::still::{BgraImage, PlacedRect};
 use clipline_capture::windows::still as grab;
 
-use crate::image::{encode_rgba_png, SiblingTemp};
+use crate::image::SiblingTemp;
 use crate::library::is_reserved_windows_file_name;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,18 +77,19 @@ pub struct SavedScreenshot {
 }
 
 /// Full pipeline for a completed frame: optional crop, PNG encode, atomic
-/// publish into the media root's Screenshots folder.
+/// publish into the media root's Screenshots folder. Consumes the frame so
+/// the full-screen path can swap channels in place without a second copy.
 pub fn save_frame(
     media_root: &Path,
     mode: ScreenshotMode,
-    image: &BgraImage,
+    image: BgraImage,
     selection: Option<PlacedRect>,
 ) -> Result<SavedScreenshot, String> {
-    let rgba = crop_to_rgba(image, selection)?;
     let (width, height) = match selection {
         Some(rect) => (rect.width, rect.height),
         None => (image.width(), image.height()),
     };
+    let rgba = crop_to_rgba(image, selection)?;
     let path = publish_screenshot(media_root, crate::util::unix_now_i64(), width, height, &rgba)
         .map_err(|error| format!("{} screenshot: {error}", mode.label()))?;
     Ok(SavedScreenshot {
@@ -134,8 +135,22 @@ pub fn publish_screenshot(
             destination.display()
         ));
     }
-    let png = encode_rgba_png(width, height, rgba)
-        .ok_or_else(|| "PNG encoding failed for the captured image".to_string())?;
+    // Fast compression keeps the keypress-to-shutter gap small; a full-res
+    // desktop frame at default zlib settings costs seconds of CPU.
+    let encode_started = std::time::Instant::now();
+    let png = crate::image::encode_rgba_png_with(
+        width,
+        height,
+        rgba,
+        png::Compression::Fast,
+    )
+    .ok_or_else(|| "PNG encoding failed for the captured image".to_string())?;
+    tracing::info!(
+        event = "screenshot_encode",
+        width,
+        height,
+        elapsed_ms = encode_started.elapsed().as_millis() as u64
+    );
     let mut temp = SiblingTemp::reserve(&destination)?;
     temp.write_all(&png)?;
     temp.publish(&destination)?;
@@ -145,12 +160,15 @@ pub fn publish_screenshot(
     Ok(destination)
 }
 
-fn crop_to_rgba(image: &BgraImage, selection: Option<PlacedRect>) -> Result<Vec<u8>, String> {
-    let cropped = match selection {
-        Some(rect) => image.crop(rect).map_err(|e| e.to_string())?,
-        None => image.clone(),
-    };
-    Ok(cropped.to_rgba())
+fn crop_to_rgba(mut image: BgraImage, selection: Option<PlacedRect>) -> Result<Vec<u8>, String> {
+    if let Some(rect) = selection {
+        let cropped = image.crop(rect).map_err(|e| e.to_string())?;
+        return Ok(cropped.to_rgba());
+    }
+    // Full-frame path: swap channels in place instead of allocating a
+    // second full-screen buffer.
+    image.to_rgba_in_place();
+    Ok(image.into_bytes())
 }
 
 #[cfg(test)]
@@ -229,7 +247,7 @@ mod tests {
         )
         .expect("image");
         let rgba = crop_to_rgba(
-            &image,
+            image.clone(),
             Some(PlacedRect {
                 x: 1,
                 y: 1,
@@ -239,7 +257,7 @@ mod tests {
         )
         .expect("crop");
         assert_eq!(rgba.len(), 4); // clamped to one pixel
-        let full = crop_to_rgba(&image, None).expect("full");
+        let full = crop_to_rgba(image, None).expect("full");
         assert_eq!(full.len(), 16);
     }
 }

@@ -8,13 +8,29 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Encode tightly-packed RGBA pixels as a PNG.
+/// Encode tightly-packed RGBA pixels as a PNG with default compression.
 pub fn encode_rgba_png(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
+    encode_rgba_png_with(width, height, rgba, png::Compression::Default)
+}
+
+/// Encode tightly-packed RGBA pixels as a PNG. Full-resolution screenshot
+/// frames are ~30 MB of RGBA; default zlib settings cost seconds per shot,
+/// so the caller picks the speed/size tradeoff.
+pub fn encode_rgba_png_with(
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+    compression: png::Compression,
+) -> Option<Vec<u8>> {
     let mut out = Vec::new();
     {
         let mut encoder = png::Encoder::new(&mut out, width, height);
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
+        // One fixed filter avoids the per-row search; Sub is the crate
+        // default and cheap on screen content.
+        encoder.set_filter(png::FilterType::Sub);
+        encoder.set_compression(compression);
         let mut writer = encoder.write_header().ok()?;
         writer.write_image_data(rgba).ok()?;
     }
