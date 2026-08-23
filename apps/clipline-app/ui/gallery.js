@@ -105,6 +105,10 @@
     // Visibility itself is owned by updateViews (review-player.js); calling
     // it here is what actually swaps the Library out for the Gallery.
     updateViews();
+    // syncSelectionControls hides the select toggle while the Gallery is
+    // closed (boot-time syncing), so opening must re-run it or the button
+    // stays hidden until something else re-syncs.
+    if (typeof syncSelectionControls === "function") syncSelectionControls();
     if (next) renderScreenshots();
   }
 

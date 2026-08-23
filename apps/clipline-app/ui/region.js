@@ -140,6 +140,13 @@
     if (RegionCore.escapeCancels(event.key)) cancel();
   });
 
+  // Hide/show cycles can leave the OS window focused while the webview
+  // document is not, so keys never reach these listeners. A click anywhere
+  // re-focuses the document; Esc then works without a fresh selection.
+  overlay.addEventListener("mousedown", function () {
+    if (document.hasFocus && !document.hasFocus()) window.focus();
+  });
+
   window.addEventListener("blur", function () {
     if (armed) cancel();
   });

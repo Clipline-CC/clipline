@@ -431,6 +431,61 @@ fn default_capability_only_targets_main_window() {
 }
 
 #[test]
+fn region_overlay_webview_has_event_permissions_and_core_bundle() {
+    // The overlay webview is reused between selections; without core:event
+    // permissions its region-overlay-shown subscription is denied, so reused
+    // opens keep the stale frame and stale selection box on screen.
+    let capability: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("capabilities/region.json"),
+        )
+        .expect("read capabilities/region.json"),
+    )
+    .expect("valid region.json");
+    assert_eq!(
+        capability["windows"][0].as_str(),
+        Some("screenshot-region"),
+        "region capability must grant the screenshot-region window"
+    );
+    assert!(
+        capability["permissions"]
+            .as_array()
+            .expect("permissions array")
+            .iter()
+            .any(|p| p.as_str() == Some("core:default")),
+        "region webview needs core:event (inside core:default) for its wake subscriptions"
+    );
+
+    // app-core.js destructures PlayerCore at top level; loading it without
+    // player-core.js kills app-core.js in the overlay page.
+    let html = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/region.html"))
+        .expect("read ui/region.html");
+    let order = |name: &str| {
+        html.find(&format!("src=\"{name}\""))
+            .unwrap_or_else(|| panic!("region.html must reference {name}"))
+    };
+    assert!(order("player-core.js") < order("app-core.js"));
+    assert!(order("cloud-core.js") < order("app-core.js"));
+    assert!(order("gallery-window-core.js") < order("app-core.js"));
+    assert!(order("window-lifecycle-core.js") < order("app-core.js"));
+
+    // Reused opens must refocus the webview content, or WebView2 keeps
+    // document focus elsewhere and Esc never reaches the page.
+    let app = app_rs();
+    let reuse = app
+        .find("if let Some(window) = reuse {")
+        .expect("overlay reuse branch");
+    let branch_end = app[reuse..]
+        .find("return Ok(());")
+        .map(|offset| reuse + offset)
+        .expect("reuse branch end");
+    assert!(
+        app[reuse..branch_end].contains("Self::focus_webview_content(&window);"),
+        "the overlay reuse path must refocus the webview content so Esc works"
+    );
+}
+
+#[test]
 fn renderer_capabilities_match_observed_window_operations() {
     let capability: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(
@@ -5766,8 +5821,7 @@ fn gallery_supports_multi_select_bulk_actions() {
         );
     }
     assert!(
-        !js.contains("card-check")
-            && !js.contains("check.addEventListener")
+        !js.contains("card-check")            && !js.contains("check.addEventListener")
             && !js.contains("bulkUploadSelected")
             && !js.contains("uploadOneClipBulk")
             && !css.contains(".card-check"),
@@ -5781,6 +5835,18 @@ fn gallery_supports_multi_select_bulk_actions() {
         !html.contains("id=\"bulk-cancel\"") && !js.contains("$(\"bulk-cancel\")"),
         "the active Select multiple control should be the single manual exit from select mode"
     );
+
+    // The Gallery's select toggle starts visible: opening the Gallery must
+    // re-sync selection controls, otherwise the boot-time sync (Gallery
+    // closed) leaves the button hidden until a context-menu Select happens.
+    {
+        let gallery = read_ui_js("gallery.js");
+        let set_active = js_function_body(&gallery, "setActive");
+        assert!(
+            set_active.contains("syncSelectionControls()"),
+            "opening the Gallery must re-sync selection controls so the select toggle is visible"
+        );
+    }
 
     let delete_clip_fn = js
         .split("async function deleteClip")

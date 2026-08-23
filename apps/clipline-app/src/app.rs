@@ -1827,6 +1827,12 @@ impl RuntimeState {
             );
             let _ = window.show();
             let _ = window.set_focus();
+            // WebView2 can keep document focus on the hidden window across a
+            // hide/show cycle even though set_focus() focuses the OS window,
+            // which silently drops every keystroke (Esc would stop working).
+            // Refocusing the webview content is what restores key input.
+            #[cfg(windows)]
+            Self::focus_webview_content(&window);
             return Ok(());
         }
 
@@ -1858,6 +1864,23 @@ impl RuntimeState {
         let _ = window.show();
         let _ = window.set_focus();
         Ok(())
+    }
+
+    /// Put keyboard focus on the overlay webview's hosted content. The OS
+    /// window being focused is not enough: after hide/show cycles WebView2
+    /// can keep document focus elsewhere, so Esc never reaches the overlay
+    /// page. `ICoreWebView2Controller::MoveFocus` is the documented way to
+    /// hand focus to the hosted content.
+    #[cfg(windows)]
+    fn focus_webview_content<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
+        let _ = window.with_webview(move |webview| {
+            let controller = webview.controller();
+            // SAFETY: COM call on a live controller handed to us by Tauri.
+            let _ = unsafe { controller.MoveFocus(
+                webview2_com::Microsoft::Web::WebView2::Win32::
+                    COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC,
+            ) };
+        });
     }
 
     fn request_save_or_show_quota<R: Runtime>(&self, app: &AppHandle<R>) -> bool {
