@@ -1891,7 +1891,7 @@ fn is_cached_mp4_file(path: &Path) -> bool {
     let parts = suffix.split('.').collect::<Vec<_>>();
     !parts.is_empty()
         && parts.len().is_multiple_of(3)
-        && parts.chunks_exact(3).all(|chunk| {
+        && parts.as_chunks::<3>().0.iter().all(|chunk| {
             !chunk[0].is_empty()
                 && chunk[0].bytes().all(|byte| byte.is_ascii_digit())
                 && !chunk[1].is_empty()
@@ -3240,7 +3240,7 @@ mod tests {
                 },
             );
             let joined = args.join(" ");
-            for pair in required.chunks_exact(2) {
+            for pair in required.as_chunks::<2>().0 {
                 assert!(
                     joined.contains(&pair.join(" ")),
                     "{encoder} missing {} in {joined}",
@@ -5112,8 +5112,10 @@ mod tests {
         assert_eq!(i32::from_le_bytes(payload[16..20].try_into().unwrap()), 1);
 
         let path_units: Vec<u16> = payload[p_files..]
-            .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes(pair.try_into().unwrap()))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_le_bytes(*pair))
             .collect();
         assert_eq!(&path_units[path_units.len() - 2..], &[0, 0]);
         let decoded = String::from_utf16(&path_units[..path_units.len() - 2]).unwrap();
@@ -5124,8 +5126,10 @@ mod tests {
     fn clipboard_text_payload_is_null_terminated_utf16() {
         let payload = clipboard_text_payload("https://clipline.example/雪");
         let units: Vec<u16> = payload
-            .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes(pair.try_into().unwrap()))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_le_bytes(*pair))
             .collect();
 
         assert_eq!(units.last(), Some(&0));

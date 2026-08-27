@@ -149,14 +149,16 @@ impl DiscontinuityFade {
     pub(crate) fn apply(&mut self, interleaved: &mut [f32]) {
         if self.remaining_pairs == 0
             || !interleaved
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .any(|pair| pair[0] != 0.0 || pair[1] != 0.0)
         {
             return;
         }
 
         let mut fade_started = self.remaining_pairs < DISCONTINUITY_FADE_PAIRS;
-        for pair in interleaved.chunks_exact_mut(2) {
+        for pair in interleaved.as_chunks_mut::<2>().0 {
             if self.remaining_pairs == 0 {
                 break;
             }
@@ -328,7 +330,7 @@ impl LoopbackAssembler {
             .late_recovery_fade_remaining_pairs
             .min(interleaved.len() / 2);
         self.buffered.reserve(interleaved.len());
-        for pair in interleaved[..fade_pairs * 2].chunks_exact(2) {
+        for pair in interleaved[..fade_pairs * 2].as_chunks::<2>().0 {
             let completed = LATE_RECOVERY_FADE_PAIRS - self.late_recovery_fade_remaining_pairs;
             let gain = completed as f32 / (LATE_RECOVERY_FADE_PAIRS - 1) as f32;
             self.buffered.push(pair[0] * gain);
