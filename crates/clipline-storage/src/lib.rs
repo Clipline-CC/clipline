@@ -2,7 +2,7 @@
 
 mod sessions;
 
-pub use sessions::{session_label, SessionTracker};
+pub use sessions::{is_session_dir_name, session_label, SessionTracker};
 
 use std::fs;
 use std::io::{self, ErrorKind, Write};
@@ -634,8 +634,9 @@ fn is_link_or_reparse_point(metadata: &fs::Metadata) -> bool {
     }
 }
 
-/// Remove a session folder when it is a direct child of `media_root` and no
-/// longer holds anything except Clipline leftover metadata (or is empty).
+/// Remove a session folder when it is a direct child of `media_root`, uses a
+/// recorder session name, and no longer holds anything except Clipline leftover
+/// metadata (or is empty).
 ///
 /// Videos, in-progress recordings, screenshots, nested directories, and any
 /// unrecognized file keep the folder. The media root itself is never removed.
@@ -644,31 +645,46 @@ pub fn remove_emptied_session_dir(session_dir: &Path, media_root: &Path) -> io::
         return Ok(false);
     }
 
-    let mut leftovers = Vec::new();
-    for entry in fs::read_dir(session_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        let metadata = match fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == ErrorKind::NotFound => continue,
-            Err(error) => return Err(error),
-        };
-        if metadata.is_dir()
-            || is_link_or_reparse_point(&metadata)
-            || !is_disposable_session_leftover(&path)
-        {
-            return Ok(false);
-        }
-        leftovers.push(path);
+    let Some(leftovers) = collect_disposable_leftovers(session_dir)? else {
+        return Ok(false);
+    };
+    if !is_generated_session_dir(session_dir, &leftovers) {
+        return Ok(false);
     }
 
+    let session_meta = session_dir.join(SESSION_META_FILE);
     for leftover in leftovers {
-        let _ = remove_file_if_exists(&leftover);
+        if leftover.file_name().and_then(|name| name.to_str()) != Some(SESSION_META_FILE) {
+            let _ = remove_file_if_exists(&leftover);
+        }
     }
+
+    // A concurrent save can land media after the first inventory. Re-check
+    // before touching session metadata so game attribution survives.
+    if collect_disposable_leftovers(session_dir)?.is_none() {
+        return Ok(false);
+    }
+
+    let staged_meta = stage_session_meta(session_dir, &session_meta)?;
     match fs::remove_dir(session_dir) {
-        Ok(()) => Ok(true),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(true),
-        Err(_) => Ok(false),
+        Ok(()) => {
+            if let Some(staged) = staged_meta {
+                let _ = fs::remove_file(staged);
+            }
+            Ok(true)
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            if let Some(staged) = staged_meta {
+                let _ = fs::remove_file(staged);
+            }
+            Ok(true)
+        }
+        Err(_) => {
+            if let Some(staged) = staged_meta {
+                let _ = fs::rename(staged, session_meta);
+            }
+            Ok(false)
+        }
     }
 }
 
@@ -712,6 +728,58 @@ fn is_direct_session_child(session_dir: &Path, media_root: &Path) -> io::Result<
         return Ok(false);
     };
     Ok(dir.parent().is_some_and(|parent| parent == root))
+}
+
+fn is_generated_session_dir(session_dir: &Path, leftovers: &[PathBuf]) -> bool {
+    session_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(is_session_dir_name)
+        || leftovers.iter().any(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name == SESSION_META_FILE)
+        })
+}
+
+fn collect_disposable_leftovers(session_dir: &Path) -> io::Result<Option<Vec<PathBuf>>> {
+    let mut leftovers = Vec::new();
+    for entry in fs::read_dir(session_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        if metadata.is_dir()
+            || is_link_or_reparse_point(&metadata)
+            || !is_disposable_session_leftover(&path)
+        {
+            return Ok(None);
+        }
+        leftovers.push(path);
+    }
+    Ok(Some(leftovers))
+}
+
+fn stage_session_meta(session_dir: &Path, session_meta: &Path) -> io::Result<Option<PathBuf>> {
+    match fs::symlink_metadata(session_meta) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => return Ok(None),
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    }
+    let staged = session_dir.with_file_name(format!(
+        ".clipline-removing-{}-{}",
+        std::process::id(),
+        session_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("session")
+    ));
+    fs::rename(session_meta, &staged)?;
+    Ok(Some(staged))
 }
 
 fn is_disposable_session_leftover(path: &Path) -> bool {
@@ -1395,6 +1463,9 @@ mod tests {
         let keep = write_owned(&dir, "2026-06-12 19-16/keep.mp4", 10);
         dir.write("2026-06-12 19-16/clipline-session.json", 4);
         let screenshots = dir.write("Screenshots/shot.png", 20);
+        let empty_screenshots = dir.path().join("EmptyScreenshots");
+        fs::create_dir_all(&empty_screenshots).unwrap();
+        let custom_leftover = dir.write("Exports/old.poster.jpg", 3);
 
         let removed = sweep_emptied_session_dirs(dir.path()).unwrap();
 
@@ -1404,6 +1475,34 @@ mod tests {
         assert!(keep.exists());
         assert!(keep.parent().unwrap().exists());
         assert!(screenshots.exists());
+        assert!(
+            empty_screenshots.exists(),
+            "empty non-session folders must not be swept"
+        );
+        assert!(
+            custom_leftover.exists(),
+            "leftover sidecars in a non-session folder must not be swept"
+        );
+    }
+
+    #[test]
+    fn remove_emptied_session_dir_keeps_session_meta_when_folder_still_has_files() {
+        let dir = TestDir::new("clipline-storage", "empty-session-keep-meta");
+        let session = dir
+            .write("2026-06-12 19-15/clipline-session.json", 12)
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let blocked = session.join("keep.txt");
+        std::fs::write(&blocked, b"user file").unwrap();
+
+        assert!(!remove_emptied_session_dir(&session, dir.path()).unwrap());
+        assert!(session.exists());
+        assert!(blocked.exists());
+        assert!(
+            session.join("clipline-session.json").exists(),
+            "session metadata must survive when the folder cannot be removed"
+        );
     }
 
     #[test]
