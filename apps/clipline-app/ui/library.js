@@ -1167,6 +1167,16 @@ function clipCard(c) {
 
   thumb.append(play, kindChip, del);
 
+  if (c.favorite) {
+    const fav = document.createElement("span");
+    fav.className = "card-fav";
+    fav.title = "Favorite";
+    // Static markup, no clip data — innerHTML is safe here.
+    fav.innerHTML =
+      '<svg viewBox="0 0 24 24"><path d="M12 21s-6.7-4.3-9.3-8.5C.9 9.6 2.4 6 5.6 5.1 7.4 4.6 9.4 5.3 12 8c2.6-2.7 4.6-3.4 6.4-2.9 3.2.9 4.7 4.5 2.9 7.4C18.7 16.7 12 21 12 21z"/></svg>';
+    thumb.appendChild(fav);
+  }
+
   if (Number.isFinite(duration)) {
     const dur = document.createElement("span");
     dur.className = "card-dur";
@@ -1640,6 +1650,7 @@ function filterGalleryClips(clips) {
     const kind = clipKind(c);
     if ((galleryFilter === "replay" || galleryFilter === "session" || galleryFilter === "trim")
       && kind !== galleryFilter) continue;
+    if (galleryFilter === "favorite" && !c.favorite) continue;
     if (galleryFilter === "marked" && !clipMarkers(c).length) continue;
     if (galleryGameType !== "all") {
       const category = c.game && c.game.id === "league_of_legends"
@@ -2003,6 +2014,9 @@ function showClipContextMenu(ev, clip) {
   upload.disabled = busy || (uploaded ? !record.remote_clip_id : !cloudConnected());
   $("clip-menu-rename").hidden = false;
   $("clip-menu-rename-file").hidden = false;
+  const favorite = $("clip-menu-favorite");
+  favorite.hidden = false;
+  favorite.textContent = clip.favorite ? "Remove from favorites" : "Add to favorites";
   $("clip-menu-delete").hidden = false;
   const menu = $("clip-context-menu");
   menu.hidden = false;
@@ -2029,6 +2043,7 @@ function showCloudClipContextMenu(ev, entry) {
   $("clip-menu-upload").hidden = true;
   $("clip-menu-rename").hidden = true;
   $("clip-menu-rename-file").hidden = true;
+  $("clip-menu-favorite").hidden = true;
   $("clip-menu-delete").hidden = true;
   const menu = $("clip-context-menu");
   menu.hidden = false;
@@ -2055,6 +2070,7 @@ function showGamePlayContextMenu(ev, play) {
   $("clip-menu-upload").hidden = true;
   $("clip-menu-rename").hidden = true;
   $("clip-menu-rename-file").hidden = true;
+  $("clip-menu-favorite").hidden = true;
   $("clip-menu-delete").hidden = true;
   const menu = $("clip-context-menu");
   menu.hidden = false;

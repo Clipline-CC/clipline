@@ -49,11 +49,21 @@ function syncUploadClipButton() {
 
 function syncReviewLocalActions() {
   const cloudOnly = isCloudOnlyReviewClip();
-  for (const id of ["rename-clip", "open-folder", "copy-clip", "delete-clip"]) {
+  for (const id of ["favorite-clip", "rename-clip", "open-folder", "copy-clip", "delete-clip"]) {
     const el = $(id);
     if (el) el.hidden = cloudOnly;
   }
+  syncFavoriteButton();
   if (cloudOnly) setClipTitleEditing(false);
+}
+
+function syncFavoriteButton() {
+  const el = $("favorite-clip");
+  if (!el) return;
+  const favorite = !!(currentClip && currentClip.favorite);
+  el.classList.toggle("favorite-on", favorite);
+  el.setAttribute("aria-pressed", String(favorite));
+  el.title = favorite ? "Remove from favorites" : "Add to favorites";
 }
 
 function setClipRenameControlsDisabled(disabled) {
@@ -1923,6 +1933,28 @@ async function deleteClip(path = currentClip && currentClip.path) {
     await invoke("delete_clip", { path });
     await applyDeletion([path]);
     setNotice("clip deleted", { transient: true });
+    $("error").textContent = "";
+  } catch (e) {
+    $("error").textContent = e;
+  }
+}
+
+async function toggleClipFavorite(clip) {
+  if (!clip || !clip.path) return;
+  if (isCloudOnlyReviewClip(clip)) return;
+  try {
+    const result = await invoke("set_clip_favorite", {
+      path: clip.path,
+      favorite: !clip.favorite,
+    });
+    const updated = { ...clip, favorite: !!result.favorite };
+    replaceClipInCache(clip.path, updated);
+    if (currentClip && currentClip.path === clip.path) currentClip = updated;
+    syncFavoriteButton();
+    renderClips();
+    setNotice(result.favorite ? "added to favorites" : "removed from favorites", {
+      transient: true,
+    });
     $("error").textContent = "";
   } catch (e) {
     $("error").textContent = e;

@@ -6115,3 +6115,39 @@ fn league_game_type_metadata_filters_the_local_library() {
         "cloud library search must keep the typed query as plain text, not a LoL Type token"
     );
 }
+
+#[test]
+fn favorites_are_guarded_across_review_gallery_and_context_menu() {
+    let html = index_html();
+    let library = read_ui_js("library.js");
+    let review = read_ui_js("review-player.js");
+    let main = read_ui_js("main.js");
+
+    assert!(
+        html.contains(r#"id="favorite-clip""#)
+            && html.contains(r#"data-filter="favorite""#)
+            && html.contains(r#"id="clip-menu-favorite""#),
+        "review header, filter row, and local context menu must each expose favorites"
+    );
+    assert!(
+        review.contains(r#""favorite-clip""#)
+            && review.contains("function syncFavoriteButton")
+            && review.contains("aria-pressed")
+            && review.contains("Remove from favorites")
+            && review.contains("Add to favorites")
+            && review.contains(r#"invoke("set_clip_favorite""#)
+            && review.contains("replaceClipInCache"),
+        "review must hide the favorite button for cloud-only clips, reflect the flag, and patch the cache after toggling"
+    );
+    assert!(
+        library.contains(r#"galleryFilter === "favorite" && !c.favorite"#)
+            && library.contains("card-fav")
+            && library.contains("clip.favorite ? \"Remove from favorites\" : \"Add to favorites\""),
+        "the gallery filter, card badge, and context-menu label must key on the favorite flag"
+    );
+    assert!(
+        library.contains("$(\"clip-menu-favorite\").hidden = true")
+            && main.contains("clip-menu-favorite"),
+        "cloud/game-play menus must hide the favorite action; main.js must wire the toggle"
+    );
+}

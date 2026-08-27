@@ -4,6 +4,40 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-27): Favorites + kind-ordered auto-delete
+
+Plan: `docs/superpowers/plans/2026-08-27-favorites-and-gc-priority.md`.
+
+**Favorites.** Any local clip can be marked as a favorite from the Review header (heart button,
+hidden for cloud-only clips) or a card's context menu (`Add to favorites` / `Remove from
+favorites`); favorited cards carry a heart badge, and a **Favorites** chip in the Library filter
+row isolates them. The flag lives in the per-clip metadata sidecar (`favorite: bool`,
+serde-defaulted and skipped when false, so non-favorite sidecars stay byte-identical), is
+serialized into `ClipInfo` for cards/Review, and is set through the new
+`set_clip_favorite(path, favorite)` command (returns `{path, favorite}`; the UI patches the
+cache in place like rename). Favorites survive renames because the sidecar is read-modify-written
+(or moved) by both rename paths.
+
+**Auto-delete priority.** `clipline-storage::enforce_quota_with_policy` now takes a caller-
+supplied `priority: Fn(&Path) -> u8` sort key (storage stays neutral; `enforce_quota_with_protection`
+delegates with constant priority). The app's single shared policy
+(`library::enforce_quota_with_clip_policy`) protects active uploads **and favorites**, and orders
+deletion **sessions → replays → trims**, oldest within each kind. All three quota-GC call sites
+use it: recorder `make_room_for_quota`, the replay-save path (`emit_saved_clip`), and the manual
+`recheck_storage_quota`.
+
+Sharp edges:
+
+- The GC reads each clip's metadata sidecar while collecting, so a favorite set *during* a GC
+  pass is honored by the pre-delete protection check (`can_delete` re-evaluates per clip).
+- Kind classification falls back to filename inference (`session_`, `_trim_`) for clips whose
+  sidecar predates kind tagging, so legacy libraries still drain in the right order.
+- The favorite sidecar serializes `title`/`kind` as explicit nulls for clips that never had
+  them; harmless, and the round-trip test pins the `favorite` key only appears when true.
+
+Not built: favorites on cloud-only clips (local flag only), a dedicated favorites tab beyond the
+filter chip, and per-kind quota GC previews in Settings.
+
 ## Checkpoint (2026-08-27): Delete emptied session folders
 
 Deleting a clip already removed its MP4 and sidecars, but the session folder stayed behind with
