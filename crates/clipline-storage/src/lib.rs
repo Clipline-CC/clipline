@@ -260,6 +260,9 @@ pub fn delete_all_managed_media(dir: &Path) -> io::Result<()> {
             first_error.get_or_insert(error);
         }
     }
+    if let Err(error) = sweep_emptied_session_dirs(dir) {
+        first_error.get_or_insert(error);
+    }
     first_error.map_or(Ok(()), Err)
 }
 
@@ -542,7 +545,6 @@ fn recovery_destination_available(path: &Path, current_marker: &Path) -> bool {
             .is_ok_and(|marker| marker == current_marker || !marker.exists())
 }
 
-
 const SESSION_META_FILE: &str = "clipline-session.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -590,13 +592,10 @@ fn delete_inventoried_clip(
     for sidecar in &clip.sidecars {
         let _ = remove_file_if_exists(sidecar);
     }
-    // Session folders disappear with their last clip; remove_dir refuses
-    // non-empty directories, so a leftover sidecar/export keeps it alive.
+    // Session folders disappear with their last clip, including leftover
+    // metadata that was not attached to this inventoried file.
     if let Some(parent) = clip.path.parent() {
-        if parent != media_root && !session_dir_has_managed_clips(parent).unwrap_or(true) {
-            let _ = remove_file_if_exists(&parent.join(SESSION_META_FILE));
-            let _ = fs::remove_dir(parent);
-        }
+        let _ = remove_emptied_session_dir(parent, media_root);
     }
     Ok(DeletedClip::Removed)
 }
@@ -635,14 +634,100 @@ fn is_link_or_reparse_point(metadata: &fs::Metadata) -> bool {
     }
 }
 
-fn session_dir_has_managed_clips(dir: &Path) -> io::Result<bool> {
-    for entry in fs::read_dir(dir)? {
-        let path = entry?.path();
-        if (is_mp4(&path) || is_recording_mp4(&path)) && is_managed_clip(&path) {
-            return Ok(true);
+/// Remove a session folder when it is a direct child of `media_root` and no
+/// longer holds anything except Clipline leftover metadata (or is empty).
+///
+/// Videos, in-progress recordings, screenshots, nested directories, and any
+/// unrecognized file keep the folder. The media root itself is never removed.
+pub fn remove_emptied_session_dir(session_dir: &Path, media_root: &Path) -> io::Result<bool> {
+    if !is_direct_session_child(session_dir, media_root)? {
+        return Ok(false);
+    }
+
+    let mut leftovers = Vec::new();
+    for entry in fs::read_dir(session_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        if metadata.is_dir()
+            || is_link_or_reparse_point(&metadata)
+            || !is_disposable_session_leftover(&path)
+        {
+            return Ok(false);
+        }
+        leftovers.push(path);
+    }
+
+    for leftover in leftovers {
+        let _ = remove_file_if_exists(&leftover);
+    }
+    match fs::remove_dir(session_dir) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(true),
+        Err(_) => Ok(false),
+    }
+}
+
+/// Remove every emptied session folder directly under `media_root`.
+pub fn sweep_emptied_session_dirs(media_root: &Path) -> io::Result<usize> {
+    let metadata = match fs::symlink_metadata(media_root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    if !metadata.is_dir() || is_link_or_reparse_point(&metadata) {
+        return Ok(0);
+    }
+
+    let mut removed = 0usize;
+    for entry in fs::read_dir(media_root)? {
+        let path = match entry {
+            Ok(entry) => entry.path(),
+            Err(_) => continue,
+        };
+        if remove_emptied_session_dir(&path, media_root).unwrap_or(false) {
+            removed += 1;
         }
     }
-    Ok(false)
+    Ok(removed)
+}
+
+fn is_direct_session_child(session_dir: &Path, media_root: &Path) -> io::Result<bool> {
+    let metadata = match fs::symlink_metadata(session_dir) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if !metadata.is_dir() || is_link_or_reparse_point(&metadata) {
+        return Ok(false);
+    }
+    let Ok(root) = media_root.canonicalize() else {
+        return Ok(false);
+    };
+    let Ok(dir) = session_dir.canonicalize() else {
+        return Ok(false);
+    };
+    Ok(dir.parent().is_some_and(|parent| parent == root))
+}
+
+fn is_disposable_session_leftover(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let name = name.to_ascii_lowercase();
+    name == SESSION_META_FILE
+        || name.ends_with(".clipline.json")
+        || name.ends_with(".clipline.json.tmp")
+        || name.ends_with(".markers.json")
+        || name.ends_with(".poster.jpg")
+        || name.ends_with(".osu-enrichment.json")
+        || name.ends_with(".clip.json")
+        || (name.contains(".markers.") && name.ends_with(".json"))
+        || (name.contains(".clipline.json.") && name.ends_with(".bak"))
 }
 
 fn sidecar_path(path: &Path) -> PathBuf {
@@ -1232,6 +1317,113 @@ mod tests {
         assert!(
             !old.parent().unwrap().exists(),
             "emptied session folder must disappear with its session metadata"
+        );
+        assert!(keep.exists());
+    }
+
+    #[test]
+    fn remove_emptied_session_dir_deletes_metadata_only_folders() {
+        let dir = TestDir::new("clipline-storage", "empty-session-metadata");
+        let session = dir
+            .write("2026-06-12 19-15/clipline-session.json", 12)
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        dir.write("2026-06-12 19-15/clip_1781306146.clipline.json", 8);
+        dir.write("2026-06-12 19-15/clip_1781306146.poster.jpg", 4);
+        dir.write(
+            "2026-06-12 19-15/session.markers.before-player-summary.json",
+            6,
+        );
+        let keep = write_owned(&dir, "2026-06-12 19-16/keep.mp4", 10);
+        let screenshots = dir.write("Screenshots/shot.png", 20);
+        let screenshot_poster = dir.write("Screenshots/shot.poster.jpg", 3);
+        let notes = dir.write("2026-06-12 19-17/notes.txt", 5);
+
+        assert!(remove_emptied_session_dir(&session, dir.path()).unwrap());
+        assert!(!session.exists());
+        assert!(keep.parent().unwrap().exists());
+        assert!(screenshots.exists());
+        assert!(screenshot_poster.exists());
+        assert!(notes.exists());
+        assert!(notes.parent().unwrap().exists());
+        assert!(dir.path().exists());
+    }
+
+    #[test]
+    fn remove_emptied_session_dir_keeps_in_progress_temp_and_recordings() {
+        let dir = TestDir::new("clipline-storage", "empty-session-keep-media");
+        let recording_session = dir
+            .write("2026-06-12 19-15/session.mp4.recording", 8)
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        dir.write("2026-06-12 19-15/clipline-session.json", 4);
+        let tmp_session = dir
+            .write("2026-06-12 19-16/clip_trim_pending_001.mp4.tmp", 8)
+            .parent()
+            .unwrap()
+            .to_path_buf();
+
+        assert!(!remove_emptied_session_dir(&recording_session, dir.path()).unwrap());
+        assert!(recording_session.exists());
+        assert!(!remove_emptied_session_dir(&tmp_session, dir.path()).unwrap());
+        assert!(tmp_session.exists());
+    }
+
+    #[test]
+    fn remove_emptied_session_dir_does_not_delete_the_media_root() {
+        let dir = TestDir::new("clipline-storage", "empty-session-root");
+        dir.write("orphan.clipline.json", 4);
+        dir.write("clipline-session.json", 4);
+
+        assert!(!remove_emptied_session_dir(dir.path(), dir.path()).unwrap());
+        assert!(dir.path().exists());
+        assert!(dir.path().join("orphan.clipline.json").exists());
+    }
+
+    #[test]
+    fn sweep_emptied_session_dirs_cleans_orphans_and_keeps_real_media() {
+        let dir = TestDir::new("clipline-storage", "sweep-empty-sessions");
+        let empty = dir.path().join("2026-06-13 02-31");
+        fs::create_dir_all(&empty).unwrap();
+        let leftover = dir
+            .write("2026-06-12 19-15/clipline-session.json", 12)
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let keep = write_owned(&dir, "2026-06-12 19-16/keep.mp4", 10);
+        dir.write("2026-06-12 19-16/clipline-session.json", 4);
+        let screenshots = dir.write("Screenshots/shot.png", 20);
+
+        let removed = sweep_emptied_session_dirs(dir.path()).unwrap();
+
+        assert_eq!(removed, 2);
+        assert!(!empty.exists());
+        assert!(!leftover.exists());
+        assert!(keep.exists());
+        assert!(keep.parent().unwrap().exists());
+        assert!(screenshots.exists());
+    }
+
+    #[test]
+    fn enforce_quota_removes_orphaned_sidecars_with_emptied_folder() {
+        let dir = TestDir::new("clipline-storage", "session-orphan-sidecar-gc");
+        let old = write_owned(&dir, "2026-06-11 09-00/old.mp4", 30);
+        let orphan = dir.write("2026-06-11 09-00/gone.clipline.json", 7);
+        let session_meta = dir.write("2026-06-11 09-00/clipline-session.json", 12);
+        tick_mtime();
+        let keep = write_owned(&dir, "keep.mp4", 10);
+
+        let report = enforce_quota(dir.path(), Some(20), None).unwrap();
+
+        assert_eq!(report.deleted_clips, 1);
+        assert!(!old.exists());
+        assert!(!orphan.exists());
+        assert!(!session_meta.exists());
+        assert!(
+            !old.parent().unwrap().exists(),
+            "orphaned leftover metadata must not keep the emptied session folder"
         );
         assert!(keep.exists());
     }

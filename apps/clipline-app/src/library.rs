@@ -30,7 +30,9 @@ use clipline_mp4::{
     remux_with_selected_audio_tracks_file, trim_keyframe_aligned_file, MediaTrackCounts,
     MediaVideoCodec,
 };
-use clipline_storage::storage_status as read_storage_status;
+use clipline_storage::{
+    remove_emptied_session_dir, storage_status as read_storage_status, sweep_emptied_session_dirs,
+};
 use windows_sys::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
 use windows_sys::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
@@ -315,6 +317,7 @@ pub async fn list_clips<R: Runtime>(
 }
 
 fn list_clips_from_dir(dir: PathBuf) -> Result<LocalClipScan, String> {
+    let _ = sweep_emptied_session_dirs(&dir);
     list_clips_from_dir_with_child_reader(dir, push_clips_from)
 }
 
@@ -706,7 +709,8 @@ fn poster_seek_seconds(clip: &Path) -> f64 {
 #[tauri::command]
 pub fn delete_clip(path: String, settings: tauri::State<StorageSettings>) -> Result<(), String> {
     let target = validate_clip_path(&settings, &path)?;
-    remove_clip_files(&target)
+    let media_root = settings.clips_dir()?;
+    remove_clip_files(&target, &media_root)
 }
 
 pub(crate) fn clip_sidecar_paths(target: &Path) -> [PathBuf; 4] {
@@ -718,7 +722,7 @@ pub(crate) fn clip_sidecar_paths(target: &Path) -> [PathBuf; 4] {
     ]
 }
 
-fn remove_clip_files(target: &Path) -> Result<(), String> {
+fn remove_clip_files(target: &Path, media_root: &Path) -> Result<(), String> {
     if let Some(error) = crate::cloud_upload::active_upload_source_error(target) {
         return Err(error);
     }
@@ -727,6 +731,9 @@ fn remove_clip_files(target: &Path) -> Result<(), String> {
     })?;
     for sidecar in clip_sidecar_paths(target) {
         let _ = std::fs::remove_file(sidecar);
+    }
+    if let Some(parent) = target.parent() {
+        let _ = remove_emptied_session_dir(parent, media_root);
     }
     Ok(())
 }
@@ -745,12 +752,13 @@ pub struct DeletedClipsReport {
 /// carries inputs that already failed validation so the caller's report stays
 /// complete in one place.
 fn delete_clips_impl(
+    media_root: PathBuf,
     validated: Vec<(String, PathBuf)>,
     mut failed: Vec<(String, String)>,
 ) -> DeletedClipsReport {
     let mut deleted = Vec::new();
     for (path, target) in validated {
-        match remove_clip_files(&target) {
+        match remove_clip_files(&target, &media_root) {
             Ok(_) => deleted.push(path),
             Err(e) => failed.push((path, e.to_string())),
         }
@@ -768,15 +776,18 @@ pub async fn delete_clips(
 ) -> Result<DeletedClipsReport, String> {
     let mut validated: Vec<(String, PathBuf)> = Vec::with_capacity(paths.len());
     let mut failed: Vec<(String, String)> = Vec::new();
+    let media_root = settings.clips_dir()?;
     for path in paths {
         match validate_clip_path(&settings, &path) {
             Ok(target) => validated.push((path, target)),
             Err(e) => failed.push((path, e)),
         }
     }
-    let result = tauri::async_runtime::spawn_blocking(move || delete_clips_impl(validated, failed))
-        .await
-        .map_err(|e| format!("delete clips task: {e}"))?;
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        delete_clips_impl(media_root, validated, failed)
+    })
+    .await
+    .map_err(|e| format!("delete clips task: {e}"))?;
     Ok(result)
 }
 
@@ -2160,7 +2171,11 @@ fn select_path_in_explorer(target: &Path) -> Result<(), String> {
     let displayable = if let Some(rest) = canonical.strip_prefix(r"\\?\UNC\") {
         std::borrow::Cow::Owned(format!(r"\\{rest}"))
     } else {
-        std::borrow::Cow::Borrowed(canonical.strip_prefix(r"\\?\").unwrap_or(canonical.as_str()))
+        std::borrow::Cow::Borrowed(
+            canonical
+                .strip_prefix(r"\\?\")
+                .unwrap_or(canonical.as_str()),
+        )
     };
     std::process::Command::new("explorer.exe")
         .raw_arg(format!("/select,\"{displayable}\""))
@@ -2209,9 +2224,11 @@ pub async fn copy_text_to_clipboard(
         .hwnd()
         .map_err(|error| format!("get Clipline window handle: {error}"))?
         .0 as isize;
-    tauri::async_runtime::spawn_blocking(move || copy_text_to_clipboard_native(&text, owner as HWND))
-        .await
-        .map_err(|error| format!("copy text task: {error}"))?
+    tauri::async_runtime::spawn_blocking(move || {
+        copy_text_to_clipboard_native(&text, owner as HWND)
+    })
+    .await
+    .map_err(|error| format!("copy text task: {error}"))?
 }
 
 #[tauri::command]
@@ -4357,11 +4374,76 @@ mod tests {
         std::fs::write(clip.with_extension("markers.json"), b"{}").unwrap();
         std::fs::write(clip_metadata_path(&clip), br#"{"title":"Old title"}"#).unwrap();
 
-        remove_clip_files(&clip).unwrap();
+        remove_clip_files(&clip, dir.path()).unwrap();
 
         assert!(!clip.exists());
         assert!(!clip.with_extension("markers.json").exists());
         assert!(!clip_metadata_path(&clip).exists());
+    }
+
+    #[test]
+    fn remove_clip_files_removes_emptied_session_folder() {
+        let dir = TestDir::new("clipline-library", "delete-empty-session");
+        let media = dir.path().join("media");
+        let session = media.join("2026-06-12 19-15");
+        let clip = session.join("clip.mp4");
+        touch_mp4(&clip);
+        std::fs::write(clip.with_extension("markers.json"), b"{}").unwrap();
+        std::fs::write(clip_metadata_path(&clip), b"{}").unwrap();
+        std::fs::write(
+            session.join("clipline-session.json"),
+            b"{\"id\":\"league\"}",
+        )
+        .unwrap();
+        let sibling = media.join("2026-06-12 19-16").join("keep.mp4");
+        touch_mp4(&sibling);
+
+        remove_clip_files(&clip, &media).unwrap();
+
+        assert!(!clip.exists());
+        assert!(
+            !session.exists(),
+            "emptied session folder should be removed"
+        );
+        assert!(sibling.exists());
+        assert!(sibling.parent().unwrap().exists());
+        assert!(media.exists(), "media root must stay");
+    }
+
+    #[test]
+    fn remove_clip_files_keeps_session_folder_with_remaining_clip() {
+        let dir = TestDir::new("clipline-library", "delete-keep-session");
+        let media = dir.path().join("media");
+        let session = media.join("2026-06-12 19-15");
+        let gone = session.join("gone.mp4");
+        let keep = session.join("keep.mp4");
+        touch_mp4(&gone);
+        touch_mp4(&keep);
+        std::fs::write(session.join("clipline-session.json"), b"{}").unwrap();
+
+        remove_clip_files(&gone, &media).unwrap();
+
+        assert!(!gone.exists());
+        assert!(keep.exists());
+        assert!(session.exists());
+        assert!(session.join("clipline-session.json").exists());
+    }
+
+    #[test]
+    fn list_clips_sweeps_emptied_session_folders() {
+        let dir = TestDir::new("clipline-library", "list-sweep-empty-session");
+        let media = dir.path().join("media");
+        let leftover = media.join("2026-06-13 02-31");
+        std::fs::create_dir_all(&leftover).unwrap();
+        std::fs::write(leftover.join("clipline-session.json"), b"{}").unwrap();
+        let keep = media.join("2026-06-13 03-00").join("clip.mp4");
+        touch_mp4(&keep);
+
+        let clips = list_clips_from_dir(media).unwrap().clips;
+
+        assert_eq!(clips.len(), 1);
+        assert!(!leftover.exists());
+        assert!(keep.exists());
     }
 
     #[test]
@@ -5055,7 +5137,7 @@ mod tests {
         // One path already failed validation upstream — passed through as failed.
         let failed_in = vec![("bogus".to_string(), "refused".to_string())];
 
-        let report = delete_clips_impl(validated, failed_in);
+        let report = delete_clips_impl(root.clone(), validated, failed_in);
 
         assert_eq!(report.deleted.len(), 2);
         assert_eq!(report.failed.len(), 1);
@@ -5129,7 +5211,10 @@ mod tests {
             .collect();
 
         assert_eq!(units.last(), Some(&0));
-        assert_eq!(String::from_utf16(&units[..units.len() - 1]).unwrap(), "https://clipline.example/雪");
+        assert_eq!(
+            String::from_utf16(&units[..units.len() - 1]).unwrap(),
+            "https://clipline.example/雪"
+        );
     }
 
     #[test]

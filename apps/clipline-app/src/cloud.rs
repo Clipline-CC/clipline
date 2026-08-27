@@ -1409,6 +1409,7 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
     request: UploadClipCommandRequest,
 ) -> Result<CloudUploadResult, String> {
     let target = validate_clip_path(&storage, &request.path)?;
+    let media_root = storage.media_dir();
     let settings = state.settings();
     let cloud = settings.cloud.clone();
 
@@ -1635,7 +1636,7 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
                 local_deleted: false,
             });
         }
-        let cleanup_result = delete_uploaded_local_files(&target);
+        let cleanup_result = delete_uploaded_local_files(&target, &media_root);
         let local_deleted = cleanup_result.is_ok() || matches!(target.try_exists(), Ok(false));
         if let Err(error) = cleanup_result {
             record.error = Some(format!(
@@ -2290,7 +2291,7 @@ fn mark_remote_not_found_once(record: &mut CloudUploadRecord) {
     record.updated_at_unix = unix_now();
 }
 
-fn delete_uploaded_local_files(target: &Path) -> std::io::Result<()> {
+fn delete_uploaded_local_files(target: &Path, media_root: &Path) -> std::io::Result<()> {
     std::fs::remove_file(target).map_err(|error| {
         std::io::Error::new(
             error.kind(),
@@ -2308,6 +2309,9 @@ fn delete_uploaded_local_files(target: &Path) -> std::io::Result<()> {
                 ));
             }
         }
+    }
+    if let Some(parent) = target.parent() {
+        let _ = clipline_storage::remove_emptied_session_dir(parent, media_root);
     }
     match first_error {
         Some(error) => Err(error),
@@ -3443,7 +3447,7 @@ mod tests {
         std::fs::write(&pending_osu, b"{}").unwrap();
         std::fs::write(&poster, b"jpg").unwrap();
 
-        delete_uploaded_local_files(&clip).unwrap();
+        delete_uploaded_local_files(&clip, &dir).unwrap();
 
         assert!(!clip.exists());
         assert!(!markers.exists());
@@ -3454,6 +3458,27 @@ mod tests {
     }
 
     #[test]
+    fn delete_uploaded_local_files_removes_emptied_session_folder() {
+        let dir = TestDir::new("clipline-cloud", "delete-empty-session");
+        let media = dir.path().join("media");
+        let session = media.join("2026-06-12 19-15");
+        let clip = session.join("clip.mp4");
+        std::fs::create_dir_all(&session).unwrap();
+        std::fs::write(&clip, b"mp4").unwrap();
+        std::fs::write(clip.with_extension("clipline.json"), b"{}").unwrap();
+        std::fs::write(session.join("clipline-session.json"), b"{}").unwrap();
+
+        delete_uploaded_local_files(&clip, &media).unwrap();
+
+        assert!(!clip.exists());
+        assert!(
+            !session.exists(),
+            "emptied session folder should be removed after delete-local-on-upload"
+        );
+        assert!(media.exists());
+    }
+
+    #[test]
     fn local_cleanup_preserves_sidecars_when_primary_deletion_fails() {
         let dir = TestDir::new("clipline-cloud", "delete-primary-first");
         let clip = dir.path().join("clip.mp4");
@@ -3461,7 +3486,8 @@ mod tests {
         std::fs::create_dir(&clip).unwrap();
         std::fs::write(&markers, b"{}").unwrap();
 
-        delete_uploaded_local_files(&clip).expect_err("a directory is not a removable MP4 file");
+        delete_uploaded_local_files(&clip, dir.path())
+            .expect_err("a directory is not a removable MP4 file");
 
         assert!(clip.exists());
         assert!(markers.exists());
@@ -3475,7 +3501,8 @@ mod tests {
         std::fs::write(&clip, b"mp4").unwrap();
         std::fs::create_dir(&markers).unwrap();
 
-        let error = delete_uploaded_local_files(&clip).expect_err("sidecar directory must fail");
+        let error = delete_uploaded_local_files(&clip, dir.path())
+            .expect_err("sidecar directory must fail");
 
         assert!(!clip.exists(), "primary deletion happens before sidecars");
         assert!(markers.exists());

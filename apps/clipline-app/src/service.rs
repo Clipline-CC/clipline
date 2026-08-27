@@ -31,7 +31,8 @@ use clipline_events::{is_review_event, ClipAudioTrack, EventKind, MarkerLog, Pla
 use clipline_lol::LeagueQueue;
 use clipline_storage::{
     clip_ownership_marker_path, enforce_quota_with_protection, ensure_clip_owned,
-    recover_recording_files, remove_clip_ownership_marker, storage_status, StorageStatus,
+    recover_recording_files, remove_clip_ownership_marker, storage_status,
+    sweep_emptied_session_dirs, StorageStatus,
 };
 use clipline_storage::{session_label, SessionTracker};
 
@@ -2222,6 +2223,7 @@ fn recover_abandoned_recordings(clips_dir: &Path, events: &Sender<Event>) {
         }
         Err(e) => warn_user(events, format!("recover unfinished recordings: {e}")),
     }
+    let _ = sweep_emptied_session_dirs(clips_dir);
 }
 
 struct RecorderFinishContext<'a> {

@@ -5684,7 +5684,7 @@ fn gallery_supports_multi_select_bulk_actions() {
         .and_then(|rest| rest.split("pub struct DeletedClipsReport").next())
         .expect("delete_clip command body exists");
     assert!(
-        delete_clip_rs.contains("remove_clip_files(&target)"),
+        delete_clip_rs.contains("remove_clip_files(&target, &media_root)"),
         "single delete should call the same file-removal helper as bulk delete"
     );
     let delete_clips_impl_rs = library
@@ -5693,7 +5693,7 @@ fn gallery_supports_multi_select_bulk_actions() {
         .and_then(|rest| rest.split("pub async fn delete_clips").next())
         .expect("delete_clips_impl body exists");
     assert!(
-        delete_clips_impl_rs.contains("remove_clip_files(&target)"),
+        delete_clips_impl_rs.contains("remove_clip_files(&target, &media_root)"),
         "bulk delete should call the shared file-removal helper"
     );
 }
