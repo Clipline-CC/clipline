@@ -1,7 +1,9 @@
 //! Filesystem storage management for saved clips.
 
+mod empty_sessions;
 mod sessions;
 
+pub use empty_sessions::{remove_emptied_session_dir, sweep_emptied_session_dirs};
 pub use sessions::{is_session_dir_name, session_label, SessionTracker};
 
 use std::fs;
@@ -545,7 +547,17 @@ fn recovery_destination_available(path: &Path, current_marker: &Path) -> bool {
             .is_ok_and(|marker| marker == current_marker || !marker.exists())
 }
 
-const SESSION_META_FILE: &str = "clipline-session.json";
+pub(crate) const SESSION_META_FILE: &str = "clipline-session.json";
+pub(crate) const CLIP_OWNERSHIP_MARKER_SUFFIX: &str = ".clipline.json";
+
+/// Sidecar suffixes paired with a clip stem (`clip.mp4` → `clip.markers.json`).
+/// Leftover-folder cleanup uses this same table; anything else is unrecognized.
+pub(crate) const CLIP_SIDECAR_SUFFIXES: &[&str] = &[
+    ".markers.json",
+    CLIP_OWNERSHIP_MARKER_SUFFIX,
+    ".osu-enrichment.json",
+    ".poster.jpg",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeletedClip {
@@ -618,7 +630,7 @@ fn is_within_media_root(path: &Path, media_root: &Path) -> bool {
     }
 }
 
-fn is_link_or_reparse_point(metadata: &fs::Metadata) -> bool {
+pub(crate) fn is_link_or_reparse_point(metadata: &fs::Metadata) -> bool {
     if metadata.file_type().is_symlink() {
         return true;
     }
@@ -634,184 +646,8 @@ fn is_link_or_reparse_point(metadata: &fs::Metadata) -> bool {
     }
 }
 
-/// Remove a session folder when it is a direct child of `media_root`, uses a
-/// recorder session name, and no longer holds anything except Clipline leftover
-/// metadata (or is empty).
-///
-/// Videos, in-progress recordings, screenshots, nested directories, and any
-/// unrecognized file keep the folder. The media root itself is never removed.
-pub fn remove_emptied_session_dir(session_dir: &Path, media_root: &Path) -> io::Result<bool> {
-    if !is_direct_session_child(session_dir, media_root)? {
-        return Ok(false);
-    }
-
-    let Some(leftovers) = collect_disposable_leftovers(session_dir)? else {
-        return Ok(false);
-    };
-    if !is_generated_session_dir(session_dir, &leftovers) {
-        return Ok(false);
-    }
-
-    let session_meta = session_dir.join(SESSION_META_FILE);
-    for leftover in leftovers {
-        if leftover.file_name().and_then(|name| name.to_str()) != Some(SESSION_META_FILE) {
-            let _ = remove_file_if_exists(&leftover);
-        }
-    }
-
-    // A concurrent save can land media after the first inventory. Re-check
-    // before touching session metadata so game attribution survives.
-    if collect_disposable_leftovers(session_dir)?.is_none() {
-        return Ok(false);
-    }
-
-    let staged_meta = stage_session_meta(session_dir, &session_meta)?;
-    match fs::remove_dir(session_dir) {
-        Ok(()) => {
-            if let Some(staged) = staged_meta {
-                let _ = fs::remove_file(staged);
-            }
-            Ok(true)
-        }
-        Err(error) if error.kind() == ErrorKind::NotFound => {
-            if let Some(staged) = staged_meta {
-                let _ = fs::remove_file(staged);
-            }
-            Ok(true)
-        }
-        Err(_) => {
-            if let Some(staged) = staged_meta {
-                let _ = fs::rename(staged, session_meta);
-            }
-            Ok(false)
-        }
-    }
-}
-
-/// Remove every emptied session folder directly under `media_root`.
-pub fn sweep_emptied_session_dirs(media_root: &Path) -> io::Result<usize> {
-    let metadata = match fs::symlink_metadata(media_root) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(0),
-        Err(error) => return Err(error),
-    };
-    if !metadata.is_dir() || is_link_or_reparse_point(&metadata) {
-        return Ok(0);
-    }
-
-    let mut removed = 0usize;
-    for entry in fs::read_dir(media_root)? {
-        let path = match entry {
-            Ok(entry) => entry.path(),
-            Err(_) => continue,
-        };
-        if remove_emptied_session_dir(&path, media_root).unwrap_or(false) {
-            removed += 1;
-        }
-    }
-    Ok(removed)
-}
-
-fn is_direct_session_child(session_dir: &Path, media_root: &Path) -> io::Result<bool> {
-    let metadata = match fs::symlink_metadata(session_dir) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error),
-    };
-    if !metadata.is_dir() || is_link_or_reparse_point(&metadata) {
-        return Ok(false);
-    }
-    let Ok(root) = media_root.canonicalize() else {
-        return Ok(false);
-    };
-    let Ok(dir) = session_dir.canonicalize() else {
-        return Ok(false);
-    };
-    Ok(dir.parent().is_some_and(|parent| parent == root))
-}
-
-fn is_generated_session_dir(session_dir: &Path, leftovers: &[PathBuf]) -> bool {
-    session_dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(is_session_dir_name)
-        || leftovers.iter().any(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name == SESSION_META_FILE)
-        })
-}
-
-fn collect_disposable_leftovers(session_dir: &Path) -> io::Result<Option<Vec<PathBuf>>> {
-    let mut leftovers = Vec::new();
-    for entry in fs::read_dir(session_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        let metadata = match fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == ErrorKind::NotFound => continue,
-            Err(error) => return Err(error),
-        };
-        if metadata.is_dir()
-            || is_link_or_reparse_point(&metadata)
-            || !is_disposable_session_leftover(&path)
-        {
-            return Ok(None);
-        }
-        leftovers.push(path);
-    }
-    Ok(Some(leftovers))
-}
-
-fn stage_session_meta(session_dir: &Path, session_meta: &Path) -> io::Result<Option<PathBuf>> {
-    match fs::symlink_metadata(session_meta) {
-        Ok(metadata) if metadata.is_file() => {}
-        Ok(_) => return Ok(None),
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error),
-    }
-    let staged = session_dir.with_file_name(format!(
-        ".clipline-removing-{}-{}",
-        std::process::id(),
-        session_dir
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("session")
-    ));
-    fs::rename(session_meta, &staged)?;
-    Ok(Some(staged))
-}
-
-fn is_disposable_session_leftover(path: &Path) -> bool {
-    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-    let name = name.to_ascii_lowercase();
-    name == SESSION_META_FILE
-        || name.ends_with(".clipline.json")
-        || name.ends_with(".clipline.json.tmp")
-        || name.ends_with(".markers.json")
-        || name.ends_with(".poster.jpg")
-        || name.ends_with(".osu-enrichment.json")
-        || name.ends_with(".clip.json")
-        || (name.contains(".markers.") && name.ends_with(".json"))
-        || (name.contains(".clipline.json.") && name.ends_with(".bak"))
-}
-
-fn sidecar_path(path: &Path) -> PathBuf {
-    path.with_extension("markers.json")
-}
-
-fn clip_metadata_path(path: &Path) -> PathBuf {
-    path.with_extension("clipline.json")
-}
-
-fn poster_path(path: &Path) -> PathBuf {
-    path.with_extension("poster.jpg")
-}
-
-fn osu_pending_path(path: &Path) -> PathBuf {
-    path.with_extension("osu-enrichment.json")
+fn clip_sidecar_path(clip: &Path, suffix: &str) -> PathBuf {
+    clip.with_extension(suffix.trim_start_matches('.'))
 }
 
 /// The sidecar files present beside a clip (markers, clip metadata, pending osu!
@@ -820,12 +656,8 @@ fn osu_pending_path(path: &Path) -> PathBuf {
 fn clip_sidecars(clip: &Path) -> io::Result<(Vec<PathBuf>, u64)> {
     let mut sidecars = Vec::new();
     let mut bytes = 0u64;
-    for candidate in [
-        sidecar_path(clip),
-        clip_metadata_path(clip),
-        osu_pending_path(clip),
-        poster_path(clip),
-    ] {
+    for suffix in CLIP_SIDECAR_SUFFIXES {
+        let candidate = clip_sidecar_path(clip, suffix);
         let len = optional_file_len(&candidate)?;
         if len > 0 || candidate.exists() {
             bytes += len;
@@ -844,7 +676,7 @@ fn optional_file_len(path: &Path) -> io::Result<u64> {
     }
 }
 
-fn remove_file_if_exists(path: &Path) -> io::Result<()> {
+pub(crate) fn remove_file_if_exists(path: &Path) -> io::Result<()> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
@@ -1397,12 +1229,8 @@ mod tests {
             .parent()
             .unwrap()
             .to_path_buf();
-        dir.write("2026-06-12 19-15/clip_1781306146.clipline.json", 8);
         dir.write("2026-06-12 19-15/clip_1781306146.poster.jpg", 4);
-        dir.write(
-            "2026-06-12 19-15/session.markers.before-player-summary.json",
-            6,
-        );
+        dir.write("2026-06-12 19-15/clip_1781306146.markers.json", 6);
         let keep = write_owned(&dir, "2026-06-12 19-16/keep.mp4", 10);
         let screenshots = dir.write("Screenshots/shot.png", 20);
         let screenshot_poster = dir.write("Screenshots/shot.poster.jpg", 3);
@@ -1437,6 +1265,56 @@ mod tests {
         assert!(recording_session.exists());
         assert!(!remove_emptied_session_dir(&tmp_session, dir.path()).unwrap());
         assert!(tmp_session.exists());
+    }
+
+    #[test]
+    fn remove_emptied_session_dir_keeps_ownership_marker_without_mp4() {
+        let dir = TestDir::new("clipline-storage", "empty-session-in-progress-marker");
+        let session = dir
+            .write("2026-06-12 19-15/clip.clipline.json", 8)
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        dir.write("2026-06-12 19-15/clipline-session.json", 4);
+        dir.write("2026-06-12 19-15/clip.poster.jpg", 3);
+
+        assert!(!remove_emptied_session_dir(&session, dir.path()).unwrap());
+        assert!(session.exists());
+        assert!(session.join("clip.clipline.json").exists());
+        assert!(session.join("clipline-session.json").exists());
+        assert!(session.join("clip.poster.jpg").exists());
+    }
+
+    #[test]
+    fn remove_emptied_session_dir_keeps_unrecognized_debug_sidecars() {
+        let dir = TestDir::new("clipline-storage", "empty-session-unrecognized");
+        let session = dir
+            .write(
+                "2026-06-12 19-15/session.markers.before-player-summary.json",
+                6,
+            )
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        dir.write("2026-06-12 19-15/clipline-session.json", 4);
+
+        assert!(!remove_emptied_session_dir(&session, dir.path()).unwrap());
+        assert!(session.exists());
+        assert!(session.join("clipline-session.json").exists());
+    }
+
+    #[test]
+    fn remove_emptied_session_dir_keeps_date_only_folders() {
+        let dir = TestDir::new("clipline-storage", "empty-session-date-only");
+        let leftover = dir
+            .write("2026-08-16/clipline-session.json", 5)
+            .parent()
+            .unwrap()
+            .to_path_buf();
+
+        assert!(!remove_emptied_session_dir(&leftover, dir.path()).unwrap());
+        assert!(leftover.exists());
+        assert!(leftover.join("clipline-session.json").exists());
     }
 
     #[test]
@@ -1509,7 +1387,7 @@ mod tests {
     fn enforce_quota_removes_orphaned_sidecars_with_emptied_folder() {
         let dir = TestDir::new("clipline-storage", "session-orphan-sidecar-gc");
         let old = write_owned(&dir, "2026-06-11 09-00/old.mp4", 30);
-        let orphan = dir.write("2026-06-11 09-00/gone.clipline.json", 7);
+        let orphan = dir.write("2026-06-11 09-00/gone.poster.jpg", 7);
         let session_meta = dir.write("2026-06-11 09-00/clipline-session.json", 12);
         tick_mtime();
         let keep = write_owned(&dir, "keep.mp4", 10);
@@ -1534,12 +1412,12 @@ mod tests {
         let saved_markers = dir.write("saved.markers.json", 2);
         let saved_osu = dir.write("saved.osu-enrichment.json", 3);
         let saved_poster = dir.write("saved.poster.jpg", 4);
-        let recording = dir.write("2026-08-16/active.mp4.recording", 20);
+        let recording = dir.write("2026-08-16 12-00/active.mp4.recording", 20);
         mark_owned(&recording);
-        let recording_markers = dir.write("2026-08-16/active.markers.json", 2);
-        let recording_osu = dir.write("2026-08-16/active.osu-enrichment.json", 3);
-        let recording_poster = dir.write("2026-08-16/active.poster.jpg", 4);
-        let session = dir.write("2026-08-16/clipline-session.json", 5);
+        let recording_markers = dir.write("2026-08-16 12-00/active.markers.json", 2);
+        let recording_osu = dir.write("2026-08-16 12-00/active.osu-enrichment.json", 3);
+        let recording_poster = dir.write("2026-08-16 12-00/active.poster.jpg", 4);
+        let session = dir.write("2026-08-16 12-00/clipline-session.json", 5);
         let legacy = dir.write("clip_1786900000.mp4", 7);
         let legacy_recording = dir.write("session_1786900001_1.mp4.recording", 8);
         let foreign = dir.write("foreign.mp4", 30);

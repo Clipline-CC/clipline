@@ -10,12 +10,13 @@ Deleting a clip already removed its MP4 and sidecars, but the session folder sta
 `clipline-session.json` (and any orphaned leftover metadata). Real libraries can accumulate
 hundreds of those empty folders.
 
-User delete, bulk delete, delete-local-after-upload, and quota GC now share
-`clipline-storage::remove_emptied_session_dir`: when a session folder no longer holds any real
-media (videos, recordings, screenshots, temps, or unrecognized files), leftover Clipline metadata
-is removed and the folder goes with it. Opening the Library and recorder startup also sweep
-already-empty leftovers. The media root, folders that still have a clip, and the Screenshots
-tree are left alone.
+User delete, bulk delete, delete-local-after-upload, quota GC, and recorder startup share
+`clipline-storage::remove_emptied_session_dir`: when a recorder-named session folder no longer
+holds any real media (videos, recordings, in-progress `*.clipline.json` markers, screenshots,
+temps, or unrecognized files), leftover clip sidecars and `clipline-session.json` are deleted and
+the folder is removed. If a concurrent save already landed new files, `remove_dir` fails and those
+files stay. Library listing does not sweep — it is a read path. The media root, Screenshots, and
+other non-session trees are left alone.
 
 ## Checkpoint (2026-08-17): Stable 1.0.2
 

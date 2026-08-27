@@ -30,9 +30,7 @@ use clipline_mp4::{
     remux_with_selected_audio_tracks_file, trim_keyframe_aligned_file, MediaTrackCounts,
     MediaVideoCodec,
 };
-use clipline_storage::{
-    remove_emptied_session_dir, storage_status as read_storage_status, sweep_emptied_session_dirs,
-};
+use clipline_storage::{remove_emptied_session_dir, storage_status as read_storage_status};
 use windows_sys::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
 use windows_sys::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
@@ -317,7 +315,6 @@ pub async fn list_clips<R: Runtime>(
 }
 
 fn list_clips_from_dir(dir: PathBuf) -> Result<LocalClipScan, String> {
-    let _ = sweep_emptied_session_dirs(&dir);
     list_clips_from_dir_with_child_reader(dir, push_clips_from)
 }
 
@@ -4430,8 +4427,8 @@ mod tests {
     }
 
     #[test]
-    fn list_clips_sweeps_emptied_session_folders() {
-        let dir = TestDir::new("clipline-library", "list-sweep-empty-session");
+    fn list_clips_does_not_sweep_emptied_session_folders() {
+        let dir = TestDir::new("clipline-library", "list-no-sweep-empty-session");
         let media = dir.path().join("media");
         let leftover = media.join("2026-06-13 02-31");
         std::fs::create_dir_all(&leftover).unwrap();
@@ -4442,7 +4439,10 @@ mod tests {
         let clips = list_clips_from_dir(media).unwrap().clips;
 
         assert_eq!(clips.len(), 1);
-        assert!(!leftover.exists());
+        assert!(
+            leftover.exists(),
+            "Library listing is a read path and must not restage or delete session folders"
+        );
         assert!(keep.exists());
     }
 
