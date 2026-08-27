@@ -286,6 +286,25 @@ pub fn enforce_quota_with_protection(
     protect: Option<&Path>,
     additionally_protected: impl Fn(&Path) -> bool,
 ) -> io::Result<GcReport> {
+    enforce_quota_with_policy(dir, quota_bytes, protect, additionally_protected, |_| 0)
+}
+
+/// Enforces the clip quota while letting the caller order deletion by clip
+/// policy and protect additional managed files that are temporarily immutable
+/// (active upload sources, favorites). Protected bytes still count toward the
+/// quota; collection skips them and continues with the next deletable clip.
+///
+/// `priority` maps a clip path to an ordering key: lower values are deleted
+/// first, and within the same priority the oldest clip goes first. The app
+/// maps clip kind onto this (sessions before replays before trims); storage
+/// itself stays neutral about what the keys mean.
+pub fn enforce_quota_with_policy(
+    dir: &Path,
+    quota_bytes: Option<u64>,
+    protect: Option<&Path>,
+    additionally_protected: impl Fn(&Path) -> bool,
+    priority: impl Fn(&Path) -> u8,
+) -> io::Result<GcReport> {
     let _guard = QUOTA_GC_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -317,8 +336,9 @@ pub fn enforce_quota_with_protection(
     }
 
     clips.sort_by(|a, b| {
-        a.modified
-            .cmp(&b.modified)
+        priority(&a.path)
+            .cmp(&priority(&b.path))
+            .then_with(|| a.modified.cmp(&b.modified))
             .then_with(|| a.path.file_name().cmp(&b.path.file_name()))
     });
 
@@ -919,6 +939,94 @@ mod tests {
         );
         assert!(newest.exists());
         assert_eq!(report.status.total_bytes, 20);
+    }
+
+    fn kind_priority(name: &str) -> u8 {
+        // Sessions drain first, then replays, then trims (the app maps the
+        // clip kind onto this order; here the file name stands in for it).
+        if name.starts_with("session-") {
+            0
+        } else if name.starts_with("replay-") {
+            1
+        } else {
+            2
+        }
+    }
+
+    #[test]
+    fn enforce_quota_with_policy_deletes_by_priority_before_age() {
+        let dir = TestDir::new("clipline-storage", "policy-priority");
+        // Oldest clip is a trim (lowest deletion priority): age must lose to
+        // kind priority when the quota frees only part of the library.
+        let trim = write_owned(&dir, "trim-old.mp4", 10);
+        tick_mtime();
+        let replay = write_owned(&dir, "replay-mid.mp4", 10);
+        tick_mtime();
+        let session = write_owned(&dir, "session-new.mp4", 10);
+
+        let report = enforce_quota_with_policy(
+            dir.path(),
+            Some(10),
+            None,
+            |_| false,
+            |path| kind_priority(path.file_name().and_then(|n| n.to_str()).unwrap_or("")),
+        )
+        .unwrap();
+
+        assert_eq!(report.deleted_clips, 2);
+        assert!(!session.exists(), "sessions must drain before replays/trims");
+        assert!(!replay.exists(), "replays must drain before trims");
+        assert!(trim.exists(), "the oldest clip can survive when its kind is low priority");
+        assert_eq!(report.status.total_bytes, 10);
+    }
+
+    #[test]
+    fn enforce_quota_with_policy_deletes_oldest_within_a_priority() {
+        let dir = TestDir::new("clipline-storage", "policy-within-kind");
+        let oldest = write_owned(&dir, "replay-oldest.mp4", 10);
+        tick_mtime();
+        let older = write_owned(&dir, "replay-old.mp4", 10);
+        tick_mtime();
+        let newer = write_owned(&dir, "replay-new.mp4", 10);
+
+        let report = enforce_quota_with_policy(
+            dir.path(),
+            Some(10),
+            None,
+            |_| false,
+            |path| kind_priority(path.file_name().and_then(|n| n.to_str()).unwrap_or("")),
+        )
+        .unwrap();
+
+        assert_eq!(report.deleted_clips, 2);
+        assert!(!oldest.exists());
+        assert!(!older.exists());
+        assert!(newer.exists());
+    }
+
+    #[test]
+    fn enforce_quota_with_policy_skips_protected_high_priority_clips() {
+        let dir = TestDir::new("clipline-storage", "policy-protected");
+        let favorite = write_owned(&dir, "session-favorite.mp4", 10);
+        tick_mtime();
+        let replay = write_owned(&dir, "replay.mp4", 10);
+        tick_mtime();
+        let trim = write_owned(&dir, "trim.mp4", 10);
+
+        let report = enforce_quota_with_policy(
+            dir.path(),
+            Some(10),
+            None,
+            |path| same_path(path, &favorite),
+            |path| kind_priority(path.file_name().and_then(|n| n.to_str()).unwrap_or("")),
+        )
+        .unwrap();
+
+        assert_eq!(report.deleted_clips, 2);
+        assert!(favorite.exists(), "protected clips must survive even at high priority");
+        assert!(!replay.exists());
+        assert!(!trim.exists());
+        assert_eq!(report.status.total_bytes, 10);
     }
 
     #[test]

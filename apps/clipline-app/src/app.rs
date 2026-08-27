@@ -1707,12 +1707,9 @@ impl RuntimeState {
         if over_quota(&status) && auto_delete {
             if let Some(quota) = quota_bytes {
                 let target = quota.saturating_sub(required_bytes);
-                if let Err(error) = clipline_storage::enforce_quota_with_protection(
-                    media_dir,
-                    Some(target),
-                    None,
-                    crate::cloud_upload::is_active_upload_source,
-                ) {
+                if let Err(error) =
+                    crate::library::enforce_quota_with_clip_policy(media_dir, Some(target), None)
+                {
                     tracing::warn!(
                         event = "storage_quota_auto_delete_failed",
                         path = ?media_dir,
@@ -3704,6 +3701,7 @@ pub fn run() {
             crate::library::delete_clips,
             crate::library::rename_clip,
             crate::library::rename_clip_file,
+            crate::library::set_clip_favorite,
             crate::library::export_clip,
             crate::library::prepare_clip_audio_sidecars,
             crate::library::reveal_clip,

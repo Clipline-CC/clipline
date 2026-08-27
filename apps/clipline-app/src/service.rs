@@ -30,9 +30,8 @@ use clipline_capture::{
 use clipline_events::{is_review_event, ClipAudioTrack, EventKind, MarkerLog, PlayerSummary};
 use clipline_lol::LeagueQueue;
 use clipline_storage::{
-    clip_ownership_marker_path, enforce_quota_with_protection, ensure_clip_owned,
-    recover_recording_files, remove_clip_ownership_marker, storage_status,
-    sweep_emptied_session_dirs, StorageStatus,
+    clip_ownership_marker_path, ensure_clip_owned, recover_recording_files,
+    remove_clip_ownership_marker, storage_status, sweep_emptied_session_dirs, StorageStatus,
 };
 use clipline_storage::{session_label, SessionTracker};
 
@@ -660,11 +659,10 @@ fn make_room_for_quota(
     };
     let before_bytes = storage_status_or_warn(clips_dir, quota_bytes).map(|status| status.total_bytes);
     let target = quota.saturating_sub(required_bytes);
-    let mut deleted_clips = match enforce_quota_with_protection(
+    let mut deleted_clips = match crate::library::enforce_quota_with_clip_policy(
         clips_dir,
         Some(target),
         protect,
-        crate::cloud_upload::is_active_upload_source,
     ) {
         Ok(report) => report.deleted_clips,
         Err(error) => {
@@ -2728,11 +2726,10 @@ fn emit_saved_clip(
         quota_bytes: opts.disk_quota_bytes,
     };
     let status = if opts.auto_delete_when_over_quota {
-        match enforce_quota_with_protection(
+        match crate::library::enforce_quota_with_clip_policy(
             clips_dir,
             opts.disk_quota_bytes,
             Some(path),
-            crate::cloud_upload::is_active_upload_source,
         ) {
             Ok(report) => report.status,
             Err(e) => {
@@ -3029,6 +3026,37 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         assert!(storage_quota_full_event(&tx, &file, Some(100), 1, false).is_none());
         assert!(storage_quota_full_event(&tx, &file, Some(100), 1, true).is_none());
+    }
+
+    #[test]
+    fn auto_delete_keeps_favorites_and_drains_sessions_before_replays_before_trims() {
+        let dir = clipline_test_utils::TestDir::new("clipline-service", "quota-policy-order");
+        // The favorited session is the OLDEST clip, so plain oldest-first GC
+        // would delete it first; kind priority must protect it and drain the
+        // replay before the trim instead.
+        let session = dir.path().join("session_1784525639.mp4");
+        std::fs::write(&session, [0; 100]).unwrap();
+        clipline_storage::ensure_clip_owned(&session).unwrap();
+        crate::library::set_clip_favorite_impl(&session, true).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let replay = dir.path().join("clip_1784525638.mp4");
+        std::fs::write(&replay, [0; 100]).unwrap();
+        clipline_storage::ensure_clip_owned(&replay).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let trim = dir.path().join("clip_1_trim_001000_002000.mp4");
+        std::fs::write(&trim, [0; 100]).unwrap();
+        clipline_storage::ensure_clip_owned(&trim).unwrap();
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        // 300 bytes of clips; a 230-byte budget still leaves room after the
+        // two deletable clips are removed, but the favorited session stays.
+        assert!(
+            storage_quota_full_event(&tx, dir.path(), Some(230), 1, true).is_none(),
+            "auto-delete should free room without touching the favorite"
+        );
+        assert!(session.exists(), "favorites must never be auto-deleted");
+        assert!(!replay.exists(), "replays must drain before trims");
+        assert!(!trim.exists());
     }
 
     #[test]

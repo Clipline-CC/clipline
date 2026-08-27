@@ -151,6 +151,8 @@ pub struct ClipInfo {
     pub name: String,
     pub title: Option<String>,
     pub kind: String,
+    /// User favorite; favorites are never auto-deleted by quota GC.
+    pub favorite: bool,
     /// Session folder name; None for legacy clips at the library root.
     pub session: Option<String>,
     pub size_mb: f64,
@@ -198,12 +200,26 @@ pub struct RenamedClipInfo {
     pub kind: String,
 }
 
+#[derive(serde::Serialize)]
+pub struct SetClipFavoriteInfo {
+    pub path: String,
+    pub favorite: bool,
+}
+
 #[derive(Default, serde::Serialize, serde::Deserialize, Clone)]
 struct ClipMetadata {
     #[serde(default)]
     title: Option<String>,
     #[serde(default)]
     kind: Option<String>,
+    /// User favorite; favorites are never auto-deleted by quota GC. Skipped
+    /// when false so non-favorite sidecars stay byte-identical.
+    #[serde(default, skip_serializing_if = "is_false")]
+    favorite: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 const AUDIO_PREVIEW_CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -408,6 +424,7 @@ fn push_clips_from(
                 .unwrap_or_default(),
             title,
             kind,
+            favorite: clip_metadata.favorite,
             session: session.clone(),
             size_mb,
             modified_unix,
@@ -708,6 +725,31 @@ pub fn delete_clip(path: String, settings: tauri::State<StorageSettings>) -> Res
     let target = validate_clip_path(&settings, &path)?;
     let media_root = settings.clips_dir()?;
     remove_clip_files(&target, &media_root)
+}
+
+/// Marks or unmarks a clip as a favorite. Favorites are never auto-deleted by
+/// quota GC, and the Library's Favorites chip isolates them.
+#[tauri::command]
+pub fn set_clip_favorite(
+    path: String,
+    favorite: bool,
+    settings: tauri::State<StorageSettings>,
+) -> Result<SetClipFavoriteInfo, String> {
+    let target = validate_clip_path(&settings, &path)?;
+    set_clip_favorite_impl(&target, favorite)
+}
+
+pub(crate) fn set_clip_favorite_impl(
+    target: &Path,
+    favorite: bool,
+) -> Result<SetClipFavoriteInfo, String> {
+    let mut metadata = read_clip_metadata(target).unwrap_or_default();
+    metadata.favorite = favorite;
+    write_clip_metadata(target, &metadata)?;
+    Ok(SetClipFavoriteInfo {
+        path: target.display().to_string(),
+        favorite,
+    })
 }
 
 pub(crate) fn clip_sidecar_paths(target: &Path) -> [PathBuf; 4] {
@@ -2336,6 +2378,38 @@ fn clip_kind_from_metadata<'a>(path: &'a Path, metadata: &'a ClipMetadata) -> &'
 pub(crate) fn clip_kind_for_path(path: &Path) -> String {
     let metadata = read_clip_metadata(path).unwrap_or_default();
     clip_kind_from_metadata(path, &metadata).to_string()
+}
+
+/// Quota GC deletes oldest clips within a kind, but drains kinds in order:
+/// sessions first, then replays, then trims. Lower keys are deleted first.
+pub(crate) fn clip_gc_priority(path: &Path) -> u8 {
+    match clip_kind_for_path(path).as_str() {
+        "session" => 0,
+        "replay" => 1,
+        _ => 2,
+    }
+}
+
+pub(crate) fn is_favorite_clip(path: &Path) -> bool {
+    read_clip_metadata(path).is_some_and(|metadata| metadata.favorite)
+}
+
+/// The app's quota-GC policy: active upload sources and favorites are never
+/// deleted, and kinds drain in priority order (sessions → replays → trims).
+pub(crate) fn enforce_quota_with_clip_policy(
+    dir: &Path,
+    quota_bytes: Option<u64>,
+    protect: Option<&Path>,
+) -> std::io::Result<clipline_storage::GcReport> {
+    clipline_storage::enforce_quota_with_policy(
+        dir,
+        quota_bytes,
+        protect,
+        |path| {
+            crate::cloud_upload::is_active_upload_source(path) || is_favorite_clip(path)
+        },
+        clip_gc_priority,
+    )
 }
 
 fn display_renamed_clip_path(old_path: &str, name: &str, fallback_parent: &Path) -> String {
@@ -4477,6 +4551,7 @@ mod tests {
             &ClipMetadata {
                 title: Some("First title".to_string()),
                 kind: Some("replay".to_string()),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -4485,6 +4560,7 @@ mod tests {
             &ClipMetadata {
                 title: Some("Second title".to_string()),
                 kind: Some("session".to_string()),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -4492,6 +4568,125 @@ mod tests {
         let metadata = read_clip_metadata(&clip).unwrap();
         assert_eq!(metadata.title.as_deref(), Some("Second title"));
         assert_eq!(metadata.kind.as_deref(), Some("session"));
+    }
+
+    #[test]
+    fn clip_metadata_favorite_round_trips_and_stays_hidden_when_false() {
+        let dir = TestDir::new("clipline-library", "favorite-metadata");
+        let clip = dir.path().join("clip.mp4");
+        touch_mp4(&clip);
+
+        write_clip_metadata(
+            &clip,
+            &ClipMetadata {
+                title: None,
+                kind: None,
+                favorite: true,
+            },
+        )
+        .unwrap();
+        let metadata = read_clip_metadata(&clip).unwrap();
+        assert!(metadata.favorite);
+
+        write_clip_metadata(
+            &clip,
+            &ClipMetadata {
+                title: Some("Keep".to_string()),
+                kind: Some("replay".to_string()),
+                favorite: false,
+            },
+        )
+        .unwrap();
+        let metadata = read_clip_metadata(&clip).unwrap();
+        assert!(!metadata.favorite);
+        let json = std::fs::read_to_string(clip_metadata_path(&clip)).unwrap();
+        assert!(
+            !json.contains("favorite"),
+            "non-favorite metadata must stay byte-identical to today"
+        );
+        assert!(json.contains("\"kind\": \"replay\""));
+    }
+
+    #[test]
+    fn set_clip_favorite_impl_sets_and_clears_the_flag() {
+        let dir = TestDir::new("clipline-library", "set-favorite");
+        let clip = dir.path().join("clip.mp4");
+        touch_mp4(&clip);
+        clipline_storage::ensure_clip_owned(&clip).unwrap();
+
+        let result = set_clip_favorite_impl(&clip, true).unwrap();
+        assert!(result.favorite);
+        assert_eq!(result.path, clip.display().to_string());
+        assert!(read_clip_metadata(&clip).unwrap().favorite);
+
+        let result = set_clip_favorite_impl(&clip, false).unwrap();
+        assert!(!result.favorite);
+        assert!(!read_clip_metadata(&clip).unwrap().favorite);
+    }
+
+    #[test]
+    fn clip_gc_priority_orders_sessions_before_replays_before_trims() {
+        assert_eq!(clip_gc_priority(Path::new("session_1781377615.mp4")), 0);
+        assert_eq!(clip_gc_priority(Path::new("clip_1784525638.mp4")), 1);
+        assert_eq!(
+            clip_gc_priority(Path::new("clip_1_trim_001000_002000.mp4")),
+            2
+        );
+    }
+
+    #[test]
+    fn enforce_quota_with_clip_policy_protects_favorites_and_orders_kinds() {
+        let dir = TestDir::new("clipline-library", "gc-clip-policy-favorites");
+        // Oldest clip is a trim (lowest deletion priority); the newest clip is
+        // a favorited session. With room for only one clip after GC, the
+        // favorite must survive and the trim must go last.
+        let trim = dir.path().join("clip_1_trim_001000_002000.mp4");
+        std::fs::write(&trim, [0; 100]).unwrap();
+        clipline_storage::ensure_clip_owned(&trim).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        let replay = dir.path().join("clip_1784525638.mp4");
+        std::fs::write(&replay, [0; 100]).unwrap();
+        clipline_storage::ensure_clip_owned(&replay).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        let session = dir.path().join("session_1784525639.mp4");
+        std::fs::write(&session, [0; 100]).unwrap();
+        clipline_storage::ensure_clip_owned(&session).unwrap();
+        set_clip_favorite_impl(&session, true).unwrap();
+
+        // Quota leaves room for one clip (sidecars count toward usage).
+        let report = enforce_quota_with_clip_policy(dir.path(), Some(200), None).unwrap();
+
+        assert_eq!(report.deleted_clips, 2);
+        assert!(session.exists(), "favorites must never be auto-deleted");
+        assert!(!replay.exists(), "replays must drain before trims");
+        assert!(!trim.exists());
+        assert_eq!(report.status.clip_count, 1);
+    }
+
+    #[test]
+    fn enforce_quota_with_clip_policy_drains_kinds_in_priority_order() {
+        let dir = TestDir::new("clipline-library", "gc-clip-policy-order");
+        // Newest clip is a session; oldest is a trim. Sessions must drain
+        // first even when they are newer than every replay and trim.
+        let trim = dir.path().join("clip_1_trim_001000_002000.mp4");
+        std::fs::write(&trim, [0; 100]).unwrap();
+        clipline_storage::ensure_clip_owned(&trim).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        let replay = dir.path().join("clip_1784525638.mp4");
+        std::fs::write(&replay, [0; 100]).unwrap();
+        clipline_storage::ensure_clip_owned(&replay).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        let session = dir.path().join("session_1784525639.mp4");
+        std::fs::write(&session, [0; 100]).unwrap();
+        clipline_storage::ensure_clip_owned(&session).unwrap();
+
+        let report = enforce_quota_with_clip_policy(dir.path(), Some(150), None).unwrap();
+
+        assert_eq!(report.deleted_clips, 2);
+        assert!(!session.exists(), "sessions must drain before replays and trims");
+        assert!(!replay.exists());
+        assert!(trim.exists(), "trims must be the last kind auto-delete touches");
+        assert_eq!(report.status.clip_count, 1);
     }
 
     #[test]
@@ -4898,6 +5093,7 @@ mod tests {
             &ClipMetadata {
                 title: Some("Case-only metadata".to_string()),
                 kind: Some("session".to_string()),
+                ..Default::default()
             },
         )
         .unwrap();
