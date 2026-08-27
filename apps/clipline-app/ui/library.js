@@ -1165,18 +1165,22 @@ function clipCard(c) {
   del.innerHTML =
     '<svg viewBox="0 0 24 24"><path d="M9 3v1H4v2h16V4h-5V3H9zM6 8v11a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V8H6zm3 2h2v9H9v-9zm4 0h2v9h-2v-9z"/></svg>';
 
-  thumb.append(play, kindChip, del);
+  // Favorite star sits left of the trash so it can be toggled without opening
+  // the clip; filled when favorited, outline otherwise.
+  const fav = document.createElement("button");
+  fav.type = "button";
+  fav.className = "card-fav-toggle" + (c.favorite ? " on" : "");
+  fav.title = c.favorite ? "Remove from favorites" : "Add to favorites";
+  fav.setAttribute("aria-pressed", String(!!c.favorite));
+  fav.innerHTML = c.favorite
+    ? '<svg viewBox="0 0 24 24"><path d="M12 2.6l3 5.9 6.5 1-4.8 4.5 1.1 6.5L12 17.3 6.2 20.6l1.1-6.5L2.5 9.6l6.5-1z"/></svg>'
+    : '<svg class="off" viewBox="0 0 24 24"><path d="M12 2.6l3 5.9 6.5 1-4.8 4.5 1.1 6.5L12 17.3 6.2 20.6l1.1-6.5L2.5 9.6l6.5-1z"/></svg>';
+  fav.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    toggleClipFavorite(c);
+  });
 
-  if (c.favorite) {
-    const fav = document.createElement("span");
-    fav.className = "card-fav";
-    fav.title = "Favorite";
-    // Static markup, no clip data — innerHTML is safe here.
-    fav.innerHTML =
-      '<svg viewBox="0 0 24 24"><path d="M12 21s-6.7-4.3-9.3-8.5C.9 9.6 2.4 6 5.6 5.1 7.4 4.6 9.4 5.3 12 8c2.6-2.7 4.6-3.4 6.4-2.9 3.2.9 4.7 4.5 2.9 7.4C18.7 16.7 12 21 12 21z"/></svg>';
-    thumb.appendChild(fav);
-  }
-
+  thumb.append(play, kindChip, fav, del);
   if (Number.isFinite(duration)) {
     const dur = document.createElement("span");
     dur.className = "card-dur";

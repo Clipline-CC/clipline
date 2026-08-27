@@ -8,10 +8,11 @@
 
 Plan: `docs/superpowers/plans/2026-08-27-favorites-and-gc-priority.md`.
 
-**Favorites.** Any local clip can be marked as a favorite from the Review header (heart button,
-hidden for cloud-only clips) or a card's context menu (`Add to favorites` / `Remove from
-favorites`); favorited cards carry a heart badge, and a **Favorites** chip in the Library filter
-row isolates them. The flag lives in the per-clip metadata sidecar (`favorite: bool`,
+**Favorites.** Any local clip can be marked as a favorite from the Review header (star button,
+hidden for cloud-only clips), the inline star toggle on each library card (left of the delete
+button; outline when off, filled when on), or a card's context menu (`Add to favorites` /
+`Remove from favorites`); the **Favorites** chip in the Library filter row isolates them. The
+flag lives in the per-clip metadata sidecar (`favorite: bool`,
 serde-defaulted and skipped when false, so non-favorite sidecars stay byte-identical), is
 serialized into `ClipInfo` for cards/Review, and is set through the new
 `set_clip_favorite(path, favorite)` command (returns `{path, favorite}`; the UI patches the

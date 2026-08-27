@@ -64,6 +64,9 @@ function syncFavoriteButton() {
   el.classList.toggle("favorite-on", favorite);
   el.setAttribute("aria-pressed", String(favorite));
   el.title = favorite ? "Remove from favorites" : "Add to favorites";
+  el.innerHTML = favorite
+    ? '<svg viewBox="0 0 24 24"><path d="M12 2.6l3 5.9 6.5 1-4.8 4.5 1.1 6.5L12 17.3 6.2 20.6l1.1-6.5L2.5 9.6l6.5-1z"/></svg>'
+    : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2.6l3 5.9 6.5 1-4.8 4.5 1.1 6.5L12 17.3 6.2 20.6l1.1-6.5L2.5 9.6l6.5-1z"/></svg>';
 }
 
 function setClipRenameControlsDisabled(disabled) {

@@ -3609,16 +3609,26 @@ button.primary.settings-save-glow {
 .card-del:active { transform: none; }
 .card-del svg { display: block; width: 15px; height: 15px; fill: currentColor; }
 
-/* Favorite heart badge on local cards; the hover delete sits right of it. */
-.card-fav {
+/* Favorite star toggle on local cards; the hover delete sits right of it. */
+.card-fav-toggle {
   position: absolute; top: 8px; right: 40px; z-index: 3;
-  width: 28px; height: 28px; display: grid; place-items: center;
-  color: var(--favorite); pointer-events: none;
+  width: 28px; height: 28px; min-width: 0; padding: 0;
+  display: grid; place-items: center; border: 0; border-radius: 6px;
+  background: rgba(var(--scrim-c-rgb),.7); color: var(--muted);
+  opacity: 0; pointer-events: none; transition: opacity 0.12s ease;
 }
-.card-fav svg { display: block; width: 15px; height: 15px; fill: currentColor;
-  filter: drop-shadow(0 1px 3px rgba(0,0,0,.6)); }
+.card:hover .card-fav-toggle, .card:focus-within .card-fav-toggle {
+  opacity: 1; pointer-events: auto;
+}
+.card-fav-toggle:hover { background: rgba(var(--scrim-c-rgb),.9); color: var(--text); }
+.card-fav-toggle.on { color: var(--favorite); opacity: 1; pointer-events: auto; }
+.card-fav-toggle.on:hover { color: var(--favorite); }
+.card-fav-toggle svg { display: block; width: 15px; height: 15px; fill: currentColor; }
+.card-fav-toggle svg.off { fill: none; stroke: currentColor; stroke-width: 1.8; }
 .gallery-grid.select-mode .card-del,
-.card.selected .card-del {
+.gallery-grid.select-mode .card-fav-toggle,
+.card.selected .card-del,
+.card.selected .card-fav-toggle {
   opacity: 0;
   pointer-events: none;
 }

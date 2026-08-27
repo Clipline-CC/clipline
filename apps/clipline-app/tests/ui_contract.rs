@@ -6141,13 +6141,19 @@ fn favorites_are_guarded_across_review_gallery_and_context_menu() {
     );
     assert!(
         library.contains(r#"galleryFilter === "favorite" && !c.favorite"#)
-            && library.contains("card-fav")
+            && library.contains("card-fav-toggle")
+            && library.contains("toggleClipFavorite(c)")
             && library.contains("clip.favorite ? \"Remove from favorites\" : \"Add to favorites\""),
-        "the gallery filter, card badge, and context-menu label must key on the favorite flag"
+        "the gallery filter, inline card star toggle, and context-menu label must key on the favorite flag"
     );
     assert!(
         library.contains("$(\"clip-menu-favorite\").hidden = true")
             && main.contains("clip-menu-favorite"),
         "cloud/game-play menus must hide the favorite action; main.js must wire the toggle"
+    );
+    assert!(
+        !html.contains("M12 21s-6.7-4.3-9.3-8.5")
+            && !library.contains("M12 21s-6.7-4.3-9.3-8.5"),
+        "favorites must use a star icon, never a heart"
     );
 }
