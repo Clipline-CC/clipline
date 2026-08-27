@@ -20,6 +20,7 @@ const APP_UI_JS: &[&str] = &[
     "app-core.js",
     "settings.js",
     "library.js",
+    "gallery.js",
     "cloud.js",
     "review-player.js",
     "support.js",
@@ -426,6 +427,61 @@ fn default_capability_only_targets_main_window() {
     assert!(
         !capability.contains("main-recovery"),
         "recovery windows are intentionally not created or granted frontend command permissions"
+    );
+}
+
+#[test]
+fn region_overlay_webview_has_event_permissions_and_core_bundle() {
+    // The overlay webview is reused between selections; without core:event
+    // permissions its region-overlay-shown subscription is denied, so reused
+    // opens keep the stale frame and stale selection box on screen.
+    let capability: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("capabilities/region.json"),
+        )
+        .expect("read capabilities/region.json"),
+    )
+    .expect("valid region.json");
+    assert_eq!(
+        capability["windows"][0].as_str(),
+        Some("screenshot-region"),
+        "region capability must grant the screenshot-region window"
+    );
+    assert!(
+        capability["permissions"]
+            .as_array()
+            .expect("permissions array")
+            .iter()
+            .any(|p| p.as_str() == Some("core:default")),
+        "region webview needs core:event (inside core:default) for its wake subscriptions"
+    );
+
+    // app-core.js destructures PlayerCore at top level; loading it without
+    // player-core.js kills app-core.js in the overlay page.
+    let html = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/region.html"))
+        .expect("read ui/region.html");
+    let order = |name: &str| {
+        html.find(&format!("src=\"{name}\""))
+            .unwrap_or_else(|| panic!("region.html must reference {name}"))
+    };
+    assert!(order("player-core.js") < order("app-core.js"));
+    assert!(order("cloud-core.js") < order("app-core.js"));
+    assert!(order("gallery-window-core.js") < order("app-core.js"));
+    assert!(order("window-lifecycle-core.js") < order("app-core.js"));
+
+    // Reused opens must refocus the webview content, or WebView2 keeps
+    // document focus elsewhere and Esc never reaches the page.
+    let app = app_rs();
+    let reuse = app
+        .find("if let Some(window) = reuse {")
+        .expect("overlay reuse branch");
+    let branch_end = app[reuse..]
+        .find("return Ok(());")
+        .map(|offset| reuse + offset)
+        .expect("reuse branch end");
+    assert!(
+        app[reuse..branch_end].contains("Self::focus_webview_content(&window);"),
+        "the overlay reuse path must refocus the webview content so Esc works"
     );
 }
 
@@ -2815,6 +2871,171 @@ fn bookmark_hotkey_drops_a_user_placed_timeline_marker() {
     assert!(
         styles_css().contains(".marker-bookmark"),
         "bookmark pins need their own category color"
+    );
+}
+
+#[test]
+fn screenshot_hotkeys_capture_region_screen_and_window() {
+    let html = index_html();
+    let js = main_js();
+    let app = app_rs();
+
+    for required in [
+        "id=\"set-screenshot-region-hotkey\"",
+        "id=\"set-screenshot-region-hotkey-2\"",
+        "id=\"set-screenshot-screen-hotkey\"",
+        "id=\"set-screenshot-screen-hotkey-2\"",
+        "id=\"set-screenshot-window-hotkey\"",
+        "id=\"set-screenshot-window-hotkey-2\"",
+        "id=\"screenshot-region-hotkey-status\"",
+        "id=\"screenshot-screen-hotkey-status\"",
+        "id=\"screenshot-window-hotkey-status\"",
+        "data-settings-key=\"screenshot_region_hotkey screenshot_region_hotkey_secondary\"",
+        "data-settings-key=\"screenshot_screen_hotkey screenshot_screen_hotkey_secondary\"",
+        "data-settings-key=\"screenshot_window_hotkey screenshot_window_hotkey_secondary\"",
+    ] {
+        assert!(
+            html.contains(required),
+            "screenshot keybind settings need `{required}`"
+        );
+    }
+    for required in [
+        "const screenshotRegionKeybinds = [\"set-screenshot-region-hotkey\", \"set-screenshot-region-hotkey-2\"]",
+        "const screenshotScreenKeybinds = [\"set-screenshot-screen-hotkey\", \"set-screenshot-screen-hotkey-2\"]",
+        "const screenshotWindowKeybinds = [\"set-screenshot-window-hotkey\", \"set-screenshot-window-hotkey-2\"]",
+        "screenshot_region_hotkey: screenshotRegionKeybinds[0] || null",
+        "screenshot_region_hotkey_secondary: screenshotRegionKeybinds[1] || null",
+        "screenshot_screen_hotkey: screenshotScreenKeybinds[0] || null",
+        "screenshot_screen_hotkey_secondary: screenshotScreenKeybinds[1] || null",
+        "screenshot_window_hotkey: screenshotWindowKeybinds[0] || null",
+        "screenshot_window_hotkey_secondary: screenshotWindowKeybinds[1] || null",
+        "\"set-screenshot-region-hotkey\",",
+        "\"set-screenshot-screen-hotkey\",",
+        "\"set-screenshot-window-hotkey\",",
+        "if (fieldId.startsWith(\"set-screenshot-region-hotkey\")) return \"screenshot-region-hotkey-status\";",
+        "if (fieldId.startsWith(\"set-screenshot-screen-hotkey\")) return \"screenshot-screen-hotkey-status\";",
+        "if (fieldId.startsWith(\"set-screenshot-window-hotkey\")) return \"screenshot-window-hotkey-status\";",
+    ] {
+        assert!(js.contains(required), "screenshot UI must include `{required}`");
+    }
+    assert!(
+        app.contains("HookAction::ScreenshotRegion")
+            && app.contains("HookAction::ScreenshotScreen")
+            && app.contains("HookAction::ScreenshotWindow")
+            && app.contains("fn request_screenshot"),
+        "the native shell must route screenshot hotkeys to RuntimeState"
+    );
+    assert!(
+        app.contains("play_screenshot_taken") && app.contains("\"screenshot-saved\""),
+        "a taken screenshot must confirm audibly and tell the UI where it landed"
+    );
+    for required in [
+        "listen(\"screenshot-saved\"",
+        "\"screenshot (\" + s.mode + \") saved \" + name",
+    ] {
+        assert!(js.contains(required), "screenshot UI must include `{required}`");
+    }
+}
+
+#[test]
+fn screenshots_gallery_has_rail_button_and_dedicated_view() {
+    let html = index_html();
+    let js = main_js();
+
+    for required in [
+        "id=\"rail-gallery\"",
+        "id=\"screenshots-view\"",
+        "id=\"screenshots-grid\"",
+        "id=\"screenshots-count\"",
+        "id=\"screenshots-sort\"",
+    ] {
+        assert!(
+            html.contains(required),
+            "screenshots Gallery must include `{required}`"
+        );
+    }
+
+    for required in [
+        "function renderScreenshots(",
+        "PlayerCore.clipKind(c) === \"screenshot\"",
+        "openScreenshotLightbox(clip, { items: allShots, index: index });",
+        "deleteClip(clip.path)",
+        "window.__renderScreenshots",
+        "window.__screenshotsGalleryActive",
+        "$(\"rail-gallery\").addEventListener(\"click\"",
+    ] {
+        assert!(js.contains(required), "Gallery JS must include `{required}`");
+    }
+
+    // The Library grid must never list screenshots; they belong to the Gallery.
+    let library = read_ui_js("library.js");
+    assert!(
+        library.contains("if (kind === \"screenshot\") continue;"),
+        "the clip Library must exclude screenshots in favor of the Gallery"
+    );
+
+    // Review arbitration must hide the Gallery view while a clip is open.
+    assert!(
+        read_ui_js("review-player.js").contains("\"screenshots-view\""),
+        "view arbitration must own the screenshots-view visibility"
+    );
+}
+
+#[test]
+fn screenshot_lightbox_navigates_with_arrows_and_buttons() {
+    let html = index_html();
+    let js = main_js();
+
+    for required in [
+        "id=\"lightbox-prev\"",
+        "id=\"lightbox-next\"",
+        "id=\"lightbox-counter\"",
+    ] {
+        assert!(
+            html.contains(required),
+            "screenshot lightbox must include `{required}`"
+        );
+    }
+
+    for required in [
+        "function stepScreenshotLightbox(",
+        "lightboxNavigation",
+        "\"ArrowLeft\"",
+        "\"ArrowRight\"",
+        "nav.index + 1} / ${nav.items.length}",
+    ] {
+        assert!(js.contains(required), "lightbox JS must include `{required}`");
+    }
+
+    // The Gallery must hand the lightbox its sorted order, so arrows follow
+    // what the grid shows.
+    assert!(
+        read_ui_js("gallery.js")
+            .contains("openScreenshotLightbox(clip, { items: allShots, index: index });"),
+        "Gallery cards must pass their sorted list to the lightbox"
+    );
+
+    // Regression guard: showModal() autofocuses a button inside the dialog,
+    // so a keydown handler that skips events focused inside it kills the
+    // arrows entirely — which is why listening happens at document level.
+    let lib = read_ui_js("library.js");
+    let init_start = lib
+        .find("(function initScreenshotLightbox()")
+        .expect("screenshot lightbox init must exist");
+    let init_end = lib[init_start..]
+        .find("})();")
+        .map(|offset| init_start + offset)
+        .expect("unterminated screenshot lightbox init");
+    let lightbox_init = &lib[init_start..init_end];
+    for banned in ["dialog.contains(", "if (inside)"] {
+        assert!(
+            !lightbox_init.contains(banned),
+            "lightbox keydown must not skip events focused inside the dialog ({banned})"
+        );
+    }
+    assert!(
+        lightbox_init.contains("document.addEventListener(\"keydown\""),
+        "lightbox arrows must be handled at document level"
     );
 }
 
@@ -5600,8 +5821,7 @@ fn gallery_supports_multi_select_bulk_actions() {
         );
     }
     assert!(
-        !js.contains("card-check")
-            && !js.contains("check.addEventListener")
+        !js.contains("card-check")            && !js.contains("check.addEventListener")
             && !js.contains("bulkUploadSelected")
             && !js.contains("uploadOneClipBulk")
             && !css.contains(".card-check"),
@@ -5615,6 +5835,18 @@ fn gallery_supports_multi_select_bulk_actions() {
         !html.contains("id=\"bulk-cancel\"") && !js.contains("$(\"bulk-cancel\")"),
         "the active Select multiple control should be the single manual exit from select mode"
     );
+
+    // The Gallery's select toggle starts visible: opening the Gallery must
+    // re-sync selection controls, otherwise the boot-time sync (Gallery
+    // closed) leaves the button hidden until a context-menu Select happens.
+    {
+        let gallery = read_ui_js("gallery.js");
+        let set_active = js_function_body(&gallery, "setActive");
+        assert!(
+            set_active.contains("syncSelectionControls()"),
+            "opening the Gallery must re-sync selection controls so the select toggle is visible"
+        );
+    }
 
     let delete_clip_fn = js
         .split("async function deleteClip")

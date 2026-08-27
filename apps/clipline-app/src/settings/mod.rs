@@ -117,6 +117,28 @@ pub struct AppSettings {
     /// Optional second keybind for dropping a bookmark.
     #[serde(default)]
     pub bookmark_hotkey_secondary: Option<String>,
+    /// Keybind for capturing a user-drawn region. Defaults to
+    /// Ctrl+PrintScreen for a settings file that predates screenshots,
+    /// unless that key is already taken; None means unbound.
+    #[serde(default = "default_screenshot_region_hotkey")]
+    pub screenshot_region_hotkey: Option<String>,
+    /// Optional second keybind for region capture.
+    #[serde(default)]
+    pub screenshot_region_hotkey_secondary: Option<String>,
+    /// Keybind for capturing the cursor's whole monitor. Defaults to bare
+    /// PrintScreen on upgrade, unless that key is already taken.
+    #[serde(default = "default_screenshot_screen_hotkey")]
+    pub screenshot_screen_hotkey: Option<String>,
+    /// Optional second keybind for full-screen capture.
+    #[serde(default)]
+    pub screenshot_screen_hotkey_secondary: Option<String>,
+    /// Keybind for capturing the foreground window. Defaults to
+    /// Alt+PrintScreen on upgrade, unless that key is already taken.
+    #[serde(default = "default_screenshot_window_hotkey")]
+    pub screenshot_window_hotkey: Option<String>,
+    /// Optional second keybind for window capture.
+    #[serde(default)]
+    pub screenshot_window_hotkey_secondary: Option<String>,
     #[serde(default)]
     pub open_on_startup: bool,
     #[serde(default = "default_enabled")]
@@ -151,6 +173,18 @@ pub(crate) fn default_bookmark_hotkey() -> Option<String> {
     Some("F7".into())
 }
 
+pub(crate) fn default_screenshot_region_hotkey() -> Option<String> {
+    Some("Ctrl+PrintScreen".into())
+}
+
+pub(crate) fn default_screenshot_screen_hotkey() -> Option<String> {
+    Some("PrintScreen".into())
+}
+
+pub(crate) fn default_screenshot_window_hotkey() -> Option<String> {
+    Some("Alt+PrintScreen".into())
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -178,6 +212,12 @@ impl Default for AppSettings {
             recording_hotkey_secondary: None,
             bookmark_hotkey: default_bookmark_hotkey(),
             bookmark_hotkey_secondary: None,
+            screenshot_region_hotkey: default_screenshot_region_hotkey(),
+            screenshot_region_hotkey_secondary: None,
+            screenshot_screen_hotkey: default_screenshot_screen_hotkey(),
+            screenshot_screen_hotkey_secondary: None,
+            screenshot_window_hotkey: default_screenshot_window_hotkey(),
+            screenshot_window_hotkey_secondary: None,
             open_on_startup: false,
             close_to_tray: true,
             minimize_to_tray: false,
@@ -229,6 +269,41 @@ impl AppSettings {
         .flatten()
         .filter(|hotkey| !hotkey.trim().is_empty())
         .collect()
+    }
+
+    fn screenshot_hotkeys_for<'a>(
+        primary: Option<&'a str>,
+        secondary: Option<&'a str>,
+    ) -> Vec<&'a str> {
+        [primary, secondary]
+            .into_iter()
+            .flatten()
+            .filter(|hotkey| !hotkey.trim().is_empty())
+            .collect()
+    }
+
+    /// All configured screenshot-region keybinds. Empty when unbound.
+    pub fn screenshot_region_hotkeys(&self) -> Vec<&str> {
+        Self::screenshot_hotkeys_for(
+            self.screenshot_region_hotkey.as_deref(),
+            self.screenshot_region_hotkey_secondary.as_deref(),
+        )
+    }
+
+    /// All configured screenshot-screen keybinds. Empty when unbound.
+    pub fn screenshot_screen_hotkeys(&self) -> Vec<&str> {
+        Self::screenshot_hotkeys_for(
+            self.screenshot_screen_hotkey.as_deref(),
+            self.screenshot_screen_hotkey_secondary.as_deref(),
+        )
+    }
+
+    /// All configured screenshot-window keybinds. Empty when unbound.
+    pub fn screenshot_window_hotkeys(&self) -> Vec<&str> {
+        Self::screenshot_hotkeys_for(
+            self.screenshot_window_hotkey.as_deref(),
+            self.screenshot_window_hotkey_secondary.as_deref(),
+        )
     }
 
     pub fn to_service_options(&self, lol_url: Option<String>) -> Result<ServiceOptions, String> {

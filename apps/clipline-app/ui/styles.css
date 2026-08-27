@@ -3230,6 +3230,33 @@ button.primary.settings-save-glow {
 }
 .gallery-view[hidden] { display: none; }
 
+/* ---- screenshots gallery ---- */
+.screenshots-view {
+  grid-area: 1 / 1;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+  min-width: 0;
+  background: var(--bg);
+}
+.screenshots-view[hidden] { display: none; }
+
+.screenshots-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 14px;
+  align-content: start;
+  padding: 4px 22px 20px;
+  overflow-y: auto;
+}
+.screenshots-grid[hidden] { display: none; }
+
+#rail-gallery {
+  color: var(--muted);
+}
+#rail-gallery:hover { color: var(--text); }
+#rail-gallery.active { color: var(--accent); }
+
 .gallery-head {
   grid-row: 1;
   display: flex;
@@ -3590,6 +3617,56 @@ button.primary.settings-save-glow {
 .card-kind.replay { background: var(--accent); color: #14100c; }
 .card-kind.session { background: var(--session); color: #14100c; }
 .card-kind.trim { background: var(--ok); color: #14100c; }
+.card-kind.screenshot { background: #d8d4ca; color: #14100c; }
+
+.screenshot-lightbox {
+  border: none;
+  padding: 0;
+  background: transparent;
+  max-width: min(92vw, 1600px);
+}
+.screenshot-lightbox::backdrop { background: rgb(0 0 0 / 0.75); }
+.lightbox-stage {
+  position: relative;
+  /* Fixed height: a shorter image loading between taller neighbors must not
+     re-center the nav arrows mid-frame (the reported arrow flash). */
+  height: min(86vh, 1400px);
+  display: grid;
+  place-items: center;
+}
+.screenshot-lightbox img {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: 8px;
+}
+.lightbox-nav {
+  position: absolute; top: 50%; transform: translateY(-50%); z-index: 2;
+  width: 44px; height: 44px; min-width: 0; padding: 0;
+  display: grid; place-items: center; border: 0; border-radius: 8px;
+  background: rgba(var(--scrim-c-rgb),.66); color: var(--text-strong);
+  transition: background 0.12s ease, opacity 0.12s ease;
+}
+.lightbox-nav:hover { background: rgba(var(--scrim-c-rgb),.9); color: #fff; }
+/* The global button:active translateY(1px) would override the -50%
+   centering transform and drop the arrow most of the way down while
+   pressed; keep the centering transform on press. */
+.lightbox-nav:active { transform: translateY(-50%); }
+.lightbox-nav svg { display: block; width: 20px; height: 20px; fill: currentColor; }
+.lightbox-prev { left: 12px; }
+.lightbox-next { right: 12px; }
+.lightbox-nav[disabled] { opacity: 0; pointer-events: none; }
+/* Counter sits in its own row below the image, not over it. */
+.lightbox-footer {
+  display: flex;
+  justify-content: center;
+  padding-top: 10px;
+}
+.lightbox-counter {
+  height: 24px; padding: 0 12px; border-radius: 6px; display: inline-flex; align-items: center;
+  background: rgba(var(--scrim-c-rgb),.74); color: var(--text-strong);
+  font-family: var(--font-mono); font-size: 11.5px; font-variant-numeric: tabular-nums;
+}
 
 .card-dur {
   position: absolute; bottom: 8px; right: 8px; z-index: 2;

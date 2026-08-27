@@ -25,6 +25,7 @@ use crate::game_discovery::DetectedGameCandidate;
 use crate::game_plugins::GamePluginInfo;
 use crate::games::{DetectedGame, GameWindowInfo};
 use crate::osu_enrichment::OsuTitleEvent;
+use crate::screenshot::{self, ScreenshotMode};
 use crate::service::{self, Cmd, Event, ServiceOptions};
 use crate::settings::{
     is_global_shortcut_hotkey, parse_hotkey, quota_bytes_from_gb, AppSettings, CaptureMode,
@@ -40,6 +41,7 @@ mod support;
 use diagnostics::{diagnostic_log_path, log_diagnostic};
 
 const MAIN_WINDOW_LABEL: &str = "main";
+const REGION_WINDOW_LABEL: &str = "screenshot-region";
 const WEBVIEW_READY_TIMEOUT: Duration = Duration::from_secs(5);
 const GAME_DETECTOR_INTERVAL: Duration = Duration::from_millis(500);
 const WINDOW_LIFECYCLE_EVENT: &str = "window-lifecycle";
@@ -1661,6 +1663,226 @@ impl RuntimeState {
         false
     }
 
+    /// Take a screenshot on a worker thread. Deliberately not routed through
+    /// the recorder command loop: screenshots must work while recording is
+    /// idle, and a WGC still grab must never block save/stop handling.
+    fn request_screenshot<R: Runtime>(&self, app: &AppHandle<R>, mode: ScreenshotMode) {
+        if mode == ScreenshotMode::Region {
+            self.begin_region_overlay(app);
+            return;
+        }
+        let started = std::time::Instant::now();
+        let app = app.clone();
+        let app_for_spawn_error = app.clone();
+        std::thread::Builder::new()
+            .name("screenshot".into())
+            .spawn(move || {
+                let grab_started = std::time::Instant::now();
+                let grabbed = screenshot::capture_frame(mode);
+                tracing::info!(
+                    event = "screenshot_grab",
+                    mode = mode.label(),
+                    elapsed_ms = grab_started.elapsed().as_millis() as u64,
+                    ok = grabbed.is_ok()
+                );
+                let media_root = app.state::<crate::library::StorageSettings>().media_dir();
+                let result = grabbed
+                    .and_then(|image| screenshot::save_frame(&media_root, mode, image, None));
+                tracing::info!(
+                    event = "screenshot_captured",
+                    mode = mode.label(),
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    ok = result.is_ok()
+                );
+                match result {
+                    Ok(saved) => {
+                        // The shot is already on disk; clipboard copy must not
+                        // delay the shutter feedback.
+                        let feedback = {
+                            crate::sound::play_screenshot_taken();
+                            crate::library::copy_screenshot_to_clipboard(
+                                &saved.path,
+                                &saved.rgba,
+                                saved.width,
+                                saved.height,
+                            )
+                        };
+                        if let Err(error) = feedback {
+                            tracing::warn!(event = "screenshot_clipboard_failed", %error);
+                            let _ = app.emit("error", format!("clipboard copy failed: {error}"));
+                        }
+                        let _ = app.emit(
+                            "screenshot-saved",
+                            serde_json::json!({ "mode": mode.label(), "path": saved.path.display().to_string() }),
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(event = "screenshot_failed", mode = mode.label(), %error);
+                        let _ = app.emit("error", error);
+                    }
+                }
+            })
+            .map(|_| ())
+            .unwrap_or_else(|error| {
+                let message = format!("start screenshot worker: {error}");
+                tracing::warn!(event = "screenshot_worker_spawn_failed", %message);
+                let _ = app_for_spawn_error.emit("error", message);
+            });
+    }
+
+    /// Region flow: freeze the cursor monitor into a temp PNG, then open a
+    /// fullscreen overlay on that monitor for the drag selection. The frame
+    /// stays in managed state so completion never re-decodes the PNG.
+    fn begin_region_overlay<R: Runtime>(&self, app: &AppHandle<R>) {
+        let started = std::time::Instant::now();
+        let result = self.open_region_overlay(app);
+        match result {
+            Ok(()) => tracing::info!(
+                event = "region_overlay_opened",
+                elapsed_ms = started.elapsed().as_millis() as u64
+            ),
+            Err(error) => {
+                tracing::warn!(event = "region_overlay_failed", %error);
+                let _ = app.emit("error", error);
+            }
+        }
+    }
+
+    fn open_region_overlay<R: Runtime>(&self, app: &AppHandle<R>) -> Result<(), String> {
+        // A previous overlay's hidden webview is reused when present: building
+        // a fresh WebView2 window costs seconds; showing an existing one is
+        // near-instant. The frozen temp PNG is refreshed every time so the
+        // reused webview re-reads current pixels from the same path.
+        let reuse = app.get_webview_window(REGION_WINDOW_LABEL);
+
+        let image = if reuse.is_some() {
+            screenshot::capture_frame(ScreenshotMode::Region)
+                .map_err(|error| format!("grab region frame: {error}"))?
+        } else {
+            // Reuse the existing worker-thread pattern: the WGC grab must not
+            // block the main thread, but the window must be built on it.
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::Builder::new()
+                .name("region-frame".into())
+                .spawn(move || {
+                    let frame = screenshot::capture_frame(ScreenshotMode::Region);
+                    let _ = tx.send(frame);
+                })
+                .map_err(|error| format!("start region frame worker: {error}"))?;
+            rx.recv()
+                .map_err(|_| "region frame worker died".to_string())?
+                .map_err(|error| format!("grab region frame: {error}"))?
+        };
+
+        let Some(monitor) = clipline_capture::windows::still::monitor_at_cursor() else {
+            return Err("no monitor found under the mouse cursor".into());
+        };
+        let dpi = clipline_capture::windows::still::dpi_at_cursor();
+
+        // Freeze the frame to a temp PNG so the overlay webview can display
+        // it through the asset protocol; the path is stable across opens and
+        // the file is deleted when the overlay state is torn down. Fast
+        // compression: this sits on the keypress-to-overlay critical path.
+        let png = crate::image::encode_rgba_png_with(
+            image.width(),
+            image.height(),
+            &image.to_rgba(),
+            png::Compression::Fast,
+        )
+        .ok_or_else(|| "encode region preview PNG".to_string())?;
+        let temp_path =
+            std::env::temp_dir().join(format!("clipline-region-frame-{}.png", std::process::id()));
+        std::fs::write(&temp_path, &png).map_err(|error| format!("write region preview: {error}"))?;
+        let canonical_temp = temp_path.canonicalize().unwrap_or_else(|_| temp_path.clone());
+        if let Err(error) = app.asset_protocol_scope().allow_file(&canonical_temp) {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(format!("scope region preview: {error}"));
+        }
+
+        {
+            let state = app.state::<RegionOverlayState>();
+            let mut slot = state
+                .0
+                .lock()
+                .map_err(|_| "region state poisoned".to_string())?;
+            *slot = Some(RegionOverlay {
+                frame: image,
+                monitor,
+                dpi,
+                temp_path,
+            });
+        }
+
+        if let Some(window) = reuse {
+            // Re-position for a possibly moved/changed monitor, then wake the
+            // overlay JS so it reloads the frozen frame before becoming
+            // visible.
+            use tauri::{PhysicalPosition, PhysicalSize};
+            let _ = window.set_position(PhysicalPosition::new(monitor.x, monitor.y));
+            let _ = window.set_size(PhysicalSize::new(monitor.width, monitor.height));
+            let _ = app.emit_to(
+                REGION_WINDOW_LABEL,
+                "region-overlay-shown",
+                serde_json::json!({ "frame_path": canonical_temp.display().to_string() }),
+            );
+            let _ = window.show();
+            let _ = window.set_focus();
+            // WebView2 can keep document focus on the hidden window across a
+            // hide/show cycle even though set_focus() focuses the OS window,
+            // which silently drops every keystroke (Esc would stop working).
+            // Refocusing the webview content is what restores key input.
+            #[cfg(windows)]
+            Self::focus_webview_content(&window);
+            return Ok(());
+        }
+
+        let build = tauri::WebviewWindowBuilder::new(
+            app,
+            REGION_WINDOW_LABEL,
+            tauri::WebviewUrl::App("region.html".into()),
+        )
+        .title("Clipline Region")
+        .decorations(false)
+        .resizable(false)
+        .maximizable(false)
+        .minimizable(false)
+        .skip_taskbar(true)
+        .focused(true)
+        .visible(false);
+        let window = match build.build() {
+            Ok(window) => window,
+            Err(error) => {
+            cleanup_region_overlay(app);
+            return Err(format!("open region overlay: {error}"));
+            }
+        };
+        // Physical-pixel placement: builder sizes are logical, which breaks
+        // on monitors above 100% scale. Build hidden, place physically, show.
+        use tauri::{PhysicalPosition, PhysicalSize};
+        let _ = window.set_position(PhysicalPosition::new(monitor.x, monitor.y));
+        let _ = window.set_size(PhysicalSize::new(monitor.width, monitor.height));
+        let _ = window.show();
+        let _ = window.set_focus();
+        Ok(())
+    }
+
+    /// Put keyboard focus on the overlay webview's hosted content. The OS
+    /// window being focused is not enough: after hide/show cycles WebView2
+    /// can keep document focus elsewhere, so Esc never reaches the overlay
+    /// page. `ICoreWebView2Controller::MoveFocus` is the documented way to
+    /// hand focus to the hosted content.
+    #[cfg(windows)]
+    fn focus_webview_content<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
+        let _ = window.with_webview(move |webview| {
+            let controller = webview.controller();
+            // SAFETY: COM call on a live controller handed to us by Tauri.
+            let _ = unsafe { controller.MoveFocus(
+                webview2_com::Microsoft::Web::WebView2::Win32::
+                    COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC,
+            ) };
+        });
+    }
+
     fn request_save_or_show_quota<R: Runtime>(&self, app: &AppHandle<R>) -> bool {
         if self.request_save() {
             return true;
@@ -1864,10 +2086,13 @@ impl RuntimeState {
         let Ok(inner) = self.0.lock() else {
             return false;
         };
-        inner
-            .settings
+        let settings = &inner.settings;
+        settings
             .hotkeys()
             .into_iter()
+            .chain(settings.screenshot_region_hotkeys())
+            .chain(settings.screenshot_screen_hotkeys())
+            .chain(settings.screenshot_window_hotkeys())
             .filter_map(|raw| parse_global_hotkey(raw).ok().flatten())
             .any(|active| &active == shortcut)
     }
@@ -2279,6 +2504,161 @@ fn save_replay<R: Runtime>(app: AppHandle<R>, state: tauri::State<RuntimeState>)
 }
 
 #[tauri::command]
+fn take_screenshot<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<RuntimeState>,
+    mode: String,
+) -> Result<(), String> {
+    let mode = match mode.as_str() {
+        "region" => ScreenshotMode::Region,
+        "screen" => ScreenshotMode::Screen,
+        "window" => ScreenshotMode::Window,
+        other => return Err(format!("unknown screenshot mode: {other}")),
+    };
+    state.request_screenshot(&app, mode);
+    Ok(())
+}
+
+/// Managed state for the region overlay: the frozen frame plus everything
+/// the overlay window and completion command need. `None` when no overlay.
+#[derive(Default)]
+struct RegionOverlayState(std::sync::Mutex<Option<RegionOverlay>>);
+
+struct RegionOverlay {
+    frame: clipline_capture::still::BgraImage,
+    monitor: clipline_capture::still::PlacedRect,
+    dpi: Option<u32>,
+    temp_path: std::path::PathBuf,
+}
+
+fn cleanup_region_overlay<R: Runtime>(app: &AppHandle<R>) {
+    // Drop the frozen frame and delete the temp PNG. The overlay webview
+    // itself stays alive (hidden) for reuse; it dies with the process.
+    if let Some(state) = app.try_state::<RegionOverlayState>() {
+        if let Ok(mut slot) = state.0.lock() {
+            if let Some(overlay) = slot.take() {
+                let _ = std::fs::remove_file(&overlay.temp_path);
+            }
+        }
+    }
+}
+
+fn close_region_window<R: Runtime>(app: &AppHandle<R>) {
+    // Hide instead of destroy: rebuilding the overlay webview costs seconds
+    // and was the dominant region-screenshot delay. The hidden window is
+    // reused by the next open; it dies with the process on quit.
+    if let Some(window) = app.get_webview_window(REGION_WINDOW_LABEL) {
+        // Disarm before parking so the webview's own blur (hiding steals
+        // focus) cannot fire a cancel command back at us.
+        let _ = app.emit_to(
+            REGION_WINDOW_LABEL,
+            "region-overlay-hidden",
+            serde_json::json!({}),
+        );
+        let _ = window.hide();
+    }
+}
+
+/// Payload for get_region_overlay_state; serializable view of RegionOverlay.
+#[derive(serde::Serialize)]
+struct RegionOverlayInfo {
+    frame_path: String,
+    monitor_x: i32,
+    monitor_y: i32,
+    monitor_width: u32,
+    monitor_height: u32,
+    dpi: Option<u32>,
+    snap_candidates: Vec<SnapCandidate>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SnapCandidate {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
+#[tauri::command]
+fn get_region_overlay_state<R: Runtime>(app: AppHandle<R>) -> Result<Option<RegionOverlayInfo>, String> {
+    let state = app.state::<RegionOverlayState>();
+    let slot = state
+        .0
+        .lock()
+        .map_err(|_| "region state poisoned".to_string())?;
+    let Some(overlay) = slot.as_ref() else {
+        return Ok(None);
+    };
+    Ok(Some(RegionOverlayInfo {
+        frame_path: overlay.temp_path.display().to_string(),
+        monitor_x: overlay.monitor.x,
+        monitor_y: overlay.monitor.y,
+        monitor_width: overlay.monitor.width,
+        monitor_height: overlay.monitor.height,
+        dpi: overlay.dpi,
+        snap_candidates: crate::windows::window_rect_at_cursor()
+            .into_iter()
+            .map(|rect| SnapCandidate { x: rect.x, y: rect.y, width: rect.width, height: rect.height })
+            .collect(),
+    }))
+}
+
+#[tauri::command]
+fn complete_region_screenshot<R: Runtime>(
+    app: AppHandle<R>,
+    selection: SnapCandidate,
+) -> Result<(), String> {
+    let frame = {
+        let state = app.state::<RegionOverlayState>();
+        let slot = state
+            .0
+            .lock()
+            .map_err(|_| "region state poisoned".to_string())?;
+        let Some(overlay) = slot.as_ref() else {
+            return Err("no active region selection".into());
+        };
+        overlay.frame.clone()
+    };
+    let media_root = app.state::<crate::library::StorageSettings>().media_dir();
+    let saved = screenshot::save_frame(
+        &media_root,
+        ScreenshotMode::Region,
+        frame,
+        Some(clipline_capture::still::PlacedRect {
+            x: selection.x,
+            y: selection.y,
+            width: selection.width,
+            height: selection.height,
+        }),
+    );
+    close_region_window(&app);
+    cleanup_region_overlay(&app);
+    let saved = saved?;
+    crate::sound::play_screenshot_taken();
+    if let Err(error) = crate::library::copy_screenshot_to_clipboard(
+        &saved.path,
+        &saved.rgba,
+        saved.width,
+        saved.height,
+    ) {
+        tracing::warn!(event = "screenshot_clipboard_failed", %error);
+        let _ = app.emit("error", format!("clipboard copy failed: {error}"));
+    }
+    let _ = app.emit(
+        "screenshot-saved",
+        serde_json::json!({ "mode": ScreenshotMode::Region.label(), "path": saved.path.display().to_string() }),
+    );
+    Ok(())
+}
+
+#[tauri::command]
+fn cancel_region_screenshot<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    close_region_window(&app);
+    cleanup_region_overlay(&app);
+    Ok(())
+}
+
+#[tauri::command]
 fn recheck_storage_quota<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<RuntimeState>,
@@ -2569,6 +2949,10 @@ fn publish_window_lifecycle<R: Runtime>(
 
 fn publish_background_window<R: Runtime>(app: &AppHandle<R>, mode: WindowLifecycleMode) {
     app.state::<MicTestState>().stop();
+    // Keybind capture unregisters every global shortcut; if the UI goes away
+    // before the webview can resume them (minimize instead of blur/close),
+    // the binds would stay dead until restart.
+    resume_hotkeys_after_ui_gone(app);
     if matches!(
         mode,
         WindowLifecycleMode::Destroying | WindowLifecycleMode::Destroyed
@@ -3200,13 +3584,171 @@ fn parse_global_hotkey(raw: &str) -> Result<Option<Shortcut>, String> {
     }
 }
 
-/// The configured Save Replay keybinds that go through the OS global-shortcut
-/// registry (mouse and modified keyboard binds use the low-level hook instead).
+/// How often to re-attempt a startup shortcut that another process still
+/// owned when we launched (a dying instance, ShareX, Snipping Tool...).
+const HOTKEY_REGISTRATION_RETRY_DELAYS_MS: &[u64] = &[2_000, 5_000, 15_000, 30_000, 60_000];
+
+/// The plugin flattens every registration failure to a string; this is the
+/// Win32 ERROR_HOTKEY_ALREADY_REGISTERED case, where the owner may release
+/// the key later and a retry can succeed.
+fn hotkey_registration_is_busy(error: &str) -> bool {
+    error.to_ascii_lowercase().contains("already registered")
+}
+
+/// True while `shortcut` is still part of the live configuration; stops a
+/// late retry from resurrecting a bind the user removed meanwhile.
+fn hotkey_still_wanted<R: Runtime>(app: &AppHandle<R>, shortcut: Shortcut) -> bool {
+    let state = app.state::<RuntimeState>();
+    let settings = state.settings();
+    matches!(
+        effective_global_hotkeys(&settings, crate::hotkeys::actions_paused()),
+        Ok(shortcuts) if shortcuts.contains(&shortcut)
+    )
+}
+
+/// Re-tries a shortcut that failed to register because another process still
+/// owned it at startup. The owner (a dying instance, ShareX, Snipping Tool)
+/// usually releases the key within seconds; without this the bind stays dead
+/// until the app restarts.
+fn spawn_hotkey_registration_retry<R: Runtime>(app: &AppHandle<R>, shortcut: Shortcut) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        for delay_ms in HOTKEY_REGISTRATION_RETRY_DELAYS_MS {
+            tokio::time::sleep(std::time::Duration::from_millis(*delay_ms)).await;
+            if !hotkey_still_wanted(&app, shortcut) {
+                return;
+            }
+            let shortcuts = app.global_shortcut();
+            if shortcuts.is_registered(shortcut) {
+                return;
+            }
+            match shortcuts.register(shortcut) {
+                Ok(()) => {
+                    tracing::info!(event = "global_hotkey_registration_recovered", ?shortcut);
+                    return;
+                }
+                Err(e) if hotkey_registration_is_busy(&e.to_string()) => continue,
+                Err(e) => {
+                    tracing::warn!(event = "global_hotkey_retry_failed", ?shortcut, error = %e);
+                    return;
+                }
+            }
+        }
+        tracing::warn!(event = "global_hotkey_retry_exhausted", ?shortcut);
+    });
+}
+
+#[tauri::command]
+fn snipping_tool_printscreen_status() -> Result<String, String> {
+    match crate::windows::snipping_tool_printscreen_state()? {
+        crate::windows::SnippingToolState::Enabled => Ok("enabled".to_string()),
+        crate::windows::SnippingToolState::Disabled => Ok("disabled".to_string()),
+    }
+}
+
+#[tauri::command]
+fn disable_snipping_tool_printscreen() -> Result<String, String> {
+    crate::windows::disable_snipping_tool_printscreen(true)?;
+    match crate::windows::snipping_tool_printscreen_state()? {
+        crate::windows::SnippingToolState::Disabled => Ok("disabled".to_string()),
+        crate::windows::SnippingToolState::Enabled => Ok("enabled".to_string()),
+    }
+}
+
+/// Which screenshot action (if any) this registered shortcut belongs to.
+/// Checked before the Save Replay match so a PrintScreen bind never falls
+/// through to the replay path.
+fn screenshot_mode_for_settings(
+    settings: &AppSettings,
+    shortcut: &Shortcut,
+    actions_paused: bool,
+) -> Option<ScreenshotMode> {
+    // While a keybind field is capturing, its shortcuts are unregistered, so
+    // this dispatch cannot legitimately fire; the check only closes the race
+    // where a press lands between the unregister and the field taking over.
+    if actions_paused {
+        return None;
+    }
+    let matches_mode = |raws: Vec<&str>, mode: ScreenshotMode| {
+        raws.into_iter()
+            .filter_map(|raw| parse_global_hotkey(raw).ok().flatten())
+            .any(|active| &active == shortcut)
+            .then_some(mode)
+    };
+    matches_mode(
+        settings.screenshot_region_hotkeys(),
+        ScreenshotMode::Region,
+    )
+    .or(matches_mode(
+        settings.screenshot_screen_hotkeys(),
+        ScreenshotMode::Screen,
+    ))
+    .or(matches_mode(
+        settings.screenshot_window_hotkeys(),
+        ScreenshotMode::Window,
+    ))
+}
+
+fn screenshot_shortcut_mode(
+    state: &tauri::State<'_, RuntimeState>,
+    shortcut: &Shortcut,
+) -> Option<ScreenshotMode> {
+    let inner = state.0.lock().ok()?;
+    screenshot_mode_for_settings(&inner.settings, shortcut, crate::hotkeys::actions_paused())
+}
+
+#[cfg(test)]
+mod screenshot_shortcut_tests {
+    use super::*;
+
+    #[test]
+    fn printscreen_binds_map_to_screenshot_modes_when_actions_are_live() {
+        let settings = AppSettings::default();
+        for (raw, expected) in [
+            ("PrintScreen", ScreenshotMode::Screen),
+            ("Ctrl+PrintScreen", ScreenshotMode::Region),
+            ("Alt+PrintScreen", ScreenshotMode::Window),
+        ] {
+            let shortcut = parse_global_hotkey(raw).unwrap().unwrap();
+            assert_eq!(
+                screenshot_mode_for_settings(&settings, &shortcut, false),
+                Some(expected),
+                "{raw} must dispatch as a screenshot, never fall through to save replay"
+            );
+        }
+    }
+
+    #[test]
+    fn paused_keybind_capture_blocks_screenshot_dispatch() {
+        let settings = AppSettings::default();
+        let shortcut = parse_global_hotkey("PrintScreen").unwrap().unwrap();
+        assert_eq!(
+            screenshot_mode_for_settings(&settings, &shortcut, true),
+            None,
+            "while a keybind field captures, dispatch must stay blocked"
+        );
+    }
+}
+
+/// The configured keybinds that go through the OS global-shortcut registry:
+/// Save Replay plus every screenshot bind (mouse and modified keyboard binds
+/// use the low-level hook instead).
 fn global_hotkeys(settings: &AppSettings) -> Result<Vec<Shortcut>, String> {
     let mut shortcuts = Vec::new();
     for raw in settings.hotkeys() {
         if let Some(shortcut) = parse_global_hotkey(raw)? {
             shortcuts.push(shortcut);
+        }
+    }
+    for raws in [
+        settings.screenshot_region_hotkeys(),
+        settings.screenshot_screen_hotkeys(),
+        settings.screenshot_window_hotkeys(),
+    ] {
+        for raw in raws {
+            if let Some(shortcut) = parse_global_hotkey(raw)? {
+                shortcuts.push(shortcut);
+            }
         }
     }
     Ok(shortcuts)
@@ -3269,9 +3811,12 @@ fn resume_hotkeys_after_ui_gone<R: Runtime>(app: &AppHandle<R>) {
     if !crate::hotkeys::actions_paused() {
         return;
     }
-    if let Err(error) = apply_hotkey_capture_active(app, &app.state::<RuntimeState>(), false) {
-        tracing::warn!(event = "hotkey_capture_resume_failed", error = %error);
-        log_diagnostic(format!("resume hotkeys after UI gone: {error}"));
+    match apply_hotkey_capture_active(app, &app.state::<RuntimeState>(), false) {
+        Ok(()) => tracing::info!(event = "hotkey_capture_resumed_after_ui_gone"),
+        Err(error) => {
+            tracing::warn!(event = "hotkey_capture_resume_failed", error = %error);
+            log_diagnostic(format!("resume hotkeys after UI gone: {error}"));
+        }
     }
 }
 
@@ -3329,10 +3874,16 @@ fn rollback_settings_side_effects<R: Runtime>(
         let save = old.hotkeys();
         let recording = old.recording_hotkeys();
         let bookmark = old.bookmark_hotkeys();
+        let screenshot_region = old.screenshot_region_hotkeys();
+        let screenshot_screen = old.screenshot_screen_hotkeys();
+        let screenshot_window = old.screenshot_window_hotkeys();
         if let Err(error) = crate::hotkeys::set_hotkeys(crate::hotkeys::HookHotkeys {
             save: &save,
             recording: &recording,
             bookmark: &bookmark,
+            screenshot_region: &screenshot_region,
+            screenshot_screen: &screenshot_screen,
+            screenshot_window: &screenshot_window,
         }) {
             errors.push(format!("restore low-level hotkeys: {error}"));
         }
@@ -3421,10 +3972,16 @@ fn save_settings<R: Runtime>(
     let new_save_hotkeys = settings.hotkeys();
     let new_recording_hotkeys = settings.recording_hotkeys();
     let new_bookmark_hotkeys = settings.bookmark_hotkeys();
+    let new_screenshot_region_hotkeys = settings.screenshot_region_hotkeys();
+    let new_screenshot_screen_hotkeys = settings.screenshot_screen_hotkeys();
+    let new_screenshot_window_hotkeys = settings.screenshot_window_hotkeys();
     if let Err(primary) = crate::hotkeys::set_hotkeys(crate::hotkeys::HookHotkeys {
         save: &new_save_hotkeys,
         recording: &new_recording_hotkeys,
         bookmark: &new_bookmark_hotkeys,
+        screenshot_region: &new_screenshot_region_hotkeys,
+        screenshot_screen: &new_screenshot_screen_hotkeys,
+        screenshot_window: &new_screenshot_window_hotkeys,
     }) {
         let rollback = rollback_settings_side_effects(
             &app,
@@ -3612,6 +4169,7 @@ pub fn run() {
         .manage(NativeMediaFolderAuthorization::default())
         .manage(crate::library::StorageSettings::new(quota_bytes, media_dir))
         .manage(crate::library::ClipboardExportState::default())
+        .manage(RegionOverlayState::default())
         .plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
             let launched_by_autostart = args.iter().any(|arg| arg == "--autostart");
             log_diagnostic(format!(
@@ -3634,7 +4192,10 @@ pub fn run() {
                 .with_handler(move |_app, shortcut, event| {
                     if event.state() == ShortcutState::Pressed {
                         let state = _app.state::<RuntimeState>();
-                        if state.active_shortcut_matches(shortcut) {
+                        let screenshot_mode = screenshot_shortcut_mode(&state, shortcut);
+                        if let Some(mode) = screenshot_mode {
+                            state.request_screenshot(_app, mode);
+                        } else if state.active_shortcut_matches(shortcut) {
                             state.request_save_or_show_quota(_app);
                         }
                     }
@@ -3643,6 +4204,10 @@ pub fn run() {
         )
         .invoke_handler(tauri::generate_handler![
             save_replay,
+            take_screenshot,
+            get_region_overlay_state,
+            complete_region_screenshot,
+            cancel_region_screenshot,
             recheck_storage_quota,
             restart_as_administrator,
             set_recording,
@@ -3710,6 +4275,8 @@ pub fn run() {
             crate::library::copy_clip_to_clipboard,
             crate::library::copy_text_to_clipboard,
             crate::library::open_media_folder,
+            snipping_tool_printscreen_status,
+            disable_snipping_tool_printscreen,
             crate::library::storage_status
         ])
         .setup(move |app| {
@@ -3724,20 +4291,33 @@ pub fn run() {
             });
             for hotkey in &startup_global_hotkeys {
                 if let Err(e) = app.global_shortcut().register(*hotkey) {
-                    let message =
-                        format!("global save hotkey unavailable; continuing without it: {e}");
-                    tracing::warn!(event = "global_hotkey_registration_failed", message = %message);
-                    let _ = app.handle().emit("error", message);
+                    if hotkey_registration_is_busy(&e.to_string()) {
+                        // Another process still owns the key; it usually
+                        // releases it shortly after we start. Retry instead of
+                        // leaving the bind dead until the next launch.
+                        spawn_hotkey_registration_retry(app.handle(), *hotkey);
+                    } else {
+                        let message =
+                            format!("global save hotkey unavailable; continuing without it: {e}");
+                        tracing::warn!(event = "global_hotkey_registration_failed", message = %message);
+                        let _ = app.handle().emit("error", message);
+                    }
                 }
             }
             let startup_save_hotkeys = settings.hotkeys();
             let startup_recording_hotkeys = settings.recording_hotkeys();
             let startup_bookmark_hotkeys = settings.bookmark_hotkeys();
+            let startup_screenshot_region_hotkeys = settings.screenshot_region_hotkeys();
+            let startup_screenshot_screen_hotkeys = settings.screenshot_screen_hotkeys();
+            let startup_screenshot_window_hotkeys = settings.screenshot_window_hotkeys();
             if let Err(e) = crate::hotkeys::install_hotkey_hook(
                 crate::hotkeys::HookHotkeys {
                     save: &startup_save_hotkeys,
                     recording: &startup_recording_hotkeys,
                     bookmark: &startup_bookmark_hotkeys,
+                    screenshot_region: &startup_screenshot_region_hotkeys,
+                    screenshot_screen: &startup_screenshot_screen_hotkeys,
+                    screenshot_window: &startup_screenshot_window_hotkeys,
                 },
                 {
                 let app = app.handle().clone();
@@ -3756,6 +4336,18 @@ pub fn run() {
                     crate::hotkeys::HookAction::Bookmark => {
                         app.state::<RuntimeState>()
                             .request_bookmark(&app, trigger.pressed_at);
+                    }
+                    crate::hotkeys::HookAction::ScreenshotRegion => {
+                        app.state::<RuntimeState>()
+                            .request_screenshot(&app, ScreenshotMode::Region);
+                    }
+                    crate::hotkeys::HookAction::ScreenshotScreen => {
+                        app.state::<RuntimeState>()
+                            .request_screenshot(&app, ScreenshotMode::Screen);
+                    }
+                    crate::hotkeys::HookAction::ScreenshotWindow => {
+                        app.state::<RuntimeState>()
+                            .request_screenshot(&app, ScreenshotMode::Window);
                     }
                 }
             },
@@ -4060,6 +4652,9 @@ fn build_main_window<R: Runtime>(
         .map_err(|e| e.to_string())?
         .build()
         .map_err(|e| e.to_string())?;
+    if let Ok(hwnd) = window.hwnd() {
+        crate::windows::set_main_window_hwnd(Some(hwnd.0 as isize));
+    }
     let generation = app.state::<FrontendReadinessState>().begin_generation();
     log_diagnostic(format!(
         "build_main_window ready label={label} generation={generation} webviews={}",
@@ -4600,6 +5195,18 @@ mod tests {
         assert!(
             live.contains(&parse_hotkey("F6").unwrap()),
             "the default Save Replay bind must be an OS global shortcut"
+        );
+        assert!(
+            live.contains(&parse_hotkey("PrintScreen").unwrap()),
+            "the default screenshot screen bind is a PrintScreen global shortcut"
+        );
+        assert!(
+            live.contains(&parse_hotkey("Ctrl+PrintScreen").unwrap()),
+            "the default screenshot region bind is an OS global shortcut"
+        );
+        assert!(
+            live.contains(&parse_hotkey("Alt+PrintScreen").unwrap()),
+            "the default screenshot window bind is an OS global shortcut"
         );
         assert!(
             effective_global_hotkeys(&settings, true)

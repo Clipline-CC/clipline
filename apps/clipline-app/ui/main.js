@@ -71,6 +71,17 @@ listen("osu-enrichment-updated", () => {
 
 listen("error", (e) => { $("error").textContent = e.payload; });
 
+// The shutter sound is the real confirmation; this is the visible echo naming
+// what was captured and where it landed.
+listen("screenshot-saved", (e) => {
+  const s = e.payload || {};
+  const name = String(s.path || "").split(/[\\\\/]/).pop();
+  setNotice("screenshot (" + s.mode + ") saved " + name, { transient: true });
+  // The Gallery lists screenshots from the clip cache; a fresh shot must
+  // reach it without waiting for an unrelated refresh.
+  requestRefresh();
+});
+
 listen("mic-test", (e) => {
   if (!micTestRunning) return;
   const result = e.payload || {};
@@ -178,9 +189,18 @@ $("gallery-select-toggle").addEventListener("click", () => {
   if (!selectMode) clearSelection();
   syncSelectionControls();
 });
+$("screenshots-select-toggle").addEventListener("click", () => {
+  selectMode = !selectMode;
+  if (!selectMode) clearSelection();
+  syncSelectionControls();
+});
 $("bulk-select-all").addEventListener("click", selectAllVisible);
 $("bulk-clear").addEventListener("click", clearSelection);
 $("bulk-delete").addEventListener("click", bulkDeleteSelected);
+// The screenshots Gallery mirrors the same bulk actions on its own bar.
+$("bulk-select-all-shot").addEventListener("click", selectAllVisible);
+$("bulk-clear-shot").addEventListener("click", clearSelection);
+$("bulk-delete-shot").addEventListener("click", bulkDeleteSelected);
 $("poster-runtime-install").addEventListener("click", () => {
   void installFfmpegForPosters().catch(() => {});
 });
@@ -384,6 +404,14 @@ $("clip-menu-rename-file").addEventListener("click", () => {
   const clip = clipContextTarget;
   hideClipContextMenu();
   if (clip) openRenameFileDialog(clip);
+});
+$("clip-menu-show-folder").addEventListener("click", () => {
+  const clip = clipContextTarget;
+  hideClipContextMenu();
+  if (!clip) return;
+  invoke("reveal_clip", { path: clip.path }).catch((e) => {
+    $("error").textContent = e;
+  });
 });
 $("clip-menu-delete").addEventListener("click", () => {
   const clip = clipContextTarget;

@@ -238,7 +238,12 @@ async function refreshClips(
       closeReview();
     }
   }
+  // Keep the screenshots Gallery current while it is open. It must render
+  // after (not before) renderClips: the Library pass bumps the poster-work
+  // generation, which would otherwise invalidate the Gallery's queued jobs
+  // and leave thumbnails blank until a manual reload.
   renderClips();
+  renderScreenshotsAfterLibraryPass();
   return true;
 }
 // Leading icon per clip kind. Static markup (no clip data) — innerHTML is safe.
@@ -249,11 +254,14 @@ const CLIP_KIND_ICONS = {
     '<svg viewBox="0 0 24 24"><path d="M3 5h18v14H3V5zM5 6v2h2v-2zM9 6v2h2v-2zM13 6v2h2v-2zM17 6v2h2v-2zM5 16v2h2v-2zM9 16v2h2v-2zM13 16v2h2v-2zM17 16v2h2v-2z"/></svg>',
   trim:
     '<svg viewBox="0 0 24 24"><path d="M9.64 7.64c.23-.5.36-1.05.36-1.64 0-2.21-1.79-4-4-4S2 3.79 2 6s1.79 4 4 4c.59 0 1.14-.13 1.64-.36L10 12l-2.36 2.36C7.14 14.13 6.59 14 6 14c-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4c0-.59-.13-1.14-.36-1.64L12 14l7 7h3v-1L9.64 7.64zM6 8c-1.1 0-2-.89-2-2s.9-2 2-2 2 .89 2 2-.9 2-2 2zm0 12c-1.1 0-2-.89-2-2s.9-2 2-2 2 .89 2 2-.9 2-2 2zm6-7.5c-.28 0-.5-.22-.5-.5s.22-.5.5-.5.5.22.5.5-.22.5-.5.5zM19 3l-6 6 2 2 7-7V3z"/></svg>',
+  screenshot:
+    '<svg viewBox="0 0 24 24"><path d="M9 3 7.2 5H4a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-3.2L15 3H9zm3 5.5A4.5 4.5 0 1 1 7.5 13 4.5 4.5 0 0 1 12 8.5zm0 2A2.5 2.5 0 1 0 14.5 13 2.5 2.5 0 0 0 12 10.5z"/></svg>',
 };
 const CLIP_KIND_LABELS = {
   replay: "Buffered replay",
   session: "Full session",
   trim: "Trimmed export",
+  screenshot: "Screenshot",
 };
 const CLOUD_VISIBILITY_ICONS = {
   public:
@@ -924,8 +932,85 @@ function cloudClipCard(entry) {
   return el;
 }
 
+/* ---- screenshot lightbox ---- */
+// The Gallery owns navigation state (sorted list + current index) and
+// overrides these hooks; these fallbacks keep the lightbox working when a
+// single screenshot is opened outside the Gallery context.
+var lightboxNavigation = null;
+
+function openScreenshotLightbox(clip, navigation = null) {
+  const dialog = document.getElementById("screenshot-lightbox");
+  const img = document.getElementById("screenshot-lightbox-img");
+  if (!dialog || !img) return;
+  lightboxNavigation = navigation;
+  img.src = convertFileSrc(clip.path);
+  img.alt = clipDisplayTitle(clip) || clip.name;
+  updateLightboxNav();
+  dialog.showModal();
+}
+
+function updateLightboxNav() {
+  const prev = document.getElementById("lightbox-prev");
+  const next = document.getElementById("lightbox-next");
+  const counter = document.getElementById("lightbox-counter");
+  const nav = lightboxNavigation;
+  if (!prev || !next || !counter || !nav) return;
+  prev.disabled = nav.index <= 0;
+  next.disabled = nav.index >= nav.items.length - 1;
+  counter.textContent =
+    nav.items.length > 1 ? `${nav.index + 1} / ${nav.items.length}` : "";
+}
+
+function stepScreenshotLightbox(delta) {
+  const nav = lightboxNavigation;
+  const dialog = document.getElementById("screenshot-lightbox");
+  if (!nav || !dialog || !dialog.open) return;
+  const nextIndex = nav.index + delta;
+  if (nextIndex < 0 || nextIndex >= nav.items.length) return;
+  nav.index = nextIndex;
+  openScreenshotLightbox(nav.items[nextIndex], nav);
+}
+
+(function initScreenshotLightbox() {
+  const dialog = document.getElementById("screenshot-lightbox");
+  if (!dialog) return;
+  dialog.tabIndex = -1;
+  // Clicking the dimmed backdrop — or any dead space of the oversized
+  // stage/dialog around the image — closes; clicking the photo or controls
+  // keeps it open. Esc closes natively via the dialog cancel event.
+  dialog.addEventListener("click", (ev) => {
+    if (ev.target === dialog || ev.target.classList?.contains("lightbox-stage")) {
+      dialog.close();
+    }
+  });
+  document.getElementById("lightbox-prev")?.addEventListener("click", () => {
+    stepScreenshotLightbox(-1);
+  });
+  document.getElementById("lightbox-next")?.addEventListener("click", () => {
+    stepScreenshotLightbox(1);
+  });
+  // Arrow keys must work no matter where focus sits — showModal() autofocuses
+  // the prev button, and a disabled arrow at either list end drops focus to
+  // <body>, which is why listening only on the dialog failed.
+  document.addEventListener("keydown", (ev) => {
+    if (!dialog.open) return;
+    if (ev.key === "ArrowLeft") {
+      ev.preventDefault();
+      stepScreenshotLightbox(-1);
+    } else if (ev.key === "ArrowRight") {
+      ev.preventDefault();
+      stepScreenshotLightbox(1);
+    }
+  });
+})();
+
 // Clip names come from disk; build rows with textContent, never innerHTML.
-const CARD_KIND_LABELS = { replay: "Replay", session: "Session", trim: "Trim" };
+const CARD_KIND_LABELS = {
+  replay: "Replay",
+  session: "Session",
+  trim: "Trim",
+  screenshot: "Screenshot",
+};
 // Marker categories → tint var, matching the timeline glyph colors.
 const MARKER_CATEGORY_TICK_VARS = {
   kill: "--mc-kill",
@@ -1258,6 +1343,7 @@ function clipCard(c) {
       return;
     }
     if (currentClip && currentClip.path === c.path) closeReview();
+    else if (kind === "screenshot") openScreenshotLightbox(c);
     else openClip(c);
   });
   el.addEventListener("contextmenu", (ev) => showClipContextMenu(ev, c));
@@ -1279,7 +1365,9 @@ function applySelectionToCard(card, on) {
 }
 
 function findClipCard(path) {
-  for (const card of document.querySelectorAll("#gallery-grid .card[data-clip-path]")) {
+  for (const card of document.querySelectorAll(
+    "#gallery-grid .card[data-clip-path], #screenshots-grid .card[data-clip-path]",
+  )) {
     if (card.dataset.clipPath === path) return card;
   }
   return null;
@@ -1295,7 +1383,7 @@ function toggleClipSelection(path) {
 }
 
 function selectClipFromContext(path) {
-  if (!path || gallerySource !== "local") return;
+  if (!path) return;
   selectMode = true;
   selectedClipPaths.add(path);
   const card = findClipCard(path);
@@ -1305,7 +1393,9 @@ function selectClipFromContext(path) {
 
 function clearSelection() {
   selectedClipPaths.clear();
-  for (const card of document.querySelectorAll("#gallery-grid .card[data-clip-path]")) {
+  for (const card of document.querySelectorAll(
+    "#gallery-grid .card[data-clip-path], #screenshots-grid .card[data-clip-path]",
+  )) {
     applySelectionToCard(card, false);
   }
   syncBulkBar();
@@ -1313,7 +1403,9 @@ function clearSelection() {
 
 function selectAllVisible() {
   selectedClipPaths = new Set(selectedClipPaths);
-  for (const card of document.querySelectorAll("#gallery-grid .card[data-clip-path]")) {
+  for (const card of document.querySelectorAll(
+    "#gallery-grid .card[data-clip-path], #screenshots-grid .card[data-clip-path]",
+  )) {
     if (!card.dataset.clipPath) continue;
     selectedClipPaths.add(card.dataset.clipPath);
     applySelectionToCard(card, true);
@@ -1333,7 +1425,8 @@ function syncSelectToggleLabel() {
 }
 
 function syncSelectionControls() {
-  if (gallerySource !== "local" && selectMode) {
+  const galleryOpen = Boolean(window.__screenshotsGalleryActive?.());
+  if (gallerySource !== "local" && !galleryOpen && selectMode) {
     selectMode = false;
     clearSelection();
   }
@@ -1343,8 +1436,20 @@ function syncSelectionControls() {
     toggle.classList.toggle("active", selectMode);
     syncSelectToggleLabel();
   }
+  const shotToggle = $("screenshots-select-toggle");
+  if (shotToggle) {
+    shotToggle.hidden = !galleryOpen;
+    shotToggle.classList.toggle("active", selectMode && galleryOpen);
+    shotToggle.textContent = selectMode ? "Done" : "Select multiple";
+  }
   const grid = $("gallery-grid");
   if (grid) grid.classList.toggle("select-mode", selectMode && gallerySource === "local");
+  // The screenshots Gallery participates in select mode too.
+  const shotGrid = $("screenshots-grid");
+  if (shotGrid) shotGrid.classList.toggle("select-mode", selectMode);
+  window.__gallerySelectMode = function () {
+    return selectMode;
+  };
   syncBulkBar();
 }
 
@@ -1357,6 +1462,14 @@ function syncBulkBar() {
   $("bulk-count").textContent = `${count} selected`;
   const del = $("bulk-delete");
   if (del) del.disabled = count === 0;
+  // Mirror the bulk state onto the screenshots Gallery's own bar.
+  const shotBar = $("screenshots-bulk-bar");
+  if (!shotBar) return;
+  shotBar.hidden = !((selectMode || count > 0)
+    && window.__screenshotsGalleryActive?.());
+  $("bulk-count-shot").textContent = `${count} selected`;
+  const delShot = $("bulk-delete-shot");
+  if (delShot) delShot.disabled = count === 0;
 }
 
 /* ---- gallery: filter / sort / group ---- */
@@ -1638,6 +1751,8 @@ function filterGalleryClips(clips) {
   let maxModifiedUnix = 0;
   for (const c of clips) {
     const kind = clipKind(c);
+    // Screenshots live in their own Gallery view, never the clip Library.
+    if (kind === "screenshot") continue;
     if ((galleryFilter === "replay" || galleryFilter === "session" || galleryFilter === "trim")
       && kind !== galleryFilter) continue;
     if (galleryFilter === "marked" && !clipMarkers(c).length) continue;
@@ -1807,6 +1922,15 @@ function beginBoundedGalleryRender() {
   posterWorkQueue = [];
   releaseGalleryRoot($("gallery-grid"));
   releaseGalleryRoot($("cloud-gallery-grid"));
+}
+
+// Re-render an open screenshots Gallery AFTER the Library's render pass, so
+// its cards queue posters at the newest generation instead of being skipped
+// by it (renderClips bumps the generation and drops older queued jobs).
+function renderScreenshotsAfterLibraryPass() {
+  if (window.__renderScreenshots && window.__screenshotsGalleryActive?.()) {
+    window.__renderScreenshots();
+  }
 }
 
 function renderClips() {
@@ -1979,6 +2103,31 @@ function clearHeavyGalleryDom() {
 $("gallery-page-prev").addEventListener("click", () => changeGalleryPage(-1));
 $("gallery-page-next").addEventListener("click", () => changeGalleryPage(1));
 
+function showScreenshotContextMenu(ev, clip) {
+  ev.preventDefault();
+  ev.stopPropagation();
+  hideRegionMenu();
+  clipContextTarget = clip;
+  cloudContextTarget = null;
+  gamePlayContextTarget = null;
+  // Screenshots are stills: only the actions that make sense for a PNG.
+  $("clip-menu-select").hidden = false;
+  $("clip-menu-play").hidden = true;
+  $("clip-menu-open-cloud-page").hidden = true;
+  $("clip-menu-copy-cloud-link").hidden = true;
+  $("clip-menu-export-play").hidden = true;
+  $("clip-menu-upload").hidden = true;
+  $("clip-menu-rename").hidden = true;
+  $("clip-menu-rename-file").hidden = true;
+  $("clip-menu-copy-shareable").hidden = true;
+  $("clip-menu-show-folder").hidden = false;
+  $("clip-menu-copy").textContent = "Copy image";
+  $("clip-menu-delete").hidden = false;
+  const menu = $("clip-context-menu");
+  menu.hidden = false;
+  positionContextMenu(menu, ev.clientX, ev.clientY);
+}
+
 function showClipContextMenu(ev, clip) {
   ev.preventDefault();
   ev.stopPropagation();
@@ -1996,6 +2145,7 @@ function showClipContextMenu(ev, clip) {
   $("clip-menu-copy-cloud-link").hidden = true;
   $("clip-menu-export-play").hidden = true;
   $("clip-menu-copy").hidden = false;
+  $("clip-menu-copy").textContent = "Copy to clipboard";
   $("clip-menu-copy-shareable").hidden = false;
   const upload = $("clip-menu-upload");
   upload.hidden = !cloudUploadControlVisible(uploaded);
@@ -2003,6 +2153,7 @@ function showClipContextMenu(ev, clip) {
   upload.disabled = busy || (uploaded ? !record.remote_clip_id : !cloudConnected());
   $("clip-menu-rename").hidden = false;
   $("clip-menu-rename-file").hidden = false;
+  $("clip-menu-show-folder").hidden = false;
   $("clip-menu-delete").hidden = false;
   const menu = $("clip-context-menu");
   menu.hidden = false;
@@ -2055,6 +2206,7 @@ function showGamePlayContextMenu(ev, play) {
   $("clip-menu-upload").hidden = true;
   $("clip-menu-rename").hidden = true;
   $("clip-menu-rename-file").hidden = true;
+  $("clip-menu-show-folder").hidden = true;
   $("clip-menu-delete").hidden = true;
   const menu = $("clip-context-menu");
   menu.hidden = false;

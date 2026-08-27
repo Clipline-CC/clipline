@@ -45,6 +45,8 @@ mod games;
 #[cfg(windows)]
 mod hotkeys;
 #[cfg(windows)]
+mod image;
+#[cfg(windows)]
 mod library;
 #[cfg(windows)]
 mod markers;
@@ -58,6 +60,8 @@ mod osu_enrichment;
 mod poster;
 #[cfg(windows)]
 mod service;
+#[cfg(windows)]
+mod screenshot;
 #[cfg(windows)]
 mod settings;
 #[cfg(windows)]

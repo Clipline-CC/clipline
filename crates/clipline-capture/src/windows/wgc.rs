@@ -118,7 +118,22 @@ impl WgcCapture {
             return Err(CaptureError::Init("invalid monitor handle".into()));
         }
         let item = create_item(|interop| unsafe { interop.CreateForMonitor(monitor) })?;
-        Self::new(item, device, clock, FrameCopyMode::Full)
+        Self::new(item, device, clock, FrameCopyMode::Full, true)
+    }
+
+    /// Capture a specific monitor without the pointer, for still screenshots.
+    /// The cursor is chrome, not content, and a region selection would
+    /// otherwise always capture its own crosshair.
+    pub fn for_monitor_on_without_cursor(
+        device: ID3D11Device,
+        monitor: HMONITOR,
+        clock: RelativeClock,
+    ) -> Result<Self, CaptureError> {
+        if monitor.is_invalid() {
+            return Err(CaptureError::Init("invalid monitor handle".into()));
+        }
+        let item = create_item(|interop| unsafe { interop.CreateForMonitor(monitor) })?;
+        Self::new(item, device, clock, FrameCopyMode::Full, false)
     }
 
     pub fn for_monitor_region_on(
@@ -131,7 +146,7 @@ impl WgcCapture {
             return Err(CaptureError::Init("invalid monitor handle".into()));
         }
         let item = create_item(|interop| unsafe { interop.CreateForMonitor(monitor) })?;
-        Self::new(item, device, clock, FrameCopyMode::StaticRegion(crop))
+        Self::new(item, device, clock, FrameCopyMode::StaticRegion(crop), true)
     }
 
     /// Capture one window (must be visible; ddoc §3: per-window preferred,
@@ -151,7 +166,7 @@ impl WgcCapture {
             return Err(CaptureError::Init("invalid window handle".into()));
         }
         let item = create_item(|interop| unsafe { interop.CreateForWindow(hwnd) })?;
-        Self::new(item, device, clock, FrameCopyMode::Full)
+        Self::new(item, device, clock, FrameCopyMode::Full, true)
     }
 
     /// Window capture that returns only the current client area. This keeps
@@ -173,7 +188,45 @@ impl WgcCapture {
                 hwnd: hwnd.0 as isize,
                 cache: Arc::new(Mutex::new(None)),
             },
+            true,
         )
+    }
+
+    /// Client-area window capture without the pointer, for still screenshots.
+    pub fn for_window_client_on_without_cursor(
+        device: ID3D11Device,
+        hwnd: HWND,
+        clock: RelativeClock,
+    ) -> Result<Self, CaptureError> {
+        if hwnd.is_invalid() {
+            return Err(CaptureError::Init("invalid window handle".into()));
+        }
+        let item = create_item(|interop| unsafe { interop.CreateForWindow(hwnd) })?;
+        Self::new(
+            item,
+            device,
+            clock,
+            FrameCopyMode::WindowClient {
+                hwnd: hwnd.0 as isize,
+                cache: Arc::new(Mutex::new(None)),
+            },
+            false,
+        )
+    }
+
+    /// Whole-window capture without the pointer, for still screenshots.
+    /// Covers the DWM extended frame bounds (title bar included), matching
+    /// the Alt+PrintScreen convention.
+    pub fn for_window_on_without_cursor(
+        device: ID3D11Device,
+        hwnd: HWND,
+        clock: RelativeClock,
+    ) -> Result<Self, CaptureError> {
+        if hwnd.is_invalid() {
+            return Err(CaptureError::Init("invalid window handle".into()));
+        }
+        let item = create_item(|interop| unsafe { interop.CreateForWindow(hwnd) })?;
+        Self::new(item, device, clock, FrameCopyMode::Full, false)
     }
 
     fn new(
@@ -181,6 +234,7 @@ impl WgcCapture {
         device: ID3D11Device,
         clock: RelativeClock,
         copy_mode: FrameCopyMode,
+        cursor_capture: bool,
     ) -> Result<Self, CaptureError> {
         init_winrt()?;
         let init = |e: windows::core::Error| CaptureError::Init(e.to_string());
@@ -202,6 +256,11 @@ impl WgcCapture {
         // Best-effort: needs Win10 20348+/Win11 (ddoc Caveats) — older
         // builds show the yellow border.
         let _ = session.SetIsBorderRequired(false);
+        if !cursor_capture {
+            // Best-effort: Win10 2004+. A failed disable falls back to
+            // including the pointer rather than failing the grab.
+            let _ = session.SetIsCursorCaptureEnabled(false);
+        }
 
         let (tx, rx) = bounded_frame_channel(FRAME_QUEUE_CAPACITY);
         let state = Arc::new(Mutex::new(FramePoolState { size }));

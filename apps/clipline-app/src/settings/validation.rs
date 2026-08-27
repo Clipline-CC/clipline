@@ -162,6 +162,100 @@ impl AppSettings {
         if bookmark_secondary == bookmark_primary && bookmark_primary.is_some() {
             return Err("secondary bookmark hotkey matches the primary bookmark hotkey".into());
         }
+        let screenshot_region_primary = self
+            .screenshot_region_hotkey
+            .as_deref()
+            .filter(|hotkey| !hotkey.trim().is_empty())
+            .map(super::hotkey::normalize_hotkey)
+            .transpose()?;
+        let screenshot_region_secondary = self
+            .screenshot_region_hotkey_secondary
+            .as_deref()
+            .filter(|hotkey| !hotkey.trim().is_empty())
+            .map(super::hotkey::normalize_hotkey)
+            .transpose()?;
+        let screenshot_screen_primary = self
+            .screenshot_screen_hotkey
+            .as_deref()
+            .filter(|hotkey| !hotkey.trim().is_empty())
+            .map(super::hotkey::normalize_hotkey)
+            .transpose()?;
+        let screenshot_screen_secondary = self
+            .screenshot_screen_hotkey_secondary
+            .as_deref()
+            .filter(|hotkey| !hotkey.trim().is_empty())
+            .map(super::hotkey::normalize_hotkey)
+            .transpose()?;
+        let screenshot_window_primary = self
+            .screenshot_window_hotkey
+            .as_deref()
+            .filter(|hotkey| !hotkey.trim().is_empty())
+            .map(super::hotkey::normalize_hotkey)
+            .transpose()?;
+        let screenshot_window_secondary = self
+            .screenshot_window_hotkey_secondary
+            .as_deref()
+            .filter(|hotkey| !hotkey.trim().is_empty())
+            .map(super::hotkey::normalize_hotkey)
+            .transpose()?;
+        let screenshot_binds = [
+            ("region", &screenshot_region_primary, &screenshot_region_secondary),
+            ("screen", &screenshot_screen_primary, &screenshot_screen_secondary),
+            (
+                "window",
+                &screenshot_window_primary,
+                &screenshot_window_secondary,
+            ),
+        ];
+        for (label, shot_primary, shot_secondary) in screenshot_binds.iter() {
+            for hotkey in [*shot_primary, *shot_secondary].into_iter().flatten() {
+                if hotkey == &primary || secondary.as_ref() == Some(hotkey) {
+                    return Err(format!(
+                        "screenshot {label} hotkey matches a Save Replay hotkey"
+                    ));
+                }
+                if recording_primary.as_ref() == Some(hotkey)
+                    || recording_secondary.as_ref() == Some(hotkey)
+                {
+                    return Err(format!(
+                        "screenshot {label} hotkey matches a recording hotkey"
+                    ));
+                }
+                if bookmark_primary.as_ref() == Some(hotkey)
+                    || bookmark_secondary.as_ref() == Some(hotkey)
+                {
+                    return Err(format!(
+                        "screenshot {label} hotkey matches a bookmark hotkey"
+                    ));
+                }
+            }
+        }
+        for (label_a, shot_primary_a, shot_secondary_a) in screenshot_binds.iter() {
+            for (label_b, shot_primary_b, shot_secondary_b) in screenshot_binds.iter() {
+                if label_a >= label_b {
+                    continue;
+                }
+                let binds_a = [*shot_primary_a, *shot_secondary_a].into_iter().flatten();
+                let binds_b = [*shot_primary_b, *shot_secondary_b].into_iter().flatten();
+                for hotkey_a in binds_a.clone() {
+                    for hotkey_b in binds_b.clone() {
+                        if hotkey_a == hotkey_b {
+                            return Err(format!(
+                                "screenshot {label_a} hotkey matches a screenshot {label_b} hotkey"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        for (label, shot_primary, shot_secondary) in screenshot_binds.iter() {
+            if shot_secondary.is_some() && shot_primary == shot_secondary && shot_primary.is_some()
+            {
+                return Err(format!(
+                    "secondary screenshot {label} hotkey matches the primary screenshot {label} hotkey"
+                ));
+            }
+        }
         self.cloud.validate()?;
         self.osu.validate()?;
         Ok(())

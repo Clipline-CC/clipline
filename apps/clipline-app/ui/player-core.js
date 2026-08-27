@@ -1756,8 +1756,15 @@ const PlayerCore = (() => {
   // from their on-disk names.
   const clipKind = (clip) => {
     const explicit = clip && typeof clip === "object" ? String(clip.kind || "").trim() : "";
-    if (explicit === "replay" || explicit === "session" || explicit === "trim") return explicit;
+    if (
+      explicit === "replay" ||
+      explicit === "session" ||
+      explicit === "trim" ||
+      explicit === "screenshot"
+    )
+      return explicit;
     const n = typeof clip === "string" ? clip : String(clip && clip.name || "");
+    if (/\.png$/i.test(n)) return "screenshot";
     if (/_trim_/.test(n)) return "trim";
     if (/^session_/.test(n)) return "session";
     return "replay";
@@ -1885,7 +1892,9 @@ const PlayerCore = (() => {
     const key = functionKeyNumber(ev);
     let hotkeyKey = null;
     let needsModifier = false;
-    if (key) {
+    if (String(ev.code) === "PrintScreen") {
+      hotkeyKey = "PrintScreen";
+    } else if (key) {
       if (key === 12) {
         return { kind: "invalid", message: "F12 is reserved by Windows for debuggers." };
       }

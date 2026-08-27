@@ -1682,6 +1682,32 @@ fn hotkey_recorder_reports_pending_cancel_and_invalid_inputs() {
 }
 
 #[test]
+fn hotkey_recorder_captures_printscreen_bare_and_modified() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.hotkeyFromKeyEvent({ code: 'PrintScreen', ctrlKey: false, altKey: false, shiftKey: false })"
+        ),
+        r#"{"kind":"captured","value":"PrintScreen"}"#
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.hotkeyFromKeyEvent({ code: 'PrintScreen', ctrlKey: true, altKey: false, shiftKey: false })"
+        ),
+        r#"{"kind":"captured","value":"Ctrl+PrintScreen"}"#
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.hotkeyFromKeyEvent({ code: 'PrintScreen', ctrlKey: false, altKey: true, shiftKey: false })"
+        ),
+        r#"{"kind":"captured","value":"Alt+PrintScreen"}"#
+    );
+}
+
+#[test]
 fn marker_styles_map_kinds_to_categories() {
     let mut ctx = player_core_context();
     assert_eq!(
@@ -2278,6 +2304,14 @@ fn clip_kind_distinguishes_trims_from_replays() {
         eval(&mut ctx, "PlayerCore.clipKind('session_1781377615.mp4')"),
         "session"
     );
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.clipKind({ name: 'shot.png', kind: 'screenshot' })"
+        ),
+        "screenshot"
+    );
+    assert_eq!(eval(&mut ctx, "PlayerCore.clipKind('shot.png')"), "screenshot");
     assert_eq!(eval(&mut ctx, "PlayerCore.clipKind('')"), "replay");
 }
 

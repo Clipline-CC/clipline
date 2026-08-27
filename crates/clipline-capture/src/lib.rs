@@ -13,6 +13,7 @@ pub mod opus;
 pub mod pcm;
 pub mod pipeline;
 pub mod probe;
+pub mod still;
 pub mod traits;
 #[cfg(windows)]
 pub mod windows;

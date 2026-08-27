@@ -4,6 +4,126 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-22): screenshots Gallery view with its own rail button
+
+Screenshots now have a dedicated **Gallery** view behind a new left-rail button
+(`rail-gallery`, below the clips counter). The Library lists video clips only;
+the Gallery lists only screenshots — each surface owns exactly one media type.
+
+- New `ui/gallery.js` controller + `#screenshots-view` section in `index.html`
+  (`#screenshots-grid`, count label, newest/oldest sort). Cards reuse the
+  existing card styling, lazy poster pipeline (`observePoster`), lightbox
+  (`openScreenshotLightbox`), and delete flow (`deleteClip`).
+- `filterGalleryClips` in `library.js` skips `kind === "screenshot"` so the
+  Library grid never shows them.
+- View arbitration stays centralized in `updateViews` (review-player.js): the
+  Gallery hides while a clip is open in Review; `refreshClips` re-renders an
+  open Gallery so new shots appear without manual refresh.
+- Contract-pinned by `screenshots_gallery_has_rail_button_and_dedicated_view`
+  in `tests/ui_contract.rs`; `gallery.js` was also added to the contract's
+  `APP_UI_JS` list so future checks cover it.
+
+Committed as `be3ee98` (feature), `9690649` (missed windows/still.rs companion),
+on top of the latency work in `c021efa`.
+
+## Checkpoint (2026-08-22): screenshot latency verified on release build — milestone closed
+
+User confirmed the screenshot-capture milestone works end to end. Release-build measurements
+(via `screenshot_grab`/`screenshot_encode`/`screenshot_captured` instrumentation):
+
+| Path | keypress → result |
+|---|---|
+| Full-screen PrintScreen | 99 ms (grab 73 + encode 19) |
+| Window Alt+PrintScreen | 60 ms |
+| Region Ctrl+PrintScreen, reused overlay | ~130 ms; first open after launch 289 ms |
+
+Debug builds remain ~15× slower at per-pixel work (1596 ms for the same full-screen shot);
+never judge capture latency from a debug binary. The earlier "delay" was debug overhead plus
+the since-fixed redundant full-frame copy and default-compression encode. Latency watcher
+monitor was removed after verification; re-create it from the log-grep pattern
+`screenshot_(captured|grab|encode)` if regressions are ever suspected.
+
+## Checkpoint (2026-08-21): PrintScreen dead-key diagnosis + upload scope fix
+
+User reported PrintScreen dead again after the QoL pass. Diagnosis: the running session had
+every global shortcut registered (ownership probe TAKEN) but dispatch silently ignored —
+consistent with `actions_paused` wedged true, which nothing logged. A fresh launch worked
+immediately (verified with a corrected SendInput injection: vk 0x2C **plus scan 0x37 and the
+extended-key flag**; injections without those never traverse the OS hotkey path and produce
+false negatives — remember this for future hotkey probes). The wedge could not be reproduced;
+if it recurs, grep `hotkey_capture_resumed_after_ui_gone|hotkey_capture_resume_failed`.
+
+Fixes landed:
+
+- **`996251fe`** — `parse_hook_hotkey` treated PrintScreen as a hard error, so every launch
+  with default screenshot binds aborted `install_hotkey_hook` entirely (the recurring
+  `hotkey_hook_install_failed … not a hook key` WARN was this, misread as benign). Mouse binds
+  and all hook dispatch died with it. PrintScreen now parses to `None` and is skipped.
+- **`1866011f`** — the temporary upload kill switch was scoped wrong: it disabled ALL uploads.
+  Intent was screenshot-only (no good cloud support yet). `openUploadDialog` now rejects just
+  screenshots with a message; video uploads work again.
+- **`19eb87d7`** — resume-after-UI-gone logs a one-line INFO when it actually resumes, so a
+  stuck-pause state can never again be invisible in the log.
+
+Gates green (workspace + capture crate explicit, clippy clean); rebuilt and relaunched via WMI
+(Start-Process through the agent shell gets killed by the shell's Job Object when the command
+ends — launch long-lived apps with Invoke-CimMethod Win32_Process Create instead).
+
+## Checkpoint (2026-08-21): screenshot QoL pass — thumbnails, Screenshots folder, overlay latency, uploads off
+
+Follow-up on `investigate-sharex` after the PrintScreen dispatch fixes were verified by the
+user. Four commits:
+
+- **Broken thumbnails fixed (`36848325`).** The screenshot milestone's `poster_command`
+  rework accidentally dropped ffmpeg's `-i`, so every new poster extraction failed with
+  `poster_extraction_failed kind=media_or_codec` (the path became an *output* file).
+  Videos kept stale cached posters; screenshots never got one. Reproduced outside the app
+  with the exact argv before fixing.
+- **Screenshots save into `<media root>\Screenshots` with no sidecars (`29644f48`).**
+  Library scan recursion + `validate_clip_path` already accepted one folder deep, so no
+  validation changes were needed. The per-shot `.clipline.json` ownership marker is gone:
+  screenshots are now invisible to the storage quota and are never auto-deleted or removed
+  by uninstall cleanup (documented tradeoff).
+- **Region overlay reuse (`e8004aa`).** Keypress-to-overlay measured 2430 ms; building a
+  fresh WebView2 window dominated. The overlay window is now hidden instead of destroyed
+  and reused: reposition → refresh frozen-frame temp PNG (stable path) → wake JS via
+  `region-overlay-shown` → show. Overlay JS arms per wake so blur cancels only live
+  selections (`region-overlay-hidden` disarms before parking). Full-screen shots log
+  `screenshot_captured` latency and shutter-sound before clipboard copy.
+- **Uploads temporarily disabled (`9f98c63`).** Single switch `UPLOADS_TEMPORARILY_DISABLED`
+  in `ui/cloud.js` inside `cloudUploadControlVisible`; hides the library Upload menu item
+  and review header button while keeping the ui_contract-pinned wiring intact.
+
+Gates: workspace tests green (incl. 125 ui-contract), warning-denied clippy clean, node
+syntax check on region.js, app rebuilt and relaunched. Old shots at the media root still
+list (root PNGs stay valid); they regain thumbnails via the `-i` fix.
+
+## Checkpoint (2026-08-21): PrintScreen screenshot dispatch + registration recovery fix
+
+Branch: `investigate-sharex` (screenshot-capture milestone debugging).
+
+PrintScreen screenshot binds did nothing at runtime. Two stacked causes:
+
+1. **Inverted pause gate** in `screenshot_shortcut_mode`
+   (`actions_paused().then_some(())?` — continue only while paused). In normal
+   operation every PrintScreen variant fell through to the Save Replay match,
+   which also matched (the shortcut is in the screenshot lists), so presses
+   triggered an invisible save-replay attempt instead of a screenshot. Fixed by
+   extracting `screenshot_mode_for_settings(settings, shortcut, actions_paused)`
+   with the gate corrected; covered by unit tests that would have caught it.
+2. **Silently lost registrations** (fixed): clicking a keybind field unregisters all
+   global shortcuts; if the window hid before the blur-driven resume ran, the
+   binds stayed dead until restart (ownership probe showed all three combos
+   free mid-session). Holding an unbound PrintScreen then hits Windows' legacy
+   full-screen-clipboard path on every auto-repeat — the reported cursor lag.
+   Fixed by calling resume_hotkeys_after_ui_gone from
+   publish_background_window — the chokepoint every background transition
+   (minimize-to-taskbar, native-minimize, close-to-tray) routes through. The
+   helper self-no-ops when binds are not paused.
+
+Gates: workspace tests green (657), clippy clean; app rebuilt and relaunched;
+ownership probe confirms bare/Ctrl/Alt PrintScreen all TAKEN by Clipline.
+
 ## Checkpoint (2026-08-17): Stable 1.0.2
 
 Plan: `docs/superpowers/plans/2026-08-17-stable-1.0.2.md`.
@@ -393,6 +513,39 @@ Not built: placing or deleting bookmarks from the review timeline, bookmarks in 
 rail, labels, and chapter-marker export.
 
 ## Checkpoint (2026-08-12): Nightly 0.1.53
+
+## Screenshot capture (2026-08-20 plan)
+
+Plan: `docs/superpowers/plans/2026-08-20-screenshot-capture.md`.
+
+Tasks 1-11 are implemented on `investigate-sharex`: WGC still capture, PNG encode/publish,
+clipboard copy, hotkeys + PrintScreen bind, Snipping Tool conflict handling, library cards,
+lightbox, quota accounting, and the confirmation sound/toast.
+
+Task 12 (region overlay) is also implemented (`21956bf2`). Region mode now freezes the cursor
+monitor into a temp PNG, opens a hidden borderless webview placed in **physical** pixels over
+that monitor (builder logical sizes misplace on >100% scale), shows the frozen frame, and lets
+the user drag a selection. Esc, a click without drag, or losing focus cancels; the temp PNG is
+deleted on every path. The crop reuses `BgraImage::crop` clamping, so virtual-desktop selection
+coords pass straight through. Selection math lives in DOM-free `ui/region-core.js`, tested by
+`tests/region_core.rs` through Boa; the overlay itself is a dedicated minimal `region.html` +
+`region.js` so main.js bootstrap never runs in the overlay window. Keypress-to-overlay latency
+is logged as the `region_overlay_opened` tracing event with `elapsed_ms`; if it exceeds ~150 ms
+on real hardware, the follow-up is a native layered window (do not hand-roll before measuring).
+Snap candidates are currently the single top-level window under the cursor at open time via
+DWM frame bounds (`window_rect_at_cursor`); multi-window snap lists are a possible follow-up.
+
+`shutter.ogg` is an 83 ms two-click shutter: a short white-noise tick followed by a softer pink-noise
+tail, quieter than `soundeffect.ogg` and noise-based so it cannot be mistaken for the bookmark blip.
+rodio is built `default-features = false, features = ["vorbis"]`, so it must stay Ogg Vorbis.
+Regenerate or replace it with the bundled ffmpeg:
+
+```sh
+ffmpeg -y -f lavfi -i "anoisesrc=color=white:duration=0.03:amplitude=0.35" \
+  -f lavfi -i "anoisesrc=color=pink:duration=0.055:amplitude=0.25" \
+  -filter_complex "[0:a]highpass=f=1200,lowpass=f=6000,afade=t=out:st=0.012:d=0.018[a0];[1:a]lowpass=f=3000,adelay=28|28,afade=t=in:d=0.004,afade=t=out:st=0.02:d=0.035[a1];[a0][a1]amix=inputs=2:normalize=0,aformat=sample_rates=48000:channel_layouts=mono" \
+  -c:a libvorbis -q:a 3 shutter.ogg
+```
 
 Plan: `docs/superpowers/plans/2026-08-12-nightly-0.1.53.md`.
 
@@ -4554,6 +4707,12 @@ real clips with matching A/V durations, real marker sidecars, real in-app playba
 **Tauri (v2)**
 - The webview **silently no-ops** (no events, no invoke) without
   `capabilities/default.json` granting `core:default`.
+- A global shortcut that fails to register at startup (another process still owns it — a dying
+  instance, ShareX, etc.) used to stay dead until relaunch. Startup now retries busy-failed
+  registrations at 2s/5s/15s/30s/60s and aborts if the bind is removed meanwhile. Remember:
+  while any process holds a registered hotkey, Windows swallows the key system-wide, so it also
+  never reaches the settings-page keybind recorder — "can't set PrintScreen" and "PrintScreen
+  bind doesn't fire" are usually the same root cause.
 - The assetProtocol scope **does not resolve `$VIDEO`** — use plain globs. With configurable
   media folders the scope is currently `**/*.mp4`; diagnose media errors via a `video.onerror`
   handler because error code 4 usually means the scope rejected the request, not a codec problem.

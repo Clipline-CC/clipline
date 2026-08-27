@@ -1039,6 +1039,129 @@ fn validation_rejects_a_bookmark_hotkey_taken_by_another_action() {
 }
 
 #[test]
+fn screenshot_hotkeys_default_to_printscreen_combos_and_round_trip() {
+    let defaults = AppSettings::default();
+    assert_eq!(
+        defaults.screenshot_region_hotkey.as_deref(),
+        Some("Ctrl+PrintScreen")
+    );
+    assert_eq!(
+        defaults.screenshot_screen_hotkey.as_deref(),
+        Some("PrintScreen")
+    );
+    assert_eq!(
+        defaults.screenshot_window_hotkey.as_deref(),
+        Some("Alt+PrintScreen")
+    );
+    assert_eq!(defaults.screenshot_region_hotkey_secondary, None);
+    assert_eq!(defaults.screenshot_screen_hotkey_secondary, None);
+    assert_eq!(defaults.screenshot_window_hotkey_secondary, None);
+    assert_eq!(
+        defaults.screenshot_region_hotkeys(),
+        vec!["Ctrl+PrintScreen"]
+    );
+    assert_eq!(defaults.screenshot_screen_hotkeys(), vec!["PrintScreen"]);
+    assert_eq!(
+        defaults.screenshot_window_hotkeys(),
+        vec!["Alt+PrintScreen"]
+    );
+
+    let dir = TestDir::new("clipline-settings", "screenshot-hotkey-round-trip");
+    let path = dir.path().join("settings.json");
+    let settings = AppSettings {
+        screenshot_region_hotkey: Some("ctrl+alt+1".into()),
+        screenshot_region_hotkey_secondary: Some("ctrl+mouse4".into()),
+        screenshot_screen_hotkey: Some("f9".into()),
+        screenshot_window_hotkey: Some("alt+g".into()),
+        ..AppSettings::default()
+    };
+    settings.save_to(&path).unwrap();
+    let loaded = AppSettings::load_from(&path).unwrap();
+
+    assert_eq!(
+        loaded.screenshot_region_hotkey.as_deref(),
+        Some("Ctrl+Alt+1")
+    );
+    assert_eq!(
+        loaded
+            .screenshot_region_hotkey_secondary
+            .as_deref(),
+        Some("Ctrl+Mouse4")
+    );
+    assert_eq!(loaded.screenshot_screen_hotkey.as_deref(), Some("F9"));
+    assert_eq!(loaded.screenshot_window_hotkey.as_deref(), Some("Alt+G"));
+}
+
+#[test]
+fn screenshot_hotkey_defaults_apply_only_when_absent_and_drop_on_collision() {
+    // A file that predates screenshot keybinds gets the defaults.
+    let legacy = settings_from_json(r#"{"hotkey": "F6"}"#);
+    assert_eq!(
+        legacy.screenshot_region_hotkey.as_deref(),
+        Some("Ctrl+PrintScreen")
+    );
+    assert_eq!(
+        legacy.screenshot_screen_hotkey.as_deref(),
+        Some("PrintScreen")
+    );
+
+    // Present-but-null means the user cleared it; the default stays gone.
+    let cleared = settings_from_json(r#"{"hotkey": "F6", "screenshot_screen_hotkey": null}"#);
+    assert_eq!(cleared.screenshot_screen_hotkey, None);
+
+    // A default that collides with an existing binding is dropped, so an
+    // upgrade never steals a keybind the user already had.
+    let stolen_recording = settings_from_json(
+        r#"{"hotkey": "F6", "recording_hotkey": "Ctrl+PrintScreen"}"#,
+    );
+    assert_eq!(stolen_recording.screenshot_region_hotkey, None);
+
+    let stolen_bookmark =
+        settings_from_json(r#"{"hotkey": "F6", "bookmark_hotkey": "PrintScreen"}"#);
+    assert_eq!(stolen_bookmark.screenshot_screen_hotkey, None);
+
+    let stolen_between_defaults = settings_from_json(
+        r#"{"hotkey": "F6", "screenshot_window_hotkey": "Ctrl+PrintScreen"}"#,
+    );
+    assert_eq!(stolen_between_defaults.screenshot_region_hotkey, None);
+}
+
+#[test]
+fn validation_rejects_screenshot_hotkeys_taken_by_another_action_or_each_other() {
+    for conflict in [
+        AppSettings {
+            screenshot_region_hotkey: Some("f6".into()),
+            ..AppSettings::default()
+        },
+        AppSettings {
+            screenshot_region_hotkey: Some("F7".into()),
+            ..AppSettings::default()
+        },
+        AppSettings {
+            screenshot_screen_hotkey: Some("ctrl+shift+r".into()),
+            recording_hotkey: Some("Ctrl+Shift+R".into()),
+            ..AppSettings::default()
+        },
+        AppSettings {
+            screenshot_window_hotkey: Some("printscreen".into()),
+            screenshot_screen_hotkey: Some("PrintScreen".into()),
+            ..AppSettings::default()
+        },
+        AppSettings {
+            screenshot_region_hotkey: Some("Ctrl+P".into()),
+            screenshot_region_hotkey_secondary: Some("ctrl+p".into()),
+            ..AppSettings::default()
+        },
+    ] {
+        assert!(
+            conflict.validate().is_err(),
+            "expected {:?} to be rejected",
+            conflict.screenshot_region_hotkey
+        );
+    }
+}
+
+#[test]
 fn upgrading_applies_the_bookmark_default_without_stealing_an_existing_keybind() {
     // A settings file written before bookmarks existed adopts the default.
     let upgraded = settings_from_json(r#"{"hotkey": "F6"}"#);
@@ -1565,6 +1688,35 @@ fn rejects_unsupported_mouse_hotkeys() {
 fn parses_plain_function_key_hotkey() {
     assert_eq!(normalize_hotkey("f10").unwrap(), "F10");
     assert!(parse_hotkey("F10").is_ok());
+}
+
+#[test]
+fn parses_printscreen_hotkey_tokens() {
+    for token in ["PrintScreen", "prtsc", "PrtScn"] {
+        assert_eq!(normalize_hotkey(token).unwrap(), "PrintScreen");
+        assert_eq!(
+            normalize_hotkey(&format!("ctrl+{token}")).unwrap(),
+            "Ctrl+PrintScreen"
+        );
+        assert_eq!(
+            normalize_hotkey(&format!("alt+shift+{token}")).unwrap(),
+            "Alt+Shift+PrintScreen"
+        );
+    }
+}
+
+#[test]
+fn printscreen_parses_bare_and_is_always_global_shortcut_routed() {
+    assert!(parse_hotkey("PrintScreen").is_ok());
+    for raw in [
+        "PrintScreen",
+        "Ctrl+PrintScreen",
+        "Alt+PrintScreen",
+        "Shift+PrintScreen",
+        "Ctrl+Alt+Shift+PrintScreen",
+    ] {
+        assert!(is_global_shortcut_hotkey(raw).unwrap(), "{raw}");
+    }
 }
 
 #[test]

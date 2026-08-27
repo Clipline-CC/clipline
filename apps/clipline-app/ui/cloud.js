@@ -655,6 +655,13 @@ async function copyCloudUrl(record) {
 
 function openUploadDialog(clip) {
   if (!clip) return;
+  // Screenshots are temporarily excluded from cloud upload (no good backend
+  // support yet); video clips still upload normally.
+  if (PlayerCore.clipKind(clip.name) === "screenshot") {
+    setDeckStatus("");
+    $("error").textContent = "Screenshot uploads are not supported yet.";
+    return;
+  }
   if (!cloudConnected()) {
     setDeckStatus("");
     $("error").textContent = "Connect Clipline Cloud before uploading.";

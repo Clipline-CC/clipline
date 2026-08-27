@@ -271,6 +271,13 @@ function fillSettings(s) {
   $("set-recording-hotkey-2").value = s.recording_hotkey_secondary || "";
   $("set-bookmark-hotkey").value = s.bookmark_hotkey || "";
   $("set-bookmark-hotkey-2").value = s.bookmark_hotkey_secondary || "";
+  $("set-screenshot-region-hotkey").value = s.screenshot_region_hotkey || "";
+  $("set-screenshot-region-hotkey-2").value = s.screenshot_region_hotkey_secondary || "";
+  $("set-screenshot-screen-hotkey").value = s.screenshot_screen_hotkey || "";
+  $("set-screenshot-screen-hotkey-2").value = s.screenshot_screen_hotkey_secondary || "";
+  $("set-screenshot-window-hotkey").value = s.screenshot_window_hotkey || "";
+  $("set-screenshot-window-hotkey-2").value = s.screenshot_window_hotkey_secondary || "";
+  refreshSnippingToolStatus();
   updateHotkeyLabels(s.hotkey, s.hotkey_secondary || "");
   $("set-open-on-startup").checked = !!s.open_on_startup;
   $("set-close-to-tray").checked = s.close_to_tray !== false;
@@ -375,6 +382,15 @@ function readHotkeySettings() {
   const bookmarkKeybinds = ["set-bookmark-hotkey", "set-bookmark-hotkey-2"]
     .map((fieldId) => $(fieldId).value.trim())
     .filter(Boolean);
+  const screenshotRegionKeybinds = ["set-screenshot-region-hotkey", "set-screenshot-region-hotkey-2"]
+    .map((fieldId) => $(fieldId).value.trim())
+    .filter(Boolean);
+  const screenshotScreenKeybinds = ["set-screenshot-screen-hotkey", "set-screenshot-screen-hotkey-2"]
+    .map((fieldId) => $(fieldId).value.trim())
+    .filter(Boolean);
+  const screenshotWindowKeybinds = ["set-screenshot-window-hotkey", "set-screenshot-window-hotkey-2"]
+    .map((fieldId) => $(fieldId).value.trim())
+    .filter(Boolean);
   return {
     hotkey: keybinds[0] || "",
     hotkey_secondary: keybinds[1] || null,
@@ -384,6 +400,12 @@ function readHotkeySettings() {
     // reverting to the default keybind on the next load.
     bookmark_hotkey: bookmarkKeybinds[0] || null,
     bookmark_hotkey_secondary: bookmarkKeybinds[1] || null,
+    screenshot_region_hotkey: screenshotRegionKeybinds[0] || null,
+    screenshot_region_hotkey_secondary: screenshotRegionKeybinds[1] || null,
+    screenshot_screen_hotkey: screenshotScreenKeybinds[0] || null,
+    screenshot_screen_hotkey_secondary: screenshotScreenKeybinds[1] || null,
+    screenshot_window_hotkey: screenshotWindowKeybinds[0] || null,
+    screenshot_window_hotkey_secondary: screenshotWindowKeybinds[1] || null,
   };
 }
 
@@ -1776,6 +1798,41 @@ function updateHotkeyLabels(hotkey = saveHotkeyLabel(), secondary = saveSecondar
   $("rail-save").title = `Save Replay (${full})`;
 }
 
+async function refreshSnippingToolStatus() {
+  const status = $("snipping-tool-status");
+  const button = $("snipping-tool-disable");
+  if (!status || !button) return;
+  try {
+    const state = await invoke("snipping_tool_printscreen_status");
+    if (state === "disabled") {
+      status.textContent = "PrintScreen is free for Clipline shortcuts. If a screenshot bind still opens Snipping Tool, sign out and back in (or restart Explorer) first.";
+      button.hidden = true;
+    } else {
+      status.textContent = "Windows currently gives the PrintScreen key to Snipping Tool, so PrintScreen binds will not reach Clipline.";
+      button.hidden = false;
+    }
+  } catch (e) {
+    status.textContent = `Could not check the PrintScreen setting: ${e}`;
+    button.hidden = true;
+  }
+}
+
+$("snipping-tool-disable").addEventListener("click", async () => {
+  const confirmed = await confirmDeleteDialog(
+    "Give PrintScreen to Clipline?",
+    "This changes a Windows setting so Snipping Tool no longer owns the PrintScreen key. Windows may need a sign-out or an Explorer restart before it takes effect.",
+    "Change setting"
+  );
+  if (!confirmed) return;
+  const status = $("snipping-tool-status");
+  try {
+    await invoke("disable_snipping_tool_printscreen");
+    await refreshSnippingToolStatus();
+  } catch (e) {
+    status.textContent = `Could not update the PrintScreen setting: ${e}`;
+  }
+});
+
 function fallbackCaptureSourceLabel(settings) {
   if (settings && settings.capture_mode === "display_region") {
     const display = displays.find((item) => isFullDisplayRegion(settings.capture_region, item));
@@ -1833,12 +1890,21 @@ const HOTKEY_FIELD_IDS = [
   "set-recording-hotkey-2",
   "set-bookmark-hotkey",
   "set-bookmark-hotkey-2",
+  "set-screenshot-region-hotkey",
+  "set-screenshot-region-hotkey-2",
+  "set-screenshot-screen-hotkey",
+  "set-screenshot-screen-hotkey-2",
+  "set-screenshot-window-hotkey",
+  "set-screenshot-window-hotkey-2",
 ];
 const HOTKEY_IDLE_MESSAGE = "Click a field to record a shortcut. Esc clears it.";
 
 function hotkeyStatusId(fieldId) {
   if (fieldId.startsWith("set-recording-hotkey")) return "recording-hotkey-status";
   if (fieldId.startsWith("set-bookmark-hotkey")) return "bookmark-hotkey-status";
+  if (fieldId.startsWith("set-screenshot-region-hotkey")) return "screenshot-region-hotkey-status";
+  if (fieldId.startsWith("set-screenshot-screen-hotkey")) return "screenshot-screen-hotkey-status";
+  if (fieldId.startsWith("set-screenshot-window-hotkey")) return "screenshot-window-hotkey-status";
   return "hotkey-status";
 }
 
