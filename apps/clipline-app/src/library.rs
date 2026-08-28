@@ -752,13 +752,16 @@ pub(crate) fn set_clip_favorite_impl(
     })
 }
 
-pub(crate) fn clip_sidecar_paths(target: &Path) -> [PathBuf; 4] {
-    [
-        target.with_extension("markers.json"),
-        clip_metadata_path(target),
-        crate::osu_enrichment::pending_path(target),
-        crate::poster::poster_path(target),
-    ]
+/// Every file that lives and dies with a clip: the MP4 plus one sidecar per
+/// storage-recognized suffix. `with_extension` replaces the extension, so each
+/// suffix is written relative to the clip stem.
+pub(crate) fn clip_sidecar_paths(target: &Path) -> Vec<PathBuf> {
+    clipline_storage::CLIP_SIDECAR_SUFFIXES
+        .iter()
+        .map(|suffix| {
+            target.with_extension(suffix.trim_start_matches('.'))
+        })
+        .collect()
 }
 
 fn remove_clip_files(target: &Path, media_root: &Path) -> Result<(), String> {
@@ -2380,36 +2383,8 @@ pub(crate) fn clip_kind_for_path(path: &Path) -> String {
     clip_kind_from_metadata(path, &metadata).to_string()
 }
 
-/// Quota GC deletes oldest clips within a kind, but drains kinds in order:
-/// sessions first, then replays, then trims. Lower keys are deleted first.
-pub(crate) fn clip_gc_priority(path: &Path) -> u8 {
-    match clip_kind_for_path(path).as_str() {
-        "session" => 0,
-        "replay" => 1,
-        _ => 2,
-    }
-}
-
 pub(crate) fn is_favorite_clip(path: &Path) -> bool {
     read_clip_metadata(path).is_some_and(|metadata| metadata.favorite)
-}
-
-/// The app's quota-GC policy: active upload sources and favorites are never
-/// deleted, and kinds drain in priority order (sessions → replays → trims).
-pub(crate) fn enforce_quota_with_clip_policy(
-    dir: &Path,
-    quota_bytes: Option<u64>,
-    protect: Option<&Path>,
-) -> std::io::Result<clipline_storage::GcReport> {
-    clipline_storage::enforce_quota_with_policy(
-        dir,
-        quota_bytes,
-        protect,
-        |path| {
-            crate::cloud_upload::is_active_upload_source(path) || is_favorite_clip(path)
-        },
-        clip_gc_priority,
-    )
 }
 
 fn display_renamed_clip_path(old_path: &str, name: &str, fallback_parent: &Path) -> String {
@@ -4622,71 +4597,6 @@ mod tests {
         let result = set_clip_favorite_impl(&clip, false).unwrap();
         assert!(!result.favorite);
         assert!(!read_clip_metadata(&clip).unwrap().favorite);
-    }
-
-    #[test]
-    fn clip_gc_priority_orders_sessions_before_replays_before_trims() {
-        assert_eq!(clip_gc_priority(Path::new("session_1781377615.mp4")), 0);
-        assert_eq!(clip_gc_priority(Path::new("clip_1784525638.mp4")), 1);
-        assert_eq!(
-            clip_gc_priority(Path::new("clip_1_trim_001000_002000.mp4")),
-            2
-        );
-    }
-
-    #[test]
-    fn enforce_quota_with_clip_policy_protects_favorites_and_orders_kinds() {
-        let dir = TestDir::new("clipline-library", "gc-clip-policy-favorites");
-        // Oldest clip is a trim (lowest deletion priority); the newest clip is
-        // a favorited session. With room for only one clip after GC, the
-        // favorite must survive and the trim must go last.
-        let trim = dir.path().join("clip_1_trim_001000_002000.mp4");
-        std::fs::write(&trim, [0; 100]).unwrap();
-        clipline_storage::ensure_clip_owned(&trim).unwrap();
-        std::thread::sleep(Duration::from_millis(20));
-        let replay = dir.path().join("clip_1784525638.mp4");
-        std::fs::write(&replay, [0; 100]).unwrap();
-        clipline_storage::ensure_clip_owned(&replay).unwrap();
-        std::thread::sleep(Duration::from_millis(20));
-        let session = dir.path().join("session_1784525639.mp4");
-        std::fs::write(&session, [0; 100]).unwrap();
-        clipline_storage::ensure_clip_owned(&session).unwrap();
-        set_clip_favorite_impl(&session, true).unwrap();
-
-        // Quota leaves room for one clip (sidecars count toward usage).
-        let report = enforce_quota_with_clip_policy(dir.path(), Some(200), None).unwrap();
-
-        assert_eq!(report.deleted_clips, 2);
-        assert!(session.exists(), "favorites must never be auto-deleted");
-        assert!(!replay.exists(), "replays must drain before trims");
-        assert!(!trim.exists());
-        assert_eq!(report.status.clip_count, 1);
-    }
-
-    #[test]
-    fn enforce_quota_with_clip_policy_drains_kinds_in_priority_order() {
-        let dir = TestDir::new("clipline-library", "gc-clip-policy-order");
-        // Newest clip is a session; oldest is a trim. Sessions must drain
-        // first even when they are newer than every replay and trim.
-        let trim = dir.path().join("clip_1_trim_001000_002000.mp4");
-        std::fs::write(&trim, [0; 100]).unwrap();
-        clipline_storage::ensure_clip_owned(&trim).unwrap();
-        std::thread::sleep(Duration::from_millis(20));
-        let replay = dir.path().join("clip_1784525638.mp4");
-        std::fs::write(&replay, [0; 100]).unwrap();
-        clipline_storage::ensure_clip_owned(&replay).unwrap();
-        std::thread::sleep(Duration::from_millis(20));
-        let session = dir.path().join("session_1784525639.mp4");
-        std::fs::write(&session, [0; 100]).unwrap();
-        clipline_storage::ensure_clip_owned(&session).unwrap();
-
-        let report = enforce_quota_with_clip_policy(dir.path(), Some(150), None).unwrap();
-
-        assert_eq!(report.deleted_clips, 2);
-        assert!(!session.exists(), "sessions must drain before replays and trims");
-        assert!(!replay.exists());
-        assert!(trim.exists(), "trims must be the last kind auto-delete touches");
-        assert_eq!(report.status.clip_count, 1);
     }
 
     #[test]

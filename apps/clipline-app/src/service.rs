@@ -659,7 +659,7 @@ fn make_room_for_quota(
     };
     let before_bytes = storage_status_or_warn(clips_dir, quota_bytes).map(|status| status.total_bytes);
     let target = quota.saturating_sub(required_bytes);
-    let mut deleted_clips = match crate::library::enforce_quota_with_clip_policy(
+    let mut deleted_clips = match crate::gc::enforce_quota_with_clip_policy(
         clips_dir,
         Some(target),
         protect,
@@ -2726,7 +2726,7 @@ fn emit_saved_clip(
         quota_bytes: opts.disk_quota_bytes,
     };
     let status = if opts.auto_delete_when_over_quota {
-        match crate::library::enforce_quota_with_clip_policy(
+        match crate::gc::enforce_quota_with_clip_policy(
             clips_dir,
             opts.disk_quota_bytes,
             Some(path),

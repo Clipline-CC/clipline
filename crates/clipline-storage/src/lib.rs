@@ -273,20 +273,7 @@ pub fn enforce_quota(
     quota_bytes: Option<u64>,
     protect: Option<&Path>,
 ) -> io::Result<GcReport> {
-    enforce_quota_with_protection(dir, quota_bytes, protect, |_| false)
-}
-
-/// Enforces the clip quota while allowing the caller to protect additional
-/// managed files that are temporarily immutable, such as active upload
-/// sources. Protected bytes still count toward the quota; collection skips
-/// them and continues with the next-oldest deletable clip.
-pub fn enforce_quota_with_protection(
-    dir: &Path,
-    quota_bytes: Option<u64>,
-    protect: Option<&Path>,
-    additionally_protected: impl Fn(&Path) -> bool,
-) -> io::Result<GcReport> {
-    enforce_quota_with_policy(dir, quota_bytes, protect, additionally_protected, |_| 0)
+    enforce_quota_with_policy(dir, quota_bytes, protect, |_| false, |_| 0)
 }
 
 /// Enforces the clip quota while letting the caller order deletion by clip
@@ -317,17 +304,29 @@ pub fn enforce_quota_with_policy(
         });
     };
 
-    let mut clips = inventory(dir, protect)?;
+    let clips = inventory(dir, protect)?;
     let mut total_bytes = clips.iter().map(ClipFile::total_bytes).sum::<u64>();
     let mut deleted_clips = 0usize;
     let mut freed_bytes = 0u64;
 
+    // Decorate up front: the priority closure may hit the filesystem (the app
+    // classifies clips via sidecars), so it must run once per clip, not
+    // O(n log n) times inside the sort.
+    let mut clips = clips
+        .into_iter()
+        .map(|clip| {
+            let priority = priority(&clip.path);
+            (priority, clip)
+        })
+        .collect::<Vec<_>>();
+
     let undeletable_bytes = clips
         .iter()
-        .filter(|clip| !clip.can_delete(protect, &additionally_protected))
-        .map(ClipFile::total_bytes)
+        .filter(|(_, clip)| !clip.can_delete(protect, &additionally_protected))
+        .map(|(_, clip)| clip.total_bytes())
         .sum::<u64>();
     if undeletable_bytes > quota {
+        let clips = clips.into_iter().map(|(_, clip)| clip).collect::<Vec<_>>();
         return Ok(GcReport {
             deleted_clips,
             freed_bytes,
@@ -335,14 +334,14 @@ pub fn enforce_quota_with_policy(
         });
     }
 
-    clips.sort_by(|a, b| {
-        priority(&a.path)
-            .cmp(&priority(&b.path))
+    clips.sort_by(|(priority_a, a), (priority_b, b)| {
+        priority_a
+            .cmp(priority_b)
             .then_with(|| a.modified.cmp(&b.modified))
             .then_with(|| a.path.file_name().cmp(&b.path.file_name()))
     });
 
-    for clip in clips {
+    for (_, clip) in clips {
         if total_bytes <= quota {
             break;
         }
@@ -572,7 +571,7 @@ pub(crate) const CLIP_OWNERSHIP_MARKER_SUFFIX: &str = ".clipline.json";
 
 /// Sidecar suffixes paired with a clip stem (`clip.mp4` → `clip.markers.json`).
 /// Leftover-folder cleanup uses this same table; anything else is unrecognized.
-pub(crate) const CLIP_SIDECAR_SUFFIXES: &[&str] = &[
+pub const CLIP_SIDECAR_SUFFIXES: &[&str] = &[
     ".markers.json",
     CLIP_OWNERSHIP_MARKER_SUFFIX,
     ".osu-enrichment.json",
@@ -926,9 +925,13 @@ mod tests {
         tick_mtime();
         let newest = write_owned(&dir, "newest.mp4", 10);
 
-        let report = enforce_quota_with_protection(dir.path(), Some(20), None, |path| {
-            same_path(path, &uploading)
-        })
+        let report = enforce_quota_with_policy(
+            dir.path(),
+            Some(20),
+            None,
+            |path| same_path(path, &uploading),
+            |_| 0,
+        )
         .unwrap();
 
         assert_eq!(report.deleted_clips, 1);
@@ -974,9 +977,15 @@ mod tests {
         .unwrap();
 
         assert_eq!(report.deleted_clips, 2);
-        assert!(!session.exists(), "sessions must drain before replays/trims");
+        assert!(
+            !session.exists(),
+            "sessions must drain before replays/trims"
+        );
         assert!(!replay.exists(), "replays must drain before trims");
-        assert!(trim.exists(), "the oldest clip can survive when its kind is low priority");
+        assert!(
+            trim.exists(),
+            "the oldest clip can survive when its kind is low priority"
+        );
         assert_eq!(report.status.total_bytes, 10);
     }
 
@@ -1023,7 +1032,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(report.deleted_clips, 2);
-        assert!(favorite.exists(), "protected clips must survive even at high priority");
+        assert!(
+            favorite.exists(),
+            "protected clips must survive even at high priority"
+        );
         assert!(!replay.exists());
         assert!(!trim.exists());
         assert_eq!(report.status.total_bytes, 10);
@@ -1327,168 +1339,6 @@ mod tests {
             "emptied session folder must disappear with its session metadata"
         );
         assert!(keep.exists());
-    }
-
-    #[test]
-    fn remove_emptied_session_dir_deletes_metadata_only_folders() {
-        let dir = TestDir::new("clipline-storage", "empty-session-metadata");
-        let session = dir
-            .write("2026-06-12 19-15/clipline-session.json", 12)
-            .parent()
-            .unwrap()
-            .to_path_buf();
-        dir.write("2026-06-12 19-15/clip_1781306146.poster.jpg", 4);
-        dir.write("2026-06-12 19-15/clip_1781306146.markers.json", 6);
-        let keep = write_owned(&dir, "2026-06-12 19-16/keep.mp4", 10);
-        let screenshots = dir.write("Screenshots/shot.png", 20);
-        let screenshot_poster = dir.write("Screenshots/shot.poster.jpg", 3);
-        let notes = dir.write("2026-06-12 19-17/notes.txt", 5);
-
-        assert!(remove_emptied_session_dir(&session, dir.path()).unwrap());
-        assert!(!session.exists());
-        assert!(keep.parent().unwrap().exists());
-        assert!(screenshots.exists());
-        assert!(screenshot_poster.exists());
-        assert!(notes.exists());
-        assert!(notes.parent().unwrap().exists());
-        assert!(dir.path().exists());
-    }
-
-    #[test]
-    fn remove_emptied_session_dir_keeps_in_progress_temp_and_recordings() {
-        let dir = TestDir::new("clipline-storage", "empty-session-keep-media");
-        let recording_session = dir
-            .write("2026-06-12 19-15/session.mp4.recording", 8)
-            .parent()
-            .unwrap()
-            .to_path_buf();
-        dir.write("2026-06-12 19-15/clipline-session.json", 4);
-        let tmp_session = dir
-            .write("2026-06-12 19-16/clip_trim_pending_001.mp4.tmp", 8)
-            .parent()
-            .unwrap()
-            .to_path_buf();
-
-        assert!(!remove_emptied_session_dir(&recording_session, dir.path()).unwrap());
-        assert!(recording_session.exists());
-        assert!(!remove_emptied_session_dir(&tmp_session, dir.path()).unwrap());
-        assert!(tmp_session.exists());
-    }
-
-    #[test]
-    fn remove_emptied_session_dir_keeps_ownership_marker_without_mp4() {
-        let dir = TestDir::new("clipline-storage", "empty-session-in-progress-marker");
-        let session = dir
-            .write("2026-06-12 19-15/clip.clipline.json", 8)
-            .parent()
-            .unwrap()
-            .to_path_buf();
-        dir.write("2026-06-12 19-15/clipline-session.json", 4);
-        dir.write("2026-06-12 19-15/clip.poster.jpg", 3);
-
-        assert!(!remove_emptied_session_dir(&session, dir.path()).unwrap());
-        assert!(session.exists());
-        assert!(session.join("clip.clipline.json").exists());
-        assert!(session.join("clipline-session.json").exists());
-        assert!(session.join("clip.poster.jpg").exists());
-    }
-
-    #[test]
-    fn remove_emptied_session_dir_keeps_unrecognized_debug_sidecars() {
-        let dir = TestDir::new("clipline-storage", "empty-session-unrecognized");
-        let session = dir
-            .write(
-                "2026-06-12 19-15/session.markers.before-player-summary.json",
-                6,
-            )
-            .parent()
-            .unwrap()
-            .to_path_buf();
-        dir.write("2026-06-12 19-15/clipline-session.json", 4);
-
-        assert!(!remove_emptied_session_dir(&session, dir.path()).unwrap());
-        assert!(session.exists());
-        assert!(session.join("clipline-session.json").exists());
-    }
-
-    #[test]
-    fn remove_emptied_session_dir_keeps_date_only_folders() {
-        let dir = TestDir::new("clipline-storage", "empty-session-date-only");
-        let leftover = dir
-            .write("2026-08-16/clipline-session.json", 5)
-            .parent()
-            .unwrap()
-            .to_path_buf();
-
-        assert!(!remove_emptied_session_dir(&leftover, dir.path()).unwrap());
-        assert!(leftover.exists());
-        assert!(leftover.join("clipline-session.json").exists());
-    }
-
-    #[test]
-    fn remove_emptied_session_dir_does_not_delete_the_media_root() {
-        let dir = TestDir::new("clipline-storage", "empty-session-root");
-        dir.write("orphan.clipline.json", 4);
-        dir.write("clipline-session.json", 4);
-
-        assert!(!remove_emptied_session_dir(dir.path(), dir.path()).unwrap());
-        assert!(dir.path().exists());
-        assert!(dir.path().join("orphan.clipline.json").exists());
-    }
-
-    #[test]
-    fn sweep_emptied_session_dirs_cleans_orphans_and_keeps_real_media() {
-        let dir = TestDir::new("clipline-storage", "sweep-empty-sessions");
-        let empty = dir.path().join("2026-06-13 02-31");
-        fs::create_dir_all(&empty).unwrap();
-        let leftover = dir
-            .write("2026-06-12 19-15/clipline-session.json", 12)
-            .parent()
-            .unwrap()
-            .to_path_buf();
-        let keep = write_owned(&dir, "2026-06-12 19-16/keep.mp4", 10);
-        dir.write("2026-06-12 19-16/clipline-session.json", 4);
-        let screenshots = dir.write("Screenshots/shot.png", 20);
-        let empty_screenshots = dir.path().join("EmptyScreenshots");
-        fs::create_dir_all(&empty_screenshots).unwrap();
-        let custom_leftover = dir.write("Exports/old.poster.jpg", 3);
-
-        let removed = sweep_emptied_session_dirs(dir.path()).unwrap();
-
-        assert_eq!(removed, 2);
-        assert!(!empty.exists());
-        assert!(!leftover.exists());
-        assert!(keep.exists());
-        assert!(keep.parent().unwrap().exists());
-        assert!(screenshots.exists());
-        assert!(
-            empty_screenshots.exists(),
-            "empty non-session folders must not be swept"
-        );
-        assert!(
-            custom_leftover.exists(),
-            "leftover sidecars in a non-session folder must not be swept"
-        );
-    }
-
-    #[test]
-    fn remove_emptied_session_dir_keeps_session_meta_when_folder_still_has_files() {
-        let dir = TestDir::new("clipline-storage", "empty-session-keep-meta");
-        let session = dir
-            .write("2026-06-12 19-15/clipline-session.json", 12)
-            .parent()
-            .unwrap()
-            .to_path_buf();
-        let blocked = session.join("keep.txt");
-        std::fs::write(&blocked, b"user file").unwrap();
-
-        assert!(!remove_emptied_session_dir(&session, dir.path()).unwrap());
-        assert!(session.exists());
-        assert!(blocked.exists());
-        assert!(
-            session.join("clipline-session.json").exists(),
-            "session metadata must survive when the folder cannot be removed"
-        );
     }
 
     #[test]

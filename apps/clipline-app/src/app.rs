@@ -1708,7 +1708,7 @@ impl RuntimeState {
             if let Some(quota) = quota_bytes {
                 let target = quota.saturating_sub(required_bytes);
                 if let Err(error) =
-                    crate::library::enforce_quota_with_clip_policy(media_dir, Some(target), None)
+                    crate::gc::enforce_quota_with_clip_policy(media_dir, Some(target), None)
                 {
                     tracing::warn!(
                         event = "storage_quota_auto_delete_failed",
