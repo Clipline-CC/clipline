@@ -734,13 +734,15 @@ pub fn delete_clip(path: String, settings: tauri::State<StorageSettings>) -> Res
 /// Marks or unmarks a clip as a favorite. Favorites are never auto-deleted by
 /// quota GC, and the Library's Favorites chip isolates them.
 #[tauri::command]
-pub fn set_clip_favorite(
+pub async fn set_clip_favorite(
     path: String,
     favorite: bool,
-    settings: tauri::State<StorageSettings>,
+    settings: tauri::State<'_, StorageSettings>,
 ) -> Result<SetClipFavoriteInfo, String> {
     let target = validate_clip_path(&settings, &path)?;
-    set_clip_favorite_impl(&target, favorite)
+    tauri::async_runtime::spawn_blocking(move || set_clip_favorite_impl(&target, favorite))
+        .await
+        .map_err(|error| format!("favorite clip task: {error}"))?
 }
 
 pub(crate) fn set_clip_favorite_impl(
@@ -1007,8 +1009,7 @@ fn rename_clip_files(
     let target = parent.join(&target_name);
     let source_metadata = clip_metadata_path(&source);
     let target_metadata = clip_metadata_path(&target);
-    let mut metadata = read_clip_metadata(&source).unwrap_or_default();
-    metadata.owned = None;
+    let metadata = read_clip_metadata(&source).unwrap_or_default();
     let title = clip_title_from_metadata(&metadata);
     let kind = clip_kind_from_metadata(&source, &metadata).to_string();
 
@@ -1068,6 +1069,7 @@ fn rename_clip_files(
     let mut target_metadata_value = read_clip_metadata(&target).unwrap_or(metadata);
     target_metadata_value.title = title.clone();
     target_metadata_value.kind = Some(kind.clone());
+    target_metadata_value.owned = None;
     if let Err(error) = write_clip_metadata(&target, &target_metadata_value) {
         if let Some(pending) = &pending_osu_move {
             pending.rollback();
@@ -4656,6 +4658,37 @@ mod tests {
                 .clip_count,
             1,
             "editing the title keeps the existing explicit adoption behavior"
+        );
+    }
+
+    #[test]
+    fn file_rename_adopts_a_favorite_only_imported_mp4() {
+        let dir = TestDir::new("clipline-library", "rename-favorite-imported");
+        let source = dir.path().join("vacation.mp4");
+        let target = dir.path().join("Vacation renamed.mp4");
+        touch_mp4(&source);
+        set_clip_favorite_impl(&source, true).unwrap();
+        assert_eq!(
+            clipline_storage::storage_status(dir.path(), Some(0))
+                .unwrap()
+                .clip_count,
+            0
+        );
+
+        rename_clip_files(
+            source.clone(),
+            source.display().to_string(),
+            normalized_clip_file_name("Vacation renamed").unwrap(),
+        )
+        .unwrap();
+
+        assert!(target.exists());
+        assert_eq!(
+            clipline_storage::storage_status(dir.path(), Some(0))
+                .unwrap()
+                .clip_count,
+            1,
+            "editing the file name must remain an explicit adoption boundary"
         );
     }
 

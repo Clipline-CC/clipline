@@ -17,10 +17,6 @@ pub(crate) fn clip_gc_priority(path: &Path) -> u8 {
     }
 }
 
-pub(crate) fn is_favorite_clip(path: &Path) -> bool {
-    library::is_favorite_clip(path)
-}
-
 /// Active upload sources and favorites are never deleted, and kinds drain in
 /// priority order (sessions → replays → trims).
 pub(crate) fn enforce_quota_with_clip_policy(
@@ -32,7 +28,9 @@ pub(crate) fn enforce_quota_with_clip_policy(
         dir,
         quota_bytes,
         protect,
-        |path| crate::cloud_upload::is_active_upload_source(path) || is_favorite_clip(path),
+        |path| {
+            crate::cloud_upload::is_active_upload_source(path) || library::is_favorite_clip(path)
+        },
         clip_gc_priority,
     )
 }
@@ -82,6 +80,24 @@ mod tests {
         assert!(!replay.exists(), "replays must drain before trims");
         assert!(!trim.exists());
         assert_eq!(report.status.clip_count, 1);
+    }
+
+    #[test]
+    fn policy_does_not_delete_other_clips_when_favorites_alone_exceed_quota() {
+        let dir = TestDir::new("clipline-gc", "favorite-over-quota");
+        let favorite = dir.path().join("favorite.mp4");
+        std::fs::write(&favorite, [0; 200]).unwrap();
+        clipline_storage::ensure_clip_owned(&favorite).unwrap();
+        library::set_clip_favorite_impl(&favorite, true).unwrap();
+        let other = dir.path().join("other.mp4");
+        std::fs::write(&other, [0; 100]).unwrap();
+        clipline_storage::ensure_clip_owned(&other).unwrap();
+
+        let report = enforce_quota_with_clip_policy(dir.path(), Some(150), None).unwrap();
+
+        assert_eq!(report.deleted_clips, 0);
+        assert!(favorite.exists());
+        assert!(other.exists(), "futile deletion cannot make room below quota");
     }
 
     #[test]

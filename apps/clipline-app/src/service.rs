@@ -1285,6 +1285,8 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                     let path = unique_media_path(&session_dir, "clip");
                     match save(&rec, &path, opts.replay_window_s) {
                         Ok((end, seconds)) => {
+                            // save() creates the ownership marker first;
+                            // empty-session cleanup relies on that ordering.
                             write_session_game_meta(
                                 &session_dir,
                                 opts.active_game.as_ref(),
@@ -2328,6 +2330,8 @@ fn begin_full_session_recording(
                 return None;
             }
         };
+    // Reservation creates the ownership marker first; empty-session cleanup
+    // relies on that ordering.
     write_session_game_meta(&session_dir, active_game, None);
     if let Err(e) = rec.start_full_session(file) {
         handle_full_session_finish_error(

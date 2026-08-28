@@ -4,6 +4,28 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-28): PR #188 second-review hardening
+
+Plan: `docs/superpowers/plans/2026-08-28-pr-188-second-review-fixes.md`.
+
+Empty-session cleanup now retries Clipline-owned crash debris instead of preserving it forever:
+orphan ownership markers expire after a one-hour recorder safety window, and the exact metadata,
+poster, osu! atomic-write, and osu! rename temp/backup shapes are disposable. Arbitrary files,
+media temps, recent ownership markers, recordings, and videos remain protected. If folder removal
+fails and restoring `clipline-session.json` also fails, that write error is now returned rather
+than reported as a normal non-removal.
+
+File rename clears an imported favorite's `owned: false` only after reading the moved metadata,
+so title and file editing are both explicit adoption boundaries as documented. Favorite writes
+run in a blocking task instead of waiting on quota GC's clip lock from Tauri's IPC thread. When
+favorites alone exceed the quota, GC deliberately avoids futile deletion of other clips; the
+quota dialog now identifies favorites as protected and tells the user to unfavorite or raise the
+quota. Comments at both recorder paths pin the ownership-marker-before-session-metadata ordering.
+
+Verification: `cargo test --workspace` passes, including device tests on the development machine.
+Fresh-cache Clippy passes for `clipline-storage` and `clipline-app`, and workspace Clippy passes
+with warnings denied.
+
 ## Checkpoint (2026-08-28): PR #188 review hardening
 
 Plan: `docs/superpowers/plans/2026-08-28-pr-188-review-fixes.md`.

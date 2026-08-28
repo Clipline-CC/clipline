@@ -3,13 +3,14 @@
 //! Protocol: classify the folder, delete leftover husks, re-check (a
 //! concurrent save can land media after the first inventory), read the session
 //! metadata into memory, `remove_dir`, and restore the file from memory only
-//! when removal fails *and* the file is still absent. Nothing is renamed to a
-//! sibling, so no cleanup pass can be wedged by stale debris, and a fresh
-//! `clipline-session.json` written mid-cleanup is never clobbered.
+//! when removal fails *and* the file is still absent. Exact Clipline temp and
+//! backup shapes are disposable; arbitrary files still keep the folder. A
+//! fresh `clipline-session.json` written mid-cleanup is never clobbered.
 
 use std::fs;
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use crate::sessions::is_session_dir_name;
 use crate::{
@@ -17,13 +18,15 @@ use crate::{
     CLIP_SIDECAR_SUFFIXES, SESSION_META_FILE,
 };
 
+const IN_PROGRESS_MARKER_GRACE: Duration = Duration::from_secs(60 * 60);
+
 /// Remove a session folder when it is a direct child of `media_root`, uses a
 /// recorder session name, and no longer holds anything except Clipline leftover
 /// metadata (or is empty).
 ///
-/// Videos, in-progress recordings, in-progress ownership markers, screenshots,
-/// nested directories, temps, and any unrecognized file keep the folder. The
-/// media root itself is never removed.
+/// Videos, in-progress recordings, recent ownership markers, screenshots,
+/// nested directories, media temps, and any unrecognized file keep the folder.
+/// The media root itself is never removed.
 pub fn remove_emptied_session_dir(session_dir: &Path, media_root: &Path) -> io::Result<bool> {
     let _guard = crate::lock_session_mutations();
     remove_emptied_session_dir_with(session_dir, media_root, |dir| {
@@ -78,7 +81,7 @@ pub(crate) fn remove_emptied_session_dir_with(
             // The folder survived (a save landed mid-cleanup); put the
             // metadata back unless a fresh one replaced it.
             if let Some(bytes) = meta_bytes.filter(|_| !session_meta.exists()) {
-                let _ = fs::write(&session_meta, bytes);
+                fs::write(&session_meta, bytes)?;
             }
             Ok(false)
         }
@@ -150,7 +153,7 @@ fn collect_disposable_leftovers(session_dir: &Path) -> io::Result<Option<Vec<Pat
 }
 
 /// `ensure_clip_owned` writes `clip.clipline.json` before the MP4 exists.
-/// Treat that marker as live work, not a husk, so cleanup cannot drop it.
+/// Treat a recent marker as live work; an old orphan is crash debris.
 fn is_in_progress_ownership_marker(session_dir: &Path, path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return false;
@@ -160,7 +163,16 @@ fn is_in_progress_ownership_marker(session_dir: &Path, path: &Path) -> bool {
     };
     let mp4 = session_dir.join(format!("{stem}.mp4"));
     let recording = session_dir.join(format!("{stem}.mp4.recording"));
-    !is_regular_file(&mp4) && !is_regular_file(&recording)
+    !is_regular_file(&mp4) && !is_regular_file(&recording) && is_fresh(path)
+}
+
+fn is_fresh(path: &Path) -> bool {
+    let Ok(modified) = fs::symlink_metadata(path).and_then(|metadata| metadata.modified()) else {
+        return true;
+    };
+    SystemTime::now()
+        .duration_since(modified)
+        .map_or(true, |age| age < IN_PROGRESS_MARKER_GRACE)
 }
 
 fn is_regular_file(path: &Path) -> bool {
@@ -172,7 +184,9 @@ fn is_disposable_session_leftover(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
-    name.eq_ignore_ascii_case(SESSION_META_FILE) || is_clip_sidecar_filename(name)
+    name.eq_ignore_ascii_case(SESSION_META_FILE)
+        || is_clip_sidecar_filename(name)
+        || is_clipline_sidecar_debris(name)
 }
 
 /// The session metadata bytes, when it is a regular file. Absent, directories,
@@ -193,6 +207,31 @@ fn is_clip_sidecar_filename(name: &str) -> bool {
     CLIP_SIDECAR_SUFFIXES
         .iter()
         .any(|suffix| strip_ascii_suffix(name, suffix).is_some())
+}
+
+fn is_clipline_sidecar_debris(name: &str) -> bool {
+    strip_ascii_suffix(name, ".tmp").is_some_and(is_clip_sidecar_filename)
+        || strip_ascii_suffix(name, ".bak")
+            .and_then(strip_numeric_component)
+            .is_some_and(is_clip_sidecar_filename)
+        || [".tmp", ".clipline-osu-tmp"]
+            .iter()
+            .any(|tag| strip_numbered_suffix(name, tag, 2).is_some_and(is_clip_sidecar_filename))
+        || strip_ascii_suffix(name, ".osu-enrichment.rename.tmp").is_some()
+        || strip_ascii_suffix(name, ".osu-enrichment.rename.backup").is_some()
+}
+
+fn strip_numbered_suffix<'a>(name: &'a str, tag: &str, count: usize) -> Option<&'a str> {
+    let mut rest = name;
+    for _ in 0..count {
+        rest = strip_numeric_component(rest)?;
+    }
+    strip_ascii_suffix(rest, tag)
+}
+
+fn strip_numeric_component(name: &str) -> Option<&str> {
+    let (prefix, number) = name.rsplit_once('.')?;
+    (!number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())).then_some(prefix)
 }
 
 fn strip_ascii_suffix<'a>(name: &'a str, suffix: &str) -> Option<&'a str> {
@@ -414,6 +453,65 @@ mod tests {
         assert!(session.join("clip.clipline.json").exists());
         assert!(session.join("clipline-session.json").exists());
         assert!(session.join("clip.poster.jpg").exists());
+    }
+
+    #[test]
+    fn removes_stale_orphan_ownership_marker() {
+        let dir = TestDir::new("clipline-storage", "empty-session-stale-marker");
+        let marker = dir.write("2026-06-12 19-15/clip.clipline.json", 8);
+        let session = marker.parent().unwrap().to_path_buf();
+        dir.write("2026-06-12 19-15/clipline-session.json", 4);
+        std::fs::File::options()
+            .write(true)
+            .open(&marker)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH)
+            .unwrap();
+
+        assert!(remove_emptied_session_dir(&session, dir.path()).unwrap());
+        assert!(!session.exists());
+    }
+
+    #[test]
+    fn removes_interrupted_clipline_sidecar_writes() {
+        let dir = TestDir::new("clipline-storage", "empty-session-sidecar-debris");
+        let session = dir
+            .write("2026-06-12 19-15/clipline-session.json", 4)
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        for name in [
+            "clip.clipline.json.tmp",
+            "clip.clipline.json.123.bak",
+            "clip.poster.jpg.tmp.123.4",
+            "clip.markers.json.clipline-osu-tmp.123.4",
+            "clip.osu-enrichment.json.clipline-osu-tmp.123.4",
+            "clip.osu-enrichment.rename.tmp",
+            "clip.osu-enrichment.rename.backup",
+        ] {
+            std::fs::write(session.join(name), b"interrupted write").unwrap();
+        }
+
+        assert!(remove_emptied_session_dir(&session, dir.path()).unwrap());
+        assert!(!session.exists());
+    }
+
+    #[test]
+    fn failed_metadata_restore_is_reported() {
+        let dir = TestDir::new("clipline-storage", "empty-session-restore-error");
+        let session = dir
+            .write("2026-06-12 19-15/clipline-session.json", 12)
+            .parent()
+            .unwrap()
+            .to_path_buf();
+
+        let error = remove_emptied_session_dir_with(&session, dir.path(), |dir_path| {
+            std::fs::remove_dir(dir_path).unwrap();
+            Err(io::Error::other("simulated failed removal report"))
+        })
+        .unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::NotFound);
     }
 
     #[test]
