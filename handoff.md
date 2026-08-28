@@ -12,8 +12,8 @@ Empty-session cleanup now retries Clipline-owned crash debris instead of preserv
 orphan ownership markers expire after a one-hour recorder safety window, and the exact metadata,
 poster, osu! atomic-write, and osu! rename temp/backup shapes are disposable. Arbitrary files,
 media temps, recent ownership markers, recordings, and videos remain protected. If folder removal
-fails and restoring `clipline-session.json` also fails, that write error is now returned rather
-than reported as a normal non-removal.
+fails and restoring `clipline-session.json` also fails, that write error now propagates through
+sweeps, quota GC, explicit deletion, post-upload deletion, and recorder-startup diagnostics.
 
 File rename clears an imported favorite's `owned: false` only after reading the moved metadata,
 so title and file editing are both explicit adoption boundaries as documented. Favorite writes

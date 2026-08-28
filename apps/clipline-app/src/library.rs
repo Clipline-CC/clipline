@@ -789,7 +789,8 @@ fn remove_clip_files(target: &Path, media_root: &Path) -> Result<(), String> {
         let _ = std::fs::remove_file(sidecar);
     }
     if let Some(parent) = target.parent() {
-        let _ = remove_emptied_session_dir(parent, media_root);
+        remove_emptied_session_dir(parent, media_root)
+            .map_err(|error| format!("clean emptied session folder: {error}"))?;
     }
     Ok(())
 }

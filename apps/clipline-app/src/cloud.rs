@@ -2311,7 +2311,9 @@ fn delete_uploaded_local_files(target: &Path, media_root: &Path) -> std::io::Res
         }
     }
     if let Some(parent) = target.parent() {
-        let _ = clipline_storage::remove_emptied_session_dir(parent, media_root);
+        if let Err(error) = clipline_storage::remove_emptied_session_dir(parent, media_root) {
+            first_error.get_or_insert(error);
+        }
     }
     match first_error {
         Some(error) => Err(error),

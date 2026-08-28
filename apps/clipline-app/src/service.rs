@@ -2196,7 +2196,9 @@ fn send_recording_status(
 }
 
 fn recover_abandoned_recordings(clips_dir: &Path, events: &Sender<Event>) {
-    let _ = sweep_emptied_session_dirs(clips_dir);
+    if let Err(error) = sweep_emptied_session_dirs(clips_dir) {
+        warn_user(events, format!("clean empty session folders: {error}"));
+    }
     static RECOVERED_THIS_PROCESS: AtomicBool = AtomicBool::new(false);
     if RECOVERED_THIS_PROCESS.swap(true, Ordering::AcqRel) {
         return;

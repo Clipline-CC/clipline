@@ -105,7 +105,7 @@ pub fn sweep_emptied_session_dirs(media_root: &Path) -> io::Result<usize> {
             Ok(entry) => entry.path(),
             Err(_) => continue,
         };
-        if remove_emptied_session_dir(&path, media_root).unwrap_or(false) {
+        if remove_emptied_session_dir(&path, media_root)? {
             removed += 1;
         }
     }

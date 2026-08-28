@@ -650,16 +650,16 @@ fn delete_inventoried_clip(
         }
     }
 
-    // The MP4 is gone; sidecar/session cleanup is best-effort so a transient
-    // sidecar error cannot hide the deletion from LibraryChanged callers or
-    // abort collection of remaining over-quota clips.
+    // The MP4 is gone; clip-attached sidecars are best-effort so a transient
+    // sidecar error cannot abort collection of remaining over-quota clips.
     for sidecar in &clip.sidecars {
         let _ = remove_file_if_exists(sidecar);
     }
     // Session folders disappear with their last clip, including leftover
-    // metadata that was not attached to this inventoried file.
+    // metadata that was not attached to this inventoried file. Unlike cached
+    // sidecars, a failed session-metadata restore must reach the caller.
     if let Some(parent) = clip.path.parent() {
-        let _ = remove_emptied_session_dir(parent, media_root);
+        remove_emptied_session_dir(parent, media_root)?;
     }
     Ok(DeletedClip::Removed)
 }
