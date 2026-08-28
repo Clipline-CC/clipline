@@ -20,10 +20,13 @@ cache in place like rename). Favorites survive renames because the sidecar is re
 (or moved) by both rename paths.
 
 **Auto-delete priority.** `clipline-storage::enforce_quota_with_policy` now takes a caller-
-supplied `priority: Fn(&Path) -> u8` sort key (storage stays neutral; `enforce_quota_with_protection`
-delegates with constant priority). The app's single shared policy
-(`library::enforce_quota_with_clip_policy`) protects active uploads **and favorites**, and orders
-deletion **sessions → replays → trims**, oldest within each kind. All three quota-GC call sites
+supplied `priority: Fn(&Path) -> u8` sort key (storage stays neutral; plain `enforce_quota`
+delegates with constant priority, and the unused `enforce_quota_with_protection` wrapper is
+gone). The app's single shared policy
+(`gc::enforce_quota_with_clip_policy`) protects active uploads **and favorites**, and orders
+deletion **sessions → replays → trims**, oldest within each kind. The priority closure is
+evaluated once per clip up front (decorate-then-sort) so sidecar reads don't run inside the
+sort. All three quota-GC call sites
 use it: recorder `make_room_for_quota`, the replay-save path (`emit_saved_clip`), and the manual
 `recheck_storage_quota`.
 
@@ -50,8 +53,11 @@ User delete, bulk delete, delete-local-after-upload, quota GC, and recorder star
 holds any real media (videos, recordings, in-progress `*.clipline.json` markers, screenshots,
 temps, or unrecognized files), leftover clip sidecars and `clipline-session.json` are deleted and
 the folder is removed. If a concurrent save already landed new files, `remove_dir` fails and those
-files stay. Library listing does not sweep — it is a read path. The media root, Screenshots, and
-other non-session trees are left alone.
+files stay. The session metadata is never staged: it is held in memory across `remove_dir` and
+written back only if the removal failed and the file is still absent, so a fresh sidecar from a
+concurrent save is never clobbered and no `.clipline-removing-*` debris is created. Library
+listing does not sweep — it is a read path. The media root, Screenshots, and other non-session
+trees are left alone.
 
 ## Checkpoint (2026-08-17): Stable 1.0.2
 
