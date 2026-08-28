@@ -25,6 +25,7 @@ use crate::{
 /// nested directories, temps, and any unrecognized file keep the folder. The
 /// media root itself is never removed.
 pub fn remove_emptied_session_dir(session_dir: &Path, media_root: &Path) -> io::Result<bool> {
+    let _guard = crate::lock_session_mutations();
     remove_emptied_session_dir_with(session_dir, media_root, |dir| {
         fs::remove_dir(dir).map(|_| ())
     })
@@ -196,8 +197,8 @@ fn is_clip_sidecar_filename(name: &str) -> bool {
 
 fn strip_ascii_suffix<'a>(name: &'a str, suffix: &str) -> Option<&'a str> {
     let start = name.len().checked_sub(suffix.len())?;
-    if start > 0 && name[start..].eq_ignore_ascii_case(suffix) {
-        Some(&name[..start])
+    if start > 0 && name.get(start..)?.eq_ignore_ascii_case(suffix) {
+        name.get(..start)
     } else {
         None
     }
@@ -292,6 +293,37 @@ mod tests {
             restored, "fresh",
             "a freshly written clipline-session.json must never be clobbered"
         );
+    }
+
+    #[test]
+    fn cleanup_holds_the_session_mutation_lock() {
+        let dir = TestDir::new("clipline-storage", "empty-session-lock");
+        let session = dir
+            .write("2026-06-12 19-15/clipline-session.json", 12)
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let root = dir.path().to_path_buf();
+        let guard = crate::lock_session_mutations();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let cleanup = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            result_tx
+                .send(remove_emptied_session_dir(&session, &root))
+                .unwrap();
+        });
+
+        started_rx.recv().unwrap();
+        assert!(
+            result_rx
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err(),
+            "cleanup must wait for an active session metadata mutation"
+        );
+        drop(guard);
+        assert!(result_rx.recv().unwrap().unwrap());
+        cleanup.join().unwrap();
     }
 
     #[test]
@@ -400,6 +432,19 @@ mod tests {
         assert!(!remove_emptied_session_dir(&session, dir.path()).unwrap());
         assert!(session.exists());
         assert!(session.join("clipline-session.json").exists());
+    }
+
+    #[test]
+    fn unicode_filename_cannot_panic_suffix_classification() {
+        let dir = TestDir::new("clipline-storage", "empty-session-unicode");
+        let session = dir
+            .write("2026-06-12 19-15/éaaaaaaaaaa", 1)
+            .parent()
+            .unwrap()
+            .to_path_buf();
+
+        assert!(!remove_emptied_session_dir(&session, dir.path()).unwrap());
+        assert!(session.exists());
     }
 
     #[test]

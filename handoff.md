@@ -4,6 +4,26 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-28): PR #188 review hardening
+
+Plan: `docs/superpowers/plans/2026-08-28-pr-188-review-fixes.md`.
+
+Favorites on imported, otherwise unowned MP4s now write `owned: false` into favorite-only
+metadata. Storage parses that explicit override, so starring and unstarring an imported file
+cannot silently opt it into destructive quota GC; existing metadata without the field remains
+owned for compatibility, while title/file rename still deliberately adopts the clip.
+
+Quota GC and favorite/title/file-rename metadata mutations share one process-wide clip lock.
+A favorite command therefore either commits before GC's protection check or, if GC won, reports
+that the clip disappeared instead of succeeding and recreating an orphan sidecar. Empty-session
+cleanup and session attribution writes likewise share one process-wide session lock, and replay
+plus full-session paths reserve their ownership marker before writing attribution, closing the
+read/unlink stale-restore race without bringing back staging files.
+
+Cleanup suffix matching now uses checked UTF-8 slices; recorder startup sweeps the current media
+root before the process-global abandoned-recording guard; and quota enforcement returns directly
+from its initial inventory when already under budget, avoiding favorite/kind reads and sorting.
+
 ## Checkpoint (2026-08-27): Favorites + kind-ordered auto-delete
 
 Plan: `docs/superpowers/plans/2026-08-27-favorites-and-gc-priority.md`.
@@ -32,8 +52,8 @@ use it: recorder `make_room_for_quota`, the replay-save path (`emit_saved_clip`)
 
 Sharp edges:
 
-- The GC reads each clip's metadata sidecar while collecting, so a favorite set *during* a GC
-  pass is honored by the pre-delete protection check (`can_delete` re-evaluates per clip).
+- GC and favorite/rename metadata writes share one clip-mutation lock, so a successful favorite
+  cannot race with deletion or lose a concurrent title update.
 - Kind classification falls back to filename inference (`session_`, `_trim_`) for clips whose
   sidecar predates kind tagging, so legacy libraries still drain in the right order.
 - The favorite sidecar serializes `title`/`kind` as explicit nulls for clips that never had

@@ -1017,6 +1017,7 @@ name = "clipline-storage"
 version = "0.1.0"
 dependencies = [
  "clipline-test-utils",
+ "serde_json",
 ]
 
 [[package]]

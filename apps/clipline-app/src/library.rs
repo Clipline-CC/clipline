@@ -216,6 +216,10 @@ struct ClipMetadata {
     /// when false so non-favorite sidecars stay byte-identical.
     #[serde(default, skip_serializing_if = "is_false")]
     favorite: bool,
+    /// Favorite-only metadata on an imported MP4 must not opt that file into
+    /// destructive storage management. Missing remains owned for compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owned: Option<bool>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -743,7 +747,15 @@ pub(crate) fn set_clip_favorite_impl(
     target: &Path,
     favorite: bool,
 ) -> Result<SetClipFavoriteInfo, String> {
+    let _guard = clipline_storage::lock_clip_mutations();
+    if !target.is_file() {
+        return Err("clip no longer exists".into());
+    }
+    let owned = clipline_storage::is_clip_owned(target);
     let mut metadata = read_clip_metadata(target).unwrap_or_default();
+    if !owned {
+        metadata.owned = Some(false);
+    }
     metadata.favorite = favorite;
     write_clip_metadata(target, &metadata)?;
     Ok(SetClipFavoriteInfo {
@@ -873,10 +885,15 @@ fn rename_clip_title(
     old_path: String,
     title: String,
 ) -> Result<RenamedClipInfo, String> {
+    let _guard = clipline_storage::lock_clip_mutations();
+    if !source.is_file() {
+        return Err("clip no longer exists".into());
+    }
     let mut metadata = read_clip_metadata(&source).unwrap_or_default();
     let kind = clip_kind_from_metadata(&source, &metadata).to_string();
     metadata.title = Some(title.clone());
     metadata.kind = Some(kind.clone());
+    metadata.owned = None;
     write_clip_metadata(&source, &metadata)?;
     let name = source
         .file_name()
@@ -980,6 +997,7 @@ fn rename_clip_files(
     old_path: String,
     target_name: String,
 ) -> Result<RenamedClipInfo, String> {
+    let _guard = clipline_storage::lock_clip_mutations();
     if let Some(error) = crate::cloud_upload::active_upload_source_error(&source) {
         return Err(error);
     }
@@ -989,7 +1007,8 @@ fn rename_clip_files(
     let target = parent.join(&target_name);
     let source_metadata = clip_metadata_path(&source);
     let target_metadata = clip_metadata_path(&target);
-    let metadata = read_clip_metadata(&source).unwrap_or_default();
+    let mut metadata = read_clip_metadata(&source).unwrap_or_default();
+    metadata.owned = None;
     let title = clip_title_from_metadata(&metadata);
     let kind = clip_kind_from_metadata(&source, &metadata).to_string();
 
@@ -4557,6 +4576,7 @@ mod tests {
                 title: None,
                 kind: None,
                 favorite: true,
+                owned: None,
             },
         )
         .unwrap();
@@ -4569,6 +4589,7 @@ mod tests {
                 title: Some("Keep".to_string()),
                 kind: Some("replay".to_string()),
                 favorite: false,
+                owned: None,
             },
         )
         .unwrap();
@@ -4597,6 +4618,45 @@ mod tests {
         let result = set_clip_favorite_impl(&clip, false).unwrap();
         assert!(!result.favorite);
         assert!(!read_clip_metadata(&clip).unwrap().favorite);
+    }
+
+    #[test]
+    fn favorite_only_metadata_never_adopts_an_imported_mp4() {
+        let dir = TestDir::new("clipline-library", "favorite-imported");
+        let clip = dir.path().join("vacation.mp4");
+        touch_mp4(&clip);
+
+        set_clip_favorite_impl(&clip, true).unwrap();
+        assert!(read_clip_metadata(&clip).unwrap().favorite);
+        assert_eq!(
+            clipline_storage::storage_status(dir.path(), Some(0))
+                .unwrap()
+                .clip_count,
+            0
+        );
+
+        set_clip_favorite_impl(&clip, false).unwrap();
+        assert_eq!(
+            clipline_storage::storage_status(dir.path(), Some(0))
+                .unwrap()
+                .clip_count,
+            0
+        );
+        assert!(clip.exists());
+
+        rename_clip_title(
+            clip.clone(),
+            clip.display().to_string(),
+            "Imported clip".into(),
+        )
+        .unwrap();
+        assert_eq!(
+            clipline_storage::storage_status(dir.path(), Some(0))
+                .unwrap()
+                .clip_count,
+            1,
+            "editing the title keeps the existing explicit adoption behavior"
+        );
     }
 
     #[test]

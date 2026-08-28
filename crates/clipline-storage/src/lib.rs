@@ -9,7 +9,7 @@ pub use sessions::{is_session_dir_name, session_label, SessionTracker};
 use std::fs;
 use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const REPLAY_CACHE_RUN_PREFIX: &str = "clipline-replay-cache-";
@@ -49,10 +49,25 @@ pub fn replay_cache_owner_identity(process_instance_id: &str) -> Option<(u32, u6
     Some((pid.parse().ok()?, creation_time.parse().ok()?))
 }
 
-/// Serializes quota collectors so overlapping recorder generations (and any
-/// concurrent app-side GC) cannot inventory the same over-quota library and
-/// over-delete while another collector's deletions are in flight.
-static QUOTA_GC_LOCK: Mutex<()> = Mutex::new(());
+/// Serializes quota GC with app-side clip metadata mutations.
+/// ponytail: process-wide lock; split per media root only if contention is measured.
+static CLIP_MUTATION_LOCK: Mutex<()> = Mutex::new(());
+
+pub fn lock_clip_mutations() -> MutexGuard<'static, ()> {
+    CLIP_MUTATION_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Serializes emptied-session cleanup with session attribution writes.
+/// ponytail: process-wide lock; split per session only if contention is measured.
+static SESSION_MUTATION_LOCK: Mutex<()> = Mutex::new(());
+
+pub fn lock_session_mutations() -> MutexGuard<'static, ()> {
+    SESSION_MUTATION_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StorageStatus {
@@ -292,9 +307,7 @@ pub fn enforce_quota_with_policy(
     additionally_protected: impl Fn(&Path) -> bool,
     priority: impl Fn(&Path) -> u8,
 ) -> io::Result<GcReport> {
-    let _guard = QUOTA_GC_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = lock_clip_mutations();
 
     let Some(quota) = quota_bytes else {
         return Ok(GcReport {
@@ -308,6 +321,14 @@ pub fn enforce_quota_with_policy(
     let mut total_bytes = clips.iter().map(ClipFile::total_bytes).sum::<u64>();
     let mut deleted_clips = 0usize;
     let mut freed_bytes = 0u64;
+
+    if total_bytes <= quota {
+        return Ok(GcReport {
+            deleted_clips,
+            freed_bytes,
+            status: status_from_clips(&clips, quota_bytes),
+        });
+    }
 
     // Decorate up front: the priority closure may hit the filesystem (the app
     // classifies clips via sidecars), so it must run once per clip, not
@@ -481,7 +502,7 @@ fn is_managed_clip(path: &Path) -> bool {
     let Ok(marker) = clip_ownership_marker_path(path) else {
         return false;
     };
-    if marker.is_file() {
+    if marker.is_file() && !clip_marker_declares_unowned(&marker) {
         return true;
     }
     // New recordings are identified by their ownership marker. Pre-marker
@@ -494,6 +515,18 @@ fn is_managed_clip(path: &Path) -> bool {
     path.with_extension("markers.json").is_file()
         || path.with_extension("osu-enrichment.json").is_file()
         || is_legacy_generated_clip(path)
+}
+
+pub fn is_clip_owned(path: &Path) -> bool {
+    is_managed_clip(path)
+}
+
+fn clip_marker_declares_unowned(marker: &Path) -> bool {
+    fs::read(marker)
+        .ok()
+        .and_then(|json| serde_json::from_slice::<serde_json::Value>(&json).ok())
+        .and_then(|value| value.get("owned").and_then(serde_json::Value::as_bool))
+        == Some(false)
 }
 
 fn is_legacy_generated_clip(path: &Path) -> bool {
@@ -883,6 +916,24 @@ mod tests {
     }
 
     #[test]
+    fn explicit_unowned_metadata_does_not_adopt_an_imported_mp4() {
+        let dir = TestDir::new("clipline-storage", "explicit-unowned");
+        let imported = dir.write("vacation.mp4", 10);
+        std::fs::write(
+            clip_ownership_marker_path(&imported).unwrap(),
+            br#"{"owned":false,"favorite":true}"#,
+        )
+        .unwrap();
+
+        let status = storage_status(dir.path(), Some(0)).unwrap();
+        let report = enforce_quota(dir.path(), Some(0), None).unwrap();
+
+        assert_eq!(status.clip_count, 0);
+        assert_eq!(report.deleted_clips, 0);
+        assert!(imported.exists());
+    }
+
+    #[test]
     fn enforce_quota_counts_an_explicitly_protected_new_clip() {
         let dir = TestDir::new("clipline-storage", "protect-new-unmarked");
         dir.write("unrelated.mp4", 90);
@@ -1039,6 +1090,33 @@ mod tests {
         assert!(!replay.exists());
         assert!(!trim.exists());
         assert_eq!(report.status.total_bytes, 10);
+    }
+
+    #[test]
+    fn enforce_quota_under_budget_skips_policy_callbacks() {
+        let dir = TestDir::new("clipline-storage", "policy-under-budget");
+        write_owned(&dir, "clip.mp4", 10);
+        let protection_checks = std::cell::Cell::new(0usize);
+        let priority_checks = std::cell::Cell::new(0usize);
+
+        let report = enforce_quota_with_policy(
+            dir.path(),
+            Some(100),
+            None,
+            |_| {
+                protection_checks.set(protection_checks.get() + 1);
+                false
+            },
+            |_| {
+                priority_checks.set(priority_checks.get() + 1);
+                0
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.deleted_clips, 0);
+        assert_eq!(protection_checks.get(), 0);
+        assert_eq!(priority_checks.get(), 0);
     }
 
     #[test]

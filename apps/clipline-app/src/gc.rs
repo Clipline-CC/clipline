@@ -41,6 +41,8 @@ pub(crate) fn enforce_quota_with_clip_policy(
 mod tests {
     use super::*;
     use clipline_test_utils::TestDir;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{mpsc, Arc};
     use std::time::Duration;
 
     #[test]
@@ -106,5 +108,55 @@ mod tests {
         assert!(!replay.exists());
         assert!(trim.exists(), "trims must be the last kind auto-delete touches");
         assert_eq!(report.status.clip_count, 1);
+    }
+
+    #[test]
+    fn favorite_started_after_gc_check_cannot_succeed_then_be_deleted() {
+        let dir = TestDir::new("clipline-gc", "favorite-race");
+        let clip = dir.path().join("vacation.mp4");
+        std::fs::write(&clip, [0; 100]).unwrap();
+        clipline_storage::ensure_clip_owned(&clip).unwrap();
+
+        let checks = Arc::new(AtomicUsize::new(0));
+        let (checked_tx, checked_rx) = mpsc::channel();
+        let (continue_tx, continue_rx) = mpsc::channel();
+        let gc_root = dir.path().to_path_buf();
+        let gc_checks = Arc::clone(&checks);
+        let gc = std::thread::spawn(move || {
+            clipline_storage::enforce_quota_with_policy(
+                &gc_root,
+                Some(0),
+                None,
+                |_| {
+                    let favorite = false;
+                    if gc_checks.fetch_add(1, Ordering::SeqCst) == 1 {
+                        checked_tx.send(()).unwrap();
+                        continue_rx.recv().unwrap();
+                    }
+                    favorite
+                },
+                |_| 0,
+            )
+            .unwrap()
+        });
+
+        checked_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let favorite_clip = clip.clone();
+        let (favorite_tx, favorite_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            favorite_tx
+                .send(library::set_clip_favorite_impl(&favorite_clip, true))
+                .unwrap();
+        });
+        let early_result = favorite_rx.recv_timeout(Duration::from_millis(100)).ok();
+        continue_tx.send(()).unwrap();
+        gc.join().unwrap();
+        let favorite_result = early_result
+            .unwrap_or_else(|| favorite_rx.recv_timeout(Duration::from_secs(2)).unwrap());
+
+        assert!(
+            favorite_result.is_err() || clip.exists(),
+            "a successful favorite command must leave the clip present"
+        );
     }
 }

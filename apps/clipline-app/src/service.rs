@@ -1282,14 +1282,14 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                         });
                         continue;
                     }
-                    write_session_game_meta(
-                        &session_dir,
-                        opts.active_game.as_ref(),
-                        league_queue.as_ref(),
-                    );
                     let path = unique_media_path(&session_dir, "clip");
                     match save(&rec, &path, opts.replay_window_s) {
                         Ok((end, seconds)) => {
+                            write_session_game_meta(
+                                &session_dir,
+                                opts.active_game.as_ref(),
+                                league_queue.as_ref(),
+                            );
                             // Markers and match summary ride along as a
                             // sidecar (ddoc §5) when either is available.
                             let markers = write_marker_sidecar(
@@ -2194,6 +2194,7 @@ fn send_recording_status(
 }
 
 fn recover_abandoned_recordings(clips_dir: &Path, events: &Sender<Event>) {
+    let _ = sweep_emptied_session_dirs(clips_dir);
     static RECOVERED_THIS_PROCESS: AtomicBool = AtomicBool::new(false);
     if RECOVERED_THIS_PROCESS.swap(true, Ordering::AcqRel) {
         return;
@@ -2221,7 +2222,6 @@ fn recover_abandoned_recordings(clips_dir: &Path, events: &Sender<Event>) {
         }
         Err(e) => warn_user(events, format!("recover unfinished recordings: {e}")),
     }
-    let _ = sweep_emptied_session_dirs(clips_dir);
 }
 
 struct RecorderFinishContext<'a> {
@@ -2275,6 +2275,7 @@ fn write_session_game_meta(
     league_queue: Option<&LeagueQueue>,
 ) {
     let Some(game) = active_game else { return };
+    let _guard = clipline_storage::lock_session_mutations();
     let meta_path = session_dir.join(SESSION_META_FILE);
     if meta_path.exists() && league_queue.is_none() {
         return;
@@ -2313,7 +2314,6 @@ fn begin_full_session_recording(
         );
         return None;
     }
-    write_session_game_meta(&session_dir, active_game, None);
     let stamp = unix_now_u64();
     let (final_path, temp_path, file) =
         match reserve_full_session_path_at(&session_dir, "session", stamp) {
@@ -2328,6 +2328,7 @@ fn begin_full_session_recording(
                 return None;
             }
         };
+    write_session_game_meta(&session_dir, active_game, None);
     if let Err(e) = rec.start_full_session(file) {
         handle_full_session_finish_error(
             &temp_path,
@@ -3578,6 +3579,57 @@ mod tests {
         assert_eq!(value["queue"]["id"], 420);
         assert_eq!(value["queue"]["category"], "ranked-solo-duo");
         assert_eq!(value["queue"]["label"], "Ranked Solo/Duo");
+    }
+
+    #[test]
+    fn session_game_metadata_waits_for_cleanup_mutations() {
+        let dir = TestDir::new("clipline-service", "session-meta-lock");
+        let session = dir.path().to_path_buf();
+        let game = ActiveGame {
+            identity: crate::game_identity::GameIdentity::custom("test-game"),
+            name: "Test game".into(),
+            exe_path: None,
+            process_id: None,
+        };
+        let guard = clipline_storage::lock_session_mutations();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            write_session_game_meta(&session, Some(&game), None);
+            result_tx.send(()).unwrap();
+        });
+
+        assert!(
+            result_rx
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err(),
+            "session metadata writes must wait for cleanup"
+        );
+        drop(guard);
+        result_rx.recv().unwrap();
+        writer.join().unwrap();
+    }
+
+    #[test]
+    fn recovery_sweeps_each_media_root_in_the_same_process() {
+        let first = TestDir::new("clipline-service", "recovery-sweep-first");
+        let second = TestDir::new("clipline-service", "recovery-sweep-second");
+        let first_session = first
+            .write("2026-06-12 19-15/clipline-session.json", 2)
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let second_session = second
+            .write("2026-06-12 19-16/clipline-session.json", 2)
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let (events, _rx) = std::sync::mpsc::channel();
+
+        recover_abandoned_recordings(first.path(), &events);
+        recover_abandoned_recordings(second.path(), &events);
+
+        assert!(!first_session.exists());
+        assert!(!second_session.exists());
     }
 
     #[test]
