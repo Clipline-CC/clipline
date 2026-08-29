@@ -1660,17 +1660,23 @@ fn decode_sample_bytes(
     }
     Ok(match sample_format {
         SampleFormat::Float32 => bytes
-            .chunks_exact(4)
-            .map(|sample| f32::from_le_bytes(sample.try_into().expect("four-byte chunk")))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|sample| f32::from_le_bytes(*sample))
             .collect(),
         SampleFormat::Pcm16 => bytes
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|sample| {
-                i16::from_le_bytes(sample.try_into().expect("two-byte chunk")) as f32 / 32_768.0
+                i16::from_le_bytes(*sample) as f32 / 32_768.0
             })
             .collect(),
         SampleFormat::Pcm24 => bytes
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|sample| {
                 let raw = sample[0] as i32 | ((sample[1] as i32) << 8) | ((sample[2] as i32) << 16);
                 let signed = (raw << 8) >> 8;
@@ -1678,10 +1684,11 @@ fn decode_sample_bytes(
             })
             .collect(),
         SampleFormat::Pcm32 => bytes
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|sample| {
-                i32::from_le_bytes(sample.try_into().expect("four-byte chunk")) as f32
-                    / 2_147_483_648.0
+                i32::from_le_bytes(*sample) as f32 / 2_147_483_648.0
             })
             .collect(),
     })

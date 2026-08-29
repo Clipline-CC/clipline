@@ -146,8 +146,8 @@ unsafe fn color_bitmap_to_png(
 
     // GetDIBits hands back BGRA. Icons without a real alpha channel come back
     // fully transparent; treat those as opaque so they don't vanish.
-    let has_alpha = buf.chunks_exact(4).any(|px| px[3] != 0);
-    for px in buf.chunks_exact_mut(4) {
+    let has_alpha = buf.as_chunks::<4>().0.iter().any(|px| px[3] != 0);
+    for px in buf.as_chunks_mut::<4>().0 {
         px.swap(0, 2); // BGRA -> RGBA
         if !has_alpha {
             px[3] = 255;
