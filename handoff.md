@@ -4,6 +4,31 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-29): Ordered clip groups and compilation export
+
+Plan: `docs/superpowers/plans/2026-08-29-groups.md` (plan commit `1f0ffe2`).
+
+The review trim row now has a secondary **Add to group** action. It can create a named group or
+append to an existing one while exporting the selected range. Membership is intentionally not a
+new database: the existing per-clip `.clipline.json` document carries optional `{ name, order }`
+group metadata. The first member creates the Library group card, normal clip rename/delete keeps
+working through the existing sidecar ownership path, and the group disappears with its last clip.
+
+Clicking a group card opens its ordered member view. Up/Down controls call one path-validated
+backend command that rewrites authoritative order values. **Export compilation** runs a bounded
+FFmpeg job over those authoritative members, letterboxes mixed dimensions to 1920×1080, converts
+to 60 fps H.264/Opus, supplies silence for members without audio, and publishes an ordinary owned
+`compilation` clip in the media root. **Upload compilation** creates the same local result and then
+reuses the existing Cloud upload dialog and durable upload path. Cloud itself needs no group API.
+V1 caps a compilation at 64 members to stay below the Windows process command-line ceiling; group
+rename and moving old Library clips between groups remain deferred.
+
+Verification: `cargo test --workspace` green; warning-denied workspace Clippy clean; all 125 UI
+contracts green; Node syntax checks clean. A real managed-FFmpeg smoke joined landscape+audio and
+portrait+silent inputs, encoded the exact 1080p60 H.264/Opus filter path, and decoded the output.
+Rust 1.98's new `chunks_exact_to_as_chunks` warnings were cleared mechanically in commit `38f465b`
+so the required warning-denied gate remains usable.
+
 ## Checkpoint (2026-08-17): Stable 1.0.2
 
 Plan: `docs/superpowers/plans/2026-08-17-stable-1.0.2.md`.

@@ -194,6 +194,7 @@ var clipContextTarget = null;
 var cloudContextTarget = null;
 var gamePlayContextTarget = null;
 var uploadDialogClip = null;
+var openGroupName = "";
 var selectedAudioTrackIds = new Set();
 var uploadSelectedAudioTrackIds = new Set();
 var currentReviewAudioKey = null;

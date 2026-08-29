@@ -1698,6 +1698,7 @@ async function exportRangeAsClip(startS, endS, {
   label = "",
   title = "",
   includeMarkers = true,
+  group = "",
 } = {}) {
   const sourceClip = currentClip;
   if (!sourceClip) return;
@@ -1713,6 +1714,7 @@ async function exportRangeAsClip(startS, endS, {
       includeMarkers,
     };
     if (title) request.title = title;
+    if (group) request.group = group;
     const exported = await invoke("export_clip", request);
     const exportedLabel = label ? `${label} ${exported.name}` : exported.name;
     setDeckStatus(`exported ${exportedLabel} · keyframe-aligned ${fmtTenths(exported.aligned_start_s)} – ${fmtTenths(exported.aligned_end_s)}`, { transient: true });
@@ -1727,15 +1729,18 @@ async function exportRangeAsClip(startS, endS, {
       duration_s: exported.duration_s,
       markers: exported.markers || null,
       game: sourceClip.game || null,
+      group: exported.group || null,
     };
     invalidateLocalClipsRefresh();
     clipsCache = [exportedClip, ...clipsCache.filter((clip) => clip.path !== exportedClip.path)];
     renderClips();
     setDeckStatusAction("Open clip", () => openClip(exportedClip));
     await refreshStorage();
+    return exportedClip;
   } catch (e) {
     setDeckStatus("");
     $("error").textContent = e;
+    return null;
   } finally {
     if (button) button.disabled = false;
   }

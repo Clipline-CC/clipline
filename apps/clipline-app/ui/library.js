@@ -73,6 +73,263 @@ function clipDisplayTitle(clip) {
   return title || PresentationCore.clipNameStem(clip && clip.name);
 }
 
+function localGroups() {
+  const groups = new Map();
+  for (const clip of clipsCache) {
+    const membership = clip && clip.group;
+    const name = String(membership && membership.name || "").trim();
+    if (!name) continue;
+    const key = name.toLocaleLowerCase();
+    if (!groups.has(key)) groups.set(key, { name, members: [], modified_unix: 0 });
+    const group = groups.get(key);
+    group.members.push(clip);
+    group.modified_unix = Math.max(group.modified_unix, Number(clip.modified_unix) || 0);
+  }
+  for (const group of groups.values()) {
+    group.members.sort((left, right) => {
+      const order = (Number(left.group && left.group.order) || 0)
+        - (Number(right.group && right.group.order) || 0);
+      return order || (Number(left.modified_unix) || 0) - (Number(right.modified_unix) || 0)
+        || String(left.path).localeCompare(String(right.path));
+    });
+    group.duration_s = group.members.reduce((sum, clip) => {
+      const duration = Number(clip.duration_s ?? clip.markers?.duration_s);
+      return sum + (Number.isFinite(duration) ? duration : 0);
+    }, 0);
+  }
+  return [...groups.values()].sort((left, right) => right.modified_unix - left.modified_unix);
+}
+
+function groupForName(name) {
+  const key = String(name || "").trim().toLocaleLowerCase();
+  return localGroups().find((group) => group.name.toLocaleLowerCase() === key) || null;
+}
+
+function visibleLocalGroups() {
+  if (!['all', 'group'].includes(galleryFilter) || galleryGameType !== "all") return [];
+  if (!gallerySearch) return localGroups();
+  return localGroups().filter((group) => {
+    const haystack = [
+      group.name,
+      ...group.members.flatMap((clip) => [clipDisplayTitle(clip), clip.name]),
+    ].join(" ").toLocaleLowerCase();
+    return haystack.includes(gallerySearch);
+  });
+}
+
+function groupCard(group) {
+  const card = document.createElement("article");
+  card.className = "card group-card";
+  card.tabIndex = 0;
+  card.setAttribute("role", "button");
+  card.setAttribute("aria-label", `Open group ${group.name}`);
+  const art = document.createElement("div");
+  art.className = "card-thumb group-card-art";
+  art.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h12v10H4zM8 9h12v10H8z"/></svg>';
+  const kind = document.createElement("span");
+  kind.className = "card-kind group";
+  kind.textContent = "Group";
+  art.appendChild(kind);
+  const meta = document.createElement("div");
+  meta.className = "card-meta";
+  const title = document.createElement("div");
+  title.className = "card-name";
+  const text = document.createElement("span");
+  text.className = "t";
+  text.textContent = group.name;
+  title.appendChild(text);
+  const info = document.createElement("div");
+  info.className = "card-sub";
+  info.textContent = `${group.members.length} clip${group.members.length === 1 ? "" : "s"}`
+    + (group.duration_s > 0 ? ` · ${fmtDur(group.duration_s)}` : "");
+  meta.append(title, info);
+  card.append(art, meta);
+  const open = () => {
+    if (!selectMode) openGroupView(group.name);
+  };
+  card.addEventListener("click", open);
+  card.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    open();
+  });
+  return card;
+}
+
+function renderGroupCards(root, groups) {
+  if (!groups.length) return;
+  const head = document.createElement("div");
+  head.className = "gallery-group-head group-section-head";
+  const label = document.createElement("span");
+  label.textContent = "Groups";
+  const count = document.createElement("span");
+  count.className = "gcount";
+  count.textContent = groups.length;
+  head.append(label, count);
+  root.appendChild(head);
+  for (const group of groups) root.appendChild(groupCard(group));
+}
+
+function syncGroupPickerMode() {
+  const creating = $("group-picker-select").value === "";
+  $("group-picker-new").hidden = !creating;
+  if (creating) $("group-picker-name").focus();
+}
+
+function openGroupPicker() {
+  if (!currentClip) return;
+  const groups = localGroups();
+  const select = $("group-picker-select");
+  select.replaceChildren();
+  for (const group of groups) {
+    const option = document.createElement("option");
+    option.value = group.name;
+    option.textContent = group.name;
+    select.appendChild(option);
+  }
+  const create = document.createElement("option");
+  create.value = "";
+  create.textContent = "New group…";
+  select.appendChild(create);
+  select.value = groups.length ? groups[0].name : "";
+  $("group-picker-name").value = "";
+  $("group-picker-status").textContent = "";
+  $("group-picker-confirm").disabled = false;
+  syncGroupPickerMode();
+  if (!$("group-picker-dialog").open) $("group-picker-dialog").showModal();
+  if (groups.length) select.focus();
+}
+
+function closeGroupPicker() {
+  if ($("group-picker-dialog").open) $("group-picker-dialog").close();
+}
+
+async function submitGroupPicker() {
+  const creating = $("group-picker-select").value === "";
+  const name = (creating ? $("group-picker-name").value : $("group-picker-select").value).trim();
+  if (!name) {
+    $("group-picker-status").textContent = "Group name is required.";
+    $("group-picker-name").focus();
+    return;
+  }
+  $("group-picker-status").textContent = "Creating clip…";
+  const exported = await exportRangeAsClip(trimStart, trimEnd, {
+    button: $("group-picker-confirm"),
+    group: name,
+  });
+  if (exported) closeGroupPicker();
+  else $("group-picker-status").textContent = String($("error").textContent || "Could not add clip to group.");
+}
+
+function closeGroupView() {
+  openGroupName = "";
+  if ($("group-view-dialog").open) $("group-view-dialog").close();
+}
+
+function renderGroupView() {
+  if (!openGroupName) return;
+  const group = groupForName(openGroupName);
+  if (!group) {
+    closeGroupView();
+    return;
+  }
+  openGroupName = group.name;
+  $("group-view-title").textContent = group.name;
+  $("group-view-summary").textContent = `${group.members.length} clip${group.members.length === 1 ? "" : "s"}`
+    + (group.duration_s > 0 ? ` · ${fmtDur(group.duration_s)}` : "");
+  $("group-view-status").textContent = "";
+  $("group-upload").disabled = !cloudConnected();
+  const list = $("group-view-members");
+  list.replaceChildren();
+  group.members.forEach((clip, index) => {
+    const row = document.createElement("div");
+    row.className = "group-view-member";
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "group-member-open";
+    const title = document.createElement("strong");
+    title.textContent = clipDisplayTitle(clip) || clip.name;
+    const meta = document.createElement("span");
+    const duration = Number(clip.duration_s ?? clip.markers?.duration_s);
+    meta.textContent = [Number.isFinite(duration) ? fmtDur(duration) : "", fmtMegabytes(clip.size_mb)]
+      .filter(Boolean).join(" · ");
+    open.append(title, meta);
+    open.addEventListener("click", () => {
+      closeGroupView();
+      openClip(clip);
+    });
+    const controls = document.createElement("div");
+    controls.className = "group-member-move";
+    for (const [direction, label] of [["up", "Move up"], ["down", "Move down"]]) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = direction === "up" ? "↑" : "↓";
+      button.title = label;
+      button.setAttribute("aria-label", `${label}: ${clipDisplayTitle(clip) || clip.name}`);
+      button.disabled = direction === "up" ? index === 0 : index === group.members.length - 1;
+      button.addEventListener("click", () => moveGroupClip(clip, direction));
+      controls.appendChild(button);
+    }
+    row.append(open, controls);
+    list.appendChild(row);
+  });
+}
+
+function openGroupView(name) {
+  openGroupName = name;
+  renderGroupView();
+  if (!$("group-view-dialog").open) $("group-view-dialog").showModal();
+}
+
+async function moveGroupClip(clip, direction) {
+  $("group-view-status").textContent = "Reordering…";
+  try {
+    const updates = await invoke("move_group_clip", { path: clip.path, direction });
+    for (const update of updates || []) {
+      const target = clipsCache.find((candidate) => PlayerCore.sameClipPath(candidate.path, update.path));
+      if (target && target.group) target.group.order = update.order;
+    }
+    renderClips();
+    renderGroupView();
+  } catch (error) {
+    $("group-view-status").textContent = String(error);
+  }
+}
+
+async function createOpenGroupCompilation() {
+  if (!openGroupName) return null;
+  $("group-export").disabled = true;
+  $("group-upload").disabled = true;
+  $("group-view-status").textContent = "Exporting compilation…";
+  await afterNextPaint();
+  try {
+    const exportedClip = await invoke("export_group", { name: openGroupName });
+    invalidateLocalClipsRefresh();
+    clipsCache = [exportedClip, ...clipsCache.filter((clip) => clip.path !== exportedClip.path)];
+    renderClips();
+    await refreshStorage();
+    return exportedClip;
+  } catch (error) {
+    $("group-view-status").textContent = String(error);
+    return null;
+  } finally {
+    $("group-export").disabled = false;
+    $("group-upload").disabled = !cloudConnected();
+  }
+}
+
+async function exportOpenGroup() {
+  const exportedClip = await createOpenGroupCompilation();
+  if (exportedClip) $("group-view-status").textContent = `Exported ${exportedClip.name}`;
+}
+
+async function uploadOpenGroup() {
+  const exportedClip = await createOpenGroupCompilation();
+  if (!exportedClip) return;
+  closeGroupView();
+  openUploadDialog(exportedClip);
+}
+
 const CLOUD_POSTER_CACHE_PREFIX = "cloud-thumb:";
 const POSTER_UNAVAILABLE_RETRY_MS = 30_000;
 var posterUnavailableUntil = new Map();
@@ -249,11 +506,14 @@ const CLIP_KIND_ICONS = {
     '<svg viewBox="0 0 24 24"><path d="M3 5h18v14H3V5zM5 6v2h2v-2zM9 6v2h2v-2zM13 6v2h2v-2zM17 6v2h2v-2zM5 16v2h2v-2zM9 16v2h2v-2zM13 16v2h2v-2zM17 16v2h2v-2z"/></svg>',
   trim:
     '<svg viewBox="0 0 24 24"><path d="M9.64 7.64c.23-.5.36-1.05.36-1.64 0-2.21-1.79-4-4-4S2 3.79 2 6s1.79 4 4 4c.59 0 1.14-.13 1.64-.36L10 12l-2.36 2.36C7.14 14.13 6.59 14 6 14c-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4c0-.59-.13-1.14-.36-1.64L12 14l7 7h3v-1L9.64 7.64zM6 8c-1.1 0-2-.89-2-2s.9-2 2-2 2 .89 2 2-.9 2-2 2zm0 12c-1.1 0-2-.89-2-2s.9-2 2-2 2 .89 2 2-.9 2-2 2zm6-7.5c-.28 0-.5-.22-.5-.5s.22-.5.5-.5.5.22.5.5-.22.5-.5.5zM19 3l-6 6 2 2 7-7V3z"/></svg>',
+  compilation:
+    '<svg viewBox="0 0 24 24"><path d="M4 4h12v10H4zM8 8h12v10H8zM11 11v4l4-2z"/></svg>',
 };
 const CLIP_KIND_LABELS = {
   replay: "Buffered replay",
   session: "Full session",
   trim: "Trimmed export",
+  compilation: "Group compilation",
 };
 const CLOUD_VISIBILITY_ICONS = {
   public:
@@ -925,7 +1185,7 @@ function cloudClipCard(entry) {
 }
 
 // Clip names come from disk; build rows with textContent, never innerHTML.
-const CARD_KIND_LABELS = { replay: "Replay", session: "Session", trim: "Trim" };
+const CARD_KIND_LABELS = { replay: "Replay", session: "Session", trim: "Trim", compilation: "Compilation" };
 // Marker categories → tint var, matching the timeline glyph colors.
 const MARKER_CATEGORY_TICK_VARS = {
   kill: "--mc-kill",
@@ -1637,6 +1897,7 @@ function filterGalleryClips(clips) {
   const items = [];
   let maxModifiedUnix = 0;
   for (const c of clips) {
+    if (galleryFilter === "group") continue;
     const kind = clipKind(c);
     if ((galleryFilter === "replay" || galleryFilter === "session" || galleryFilter === "trim")
       && kind !== galleryFilter) continue;
@@ -1842,6 +2103,7 @@ function renderClips() {
   pruneLocalPosterCache(clipsCache);
   const filteredResult = filterGalleryClips(clipsCache);
   const filtered = filteredResult.items;
+  const libraryGroups = visibleLocalGroups();
   const sorted = sortGalleryClips(filtered);
   const groups = galleryGroups(sorted);
   const firstGroup = groups[0];
@@ -1849,7 +2111,7 @@ function renderClips() {
   const firstItems = firstGroup && firstGroup.clips || [];
   const lastItems = lastGroup && lastGroup.clips || [];
   const identity = groupedGalleryIdentity(
-    `local|${galleryFilter}|${galleryGameType}|${gallerySort}|${galleryGroup}|${gallerySearch}`,
+    `local|${galleryFilter}|${galleryGameType}|${gallerySort}|${galleryGroup}|${gallerySearch}|${libraryGroups.map((group) => `${group.name}:${group.members.map((clip) => clip.group.order).join(",")}`).join("|")}`,
     filtered.length,
     firstItems[0],
     lastItems[lastItems.length - 1],
@@ -1861,9 +2123,9 @@ function renderClips() {
   });
   const page = GalleryWindowCore.windowGroups(groups, galleryPageState);
   syncGalleryPagination(page);
-  $("gallery-count").textContent = clipsCache.length
-    ? `${filtered.length} of ${clipsCache.length}`
-    : "";
+  $("gallery-count").textContent = galleryFilter === "group"
+    ? `${libraryGroups.length} group${libraryGroups.length === 1 ? "" : "s"}`
+    : clipsCache.length ? `${filtered.length} of ${clipsCache.length}` : "";
   if (!clipsCache.length) {
     const empty = document.createElement("div");
     empty.className = "gallery-empty";
@@ -1871,13 +2133,15 @@ function renderClips() {
     root.appendChild(empty);
     return;
   }
-  if (!filtered.length) {
+  if (!filtered.length && !libraryGroups.length) {
     const empty = document.createElement("div");
     empty.className = "gallery-empty";
     empty.textContent = "No clips match those filters.";
     root.appendChild(empty);
     return;
   }
+  if (galleryPageState.page === 0) renderGroupCards(root, libraryGroups);
+  if (galleryFilter === "group") return;
   for (const group of page.groups) {
     if (group.label !== null) {
       const head = document.createElement("div");

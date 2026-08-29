@@ -3590,6 +3590,21 @@ button.primary.settings-save-glow {
 .card-kind.replay { background: var(--accent); color: #14100c; }
 .card-kind.session { background: var(--session); color: #14100c; }
 .card-kind.trim { background: var(--ok); color: #14100c; }
+.card-kind.compilation { background: var(--session); color: #14100c; }
+.card-kind.group { background: var(--accent); color: var(--accent-text); }
+
+.group-card-art {
+  display: grid;
+  place-items: center;
+  color: var(--accent);
+  background: radial-gradient(circle at 35% 30%, rgba(var(--accent-rgb), .28), var(--well) 72%);
+}
+.group-card-art > svg {
+  width: 64px;
+  height: 64px;
+  fill: currentColor;
+  filter: drop-shadow(0 6px 16px rgba(var(--scrim-c-rgb), .55));
+}
 
 .card-dur {
   position: absolute; bottom: 8px; right: 8px; z-index: 2;
@@ -3782,6 +3797,8 @@ button.primary.settings-save-glow {
 #update-dialog,
 #elevation-dialog,
 #upload-dialog,
+#group-picker-dialog,
+#group-view-dialog,
 #storage-quota-dialog,
 #rename-file-dialog {
   width: 380px;
@@ -3797,10 +3814,13 @@ button.primary.settings-save-glow {
 #update-dialog::backdrop,
 #elevation-dialog::backdrop,
 #upload-dialog::backdrop,
+#group-picker-dialog::backdrop,
+#group-view-dialog::backdrop,
 #storage-quota-dialog::backdrop,
 #rename-file-dialog::backdrop { background: rgba(var(--scrim-b-rgb), 0.62); }
 
 #storage-quota-dialog { width: min(500px, calc(100vw - 32px)); }
+#group-view-dialog { width: min(640px, calc(100vw - 32px)); }
 .storage-quota-actions { flex-wrap: wrap; }
 
 #detected-games-dialog,
@@ -3855,12 +3875,57 @@ button.primary.settings-save-glow {
   font-size: 11.5px;
 }
 .upload-body textarea { resize: none; }
+.group-picker-new { display: grid; gap: 8px; }
+.group-picker-new[hidden] { display: none; }
+.group-view-body { gap: 12px; max-height: min(70vh, 680px); }
+.group-view-heading { display: grid; gap: 2px; }
+.group-view-members {
+  display: grid;
+  gap: 6px;
+  overflow-y: auto;
+  min-height: 0;
+}
+.group-view-member {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+.group-member-open {
+  display: grid;
+  justify-items: start;
+  gap: 2px;
+  min-width: 0;
+  height: auto;
+  padding: 5px 7px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+.group-member-open strong,
+.group-member-open span {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.group-member-open span { color: var(--muted); font-family: var(--font-mono); font-size: 11px; }
+.group-member-move { display: flex; gap: 5px; }
+.group-member-move button { width: 30px; min-width: 30px; padding: 0; }
+.group-view-actions { flex-wrap: wrap; }
 .upload-audio-section[hidden] { display: none; }
 .upload-audio-section > span {
   display: block;
   color: var(--muted);
   font-size: 11.5px;
 }
+#group-view-status:empty,
+#group-picker-status:empty,
 #upload-dialog-status:empty,
 #rename-file-status:empty { display: none; }
 

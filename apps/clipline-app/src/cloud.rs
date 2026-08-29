@@ -2532,6 +2532,14 @@ mod tests {
 
         assert_eq!(upload_title(None, &clip), "Ranked win vs Lux");
         assert_eq!(source_type(&clip), "session");
+
+        std::fs::write(
+            clip.with_extension("clipline.json"),
+            r#"{"title":"Highlights compilation","kind":"compilation"}"#,
+        )
+        .unwrap();
+        assert_eq!(upload_title(None, &clip), "Highlights compilation");
+        assert_eq!(source_type(&clip), "compilation");
     }
 
     #[test]

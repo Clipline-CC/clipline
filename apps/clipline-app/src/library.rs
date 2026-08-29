@@ -4,6 +4,8 @@
 
 #[path = "library/naming.rs"]
 mod naming;
+#[path = "library/groups.rs"]
+pub(crate) mod groups;
 use naming::{
     inferred_clip_kind_for_path, is_reserved_windows_file_name, normalized_clip_file_name,
     normalized_clip_title,
@@ -159,6 +161,14 @@ pub struct ClipInfo {
     pub markers: Option<ClipMarkers>,
     /// Game this clip's session belongs to, if recorded under a detected game.
     pub game: Option<ClipGame>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<ClipGroup>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ClipGroup {
+    pub name: String,
+    pub order: u32,
 }
 
 #[derive(serde::Serialize)]
@@ -187,6 +197,8 @@ pub struct ExportedClipInfo {
     pub aligned_end_s: f64,
     pub duration_s: f64,
     pub markers: Option<ClipMarkers>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<ClipGroup>,
 }
 
 #[derive(serde::Serialize)]
@@ -204,6 +216,8 @@ struct ClipMetadata {
     title: Option<String>,
     #[serde(default)]
     kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    group: Option<ClipGroup>,
 }
 
 const AUDIO_PREVIEW_CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -395,6 +409,7 @@ fn push_clips_from(
         let markers = util::markers_with_inferred_audio_tracks(&path, raw_markers);
         let title = clip_title_from_metadata(&clip_metadata);
         let kind = clip_kind_from_metadata(&path, &clip_metadata).to_string();
+        let group = clip_metadata.group.clone();
         // Prefer the session sidecar; fall back to the game named in markers
         // so clips recorded before session tagging still show an icon.
         let game = session_game
@@ -414,6 +429,7 @@ fn push_clips_from(
             duration_s,
             markers,
             game,
+            group,
         });
     }
     Ok(())
@@ -1056,6 +1072,7 @@ fn rollback_renamed_clip_files(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri exposes these as named invoke fields.
 pub async fn export_clip<R: Runtime>(
     app: AppHandle<R>,
     path: String,
@@ -1063,13 +1080,18 @@ pub async fn export_clip<R: Runtime>(
     end_s: f64,
     title: Option<String>,
     include_markers: Option<bool>,
+    group: Option<String>,
     settings: tauri::State<'_, StorageSettings>,
 ) -> Result<ExportedClipInfo, String> {
     let scope_root = settings.clips_dir()?;
     let source = validate_clip_path(&settings, &path)?;
     let include_markers = include_markers.unwrap_or(true);
+    let group_root = scope_root.clone();
     let exported = tauri::async_runtime::spawn_blocking(move || {
-        export_clip_file(source, start_s, end_s, title, include_markers)
+        let group = group
+            .map(|name| groups::group_for_export(&group_root, &name))
+            .transpose()?;
+        export_clip_file(source, start_s, end_s, title, include_markers, group)
     })
     .await
     .map_err(|e| format!("export clip task: {e}"))??;
@@ -1891,7 +1913,7 @@ fn is_cached_mp4_file(path: &Path) -> bool {
     let parts = suffix.split('.').collect::<Vec<_>>();
     !parts.is_empty()
         && parts.len().is_multiple_of(3)
-        && parts.chunks_exact(3).all(|chunk| {
+        && parts.as_chunks::<3>().0.iter().all(|chunk| {
             !chunk[0].is_empty()
                 && chunk[0].bytes().all(|byte| byte.is_ascii_digit())
                 && !chunk[1].is_empty()
@@ -1956,6 +1978,7 @@ fn export_clip_file(
     end_s: f64,
     title: Option<String>,
     include_markers: bool,
+    group: Option<ClipGroup>,
 ) -> Result<ExportedClipInfo, String> {
     let tmp = unique_temp_export_path(&source)?;
     let info = match trim_keyframe_aligned_file(&source, &tmp, start_s, end_s) {
@@ -1965,18 +1988,50 @@ fn export_clip_file(
             return Err(e.to_string());
         }
     };
-    let target = unique_export_path(&source, info.aligned_start_s, info.aligned_end_s, title)?;
-    std::fs::rename(&tmp, &target).map_err(|e| e.to_string())?;
+    let target = unique_export_path(
+        &source,
+        info.aligned_start_s,
+        info.aligned_end_s,
+        title.clone(),
+    )?;
+    if let Err(error) = std::fs::rename(&tmp, &target) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error.to_string());
+    }
 
-    let exported_markers = export_markers_for_range(
+    let exported_markers = match export_markers_for_range(
         &source,
         info.aligned_start_s,
         info.aligned_end_s,
         include_markers,
-    )?;
-    if let Some(markers) = &exported_markers {
-        let json = serde_json::to_string_pretty(markers).map_err(|e| e.to_string())?;
-        std::fs::write(target.with_extension("markers.json"), json).map_err(|e| e.to_string())?;
+    ) {
+        Ok(markers) => markers,
+        Err(error) => {
+            let _ = remove_clip_files(&target);
+            return Err(error);
+        }
+    };
+    let sidecars = (|| {
+        if let Some(markers) = &exported_markers {
+            let json = serde_json::to_string_pretty(markers).map_err(|e| e.to_string())?;
+            std::fs::write(target.with_extension("markers.json"), json)
+                .map_err(|e| e.to_string())?;
+        }
+        if title.is_some() || group.is_some() {
+            write_clip_metadata(
+                &target,
+                &ClipMetadata {
+                    title,
+                    kind: Some("trim".to_string()),
+                    group: group.clone(),
+                },
+            )?;
+        }
+        Ok::<(), String>(())
+    })();
+    if let Err(error) = sidecars {
+        let _ = remove_clip_files(&target);
+        return Err(error);
     }
     let meta =
         std::fs::metadata(&target).map_err(|e| format!("read exported clip metadata: {e}"))?;
@@ -2000,6 +2055,7 @@ fn export_clip_file(
         aligned_end_s: info.aligned_end_s,
         duration_s: info.duration_s,
         markers: exported_markers,
+        group,
     })
 }
 
@@ -2315,7 +2371,7 @@ fn clip_kind_from_metadata<'a>(path: &'a Path, metadata: &'a ClipMetadata) -> &'
         .kind
         .as_deref()
         .map(str::trim)
-        .filter(|value| matches!(*value, "replay" | "session" | "trim"))
+        .filter(|value| matches!(*value, "replay" | "session" | "trim" | "compilation"))
         .unwrap_or_else(|| inferred_clip_kind_for_path(path))
 }
 
@@ -3240,7 +3296,7 @@ mod tests {
                 },
             );
             let joined = args.join(" ");
-            for pair in required.chunks_exact(2) {
+            for pair in required.as_chunks::<2>().0 {
                 assert!(
                     joined.contains(&pair.join(" ")),
                     "{encoder} missing {} in {joined}",
@@ -4395,6 +4451,7 @@ mod tests {
             &ClipMetadata {
                 title: Some("First title".to_string()),
                 kind: Some("replay".to_string()),
+                group: None,
             },
         )
         .unwrap();
@@ -4403,6 +4460,7 @@ mod tests {
             &ClipMetadata {
                 title: Some("Second title".to_string()),
                 kind: Some("session".to_string()),
+                group: None,
             },
         )
         .unwrap();
@@ -4410,6 +4468,30 @@ mod tests {
         let metadata = read_clip_metadata(&clip).unwrap();
         assert_eq!(metadata.title.as_deref(), Some("Second title"));
         assert_eq!(metadata.kind.as_deref(), Some("session"));
+    }
+
+    #[test]
+    fn clip_metadata_round_trips_group_membership() {
+        let dir = TestDir::new("clipline-library", "group-metadata");
+        let clip = dir.path().join("clip.mp4");
+        touch_mp4(&clip);
+
+        write_clip_metadata(
+            &clip,
+            &ClipMetadata {
+                title: Some("Grouped clip".to_string()),
+                kind: Some("trim".to_string()),
+                group: Some(ClipGroup {
+                    name: "Highlights".to_string(),
+                    order: 2,
+                }),
+            },
+        )
+        .unwrap();
+
+        let metadata = read_clip_metadata(&clip).unwrap();
+        assert_eq!(metadata.group.as_ref().map(|group| group.name.as_str()), Some("Highlights"));
+        assert_eq!(metadata.group.map(|group| group.order), Some(2));
     }
 
     #[test]
@@ -4816,6 +4898,7 @@ mod tests {
             &ClipMetadata {
                 title: Some("Case-only metadata".to_string()),
                 kind: Some("session".to_string()),
+                group: None,
             },
         )
         .unwrap();
@@ -5112,8 +5195,10 @@ mod tests {
         assert_eq!(i32::from_le_bytes(payload[16..20].try_into().unwrap()), 1);
 
         let path_units: Vec<u16> = payload[p_files..]
-            .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes(pair.try_into().unwrap()))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_le_bytes(*pair))
             .collect();
         assert_eq!(&path_units[path_units.len() - 2..], &[0, 0]);
         let decoded = String::from_utf16(&path_units[..path_units.len() - 2]).unwrap();
@@ -5124,8 +5209,10 @@ mod tests {
     fn clipboard_text_payload_is_null_terminated_utf16() {
         let payload = clipboard_text_payload("https://clipline.example/雪");
         let units: Vec<u16> = payload
-            .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes(pair.try_into().unwrap()))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_le_bytes(*pair))
             .collect();
 
         assert_eq!(units.last(), Some(&0));

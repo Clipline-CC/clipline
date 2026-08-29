@@ -957,6 +957,11 @@ fn library_rs() -> String {
     fs::read_to_string(path).expect("read src/library.rs")
 }
 
+fn library_groups_rs() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/library/groups.rs");
+    fs::read_to_string(path).expect("read src/library/groups.rs")
+}
+
 fn cloud_rs() -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/cloud.rs");
     fs::read_to_string(path).expect("read src/cloud.rs")
@@ -5696,6 +5701,53 @@ fn gallery_supports_multi_select_bulk_actions() {
         delete_clips_impl_rs.contains("remove_clip_files(&target)"),
         "bulk delete should call the shared file-removal helper"
     );
+}
+
+#[test]
+fn groups_are_created_from_trim_and_managed_in_the_library() {
+    let html = index_html();
+    let js = main_js();
+    let css = styles_css();
+    let library = library_rs();
+    let groups = library_groups_rs();
+    let app = app_rs();
+
+    for required in [
+        "id=\"add-to-group\"",
+        "id=\"group-picker-dialog\"",
+        "id=\"group-picker-select\"",
+        "id=\"group-picker-name\"",
+        "id=\"group-view-dialog\"",
+        "id=\"group-view-members\"",
+        "id=\"group-export\"",
+        "id=\"group-upload\"",
+    ] {
+        assert!(html.contains(required), "groups markup must include `{required}`");
+    }
+    for required in [
+        "function openGroupPicker",
+        "function submitGroupPicker",
+        "function renderGroupCards",
+        "function openGroupView",
+        "function moveGroupClip",
+        "function exportOpenGroup",
+        "function uploadOpenGroup",
+        "openUploadDialog(exportedClip)",
+    ] {
+        assert!(js.contains(required), "groups UI must include `{required}`");
+    }
+    for required in [".group-card", ".group-view-member", ".group-member-move"] {
+        assert!(css.contains(required), "groups styling must include `{required}`");
+    }
+    for required in ["pub struct ClipGroup", "group: Option<ClipGroup>"] {
+        assert!(library.contains(required), "group backend must include `{required}`");
+    }
+    for required in ["pub async fn export_group", "pub async fn move_group_clip"] {
+        assert!(groups.contains(required), "group commands must include `{required}`");
+    }
+    for required in ["crate::library::groups::export_group", "crate::library::groups::move_group_clip"] {
+        assert!(app.contains(required), "command registry must include `{required}`");
+    }
 }
 
 #[test]

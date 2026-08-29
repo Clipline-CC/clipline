@@ -181,6 +181,24 @@ $("gallery-select-toggle").addEventListener("click", () => {
 $("bulk-select-all").addEventListener("click", selectAllVisible);
 $("bulk-clear").addEventListener("click", clearSelection);
 $("bulk-delete").addEventListener("click", bulkDeleteSelected);
+$("group-picker-select").addEventListener("change", syncGroupPickerMode);
+$("group-picker-confirm").addEventListener("click", submitGroupPicker);
+$("group-picker-cancel").addEventListener("click", closeGroupPicker);
+$("group-picker-name").addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  submitGroupPicker();
+});
+$("group-picker-dialog").addEventListener("click", (event) => {
+  if (event.target === $("group-picker-dialog")) closeGroupPicker();
+});
+$("group-export").addEventListener("click", exportOpenGroup);
+$("group-upload").addEventListener("click", uploadOpenGroup);
+$("group-view-close").addEventListener("click", closeGroupView);
+$("group-view-dialog").addEventListener("click", (event) => {
+  if (event.target === $("group-view-dialog")) closeGroupView();
+});
+$("group-view-dialog").addEventListener("close", () => { openGroupName = ""; });
 $("poster-runtime-install").addEventListener("click", () => {
   void installFfmpegForPosters().catch(() => {});
 });
@@ -480,6 +498,7 @@ $("volume-slider").addEventListener("input", () => {
 });
 
 $("export-clip").addEventListener("click", exportTrim);
+$("add-to-group").addEventListener("click", openGroupPicker);
 $("deck-status-action").addEventListener("click", runDeckStatusAction);
 $("delete-clip").addEventListener("click", () => deleteClip());
 $("open-folder").addEventListener("click", openFolder);
