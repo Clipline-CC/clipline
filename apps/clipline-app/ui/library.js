@@ -123,6 +123,29 @@ function activeGroup() {
   return activeGroupName ? groupForName(activeGroupName) : null;
 }
 
+function groupCompilationKey(name) {
+  return String(name || "").trim().toLocaleLowerCase();
+}
+
+function invalidateGroupCompilation(name) {
+  const key = groupCompilationKey(name);
+  if (!key) return;
+  invalidatedGroupCompilations.add(key);
+  groupCompilationClips.delete(key);
+}
+
+function groupCompilationClip(group = activeGroup()) {
+  if (!group) return null;
+  const key = groupCompilationKey(group.name);
+  if (invalidatedGroupCompilations.has(key)) return null;
+  const expectedTitle = `${group.name} compilation`.toLocaleLowerCase();
+  const candidates = clipsCache
+    .filter((clip) => clipKind(clip) === "compilation"
+      && clipDisplayTitle(clip).toLocaleLowerCase() === expectedTitle)
+    .sort((left, right) => (Number(right.modified_unix) || 0) - (Number(left.modified_unix) || 0));
+  return groupCompilationClips.get(key) || candidates[0] || null;
+}
+
 function topLevelLocalClips(clips = clipsCache) {
   return clips.filter((clip) => !clip.group);
 }
@@ -390,6 +413,7 @@ async function moveGroupClip(clip, direction, steps = 1) {
       const updates = await invoke("move_group_clip", { path: clip.path, direction });
       applyGroupOrderUpdates(updates);
     }
+    invalidateGroupCompilation(activeGroupName);
     renderClips();
     syncGroupReviewHeader();
     preloadNextGroupMember();
@@ -417,6 +441,9 @@ async function createOpenGroupCompilation() {
   await afterNextPaint();
   try {
     const exportedClip = await invoke("export_group", { name: activeGroupName });
+    const groupKey = groupCompilationKey(activeGroupName);
+    invalidatedGroupCompilations.delete(groupKey);
+    groupCompilationClips.set(groupKey, exportedClip);
     invalidateLocalClipsRefresh();
     clipsCache = [exportedClip, ...clipsCache.filter((clip) => clip.path !== exportedClip.path)];
     renderClips();
@@ -432,14 +459,14 @@ async function createOpenGroupCompilation() {
 
 async function copyOpenGroup(event) {
   $("copy-clip").disabled = true;
-  const exportedClip = await createOpenGroupCompilation();
+  const exportedClip = groupCompilationClip() || await createOpenGroupCompilation();
   if (exportedClip) await copyClipToClipboard(event, exportedClip);
   $("copy-clip").disabled = false;
 }
 
 async function uploadOpenGroup() {
   $("upload-clip").disabled = true;
-  const exportedClip = await createOpenGroupCompilation();
+  const exportedClip = groupCompilationClip() || await createOpenGroupCompilation();
   if (exportedClip) openUploadDialog(exportedClip);
   syncUploadClipButton();
 }

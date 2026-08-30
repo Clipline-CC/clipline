@@ -25,7 +25,7 @@ pub struct GroupOrderUpdate {
 #[derive(Clone, Debug, PartialEq)]
 struct CompilationInput {
     path: PathBuf,
-    has_audio: bool,
+    audio_tracks: usize,
     duration_s: f64,
 }
 
@@ -286,7 +286,7 @@ fn compilation_inputs(members: &[GroupMember]) -> Result<Vec<CompilationInput>, 
                 .ok_or_else(|| format!("group clip {:?} has no valid duration", member.path))?;
             Ok(CompilationInput {
                 path: member.path.clone(),
-                has_audio: counts.audio > 0,
+                audio_tracks: counts.audio,
                 duration_s,
             })
         })
@@ -382,7 +382,7 @@ fn ffmpeg_compilation_args(
         let video_input = next_input;
         args.extend(["-i".into(), input.path.display().to_string()]);
         next_input += 1;
-        let audio_input = if input.has_audio {
+        let audio_input = if input.audio_tracks > 0 {
             video_input
         } else {
             let audio_input = next_input;
@@ -397,17 +397,30 @@ fn ffmpeg_compilation_args(
             next_input += 1;
             audio_input
         };
-        stream_inputs.push((video_input, audio_input));
+        stream_inputs.push((video_input, audio_input, input.audio_tracks.max(1)));
     }
 
     let mut filters = Vec::with_capacity(inputs.len() * 2 + 1);
-    for (index, (video_input, audio_input)) in stream_inputs.iter().enumerate() {
+    for (index, (video_input, audio_input, audio_tracks)) in stream_inputs.iter().enumerate() {
         filters.push(format!(
             "[{video_input}:v:0]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=60,format=nv12,setpts=PTS-STARTPTS[v{index}]"
         ));
-        filters.push(format!(
-            "[{audio_input}:a:0]aresample=48000:async=1:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo,asetpts=PTS-STARTPTS[a{index}]"
-        ));
+        if *audio_tracks == 1 {
+            filters.push(format!(
+                "[{audio_input}:a:0]aresample=48000:async=1:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo,asetpts=PTS-STARTPTS[a{index}]"
+            ));
+        } else {
+            let mut mix_inputs = String::new();
+            for track in 0..*audio_tracks {
+                filters.push(format!(
+                    "[{audio_input}:a:{track}]aresample=48000:async=1:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo[a{index}_{track}]"
+                ));
+                mix_inputs.push_str(&format!("[a{index}_{track}]"));
+            }
+            filters.push(format!(
+                "{mix_inputs}amix=inputs={audio_tracks}:duration=longest:dropout_transition=0:normalize=1,asetpts=PTS-STARTPTS[a{index}]"
+            ));
+        }
     }
     let concat_inputs: String = (0..inputs.len())
         .map(|index| format!("[v{index}][a{index}]"))
@@ -471,10 +484,10 @@ impl GroupMember {
 
 #[cfg(test)]
 impl CompilationInput {
-    fn test(path: &str, has_audio: bool, duration_s: f64) -> Self {
+    fn test(path: &str, audio_tracks: usize, duration_s: f64) -> Self {
         Self {
             path: PathBuf::from(path),
-            has_audio,
+            audio_tracks,
             duration_s,
         }
     }
@@ -559,8 +572,8 @@ mod tests {
     #[test]
     fn ffmpeg_compilation_args_normalize_video_and_supply_silent_audio() {
         let inputs = vec![
-            CompilationInput::test("with.mp4", true, 2.5),
-            CompilationInput::test("silent.mp4", false, 1.25),
+            CompilationInput::test("with.mp4", 2, 2.5),
+            CompilationInput::test("silent.mp4", 0, 1.25),
         ];
         let args = ffmpeg_compilation_args(
             &inputs,
@@ -572,6 +585,9 @@ mod tests {
 
         assert!(joined.contains("scale=1920:1080:force_original_aspect_ratio=decrease"));
         assert!(joined.contains("anullsrc=channel_layout=stereo:sample_rate=48000"));
+        assert!(joined.contains("[0:a:0]aresample=48000"));
+        assert!(joined.contains("[0:a:1]aresample=48000"));
+        assert!(joined.contains("amix=inputs=2:duration=longest:dropout_transition=0:normalize=1"));
         assert!(joined.contains("concat=n=2:v=1:a=1"));
         assert!(joined.contains("-c:v h264_mf"));
         assert!(joined.contains("-c:a libopus"));

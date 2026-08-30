@@ -10,12 +10,25 @@ var renameFilePending = false;
 function syncUploadClipButton() {
   const btn = $("upload-clip");
   if (!btn) return;
-  if (activeGroup()) {
-    btn.hidden = !cloudConnected();
-    btn.disabled = !cloudConnected();
-    btn.title = "Upload group compilation to Clipline Cloud";
-    btn.classList.remove("uploaded", "busy");
-    btn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M12 3 6.5 8.5 8 10l3-3v10h2V7l3 3 1.5-1.5L12 3zM5 19h14v2H5v-2z"/></svg>';
+  const group = activeGroup();
+  if (group) {
+    const compilation = groupCompilationClip(group);
+    const record = compilation ? clipCloudRecord(compilation) : null;
+    const busy = record && ["queued", "uploading", "processing", "retrying"].includes(record.upload_status);
+    const uploaded = cloudRecordUploaded(record);
+    const shareable = !!cloudShareUrl(record);
+    btn.hidden = !cloudUploadControlVisible(uploaded);
+    btn.disabled = busy || (uploaded ? !record.remote_clip_id : !cloudConnected());
+    btn.title = shareable
+      ? "Copy group cloud link"
+      : uploaded ? "Open group cloud page — no public share link" : "Upload group compilation to Clipline Cloud";
+    btn.classList.toggle("uploaded", uploaded);
+    btn.classList.toggle("busy", Boolean(busy));
+    btn.innerHTML = shareable
+      ? '<svg viewBox="0 0 24 24"><path d="M10.6 13.4a1 1 0 0 1 0-1.4l3.5-3.5a3 3 0 1 1 4.2 4.2l-1.5 1.5-1.4-1.4 1.5-1.5a1 1 0 1 0-1.4-1.4L12 13.4a1 1 0 0 1-1.4 0zm2.8-2.8a1 1 0 0 1 0 1.4l-3.5 3.5a3 3 0 1 1-4.2-4.2l1.5-1.5 1.4 1.4-1.5 1.5a1 1 0 1 0 1.4 1.4L12 10.6a1 1 0 0 1 1.4 0z"/></svg>'
+      : uploaded
+        ? '<svg viewBox="0 0 24 24"><path d="M7.2 18h10.2a4.1 4.1 0 0 0 .4-8.2A6.2 6.2 0 0 0 5.9 8.1 5 5 0 0 0 7.2 18zm.2-2a3 3 0 0 1-.5-5.9l.8-.1.3-.8A4.2 4.2 0 0 1 16 10.4l.2 1.2 1.2.1A2.1 2.1 0 0 1 17.4 16H7.4z"/></svg>'
+        : '<svg viewBox="0 0 24 24"><path d="M12 3 6.5 8.5 8 10l3-3v10h2V7l3 3 1.5-1.5L12 3zM5 19h14v2H5v-2z"/></svg>';
     return;
   }
   const clip = currentClip;
@@ -1758,6 +1771,7 @@ async function exportRangeAsClip(startS, endS, {
     clipsCache = [exportedClip, ...clipsCache.filter((clip) => clip.path !== exportedClip.path)];
     renderClips();
     if (exportedClip.group) {
+      invalidateGroupCompilation(exportedClip.group.name);
       setDeckStatusAction("Open group", () => openGroupView(exportedClip.group.name));
     } else {
       setDeckStatusAction("Open clip", () => openClip(exportedClip));
@@ -1840,6 +1854,10 @@ async function applyDeletion(removedPaths) {
     replacement = groupBefore.members.slice(index + 1).find(survives)
       || groupBefore.members.slice(0, index).reverse().find(survives)
       || null;
+  }
+  if (groupBefore && groupBefore.members.some((clip) =>
+    removed.has(GalleryWindowCore.clipPathKey(clip.path)))) {
+    invalidateGroupCompilation(groupBefore.name);
   }
   invalidateLocalClipsRefresh();
   clipsCache = clipsCache.filter(

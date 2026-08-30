@@ -279,7 +279,11 @@ Riot's Vanguard FAQ confirms in-game/LCU APIs "should continue to function" and 
   Right-clicking a rail member opens the app-owned Delete menu for that clip, and deleting the
   active member continues with a surviving neighbor. Export normalizes members to 1080p60 H.264/Opus and concatenates them into a
   normal editable local `compilation` clip; Upload creates that same compilation and hands it to
-  the existing Clipline Cloud title/description/visibility dialog. V1 compiles at most 64 members
+  the existing Clipline Cloud title/description/visibility dialog. Each member's enabled embedded
+  audio streams are normalized and mixed before concatenation, so split Output + Microphone clips
+  keep both sources. The group header resolves the latest group compilation through normal local
+  cloud records, so a successful public/unlisted upload changes Upload into Copy cloud link just as
+  it does for an ordinary clip. V1 compiles at most 64 members
   per group and does not include group rename or moving an already-existing library clip between
   groups.
 - **Export:** MP4 (H.264 for compatibility, AV1/HEVC for size), plus **GIF/WebM** for sharing.

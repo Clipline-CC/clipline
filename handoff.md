@@ -4,6 +4,29 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-29): Group upload audio and cloud state
+
+Plan: `docs/superpowers/plans/2026-08-29-group-upload-audio-state.md`.
+
+The missing microphone was upstream of Cloud. Real repro members each contain `0:output` and
+`1:microphone`, but compilation discovery reduced `audio=2` to a boolean and FFmpeg hardcoded
+`a:0`. `CompilationInput` now retains the audio count; every stream is normalized to 48 kHz stereo,
+multi-stream members use `amix` with longest duration/zero dropout/normalization, and the resulting
+single Opus stream feeds the existing cross-clip concat. Zero-audio members still receive silence.
+
+The group upload icon also bypassed normal record state. Group mode now resolves the newest local
+`<group> compilation` clip, looks up its ordinary persisted cloud record, and uses the same
+queued/uploading/uploaded/shareable rendering and click behavior as normal clips. Public/unlisted
+uploads become Copy group cloud link; private uploads open the cloud page. Existing compilations
+are reused for Copy/Upload and invalidated in-session when membership or order changes.
+
+A real discrimination smoke used silent stream 0 plus an 880 Hz stream 1; the compilation measured
+`max_volume: -21.2 dB` and contained one stereo Opus stream, proving the formerly omitted second
+stream reaches output.
+
+Verification: Node syntax checks clean, all 125 UI contracts green, `cargo test --workspace`
+green, and warning-denied workspace Clippy clean.
+
 ## Checkpoint (2026-08-29): Library metadata order and group rail layout
 
 Plan: `docs/superpowers/plans/2026-08-29-library-metadata-and-group-rail.md`.

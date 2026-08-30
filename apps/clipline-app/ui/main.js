@@ -523,8 +523,13 @@ $("rename-file-input").addEventListener("keydown", (ev) => {
   }
 });
 $("upload-clip").addEventListener("click", () => {
-  if (activeGroup()) {
-    uploadOpenGroup();
+  const group = activeGroup();
+  if (group) {
+    const compilation = groupCompilationClip(group);
+    const record = compilation ? clipCloudRecord(compilation) : null;
+    if (cloudShareUrl(record)) copyCloudUrl(record);
+    else if (cloudRecordUploaded(record)) openCloudClipUrl(record);
+    else uploadOpenGroup();
     return;
   }
   if (!currentClip) return;
