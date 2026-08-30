@@ -5912,9 +5912,11 @@ fn groups_are_created_from_trim_and_managed_in_the_library() {
     assert!(
         groups.contains("GROUP_ORDER_JOURNAL_FILE")
             && groups.contains("recover_group_order_transaction_unlocked")
+            && groups.contains("sync published group order journal")
             && library.contains("groups::recover_group_order_transaction(&dir)?;")
-            && library.contains("groups::recover_group_order_transaction(&clips_dir)?;"),
-        "Library scans and clip mutations must recover an interrupted group reorder before using sidecars"
+            && library.contains("groups::recover_group_order_transaction(&clips_dir)?;")
+            && library.contains("sync replaced clip metadata"),
+        "the journal and sidecars must be durable before recovery state can be discarded"
     );
 }
 

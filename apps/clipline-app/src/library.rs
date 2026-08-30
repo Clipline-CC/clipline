@@ -13,7 +13,7 @@ use naming::{
 
 use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -2348,8 +2348,25 @@ fn write_clip_metadata(path: &Path, metadata: &ClipMetadata) -> Result<(), Strin
     let json =
         serde_json::to_vec_pretty(metadata).map_err(|e| format!("serialize clip metadata: {e}"))?;
     let tmp = target.with_extension("clipline.json.tmp");
-    std::fs::write(&tmp, json).map_err(|e| format!("write clip metadata: {e}"))?;
-    replace_clip_metadata(&tmp, &target)
+    let result = (|| {
+        let mut file = std::fs::File::create(&tmp)
+            .map_err(|error| format!("create clip metadata: {error}"))?;
+        file.write_all(&json)
+            .map_err(|error| format!("write clip metadata: {error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("sync clip metadata: {error}"))?;
+        replace_clip_metadata(&tmp, &target)?;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&target)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| format!("sync replaced clip metadata: {error}"))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(tmp);
+    }
+    result
 }
 
 fn replace_clip_metadata(tmp: &Path, target: &Path) -> Result<(), String> {

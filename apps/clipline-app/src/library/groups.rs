@@ -232,7 +232,13 @@ fn write_group_order_journal(
         file.sync_all()
             .map_err(|error| format!("sync group order journal: {error}"))?;
         std::fs::rename(&tmp, &target)
-            .map_err(|error| format!("publish group order journal: {error}"))
+            .map_err(|error| format!("publish group order journal: {error}"))?;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&target)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| format!("sync published group order journal: {error}"))
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(tmp);
