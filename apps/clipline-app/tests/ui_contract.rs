@@ -5782,8 +5782,10 @@ fn groups_are_created_from_trim_and_managed_in_the_library() {
         assert!(css.contains(required), "groups styling must include `{required}`");
     }
     assert!(
-        js.contains("filter((clip) => !clip.group && !clip.source_group)"),
-        "group members and generated compilations must stay in clipsCache without separate top-level cards"
+        js.contains("function groupCompilationClip(group = activeGroup(), clips = clipsCache)")
+            && js.contains("localGroups(clips).map((group) => groupCompilationClip(group, clips))")
+            && js.contains("filter((clip) => !clip.group && !ownedCompilations.has(clip))"),
+        "only the current compilation owned by a live group should be hidden; stale and orphaned outputs must stay accessible"
     );
     let filter_chips = html
         .split("<div class=\"gallery-filter-chips\">")
@@ -5802,6 +5804,16 @@ fn groups_are_created_from_trim_and_managed_in_the_library() {
             && js.contains("const items = [...filtered, ...libraryGroups]")
             && js.contains("root.appendChild(c.members ? groupCard(c) : clipCard(c))"),
         "group cards must use the ordinary Library grouping and rendering pipeline"
+    );
+    assert!(
+        js.contains("function localGroups(clips = clipsCache)")
+            && js.contains("gameNames.size === 1 ? group.members[0].game || null : { name: \"Multiple games\" }")
+            && js.contains("sessions.size === 1 ? group.members[0].session || null : \"Multiple sessions\""),
+        "groups need truthful homogeneous or mixed game and session classifications"
+    );
+    assert!(
+        js.contains("c.members.reduce((sum, member) => sum + clipMarkers(member).length, 0)"),
+        "Most markers sorting must count markers across a group's members"
     );
     for required in [
         "group.size_mb = group.members.reduce",

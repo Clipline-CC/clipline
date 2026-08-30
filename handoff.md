@@ -17,6 +17,17 @@ Verification: Node syntax checks, focused Groups UI contract, `cargo test --work
 warning-denied workspace Clippy all green. One unrelated capture cadence test failed its first
 timing-sensitive workspace run, passed alone, then passed in the full rerun.
 
+Greptile follow-up: hiding every `source_group` output could strand stale compilations after a
+reorder or last-member removal, and synthetic group cards lacked the fields consumed by game,
+session, and Most markers controls. The Library now hides only the newest exact-fingerprint output
+owned by each live group; stale/orphaned/duplicate outputs remain ordinary Compilation cards.
+Homogeneous groups use their shared game/session bucket, mixed groups use explicit Multiple
+games/sessions buckets, and marker sorting sums member markers.
+
+Follow-up verification: Node syntax checks, focused Groups UI contract, `cargo test --workspace`,
+and warning-denied workspace Clippy all green; independent adversarial traces confirmed the
+compilation ownership and grouping edge cases.
+
 ## Checkpoint (2026-08-30): Durable group reorder recovery
 
 Plan: `docs/superpowers/plans/2026-08-30-group-order-journal.md`.

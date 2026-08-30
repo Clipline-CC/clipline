@@ -87,9 +87,9 @@ function groupNameKey(name) {
   return String(name || "").trim().toLowerCase();
 }
 
-function localGroups() {
+function localGroups(clips = clipsCache) {
   const groups = new Map();
-  for (const clip of clipsCache) {
+  for (const clip of clips) {
     const membership = clip && clip.group;
     const name = String(membership && membership.name || "").trim();
     if (!name) continue;
@@ -114,6 +114,10 @@ function localGroups() {
       (sum, clip) => sum + (Number(clip.size_mb) || 0),
       0,
     );
+    const gameNames = new Set(group.members.map((clip) => clip.game && clip.game.name || ""));
+    group.game = gameNames.size === 1 ? group.members[0].game || null : { name: "Multiple games" };
+    const sessions = new Set(group.members.map((clip) => clip.session || ""));
+    group.session = sessions.size === 1 ? group.members[0].session || null : "Multiple sessions";
   }
   return [...groups.values()].sort((left, right) => right.modified_unix - left.modified_unix);
 }
@@ -133,10 +137,10 @@ function groupFingerprint(group) {
     : "";
 }
 
-function groupCompilationClip(group = activeGroup()) {
+function groupCompilationClip(group = activeGroup(), clips = clipsCache) {
   if (!group) return null;
   const fingerprint = groupFingerprint(group);
-  const candidates = clipsCache
+  const candidates = clips
     .filter((clip) => clipKind(clip) === "compilation"
       && groupNameKey(clip.source_group) === groupNameKey(group.name)
       && clip.source_group_fingerprint === fingerprint)
@@ -145,7 +149,10 @@ function groupCompilationClip(group = activeGroup()) {
 }
 
 function topLevelLocalClips(clips = clipsCache) {
-  return clips.filter((clip) => !clip.group && !clip.source_group);
+  const ownedCompilations = new Set(
+    localGroups(clips).map((group) => groupCompilationClip(group, clips)).filter(Boolean),
+  );
+  return clips.filter((clip) => !clip.group && !ownedCompilations.has(clip));
 }
 
 function groupReviewMeta(group, currentDuration = NaN) {
@@ -2253,7 +2260,9 @@ function filterGalleryClips(clips, { groupName = "" } = {}) {
 
 function sortGalleryClips(clips) {
   const out = clips.slice();
-  const markerCount = (c) => clipMarkers(c).length;
+  const markerCount = (c) => c.members
+    ? c.members.reduce((sum, member) => sum + clipMarkers(member).length, 0)
+    : clipMarkers(c).length;
   if (gallerySort === "old") out.sort((a, b) => a.modified_unix - b.modified_unix);
   else if (gallerySort === "big") out.sort((a, b) => b.size_mb - a.size_mb);
   else if (gallerySort === "marks") out.sort((a, b) => markerCount(b) - markerCount(a));
