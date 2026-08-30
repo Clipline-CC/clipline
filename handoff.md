@@ -15,10 +15,12 @@ multi-stream members use `amix` with longest duration/zero dropout/normalization
 single Opus stream feeds the existing cross-clip concat. Zero-audio members still receive silence.
 
 The group upload icon also bypassed normal record state. Group mode now resolves the newest local
-`<group> compilation` clip, looks up its ordinary persisted cloud record, and uses the same
+versioned `source_group` compilation clip, looks up its ordinary persisted cloud record, and uses the same
 queued/uploading/uploaded/shareable rendering and click behavior as normal clips. Public/unlisted
 uploads become Copy group cloud link; private uploads open the cloud page. Existing compilations
-are reused for Copy/Upload and invalidated in-session when membership or order changes.
+are reused for Copy/Upload and invalidated in-session when membership or order changes. New
+compilations persist `source_group` plus `compilation_version: 2`; pre-fix stream-0-only outputs
+lack that marker and are deliberately not reused, so the next Upload regenerates corrected audio.
 
 A real discrimination smoke used silent stream 0 plus an 880 Hz stream 1; the compilation measured
 `max_volume: -21.2 dB` and contained one stereo Opus stream, proving the formerly omitted second

@@ -138,10 +138,10 @@ function groupCompilationClip(group = activeGroup()) {
   if (!group) return null;
   const key = groupCompilationKey(group.name);
   if (invalidatedGroupCompilations.has(key)) return null;
-  const expectedTitle = `${group.name} compilation`.toLocaleLowerCase();
   const candidates = clipsCache
     .filter((clip) => clipKind(clip) === "compilation"
-      && clipDisplayTitle(clip).toLocaleLowerCase() === expectedTitle)
+      && clip.source_group === group.name
+      && Number(clip.compilation_version) === 2)
     .sort((left, right) => (Number(right.modified_unix) || 0) - (Number(left.modified_unix) || 0));
   return groupCompilationClips.get(key) || candidates[0] || null;
 }

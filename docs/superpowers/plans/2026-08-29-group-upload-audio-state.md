@@ -16,7 +16,7 @@ same Upload → Copy cloud link/Open cloud page state machine as normal clips.
       `amix=inputs=2`, while zero-audio members still receive generated silence.
 - [ ] Retain each member's audio track count, normalize every stream to 48 kHz stereo, `amix` with
       longest duration/zero dropout/normalization, then feed the existing cross-clip concat.
-- [ ] Add a failing UI contract for resolving the latest `${group} compilation` clip, consulting
+- [ ] Add a failing UI contract for resolving the latest versioned `source_group` compilation, consulting
       `clipCloudRecord`, rendering uploaded/shareable state, and routing clicks through copy/open.
 - [ ] Reuse an existing current compilation for Copy/Upload; invalidate it in-session when group
       order or membership changes.

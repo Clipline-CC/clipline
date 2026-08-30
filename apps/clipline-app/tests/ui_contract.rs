@@ -5742,6 +5742,8 @@ fn groups_are_created_from_trim_and_managed_in_the_library() {
         "function deleteOpenGroup",
         "function groupCompilationClip",
         "function invalidateGroupCompilation",
+        "clip.source_group === group.name",
+        "Number(clip.compilation_version) === 2",
         "const compilation = groupCompilationClip(group)",
         "const record = compilation ? clipCloudRecord(compilation) : null",
         "openUploadDialog(exportedClip)",

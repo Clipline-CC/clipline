@@ -2,6 +2,7 @@ use super::*;
 
 const MAX_GROUP_NAME_CHARS: usize = 80;
 const MAX_COMPILATION_CLIPS: usize = 64;
+const GROUP_COMPILATION_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, PartialEq)]
 struct GroupMember {
@@ -216,6 +217,8 @@ fn export_group_file(root: &Path, name: &str) -> Result<ClipInfo, String> {
                 title: Some(title.clone()),
                 kind: Some("compilation".to_string()),
                 group: None,
+                source_group: Some(name.to_string()),
+                compilation_version: Some(GROUP_COMPILATION_VERSION),
             },
         )?;
         let json = serde_json::to_vec_pretty(&markers)
@@ -251,6 +254,8 @@ fn export_group_file(root: &Path, name: &str) -> Result<ClipInfo, String> {
         markers: Some(markers),
         game: None,
         group: None,
+        source_group: Some(name.to_string()),
+        compilation_version: Some(GROUP_COMPILATION_VERSION),
     })
 }
 

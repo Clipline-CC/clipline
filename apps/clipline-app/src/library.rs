@@ -163,6 +163,10 @@ pub struct ClipInfo {
     pub game: Option<ClipGame>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub group: Option<ClipGroup>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_group: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compilation_version: Option<u32>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -218,6 +222,10 @@ struct ClipMetadata {
     kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     group: Option<ClipGroup>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_group: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    compilation_version: Option<u32>,
 }
 
 const AUDIO_PREVIEW_CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -410,6 +418,8 @@ fn push_clips_from(
         let title = clip_title_from_metadata(&clip_metadata);
         let kind = clip_kind_from_metadata(&path, &clip_metadata).to_string();
         let group = clip_metadata.group.clone();
+        let source_group = clip_metadata.source_group.clone();
+        let compilation_version = clip_metadata.compilation_version;
         // Prefer the session sidecar; fall back to the game named in markers
         // so clips recorded before session tagging still show an icon.
         let game = session_game
@@ -430,6 +440,8 @@ fn push_clips_from(
             markers,
             game,
             group,
+            source_group,
+            compilation_version,
         });
     }
     Ok(())
@@ -2024,6 +2036,8 @@ fn export_clip_file(
                     title,
                     kind: Some("trim".to_string()),
                     group: group.clone(),
+                    source_group: None,
+                    compilation_version: None,
                 },
             )?;
         }
@@ -4452,6 +4466,8 @@ mod tests {
                 title: Some("First title".to_string()),
                 kind: Some("replay".to_string()),
                 group: None,
+                source_group: None,
+                compilation_version: None,
             },
         )
         .unwrap();
@@ -4461,6 +4477,8 @@ mod tests {
                 title: Some("Second title".to_string()),
                 kind: Some("session".to_string()),
                 group: None,
+                source_group: None,
+                compilation_version: None,
             },
         )
         .unwrap();
@@ -4485,6 +4503,8 @@ mod tests {
                     name: "Highlights".to_string(),
                     order: 2,
                 }),
+                source_group: Some("Highlights".to_string()),
+                compilation_version: Some(2),
             },
         )
         .unwrap();
@@ -4492,6 +4512,8 @@ mod tests {
         let metadata = read_clip_metadata(&clip).unwrap();
         assert_eq!(metadata.group.as_ref().map(|group| group.name.as_str()), Some("Highlights"));
         assert_eq!(metadata.group.map(|group| group.order), Some(2));
+        assert_eq!(metadata.source_group.as_deref(), Some("Highlights"));
+        assert_eq!(metadata.compilation_version, Some(2));
     }
 
     #[test]
@@ -4899,6 +4921,8 @@ mod tests {
                 title: Some("Case-only metadata".to_string()),
                 kind: Some("session".to_string()),
                 group: None,
+                source_group: None,
+                compilation_version: None,
             },
         )
         .unwrap();
