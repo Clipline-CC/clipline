@@ -2298,6 +2298,13 @@ fn clip_kind_prefers_backend_kind_for_renamed_clips() {
         ),
         "trim"
     );
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.clipKind({ name: 'Highlights.mp4', kind: 'compilation' })"
+        ),
+        "compilation"
+    );
 }
 
 #[test]

@@ -263,6 +263,42 @@ Riot's Vanguard FAQ confirms in-game/LCU APIs "should continue to function" and 
 ### 11. Clip Editor
 - **Lossless trim:** keyframe-aligned stream copy (instant, no quality loss) for cuts on GOP boundaries; **re-encode only the boundary GOPs** for frame-accurate trims.
 - Timeline with event markers; in/out points; merge multiple replay clips into a montage (joining files, ShadowPlay-montage style).
+- **Groups:** the trim action has a secondary **Add to group** path. Group membership and order
+  live in each clip's existing `.clipline.json` sidecar, so the first member creates the group and
+  deleting the last member removes it without a second database. Group members stay out of the
+  top-level Library: one group card represents them with an asymmetric mosaic of up to four real
+  clip posters. Group cards remain visible whenever any member matches the active kind, marker,
+  game, or text filter. Group names use the same Unicode lowercase key in native and frontend code.
+  Local clip and group cards share a primary metadata order of duration, size, then
+  relative modified time. Opening a group reuses the normal review player as a sequential playlist and repurposes
+  the Match events rail for member posters/titles; rows are mouse-draggable with keyboard Up/Down
+  fallbacks, and one ordered-path backend command validates and commits the complete reorder with
+  a durable pre-order journal under the app-wide clip-mutation lock; the journal and each sidecar
+  replacement use write-through phase transitions before the journal becomes a committed marker.
+  If rollback is blocked, every Library scan retries recovery and
+  refuses to expose mixed order until restoration completes. Playback advances to the next member
+  at end. Clipline disables Tauri's unused
+  native file-drop interception so WebView drag events reach those rows; document-level drag/drop
+  cancellation keeps external Explorer files from navigating the WebView. The next member is
+  preloaded into a muted layered video that covers the main player's source swap until its first
+  frame decodes, avoiding a blank visual boundary. Group mode reuses the standard review-header
+  actions instead of a second toolbar: Explorer reveals the current member; Copy and Upload build
+  the authoritative compilation; Delete confirms once before removing the group and its members.
+  Right-clicking a rail member opens app-owned Remove from group and Delete actions; either action
+  continues an active group review with a surviving neighbor. Export normalizes members to 1080p60 H.264/Opus and concatenates them into a
+  normal editable local `compilation` clip; Upload creates that same compilation and hands it to
+  the existing Clipline Cloud title/description/visibility dialog. Each member's enabled embedded
+  audio streams are normalized and mixed before concatenation, so split Output + Microphone clips
+  keep both sources. Video and audio are padded/trimmed to the same per-member endpoint, and mixed
+  audio timestamps are rebuilt from sample count, so unequal
+  Output/Microphone tails cannot feed untimestamped frames into a concat boundary. The group header
+  reuses a compilation only when its persisted, Unicode-lowercased normalized ordered-member
+  fingerprint matches the live group, including after restart. It resolves that compilation through
+  normal local cloud records, so a successful
+  public/unlisted upload changes Upload into Copy cloud link just as it does for an ordinary clip.
+  V1 compiles at most 64 members and rejects the actual UTF-16 FFmpeg invocation before it can
+  exceed Windows' process command-line limit. It does not include group rename or moving an
+  already-existing library clip between groups.
 - **Export:** MP4 (H.264 for compatibility, AV1/HEVC for size), plus **GIF/WebM** for sharing.
 - A successful trim export adds the result to the local library immediately and exposes an **Open clip** action beside the success status, avoiding a back-to-library search. The review stage supports standard fullscreen playback through its transport control or `F`; `Esc` returns from fullscreen before the existing close-clip shortcut applies.
 - **Preview decodes natively** (FFmpeg + D3D11VA hardware decode), presenting frames to the UI as shared textures — WebView2's `<video>` cannot be assumed to play AV1/HEVC (§4), and frame-accurate scrubbing of high-bitrate streams needs our own decode loop regardless.

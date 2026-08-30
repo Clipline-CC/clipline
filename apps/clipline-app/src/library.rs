@@ -4,6 +4,8 @@
 
 #[path = "library/naming.rs"]
 mod naming;
+#[path = "library/groups.rs"]
+pub(crate) mod groups;
 use naming::{
     inferred_clip_kind_for_path, is_reserved_windows_file_name, normalized_clip_file_name,
     normalized_clip_title,
@@ -11,7 +13,7 @@ use naming::{
 
 use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -163,6 +165,18 @@ pub struct ClipInfo {
     pub markers: Option<ClipMarkers>,
     /// Game this clip's session belongs to, if recorded under a detected game.
     pub game: Option<ClipGame>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<ClipGroup>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_group: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_group_fingerprint: Option<String>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ClipGroup {
+    pub name: String,
+    pub order: u32,
 }
 
 #[derive(serde::Serialize)]
@@ -191,6 +205,8 @@ pub struct ExportedClipInfo {
     pub aligned_end_s: f64,
     pub duration_s: f64,
     pub markers: Option<ClipMarkers>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<ClipGroup>,
 }
 
 #[derive(serde::Serialize)]
@@ -214,6 +230,12 @@ struct ClipMetadata {
     title: Option<String>,
     #[serde(default)]
     kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    group: Option<ClipGroup>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_group: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_group_fingerprint: Option<String>,
 }
 
 const AUDIO_PREVIEW_CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -325,6 +347,7 @@ pub async fn list_clips<R: Runtime>(
 }
 
 fn list_clips_from_dir(dir: PathBuf) -> Result<LocalClipScan, String> {
+    groups::recover_group_order_transaction(&dir)?;
     list_clips_from_dir_with_child_reader(dir, push_clips_from)
 }
 
@@ -405,6 +428,9 @@ fn push_clips_from(
         let markers = util::markers_with_inferred_audio_tracks(&path, raw_markers);
         let title = clip_title_from_metadata(&clip_metadata);
         let kind = clip_kind_from_metadata(&path, &clip_metadata).to_string();
+        let group = clip_metadata.group.clone();
+        let source_group = clip_metadata.source_group.clone();
+        let source_group_fingerprint = clip_metadata.source_group_fingerprint.clone();
         // Prefer the session sidecar; fall back to the game named in markers
         // so clips recorded before session tagging still show an icon.
         let game = session_game
@@ -425,6 +451,9 @@ fn push_clips_from(
             duration_s,
             markers,
             game,
+            group,
+            source_group,
+            source_group_fingerprint,
         });
     }
     Ok(())
@@ -1164,6 +1193,7 @@ fn rollback_renamed_clip_files(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri exposes these as named invoke fields.
 pub async fn export_clip<R: Runtime>(
     app: AppHandle<R>,
     path: String,
@@ -1171,13 +1201,26 @@ pub async fn export_clip<R: Runtime>(
     end_s: f64,
     title: Option<String>,
     include_markers: Option<bool>,
+    group: Option<String>,
     settings: tauri::State<'_, StorageSettings>,
 ) -> Result<ExportedClipInfo, String> {
     let scope_root = settings.clips_dir()?;
     let source = validate_clip_path(&settings, &path)?;
     let include_markers = include_markers.unwrap_or(true);
+    let group_root = scope_root.clone();
     let exported = tauri::async_runtime::spawn_blocking(move || {
-        export_clip_file(source, start_s, end_s, title, include_markers)
+        let group = group
+            .map(|name| groups::group_for_export(&group_root, &name))
+            .transpose()?;
+        export_clip_file(
+            source,
+            start_s,
+            end_s,
+            title,
+            include_markers,
+            group,
+            &group_root,
+        )
     })
     .await
     .map_err(|e| format!("export clip task: {e}"))??;
@@ -1711,42 +1754,15 @@ fn transcode_share_file_with_ffmpeg(
         .ok_or_else(|| "ffmpeg is not available for a shareable clipboard export".to_string())?;
     let video_modes = share_video_export_modes(source)?;
     let timeout = share_export_timeout(source);
-    let deadline = Instant::now()
-        .checked_add(timeout)
-        .unwrap_or_else(Instant::now);
-    let mut last_error = String::new();
-
-    for mode in video_modes {
-        job.ensure_active()?;
-        let Some(remaining) = remaining_share_export_timeout(deadline, Instant::now()) else {
-            last_error = format!(
-                "ffmpeg share export exhausted its {} second timeout",
-                timeout.as_secs()
-            );
-            break;
-        };
-        let _ = std::fs::remove_file(target);
-        let mut command = Command::new(&ffmpeg);
-        suppress_console(&mut command);
-        command
-            .args(ffmpeg_share_export_args(input, target, has_audio, &mode))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
-        match run_share_ffmpeg(&mut command, remaining, || job.is_cancelled()) {
-            Ok(output) if output.status.success() => return Ok(()),
-            Ok(output) => {
-                last_error = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                if last_error.is_empty() {
-                    last_error = format!("ffmpeg exited with {}", output.status);
-                }
-            }
-            Err(error) => last_error = error,
-        }
-    }
-
-    let _ = std::fs::remove_file(target);
-    Err(format!("prepare shareable clipboard clip: {last_error}"))
+    run_ffmpeg_fallback(
+        &ffmpeg,
+        target,
+        timeout,
+        video_modes,
+        "shareable clipboard export",
+        || job.is_cancelled(),
+        |mode| ffmpeg_share_export_args(input, target, has_audio, mode),
+    )
 }
 
 fn share_video_export_modes(source: &Path) -> Result<Vec<ShareVideoExportMode>, String> {
@@ -1762,7 +1778,18 @@ fn share_video_export_modes(source: &Path) -> Result<Vec<ShareVideoExportMode>, 
         ));
     }
 
-    let mut encoders: Vec<(String, EncoderBackend)> = Vec::new();
+    let encoders = available_h264_encoders();
+    if encoders.is_empty() {
+        return Err("no usable FFmpeg H.264 encoder is available for this clip".into());
+    }
+    Ok(encoders
+        .into_iter()
+        .map(|(encoder, backend)| ShareVideoExportMode::Encode { encoder, backend })
+        .collect())
+}
+
+fn available_h264_encoders() -> Vec<(String, EncoderBackend)> {
+    let mut encoders = Vec::new();
     for capability in clipline_capture::ffmpeg::probe() {
         if !capability.codecs.contains(&Codec::H264) {
             continue;
@@ -1775,13 +1802,7 @@ fn share_video_export_modes(source: &Path) -> Result<Vec<ShareVideoExportMode>, 
             encoders.push((name.to_string(), capability.backend));
         }
     }
-    if encoders.is_empty() {
-        return Err("no usable FFmpeg H.264 encoder is available for this clip".into());
-    }
-    Ok(encoders
-        .into_iter()
-        .map(|(encoder, backend)| ShareVideoExportMode::Encode { encoder, backend })
-        .collect())
+    encoders
 }
 
 fn ffmpeg_share_export_args(
@@ -1848,12 +1869,16 @@ fn ffmpeg_share_export_args(
 }
 
 fn share_export_timeout(source: &Path) -> Duration {
-    const MIN_SECONDS: u64 = 2 * 60;
-    const MAX_SECONDS: u64 = 6 * 60 * 60;
     let duration = clipline_mp4::movie_duration_s_file(source)
         .ok()
         .flatten()
         .unwrap_or(60.0);
+    share_export_timeout_for_duration(duration)
+}
+
+fn share_export_timeout_for_duration(duration: f64) -> Duration {
+    const MIN_SECONDS: u64 = 2 * 60;
+    const MAX_SECONDS: u64 = 6 * 60 * 60;
     let seconds = (duration * 4.0 + 60.0).ceil().max(0.0) as u64;
     Duration::from_secs(seconds.clamp(MIN_SECONDS, MAX_SECONDS))
 }
@@ -1864,25 +1889,73 @@ fn remaining_share_export_timeout(deadline: Instant, now: Instant) -> Option<Dur
         .filter(|remaining| !remaining.is_zero())
 }
 
+fn run_ffmpeg_fallback<T>(
+    ffmpeg: &Path,
+    target: &Path,
+    timeout: Duration,
+    modes: impl IntoIterator<Item = T>,
+    label: &str,
+    is_cancelled: impl Fn() -> bool,
+    mut args_for: impl FnMut(&T) -> Vec<String>,
+) -> Result<(), String> {
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .unwrap_or_else(Instant::now);
+    let mut last_error = String::new();
+    for mode in modes {
+        if is_cancelled() {
+            return Err(format!("{label} cancelled"));
+        }
+        let Some(remaining) = remaining_share_export_timeout(deadline, Instant::now()) else {
+            last_error = format!("exhausted its {} second timeout", timeout.as_secs());
+            break;
+        };
+        let _ = std::fs::remove_file(target);
+        let mut command = Command::new(ffmpeg);
+        suppress_console(&mut command);
+        command
+            .args(args_for(&mode))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        match run_export_ffmpeg(&mut command, remaining, label, &is_cancelled) {
+            Ok(output) if output.status.success() => return Ok(()),
+            Ok(output) => {
+                last_error = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                if last_error.is_empty() {
+                    last_error = format!("ffmpeg exited with {}", output.status);
+                }
+            }
+            Err(error) => last_error = error,
+        }
+    }
+    let _ = std::fs::remove_file(target);
+    if last_error.is_empty() {
+        last_error = "no encoder attempts were available".into();
+    }
+    Err(format!("{label}: {last_error}"))
+}
+
 struct ShareFfmpegOutput {
     status: ExitStatus,
     stderr: Vec<u8>,
 }
 
-fn run_share_ffmpeg(
+fn run_export_ffmpeg(
     command: &mut Command,
     timeout: Duration,
+    label: &str,
     is_cancelled: impl Fn() -> bool,
 ) -> Result<ShareFfmpegOutput, String> {
     const MAX_STDERR_BYTES: usize = 128 * 1024;
 
     let mut child = command
         .spawn()
-        .map_err(|error| format!("spawn ffmpeg share export: {error}"))?;
+        .map_err(|error| format!("spawn ffmpeg {label}: {error}"))?;
     let Some(stderr) = child.stderr.take() else {
         let _ = child.kill();
         let _ = child.wait();
-        return Err("spawn ffmpeg share export: stderr pipe unavailable".into());
+        return Err(format!("spawn ffmpeg {label}: stderr pipe unavailable"));
     };
     let reader = match std::thread::Builder::new()
         .name("clipline-share-ffmpeg-stderr".into())
@@ -1892,7 +1965,7 @@ fn run_share_ffmpeg(
         Err(error) => {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(format!("spawn ffmpeg share stderr reader: {error}"));
+            return Err(format!("spawn ffmpeg {label} stderr reader: {error}"));
         }
     };
 
@@ -1903,7 +1976,7 @@ fn run_share_ffmpeg(
         if is_cancelled() {
             let _ = child.kill();
             let _ = child.wait();
-            break Err("ffmpeg share export cancelled".into());
+            break Err(format!("{label} cancelled"));
         }
         match child.try_wait() {
             Ok(Some(status)) => break Ok(status),
@@ -1914,21 +1987,21 @@ fn run_share_ffmpeg(
                 let _ = child.kill();
                 let _ = child.wait();
                 break Err(format!(
-                    "ffmpeg share export timed out after {} seconds",
+                    "{label} timed out after {} seconds",
                     timeout.as_secs()
                 ));
             }
             Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                break Err(format!("wait for ffmpeg share export: {error}"));
+                break Err(format!("wait for ffmpeg {label}: {error}"));
             }
         }
     };
     let stderr = reader
         .join()
-        .map_err(|_| "ffmpeg share stderr reader panicked".to_string())?
-        .map_err(|error| format!("read ffmpeg share stderr: {error}"))?;
+        .map_err(|_| format!("ffmpeg {label} stderr reader panicked"))?
+        .map_err(|error| format!("read ffmpeg {label} stderr: {error}"))?;
     Ok(ShareFfmpegOutput {
         status: status?,
         stderr,
@@ -2064,6 +2137,8 @@ fn export_clip_file(
     end_s: f64,
     title: Option<String>,
     include_markers: bool,
+    group: Option<ClipGroup>,
+    media_root: &Path,
 ) -> Result<ExportedClipInfo, String> {
     let tmp = unique_temp_export_path(&source)?;
     let info = match trim_keyframe_aligned_file(&source, &tmp, start_s, end_s) {
@@ -2073,18 +2148,52 @@ fn export_clip_file(
             return Err(e.to_string());
         }
     };
-    let target = unique_export_path(&source, info.aligned_start_s, info.aligned_end_s, title)?;
-    std::fs::rename(&tmp, &target).map_err(|e| e.to_string())?;
+    let target = unique_export_path(
+        &source,
+        info.aligned_start_s,
+        info.aligned_end_s,
+        title.clone(),
+    )?;
+    if let Err(error) = std::fs::rename(&tmp, &target) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error.to_string());
+    }
 
-    let exported_markers = export_markers_for_range(
+    let exported_markers = match export_markers_for_range(
         &source,
         info.aligned_start_s,
         info.aligned_end_s,
         include_markers,
-    )?;
-    if let Some(markers) = &exported_markers {
-        let json = serde_json::to_string_pretty(markers).map_err(|e| e.to_string())?;
-        std::fs::write(target.with_extension("markers.json"), json).map_err(|e| e.to_string())?;
+    ) {
+        Ok(markers) => markers,
+        Err(error) => {
+            let _ = remove_clip_files(&target, media_root);
+            return Err(error);
+        }
+    };
+    let sidecars = (|| {
+        if let Some(markers) = &exported_markers {
+            let json = serde_json::to_string_pretty(markers).map_err(|e| e.to_string())?;
+            std::fs::write(target.with_extension("markers.json"), json)
+                .map_err(|e| e.to_string())?;
+        }
+        if group.is_some() {
+            write_clip_metadata(
+                &target,
+                &ClipMetadata {
+                    title,
+                    kind: Some("trim".to_string()),
+                    group: group.clone(),
+                    source_group: None,
+                    source_group_fingerprint: None,
+                },
+            )?;
+        }
+        Ok::<(), String>(())
+    })();
+    if let Err(error) = sidecars {
+        let _ = remove_clip_files(&target, media_root);
+        return Err(error);
     }
     let meta =
         std::fs::metadata(&target).map_err(|e| format!("read exported clip metadata: {e}"))?;
@@ -2108,6 +2217,7 @@ fn export_clip_file(
         aligned_end_s: info.aligned_end_s,
         duration_s: info.duration_s,
         markers: exported_markers,
+        group,
     })
 }
 
@@ -2241,8 +2351,9 @@ pub(crate) fn validate_clip_path(
     settings: &StorageSettings,
     path: &str,
 ) -> Result<PathBuf, String> {
-    let dir = settings
-        .clips_dir()?
+    let clips_dir = settings.clips_dir()?;
+    groups::recover_group_order_transaction(&clips_dir)?;
+    let dir = clips_dir
         .canonicalize()
         .map_err(|e| e.to_string())?;
     let target = Path::new(path).canonicalize().map_err(|e| e.to_string())?;
@@ -2364,12 +2475,29 @@ fn write_clip_metadata(path: &Path, metadata: &ClipMetadata) -> Result<(), Strin
     let json =
         serde_json::to_vec_pretty(metadata).map_err(|e| format!("serialize clip metadata: {e}"))?;
     let tmp = target.with_extension("clipline.json.tmp");
-    std::fs::write(&tmp, json).map_err(|e| format!("write clip metadata: {e}"))?;
-    replace_clip_metadata(&tmp, &target)
+    let result = (|| {
+        let mut file = std::fs::File::create(&tmp)
+            .map_err(|error| format!("create clip metadata: {error}"))?;
+        file.write_all(&json)
+            .map_err(|error| format!("write clip metadata: {error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("sync clip metadata: {error}"))?;
+        replace_clip_metadata(&tmp, &target)?;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&target)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| format!("sync replaced clip metadata: {error}"))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(tmp);
+    }
+    result
 }
 
 fn replace_clip_metadata(tmp: &Path, target: &Path) -> Result<(), String> {
-    match std::fs::rename(tmp, target) {
+    match crate::windows::replace_file(tmp, target) {
         Ok(()) => Ok(()),
         Err(error) if target.is_file() => replace_existing_clip_metadata(tmp, target, error),
         Err(error) => {
@@ -2393,14 +2521,14 @@ fn replace_existing_clip_metadata(
             ));
         }
     }
-    if let Err(error) = std::fs::rename(target, &backup) {
+    if let Err(error) = crate::windows::replace_file(target, &backup) {
         let _ = std::fs::remove_file(tmp);
         return Err(format!(
             "replace clip metadata: {original_error}; backup existing clip metadata: {error}"
         ));
     }
-    if let Err(error) = std::fs::rename(tmp, target) {
-        let _ = std::fs::rename(&backup, target);
+    if let Err(error) = crate::windows::replace_file(tmp, target) {
+        let _ = crate::windows::replace_file(&backup, target);
         let _ = std::fs::remove_file(tmp);
         return Err(format!("replace clip metadata: {error}"));
     }
@@ -2433,7 +2561,7 @@ fn clip_kind_from_metadata<'a>(path: &'a Path, metadata: &'a ClipMetadata) -> &'
         .kind
         .as_deref()
         .map(str::trim)
-        .filter(|value| matches!(*value, "replay" | "session" | "trim"))
+        .filter(|value| matches!(*value, "replay" | "session" | "trim" | "compilation"))
         .unwrap_or_else(|| inferred_clip_kind_for_path(path))
 }
 
@@ -4588,6 +4716,9 @@ mod tests {
             &ClipMetadata {
                 title: Some("First title".to_string()),
                 kind: Some("replay".to_string()),
+                group: None,
+                source_group: None,
+                source_group_fingerprint: None,
             },
         )
         .unwrap();
@@ -4596,6 +4727,9 @@ mod tests {
             &ClipMetadata {
                 title: Some("Second title".to_string()),
                 kind: Some("session".to_string()),
+                group: None,
+                source_group: None,
+                source_group_fingerprint: None,
             },
         )
         .unwrap();
@@ -4603,6 +4737,37 @@ mod tests {
         let metadata = read_clip_metadata(&clip).unwrap();
         assert_eq!(metadata.title.as_deref(), Some("Second title"));
         assert_eq!(metadata.kind.as_deref(), Some("session"));
+    }
+
+    #[test]
+    fn clip_metadata_round_trips_group_membership() {
+        let dir = TestDir::new("clipline-library", "group-metadata");
+        let clip = dir.path().join("clip.mp4");
+        touch_mp4(&clip);
+
+        write_clip_metadata(
+            &clip,
+            &ClipMetadata {
+                title: Some("Grouped clip".to_string()),
+                kind: Some("trim".to_string()),
+                group: Some(ClipGroup {
+                    name: "Highlights".to_string(),
+                    order: 2,
+                }),
+                source_group: Some("Highlights".to_string()),
+                source_group_fingerprint: Some("fingerprint".to_string()),
+            },
+        )
+        .unwrap();
+
+        let metadata = read_clip_metadata(&clip).unwrap();
+        assert_eq!(metadata.group.as_ref().map(|group| group.name.as_str()), Some("Highlights"));
+        assert_eq!(metadata.group.map(|group| group.order), Some(2));
+        assert_eq!(metadata.source_group.as_deref(), Some("Highlights"));
+        assert_eq!(
+            metadata.source_group_fingerprint.as_deref(),
+            Some("fingerprint")
+        );
     }
 
     #[test]
@@ -5104,6 +5269,9 @@ mod tests {
             &ClipMetadata {
                 title: Some("Case-only metadata".to_string()),
                 kind: Some("session".to_string()),
+                group: None,
+                source_group: None,
+                source_group_fingerprint: None,
             },
         )
         .unwrap();

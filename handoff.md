@@ -4,6 +4,246 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-30): Durable group reorder recovery
+
+Plan: `docs/superpowers/plans/2026-08-30-group-order-journal.md`.
+
+Best-effort reverse writes could still leave mixed order if the initial write and rollback both
+failed. Reorder now atomically publishes `.clipline-group-order.json` with every prior sidecar value
+before changing any member. Immediate rollback and every production Library scan replay that journal
+idempotently; a blocked recovery keeps the journal and fails the scan, so playback/export never
+consume partial order. The app-wide clip-mutation lock prevents scans, reorder commits, rename,
+ungroup, deletion, upload cleanup, favorites, and GC racing the journal.
+Journal publication and every replaced sidecar are flushed before journal deletion, so power loss
+cannot persist deletion ahead of the order writes. Successful commit atomically renames the journal
+to a write-through `.committed` marker before best-effort cleanup; restart treats that marker as
+committed order, while an unrenamed journal always means rollback.
+
+The regression test creates a partial order plus a deliberately blocked sidecar restore, proves the
+Library scan fails without deleting the journal, removes the obstruction, then verifies the next
+recovery restores order and removes the journal.
+
+Verification: 11 focused Groups tests green, all 125 UI contracts and 639 app tests green,
+`cargo test --workspace` green, and warning-denied workspace Clippy clean.
+
+## Checkpoint (2026-08-30): Unicode compilation fingerprint parity
+
+Plan: `docs/superpowers/plans/2026-08-30-group-fingerprint-unicode.md`.
+
+The frontend Windows path key uses Unicode `toLowerCase`, but Rust used `to_ascii_lowercase`, so an
+uppercase accented character in any member path made every compilation cache lookup miss. Rust now
+uses `to_lowercase`; the fingerprint contract includes `D:\Clips\ÉCLAIR.mp4` versus verbatim
+`\\?\d:\clips\éclair.mp4` and pins the shared `windows:d:\clips\éclair.mp4` bytes.
+
+Verification: focused regression green, `cargo test --workspace` green, and warning-denied workspace
+Clippy clean.
+
+## Checkpoint (2026-08-30): Groups second review follow-up
+
+Plan: `docs/superpowers/plans/2026-08-30-groups-second-review.md`.
+
+The second report was pinned to pre-follow-up commit `21b0966b`; its fresh-member reorder and stale
+compilation P2s, atomicity/timeout/command-length clusters, and endpoint concern were already fixed
+at `6341ac8c`. The remaining external-drop finding was valid: with native drop interception disabled,
+the app now cancels document-level `dragover` and `drop` defaults so Explorer files cannot navigate
+the WebView away from Clipline while group row handlers still receive internal drags.
+
+Rust and JavaScript now share Unicode lowercase group-name keys, so names such as `Éclair`/`éclair`
+cannot split native membership behind one UI card. Reorder refuses corrupt or unreadable member
+sidecars instead of replacing them with defaults. A failed compilation duration probe falls back to
+summed member duration, avoiding an orphan after publish. Non-group titled exports retain legacy
+kind/sidecar behavior.
+
+Group card visibility is derived from member predicates under kind, marked, game, and text filters.
+Group picker submission and per-group compilation creation are single-flight, and the playback rail
+policy now reads `activeGroupName` rather than rebuilding/sorting all groups on each sync tick.
+
+Verification: Node syntax checks clean, all 125 UI contracts and 638 app tests green,
+`cargo test --workspace` green, and warning-denied workspace Clippy clean.
+
+## Checkpoint (2026-08-30): Groups PR review blockers
+
+Plan: `docs/superpowers/plans/2026-08-30-groups-pr-review.md`.
+
+Freshly exported members can reach the UI as `\\?\D:\...` while Library scans return `D:\...`.
+The old exact backend comparison made first-use drag and Alt+Arrow reorders fail. Reordering is now
+one `reorder_group(name, ordered_paths)` call: every path is validated once, Windows device prefixes
+and case are normalized, the group is scanned once, and changed sidecars roll back if a later write
+fails. This deletes the neighbor-move protocol and its N scans/N×member writes.
+
+Compilation reuse no longer depends on process-local maps, invalidation sets, or a format-version
+literal. Each compilation persists `source_group_fingerprint`, built from normalized ordered member
+paths; the UI compares it directly with the current group. Reorder, membership changes, restart,
+compilation deletion, and same-name group recreation therefore reject stale media without mutable
+cache state. Deleting a group also deletes its generated compilations.
+
+The member context menu now offers **Remove from group**, clearing only group metadata and keeping
+review on a surviving neighbor. Group rail visibility runs through the existing event/play/metadata
+policy functions, while the gallery renderer no longer reaches into review chrome.
+
+Group compilation and normal share export now use one encoder fallback runner, one overall deadline,
+bounded diagnostics, and the existing lifecycle cancellation generation. Every member video and
+audio stream is padded/trimmed to the same endpoint before concat. The real five-member smoke
+produced 96.533 s video and 96.530 s stereo Opus audio, a 3.3 ms endpoint delta. The group cap is
+backed by an actual UTF-16 command-length check before `CreateProcessW`, so unusually long paths
+fail clearly instead of overrunning Windows' command-line ceiling.
+
+Verification: Node syntax checks clean, all 125 UI contracts and 636 app tests green,
+`cargo test --workspace` green, and warning-denied workspace Clippy clean. The one unrelated memory
+cache timing test failed once in an earlier run, then passed twice in isolation and in both complete
+reruns.
+
+## Checkpoint (2026-08-29): Group mixed-audio concat boundary
+
+Plan: `docs/superpowers/plans/2026-08-29-group-compilation-amix-boundary.md`.
+
+Real Output and Microphone tracks can end about 180 ms apart. At the shorter stream's EOF,
+`amix=duration=longest` could emit a tail frame with `pts=NOPTS`; the existing
+`asetpts=PTS-STARTPTS` preserved that invalid value and FFmpeg intermittently returned
+`-1094995529` at the group concat boundary. Both source files decoded cleanly and the old
+single-stream graph succeeded. The mixed branch now rebuilds monotonic timestamps directly from
+audio sample count with `asetpts=N/SR/TB`, preserving the longer track without extra staging.
+
+The original real graph reproduced the failure. `ashowinfo` pinned the first bad frame, while the
+one-line timestamp fix passed the same unpadded graph 12/12 times. A separate corrected
+96.5-second compilation produced one H.264 video plus one stereo Opus mix.
+
+Verification: `cargo test --workspace` green and warning-denied workspace Clippy clean.
+
+## Checkpoint (2026-08-29): Group upload audio and cloud state
+
+Plan: `docs/superpowers/plans/2026-08-29-group-upload-audio-state.md`.
+
+The missing microphone was upstream of Cloud. Real repro members each contain `0:output` and
+`1:microphone`, but compilation discovery reduced `audio=2` to a boolean and FFmpeg hardcoded
+`a:0`. `CompilationInput` now retains the audio count; every stream is normalized to 48 kHz stereo,
+multi-stream members use `amix` with longest duration/zero dropout/normalization, and the resulting
+single Opus stream feeds the existing cross-clip concat. Zero-audio members still receive silence.
+
+The group upload icon also bypassed normal record state. Group mode now resolves the matching local
+`source_group` compilation clip, looks up its ordinary persisted cloud record, and uses the same
+queued/uploading/uploaded/shareable rendering and click behavior as normal clips. Public/unlisted
+uploads become Copy group cloud link; private uploads open the cloud page. Existing compilations
+are reused for Copy/Upload only when their persisted ordered-member fingerprint matches. Legacy
+stream-0-only outputs lack that fingerprint and are deliberately not reused.
+
+A real discrimination smoke used silent stream 0 plus an 880 Hz stream 1; the compilation measured
+`max_volume: -21.2 dB` and contained one stereo Opus stream, proving the formerly omitted second
+stream reaches output.
+
+Verification: Node syntax checks clean, all 125 UI contracts green, `cargo test --workspace`
+green, and warning-denied workspace Clippy clean.
+
+## Checkpoint (2026-08-29): Library metadata order and group rail layout
+
+Plan: `docs/superpowers/plans/2026-08-29-library-metadata-and-group-rail.md`.
+
+Local clip and group cards now share one metadata formatter with duration first, size second, and
+relative modified time third; optional queue/marker context follows those primary fields. Group
+aggregation now sums member size as well as duration and latest modification, replacing the old
+`2 clips · 0:33` line with the same `0:33 · 31.4 MB · just now` shape used by normal clips.
+
+The group rail text overlap came from a generic event-button grid competing with the group-specific
+grid, plus a stray unmatched closing brace at that CSS boundary. Group rows now use an explicit
+flex layout: the poster owns a fixed 52px basis, the body owns the remaining width with
+`min-width: 0` and `overflow: hidden`, and title/meta ellipsize only inside that body.
+
+Verification: Node syntax check clean, all 125 UI contracts green, `cargo test --workspace`
+green, and warning-denied workspace Clippy clean.
+
+## Checkpoint (2026-08-29): Group context actions and header controls
+
+Plan: `docs/superpowers/plans/2026-08-29-groups-context-actions.md`.
+
+Group member rows now right-click into the existing app-owned context menu with only Delete shown.
+The normal `clipContextTarget`/`clip-menu-delete`/`deleteClip` flow stays authoritative. Deleting
+the active member selects the next surviving member (or the previous one at the end); the group
+review closes only when no member survives.
+
+The bottom Export compilation / Upload compilation row is deleted. Group mode keeps the standard
+review-header Explorer, Copy, Upload, and Delete icons: Explorer reveals the current member, Copy
+creates the authoritative compilation then uses `copyClipToClipboard`, Upload creates it then opens
+the existing upload dialog, and Delete confirms once before bulk-deleting all group members.
+Rename remains hidden because group rename is still out of scope.
+
+Drag feedback now scales/fades the source, opens an animated eight-pixel insertion gap above or
+below the hovered target, and draws a glowing accent insertion line. Persistence still uses the
+same native HTML drag pipeline and path-validated backend order command.
+
+Verification: Node syntax checks clean, all 125 UI contracts green, `cargo test --workspace`
+green, and warning-denied workspace Clippy clean.
+
+## Checkpoint (2026-08-29): Group drag interception and playback bridge
+
+Plan: `docs/superpowers/plans/2026-08-29-groups-drag-and-playback.md`.
+
+The non-working group drag was a Tauri/WebView ownership conflict, not the reorder command. Tauri's
+native Windows file-drop handler defaults on and consumed the gesture before HTML `dragstart`, so
+`groupDragSourcePath` remained empty and the backend was unreachable. The main-window config now
+sets `dragDropEnabled: false`; Clipline has no native `DragDropEvent` consumer to lose. The entire
+clip row remains the HTML drag target. Visible arrows and the drag glyph are removed; focused rows
+retain Alt+Up/Down as the no-extra-chrome keyboard equivalent.
+
+Group playback now primes the next member in one reusable muted video layered over the main stage.
+At the boundary, that prepared video (or its poster while still buffering) covers the ordinary
+main-player source replacement, then hides as soon as the main video emits `loadeddata`. This
+removes the black/blank visual gap without introducing a second player state machine; audio and
+selected sidecars remain authoritative on the existing main player, so this is visual gaplessness,
+not sample-continuous audio mixing.
+
+Verification: Node syntax checks clean, focused Groups contract green, `cargo test --workspace`
+green, and warning-denied workspace Clippy clean. Live mouse drag/transition acceptance remains the
+user handoff because Computer Use's native pipe is unavailable.
+
+## Checkpoint (2026-08-29): Groups use the review player
+
+Plan: `docs/superpowers/plans/2026-08-29-groups-player-view.md`.
+
+The first Groups pass is refined around one top-level Library owner. Grouped trim files remain in
+`clipsCache` and on disk but no longer render individual cards; search and group playback still see
+them. The post-export deck action now says **Open group**. A group card combines up to four normal
+lazy-loaded clip posters into a full-bleed/cutout mosaic with a fourth-photo polaroid treatment and
+an overflow count instead of using a placeholder glyph.
+
+The standalone group dialog is deleted. Opening a group puts its first member in the existing
+review player, shows the group name and aggregate/member position in the header, and reuses the
+Match events rail for ordered clip rows. Clicking a row loads that member, reaching `ended`
+advances to the next member, and HTML drag/drop reorders through the existing path-validated move
+command. Alt+Up/Down on the focused row is the keyboard-accessible equivalent. Per-member
+rename/delete/share/trim chrome is hidden in group mode; compilation Export and Upload now live in
+the review deck and still use the authoritative FFmpeg/cloud paths from the first pass.
+
+Verification: Node syntax checks clean, all 125 UI contracts green, `cargo test --workspace`
+green, and warning-denied workspace Clippy clean. The rebuilt app started against the real local
+Library with one two-member group; startup/mosaic rendering produced no frontend warning or error
+diagnostics. Computer Use's native pipe was unavailable, so click/drag visual acceptance remains
+the user handoff.
+
+## Checkpoint (2026-08-29): Ordered clip groups and compilation export
+
+Plan: `docs/superpowers/plans/2026-08-29-groups.md` (plan commit `1f0ffe2`).
+
+The review trim row now has a secondary **Add to group** action. It can create a named group or
+append to an existing one while exporting the selected range. Membership is intentionally not a
+new database: the existing per-clip `.clipline.json` document carries optional `{ name, order }`
+group metadata. The first member creates the Library group card, normal clip rename/delete keeps
+working through the existing sidecar ownership path, and the group disappears with its last clip.
+
+Clicking a group card opens its ordered member view. Up/Down controls call one path-validated
+backend command that rewrites authoritative order values. **Export compilation** runs a bounded
+FFmpeg job over those authoritative members, letterboxes mixed dimensions to 1920×1080, converts
+to 60 fps H.264/Opus, supplies silence for members without audio, and publishes an ordinary owned
+`compilation` clip in the media root. **Upload compilation** creates the same local result and then
+reuses the existing Cloud upload dialog and durable upload path. Cloud itself needs no group API.
+V1 caps a compilation at 64 members to stay below the Windows process command-line ceiling; group
+rename and moving old Library clips between groups remain deferred.
+
+Verification: `cargo test --workspace` green; warning-denied workspace Clippy clean; all 125 UI
+contracts green; Node syntax checks clean. A real managed-FFmpeg smoke joined landscape+audio and
+portrait+silent inputs, encoded the exact 1080p60 H.264/Opus filter path, and decoded the output.
+Rust 1.98's new `chunks_exact_to_as_chunks` warnings were cleared mechanically in commit `38f465b`
+so the required warning-denied gate remains usable.
+
 ## Checkpoint (2026-08-30): PR #188 final-review fixes
 
 Plan: `docs/superpowers/plans/2026-08-30-pr-188-final-review-fixes.md`.

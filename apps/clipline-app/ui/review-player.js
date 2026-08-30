@@ -10,6 +10,27 @@ var renameFilePending = false;
 function syncUploadClipButton() {
   const btn = $("upload-clip");
   if (!btn) return;
+  const group = activeGroup();
+  if (group) {
+    const compilation = groupCompilationClip(group);
+    const record = compilation ? clipCloudRecord(compilation) : null;
+    const busy = record && ["queued", "uploading", "processing", "retrying"].includes(record.upload_status);
+    const uploaded = cloudRecordUploaded(record);
+    const shareable = !!cloudShareUrl(record);
+    btn.hidden = !cloudUploadControlVisible(uploaded);
+    btn.disabled = busy || (uploaded ? !record.remote_clip_id : !cloudConnected());
+    btn.title = shareable
+      ? "Copy group cloud link"
+      : uploaded ? "Open group cloud page — no public share link" : "Upload group compilation to Clipline Cloud";
+    btn.classList.toggle("uploaded", uploaded);
+    btn.classList.toggle("busy", Boolean(busy));
+    btn.innerHTML = shareable
+      ? '<svg viewBox="0 0 24 24"><path d="M10.6 13.4a1 1 0 0 1 0-1.4l3.5-3.5a3 3 0 1 1 4.2 4.2l-1.5 1.5-1.4-1.4 1.5-1.5a1 1 0 1 0-1.4-1.4L12 13.4a1 1 0 0 1-1.4 0zm2.8-2.8a1 1 0 0 1 0 1.4l-3.5 3.5a3 3 0 1 1-4.2-4.2l1.5-1.5 1.4 1.4-1.5 1.5a1 1 0 1 0 1.4 1.4L12 10.6a1 1 0 0 1 1.4 0z"/></svg>'
+      : uploaded
+        ? '<svg viewBox="0 0 24 24"><path d="M7.2 18h10.2a4.1 4.1 0 0 0 .4-8.2A6.2 6.2 0 0 0 5.9 8.1 5 5 0 0 0 7.2 18zm.2-2a3 3 0 0 1-.5-5.9l.8-.1.3-.8A4.2 4.2 0 0 1 16 10.4l.2 1.2 1.2.1A2.1 2.1 0 0 1 17.4 16H7.4z"/></svg>'
+        : '<svg viewBox="0 0 24 24"><path d="M12 3 6.5 8.5 8 10l3-3v10h2V7l3 3 1.5-1.5L12 3zM5 19h14v2H5v-2z"/></svg>';
+    return;
+  }
   const clip = currentClip;
   if (isCloudOnlyReviewClip(clip)) {
     const shareable = !!(
@@ -49,12 +70,15 @@ function syncUploadClipButton() {
 
 function syncReviewLocalActions() {
   const cloudOnly = isCloudOnlyReviewClip();
-  for (const id of ["favorite-clip", "rename-clip", "open-folder", "copy-clip", "delete-clip"]) {
+  const group = Boolean(activeGroup());
+  $("rename-clip").hidden = cloudOnly || group;
+  for (const id of ["favorite-clip", "open-folder", "copy-clip", "delete-clip"]) {
     const el = $(id);
     if (el) el.hidden = cloudOnly;
   }
   syncFavoriteButton();
-  if (cloudOnly) setClipTitleEditing(false);
+  if (cloudOnly || group) setClipTitleEditing(false);
+  syncGroupReviewChrome();
 }
 
 function syncFavoriteButton() {
@@ -536,6 +560,8 @@ function suspendReviewPlayback({ renderGallery = true } = {}) {
   releaseReviewVideoSource();
   reviewSeekState = PlayerCore.createLogicalSeekState();
   currentClip = null;
+  activeGroupName = "";
+  clearGroupPlaybackPreload();
   currentReviewMediaPath = null;
   currentReviewAudioKey = null;
   currentReviewAudioTrackIds = [];
@@ -741,7 +767,7 @@ async function submitRenameFileDialog() {
   }
 }
 
-function openClip(clip) {
+function openClip(clip, { preserveGroup = false, autoplay = true } = {}) {
   if (settingsOpen) {
     syncSettingsDraftFromForm({ resetDiscard: false });
     if (settingsHaveUnsavedChanges()) {
@@ -749,6 +775,10 @@ function openClip(clip) {
       return;
     }
     toggleSettings(false);
+  }
+  if (!preserveGroup) {
+    activeGroupName = "";
+    clearGroupPlaybackPreload();
   }
   cancelDesiredAudioPreview();
   clearReviewAudioSidecars("direct");
@@ -764,8 +794,11 @@ function openClip(clip) {
   setDeckStatus("");
   $("stage-note").textContent = "loading…";
   setClipTitleEditing(false);
-  $("pname").textContent = clipDisplayTitle(clip) || clip.name;
-  $("pmeta").textContent = `${fmtMegabytes(clip.size_mb)} · ${PlayerCore.clipFileLabel(clip)}`;
+  const group = activeGroup();
+  $("pname").textContent = group ? group.name : clipDisplayTitle(clip) || clip.name;
+  $("pmeta").textContent = group
+    ? groupReviewMeta(group)
+    : `${fmtMegabytes(clip.size_mb)} · ${PlayerCore.clipFileLabel(clip)}`;
   syncReviewLocalActions();
   syncUploadClipButton();
   updateViews();
@@ -784,7 +817,7 @@ function openClip(clip) {
   renderClips();
   noteActivity();
   requestAnimationFrame(updateStageFrame);
-  video.play().catch(() => syncPlayState());
+  if (autoplay) video.play().catch(() => syncPlayState());
   if (clipAudioTracks(clip).length > 0) {
     requestSelectedAudioPreview();
   }
@@ -800,6 +833,8 @@ function closeReview() {
   releaseReviewVideoSource();
   reviewSeekState = PlayerCore.createLogicalSeekState();
   currentClip = null;
+  activeGroupName = "";
+  clearGroupPlaybackPreload();
   simpleTrimMode = false;
   currentReviewMediaPath = null;
   currentReviewAudioKey = null;
@@ -940,15 +975,16 @@ function applyTimelineEditorPreference() {
   const deck = document.querySelector(".deck");
   if (!deck) return;
   const legacy = legacyTimelineEnabled();
-  if (legacy) simpleTrimMode = false;
+  const group = Boolean(activeGroup());
+  if (legacy || group) simpleTrimMode = false;
   deck.classList.toggle("legacy-timeline", legacy);
   deck.classList.toggle("simple-timeline", !legacy);
   deck.classList.toggle("simple-trim-active", !legacy && simpleTrimMode);
 
   const toggle = $("trim-mode-toggle");
-  $("trim-action-panel").hidden = legacy;
-  toggle.disabled = legacy;
-  toggle.hidden = legacy;
+  $("trim-action-panel").hidden = legacy || group;
+  toggle.disabled = legacy || group;
+  toggle.hidden = legacy || group;
   toggle.classList.toggle("active", !legacy && simpleTrimMode);
   toggle.setAttribute("aria-pressed", String(!legacy && simpleTrimMode));
   toggle.title = simpleTrimMode ? "Close" : "Clip";
@@ -967,7 +1003,7 @@ function applyTimelineEditorPreference() {
 }
 
 function setSimpleTrimMode(active) {
-  if (legacyTimelineEnabled()) {
+  if (legacyTimelineEnabled() || activeGroup()) {
     simpleTrimMode = false;
     scheduleTrimBoundaryCheck();
     applyTimelineEditorPreference();
@@ -1711,6 +1747,7 @@ async function exportRangeAsClip(startS, endS, {
   label = "",
   title = "",
   includeMarkers = true,
+  group = "",
 } = {}) {
   const sourceClip = currentClip;
   if (!sourceClip) return;
@@ -1726,6 +1763,7 @@ async function exportRangeAsClip(startS, endS, {
       includeMarkers,
     };
     if (title) request.title = title;
+    if (group) request.group = group;
     const exported = await invoke("export_clip", request);
     const exportedLabel = label ? `${label} ${exported.name}` : exported.name;
     setDeckStatus(`exported ${exportedLabel} · keyframe-aligned ${fmtTenths(exported.aligned_start_s)} – ${fmtTenths(exported.aligned_end_s)}`, { transient: true });
@@ -1740,15 +1778,22 @@ async function exportRangeAsClip(startS, endS, {
       duration_s: exported.duration_s,
       markers: exported.markers || null,
       game: sourceClip.game || null,
+      group: exported.group || null,
     };
     invalidateLocalClipsRefresh();
     clipsCache = [exportedClip, ...clipsCache.filter((clip) => clip.path !== exportedClip.path)];
     renderClips();
-    setDeckStatusAction("Open clip", () => openClip(exportedClip));
+    if (exportedClip.group) {
+      setDeckStatusAction("Open group", () => openGroupView(exportedClip.group.name));
+    } else {
+      setDeckStatusAction("Open clip", () => openClip(exportedClip));
+    }
     await refreshStorage();
+    return exportedClip;
   } catch (e) {
     setDeckStatus("");
     $("error").textContent = e;
+    return null;
   } finally {
     if (button) button.disabled = false;
   }
@@ -1812,12 +1857,28 @@ async function applyDeletion(removedPaths) {
   const removed = new Set((removedPaths || []).map(GalleryWindowCore.clipPathKey).filter(Boolean));
   if (!removed.size) return;
   const wasCurrent = currentClip && removed.has(GalleryWindowCore.clipPathKey(currentClip.path));
+  const groupBefore = activeGroup();
+  let replacement = null;
+  if (wasCurrent && groupBefore) {
+    const index = groupBefore.members.findIndex((clip) =>
+      PlayerCore.sameClipPath(clip.path, currentClip.path));
+    const survives = (clip) => !removed.has(GalleryWindowCore.clipPathKey(clip.path));
+    replacement = groupBefore.members.slice(index + 1).find(survives)
+      || groupBefore.members.slice(0, index).reverse().find(survives)
+      || null;
+  }
   invalidateLocalClipsRefresh();
   clipsCache = clipsCache.filter(
     (clip) => !removed.has(GalleryWindowCore.clipPathKey(clip.path)),
   );
-  if (wasCurrent) closeReview();
-  else renderClips();
+  if (wasCurrent && replacement) {
+    activeGroupName = groupBefore.name;
+    openGroupMember(replacement);
+  } else if (wasCurrent) closeReview();
+  else {
+    renderClips();
+    if (groupBefore) renderGameEventRail();
+  }
   await refreshStorage();
 }
 

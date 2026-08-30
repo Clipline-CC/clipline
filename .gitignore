@@ -4,6 +4,7 @@
 *.mp4
 .local-secrets/
 .playwright-mcp/
+paseo.json
 # Release builds stage an LGPL ffmpeg bundle here before packaging. Keep the
 # directory contract in git, but never commit the large third-party binaries.
 apps/clipline-app/ffmpeg/*

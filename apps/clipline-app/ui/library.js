@@ -73,6 +73,470 @@ function clipDisplayTitle(clip) {
   return title || PresentationCore.clipNameStem(clip && clip.name);
 }
 
+function libraryItemMeta(durationS, sizeMb, modifiedUnix) {
+  const parts = [];
+  if (Number.isFinite(durationS)) parts.push(fmtDur(durationS));
+  if (Number.isFinite(Number(sizeMb))) parts.push(fmtMegabytes(Number(sizeMb)));
+  if (Number.isFinite(Number(modifiedUnix))) {
+    parts.push(fmtAgo(Date.now() / 1000, Number(modifiedUnix)));
+  }
+  return parts;
+}
+
+function groupNameKey(name) {
+  return String(name || "").trim().toLowerCase();
+}
+
+function localGroups() {
+  const groups = new Map();
+  for (const clip of clipsCache) {
+    const membership = clip && clip.group;
+    const name = String(membership && membership.name || "").trim();
+    if (!name) continue;
+    const key = groupNameKey(name);
+    if (!groups.has(key)) groups.set(key, { name, members: [], modified_unix: 0 });
+    const group = groups.get(key);
+    group.members.push(clip);
+    group.modified_unix = Math.max(group.modified_unix, Number(clip.modified_unix) || 0);
+  }
+  for (const group of groups.values()) {
+    group.members.sort((left, right) => {
+      const order = (Number(left.group && left.group.order) || 0)
+        - (Number(right.group && right.group.order) || 0);
+      return order || (Number(left.modified_unix) || 0) - (Number(right.modified_unix) || 0)
+        || String(left.path).localeCompare(String(right.path));
+    });
+    group.duration_s = group.members.reduce((sum, clip) => {
+      const duration = Number(clip.duration_s ?? clip.markers?.duration_s);
+      return sum + (Number.isFinite(duration) ? duration : 0);
+    }, 0);
+    group.size_mb = group.members.reduce(
+      (sum, clip) => sum + (Number(clip.size_mb) || 0),
+      0,
+    );
+  }
+  return [...groups.values()].sort((left, right) => right.modified_unix - left.modified_unix);
+}
+
+function groupForName(name) {
+  const key = groupNameKey(name);
+  return localGroups().find((group) => groupNameKey(group.name) === key) || null;
+}
+
+function activeGroup() {
+  return activeGroupName ? groupForName(activeGroupName) : null;
+}
+
+function groupFingerprint(group) {
+  return group && group.members
+    ? group.members.map((clip) => GalleryWindowCore.clipPathKey(clip.path)).join("\0")
+    : "";
+}
+
+function groupCompilationClip(group = activeGroup()) {
+  if (!group) return null;
+  const fingerprint = groupFingerprint(group);
+  const candidates = clipsCache
+    .filter((clip) => clipKind(clip) === "compilation"
+      && groupNameKey(clip.source_group) === groupNameKey(group.name)
+      && clip.source_group_fingerprint === fingerprint)
+    .sort((left, right) => (Number(right.modified_unix) || 0) - (Number(left.modified_unix) || 0));
+  return candidates[0] || null;
+}
+
+function topLevelLocalClips(clips = clipsCache) {
+  return clips.filter((clip) => !clip.group);
+}
+
+function groupReviewMeta(group, currentDuration = NaN) {
+  const index = group.members.findIndex((clip) => currentClip
+    && PlayerCore.sameClipPath(clip.path, currentClip.path));
+  const parts = [
+    `${group.members.length} clip${group.members.length === 1 ? "" : "s"}`,
+    group.duration_s > 0 ? fmtDur(group.duration_s) : "",
+    index >= 0 ? `playing ${index + 1} of ${group.members.length}` : "",
+    Number.isFinite(currentDuration) ? fmtDur(currentDuration) : "",
+  ];
+  return parts.filter(Boolean).join(" · ");
+}
+
+function visibleLocalGroups() {
+  return localGroups().filter((group) =>
+    filterGalleryClips(group.members, { groupName: group.name }).items.length);
+}
+
+function groupPosterMosaic(group) {
+  const mosaic = document.createElement("div");
+  const shown = group.members.slice(0, 4);
+  mosaic.className = "group-poster-mosaic";
+  mosaic.dataset.count = String(shown.length);
+  shown.forEach((clip, index) => {
+    const cell = document.createElement("div");
+    cell.className = `group-poster-cell group-poster-cell-${index + 1}`;
+    cell.style.cssText = thumbGradient(clip);
+    observePoster(clip.path, cell);
+    mosaic.appendChild(cell);
+  });
+  if (group.members.length > shown.length) {
+    const overflow = document.createElement("span");
+    overflow.className = "group-poster-overflow";
+    overflow.textContent = `+${group.members.length - shown.length}`;
+    mosaic.appendChild(overflow);
+  }
+  return mosaic;
+}
+
+function groupCard(group) {
+  const card = document.createElement("article");
+  card.className = "card group-card";
+  card.tabIndex = 0;
+  card.setAttribute("role", "button");
+  card.setAttribute("aria-label", `Open group ${group.name}`);
+  const art = document.createElement("div");
+  art.className = "card-thumb group-card-art";
+  art.appendChild(groupPosterMosaic(group));
+  const kind = document.createElement("span");
+  kind.className = "card-kind group";
+  kind.textContent = "Group";
+  art.appendChild(kind);
+  const meta = document.createElement("div");
+  meta.className = "card-meta";
+  const title = document.createElement("div");
+  title.className = "card-name";
+  const text = document.createElement("span");
+  text.className = "t";
+  text.textContent = group.name;
+  title.appendChild(text);
+  const info = document.createElement("div");
+  info.className = "card-sub";
+  info.textContent = libraryItemMeta(group.duration_s, group.size_mb, group.modified_unix).join(" · ");
+  meta.append(title, info);
+  card.append(art, meta);
+  const open = () => {
+    if (!selectMode) openGroupView(group.name);
+  };
+  card.addEventListener("click", open);
+  card.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    open();
+  });
+  return card;
+}
+
+function renderGroupCards(root, groups) {
+  if (!groups.length) return;
+  const head = document.createElement("div");
+  head.className = "gallery-group-head group-section-head";
+  const label = document.createElement("span");
+  label.textContent = "Groups";
+  const count = document.createElement("span");
+  count.className = "gcount";
+  count.textContent = groups.length;
+  head.append(label, count);
+  root.appendChild(head);
+  for (const group of groups) root.appendChild(groupCard(group));
+}
+
+function syncGroupPickerMode() {
+  const creating = $("group-picker-select").value === "";
+  $("group-picker-new").hidden = !creating;
+  if (creating) $("group-picker-name").focus();
+}
+
+function openGroupPicker() {
+  if (!currentClip) return;
+  const groups = localGroups();
+  const select = $("group-picker-select");
+  select.replaceChildren();
+  for (const group of groups) {
+    const option = document.createElement("option");
+    option.value = group.name;
+    option.textContent = group.name;
+    select.appendChild(option);
+  }
+  const create = document.createElement("option");
+  create.value = "";
+  create.textContent = "New group…";
+  select.appendChild(create);
+  select.value = groups.length ? groups[0].name : "";
+  $("group-picker-name").value = "";
+  $("group-picker-status").textContent = "";
+  $("group-picker-confirm").disabled = false;
+  syncGroupPickerMode();
+  if (!$("group-picker-dialog").open) $("group-picker-dialog").showModal();
+  if (groups.length) select.focus();
+}
+
+function closeGroupPicker() {
+  if ($("group-picker-dialog").open) $("group-picker-dialog").close();
+}
+
+async function submitGroupPicker() {
+  if ($("group-picker-confirm").disabled) return;
+  const creating = $("group-picker-select").value === "";
+  const name = (creating ? $("group-picker-name").value : $("group-picker-select").value).trim();
+  if (!name) {
+    $("group-picker-status").textContent = "Group name is required.";
+    $("group-picker-name").focus();
+    return;
+  }
+  $("group-picker-status").textContent = "Creating clip…";
+  const exported = await exportRangeAsClip(trimStart, trimEnd, {
+    button: $("group-picker-confirm"),
+    group: name,
+  });
+  if (exported) closeGroupPicker();
+  else $("group-picker-status").textContent = String($("error").textContent || "Could not add clip to group.");
+}
+
+function syncGroupReviewChrome() {
+  const group = activeGroup();
+  const active = Boolean(group);
+  $("review-viewer").classList.toggle("group-review", active);
+  $("clip-export-row").hidden = active;
+  $("open-folder").title = active ? "Show current group clip in Explorer" : "Show this clip in Explorer";
+  $("copy-clip").title = active
+    ? "Copy group compilation to clipboard"
+    : "Copy shareable clip to clipboard (clips over 5 minutes copy the media file; Shift+click copies the original)";
+  $("delete-clip").title = active ? "Delete group and all clips" : "Delete source clip from disk";
+  if (active) simpleTrimMode = false;
+}
+
+function syncGroupReviewHeader() {
+  const group = activeGroup();
+  if (!group) return;
+  $("pname").textContent = group.name;
+  $("pmeta").textContent = groupReviewMeta(group, video.duration);
+}
+
+function clearGroupPlaybackPreload() {
+  const preload = $("group-preload-video");
+  preload.pause();
+  preload.hidden = true;
+  preload.dataset.groupClipPath = "";
+  preload.removeAttribute("poster");
+  preload.removeAttribute("src");
+  preload.load();
+}
+
+function preloadNextGroupMember() {
+  const group = activeGroup();
+  const preload = $("group-preload-video");
+  const index = group && currentClip
+    ? group.members.findIndex((clip) => PlayerCore.sameClipPath(clip.path, currentClip.path))
+    : -1;
+  const next = index >= 0 ? group.members[index + 1] : null;
+  if (!next) {
+    clearGroupPlaybackPreload();
+    return;
+  }
+  if (PlayerCore.sameClipPath(preload.dataset.groupClipPath, next.path)) return;
+  preload.pause();
+  preload.hidden = true;
+  preload.dataset.groupClipPath = next.path;
+  const poster = posterCacheGet(next.path);
+  if (typeof poster === "string") preload.poster = poster;
+  else preload.removeAttribute("poster");
+  preload.src = convertFileSrc(next.path);
+  preload.load();
+}
+
+function beginGroupPlaybackBridge(nextClip) {
+  const preload = $("group-preload-video");
+  if (!nextClip || !PlayerCore.sameClipPath(preload.dataset.groupClipPath, nextClip.path)) return;
+  if (preload.readyState < 2 && !preload.hasAttribute("poster")) return;
+  preload.playbackRate = video.playbackRate;
+  try { preload.currentTime = 0; } catch (_) { /* Metadata may still be loading; the poster remains. */ }
+  preload.hidden = false;
+  if (preload.readyState >= 2) preload.play().catch(() => {});
+}
+
+function finishGroupPlaybackBridge() {
+  const preload = $("group-preload-video");
+  preload.hidden = true;
+  preload.pause();
+  preloadNextGroupMember();
+}
+
+function openGroupMember(clip, { autoplay = true } = {}) {
+  const group = activeGroup();
+  if (!group || !group.members.some((member) => PlayerCore.sameClipPath(member.path, clip.path))) {
+    return;
+  }
+  if (currentClip && !PlayerCore.sameClipPath(currentClip.path, clip.path)) {
+    beginGroupPlaybackBridge(clip);
+  }
+  openClip(clip, { preserveGroup: true, autoplay });
+}
+
+function openGroupView(name) {
+  const group = groupForName(name);
+  if (!group || !group.members.length) return;
+  activeGroupName = group.name;
+  gameEventRailCollapsed = false;
+  openGroupMember(group.members[0]);
+}
+
+function advanceGroupPlayback() {
+  const group = activeGroup();
+  if (!group || !currentClip) return;
+  const index = group.members.findIndex((clip) => PlayerCore.sameClipPath(clip.path, currentClip.path));
+  if (index < 0 || index + 1 >= group.members.length) {
+    setDeckStatus("group playback finished", { transient: true });
+    return;
+  }
+  openGroupMember(group.members[index + 1]);
+}
+
+function applyGroupOrderUpdates(updates) {
+  for (const update of updates || []) {
+    const target = clipsCache.find((candidate) => PlayerCore.sameClipPath(candidate.path, update.path));
+    if (target && target.group) target.group.order = update.order;
+  }
+}
+
+async function moveGroupClip(clip, direction) {
+  const group = activeGroup();
+  if (!group || !clip) return;
+  const from = group.members.findIndex((member) => PlayerCore.sameClipPath(member.path, clip.path));
+  const delta = direction === "up" ? -1 : 1;
+  const to = Math.max(0, Math.min(group.members.length - 1, from + delta));
+  if (from < 0 || from === to) return;
+  const ordered = [...group.members];
+  ordered.splice(to, 0, ordered.splice(from, 1)[0]);
+  await reorderGroupMembers(group, ordered.map((member) => member.path));
+}
+
+async function reorderGroupMembers(group, orderedPaths) {
+  if (groupReorderPending || !group) return;
+  groupReorderPending = true;
+  setDeckStatus("reordering group…");
+  try {
+    const updates = await invoke("reorder_group", { name: group.name, orderedPaths });
+    applyGroupOrderUpdates(updates);
+    renderClips();
+    renderGroupClipRail();
+    syncGroupReviewHeader();
+    preloadNextGroupMember();
+    setDeckStatus("group order updated", { transient: true });
+  } catch (error) {
+    setDeckStatus("");
+    $("error").textContent = String(error);
+  } finally {
+    groupReorderPending = false;
+  }
+}
+
+function dropGroupClip(sourcePath, targetPath) {
+  const group = activeGroup();
+  if (!group || sourcePath === targetPath) return;
+  const from = group.members.findIndex((clip) => PlayerCore.sameClipPath(clip.path, sourcePath));
+  const to = group.members.findIndex((clip) => PlayerCore.sameClipPath(clip.path, targetPath));
+  if (from < 0 || to < 0 || from === to) return;
+  const ordered = [...group.members];
+  ordered.splice(to, 0, ordered.splice(from, 1)[0]);
+  reorderGroupMembers(group, ordered.map((member) => member.path));
+}
+
+async function createOpenGroupCompilation() {
+  if (!activeGroupName) return null;
+  const name = activeGroupName;
+  const key = groupNameKey(name);
+  if (groupCompilationInflight.has(key)) return groupCompilationInflight.get(key);
+  const pending = (async () => {
+    setDeckStatus("exporting compilation…");
+    await afterNextPaint();
+    try {
+      const exportedClip = await invoke("export_group", { name });
+      invalidateLocalClipsRefresh();
+      clipsCache = [
+        exportedClip,
+        ...clipsCache.filter((clip) => !PlayerCore.sameClipPath(clip.path, exportedClip.path)),
+      ];
+      renderClips();
+      await refreshStorage();
+      setDeckStatus("group compilation ready", { transient: true });
+      return exportedClip;
+    } catch (error) {
+      setDeckStatus("");
+      $("error").textContent = String(error);
+      return null;
+    }
+  })();
+  groupCompilationInflight.set(key, pending);
+  try {
+    return await pending;
+  } finally {
+    if (groupCompilationInflight.get(key) === pending) groupCompilationInflight.delete(key);
+  }
+}
+
+async function copyOpenGroup(event) {
+  $("copy-clip").disabled = true;
+  const exportedClip = groupCompilationClip() || await createOpenGroupCompilation();
+  if (exportedClip) await copyClipToClipboard(event, exportedClip);
+  $("copy-clip").disabled = false;
+}
+
+async function uploadOpenGroup() {
+  $("upload-clip").disabled = true;
+  const exportedClip = groupCompilationClip() || await createOpenGroupCompilation();
+  if (exportedClip) openUploadDialog(exportedClip);
+  syncUploadClipButton();
+}
+
+async function deleteOpenGroup() {
+  const group = activeGroup();
+  if (!group) return;
+  const count = group.members.length;
+  if (!(await confirmDeleteDialog(
+    `Delete group “${group.name}”?`,
+    `This deletes all ${count} clip${count === 1 ? "" : "s"} in the group.`,
+  ))) return;
+  try {
+    const generated = clipsCache.filter((clip) =>
+      groupNameKey(clip.source_group) === groupNameKey(group.name));
+    const paths = [...group.members, ...generated].map((clip) => clip.path);
+    const report = await invoke("delete_clips", { paths });
+    await applyDeletion(report.deleted);
+    const notice = deletionNotice(report.deleted.length);
+    if (notice) setNotice(notice, { transient: true });
+    $("error").textContent = formatDeletionFailures(report.failed);
+  } catch (error) {
+    $("error").textContent = String(error);
+  }
+}
+
+async function removeClipFromGroup(clip) {
+  const group = activeGroup();
+  if (!group || !clip || !clip.group) return;
+  const index = group.members.findIndex((member) => PlayerCore.sameClipPath(member.path, clip.path));
+  if (index < 0) return;
+  const replacement = group.members[index + 1] || group.members[index - 1] || null;
+  const wasCurrent = currentClip && PlayerCore.sameClipPath(currentClip.path, clip.path);
+  try {
+    await invoke("remove_from_group", { path: clip.path });
+    clip.group = null;
+    invalidateLocalClipsRefresh();
+    if (wasCurrent && replacement) {
+      activeGroupName = group.name;
+      openGroupMember(replacement);
+    } else if (wasCurrent) {
+      closeReview();
+    } else {
+      renderClips();
+      renderGroupClipRail();
+      syncGroupReviewHeader();
+      preloadNextGroupMember();
+    }
+    setNotice("removed clip from group", { transient: true });
+    await refreshStorage();
+  } catch (error) {
+    $("error").textContent = String(error);
+  }
+}
+
 const CLOUD_POSTER_CACHE_PREFIX = "cloud-thumb:";
 const POSTER_UNAVAILABLE_RETRY_MS = 30_000;
 var posterUnavailableUntil = new Map();
@@ -249,11 +713,14 @@ const CLIP_KIND_ICONS = {
     '<svg viewBox="0 0 24 24"><path d="M3 5h18v14H3V5zM5 6v2h2v-2zM9 6v2h2v-2zM13 6v2h2v-2zM17 6v2h2v-2zM5 16v2h2v-2zM9 16v2h2v-2zM13 16v2h2v-2zM17 16v2h2v-2z"/></svg>',
   trim:
     '<svg viewBox="0 0 24 24"><path d="M9.64 7.64c.23-.5.36-1.05.36-1.64 0-2.21-1.79-4-4-4S2 3.79 2 6s1.79 4 4 4c.59 0 1.14-.13 1.64-.36L10 12l-2.36 2.36C7.14 14.13 6.59 14 6 14c-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4c0-.59-.13-1.14-.36-1.64L12 14l7 7h3v-1L9.64 7.64zM6 8c-1.1 0-2-.89-2-2s.9-2 2-2 2 .89 2 2-.9 2-2 2zm0 12c-1.1 0-2-.89-2-2s.9-2 2-2 2 .89 2 2-.9 2-2 2zm6-7.5c-.28 0-.5-.22-.5-.5s.22-.5.5-.5.5.22.5.5-.22.5-.5.5zM19 3l-6 6 2 2 7-7V3z"/></svg>',
+  compilation:
+    '<svg viewBox="0 0 24 24"><path d="M4 4h12v10H4zM8 8h12v10H8zM11 11v4l4-2z"/></svg>',
 };
 const CLIP_KIND_LABELS = {
   replay: "Buffered replay",
   session: "Full session",
   trim: "Trimmed export",
+  compilation: "Group compilation",
 };
 const CLOUD_VISIBILITY_ICONS = {
   public:
@@ -416,16 +883,19 @@ var selectedGamePlayEnd = null;
 var gamePlayRows = [];
 
 function eventRailPolicy(clip) {
+  if (activeGroupName) return { enabled: true, group: true, title: "group clips" };
   const presentation = pluginPresentationForClip(clip);
   return presentation && presentation.event_rail ? presentation.event_rail : null;
 }
 
 function playRailPolicy(clip) {
+  if (activeGroupName) return { enabled: false };
   const presentation = pluginPresentationForClip(clip);
   return presentation && presentation.play_rail ? presentation.play_rail : null;
 }
 
 function metadataPanelPolicy(clip) {
+  if (activeGroupName) return { enabled: false };
   const presentation = pluginPresentationForClip(clip);
   return presentation && presentation.metadata_panel ? presentation.metadata_panel : null;
 }
@@ -499,6 +969,114 @@ function selectedGamePlayIndexForTime(currentTime, options = {}) {
   return -1;
 }
 
+function syncGroupClipRail() {
+  const activePath = currentClip && currentClip.path;
+  const next = gameEventRows.findIndex((row) => activePath
+    && PlayerCore.sameClipPath(row.dataset.groupClipPath, activePath));
+  if (next === activeGameEventIndex) return;
+  activeGameEventIndex = next;
+  gameEventRows.forEach((row, index) => {
+    const active = index === next;
+    row.classList.toggle("active", Boolean(active));
+    row.setAttribute("aria-current", active ? "true" : "false");
+    if (active) row.scrollIntoView({ block: "nearest", inline: "nearest" });
+  });
+}
+
+function clearGroupDragIndicators() {
+  document.querySelectorAll(".group-clip-row.drag-before, .group-clip-row.drag-after")
+    .forEach((row) => row.classList.remove("drag-before", "drag-after"));
+}
+
+function renderGroupClipRail() {
+  const group = activeGroup();
+  if (!group) return;
+  activeGameEventIndex = -1;
+  const rail = $("game-event-rail");
+  const list = $("game-event-list");
+  rail.classList.add("group-clip-rail");
+  $("game-event-rail-title").textContent = group.name;
+  $("game-event-rail-summary").textContent = `${group.members.length} clip${group.members.length === 1 ? "" : "s"} · drag to reorder`;
+  list.replaceChildren();
+  gameEventRows = [];
+  group.members.forEach((clip, index) => {
+    const item = document.createElement("li");
+    item.className = "group-clip-row";
+    item.draggable = true;
+    item.dataset.groupClipPath = clip.path;
+
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "group-clip-open";
+    open.dataset.groupClipPath = clip.path;
+    const poster = document.createElement("span");
+    poster.className = "group-clip-poster";
+    poster.style.cssText = thumbGradient(clip);
+    observePoster(clip.path, poster);
+    const body = document.createElement("span");
+    body.className = "group-clip-body";
+    const title = document.createElement("strong");
+    title.textContent = clipDisplayTitle(clip) || clip.name;
+    const duration = Number(clip.duration_s ?? clip.markers?.duration_s);
+    const meta = document.createElement("span");
+    meta.textContent = [
+      `${index + 1}`.padStart(2, "0"),
+      Number.isFinite(duration) ? fmtDur(duration) : "",
+      fmtMegabytes(clip.size_mb),
+    ].filter(Boolean).join(" · ");
+    body.append(title, meta);
+    open.append(poster, body);
+    open.title = "Click to play · Alt+Up/Down to reorder";
+    open.addEventListener("click", () => openGroupMember(clip));
+    open.addEventListener("keydown", (event) => {
+      if (!event.altKey || !["ArrowUp", "ArrowDown"].includes(event.key)) return;
+      const direction = event.key === "ArrowUp" ? "up" : "down";
+      if ((direction === "up" && index === 0)
+          || (direction === "down" && index === group.members.length - 1)) return;
+      event.preventDefault();
+      moveGroupClip(clip, direction);
+    });
+    gameEventRows.push(open);
+    item.appendChild(open);
+    item.addEventListener("dragstart", (event) => {
+      groupDragSourcePath = clip.path;
+      item.classList.add("dragging");
+      if (event.dataTransfer) {
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("text/plain", "clipline-group-member");
+      }
+    });
+    item.addEventListener("dragover", (event) => {
+      if (!groupDragSourcePath) return;
+      event.preventDefault();
+      clearGroupDragIndicators();
+      const sourceIndex = group.members.findIndex((member) =>
+        PlayerCore.sameClipPath(member.path, groupDragSourcePath));
+      if (sourceIndex === index) return;
+      item.classList.add(index < sourceIndex ? "drag-before" : "drag-after");
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+    });
+    item.addEventListener("drop", (event) => {
+      event.preventDefault();
+      const sourcePath = groupDragSourcePath;
+      clearGroupDragIndicators();
+      groupDragSourcePath = "";
+      dropGroupClip(sourcePath, clip.path);
+    });
+    item.addEventListener("dragend", () => {
+      groupDragSourcePath = "";
+      item.classList.remove("dragging");
+      clearGroupDragIndicators();
+    });
+    item.addEventListener("contextmenu", (event) => showGroupClipContextMenu(event, clip));
+    list.appendChild(item);
+  });
+  rail.hidden = false;
+  syncReviewSideRailLayout();
+  setGameEventRailCollapsed(gameEventRailCollapsed);
+  syncGroupClipRail();
+}
+
 function renderGameEventRail(clip = currentClip) {
   const rail = $("game-event-rail");
   const title = $("game-event-rail-title");
@@ -509,6 +1087,11 @@ function renderGameEventRail(clip = currentClip) {
   const markers = clipMatchEventMarkers(clip);
   activeGameEventIndex = -1;
   clearGameEventSelection();
+  if (eventRail && eventRail.group) {
+    renderGroupClipRail();
+    return;
+  }
+  rail.classList.remove("group-clip-rail");
   if (!eventRail || !eventRail.enabled || !markers.length) {
     rail.hidden = true;
     rail.classList.remove("is-collapsed");
@@ -591,7 +1174,9 @@ function setGameEventRailCollapsed(collapsed) {
   rail.classList.toggle("is-collapsed", gameEventRailCollapsed);
   syncReviewSideRailLayout();
   if (toggle) {
-    const label = gameEventRailCollapsed ? "Expand match events" : "Collapse match events";
+    const policy = eventRailPolicy(currentClip);
+    const subject = policy && policy.group ? policy.title : "match events";
+    const label = `${gameEventRailCollapsed ? "Expand" : "Collapse"} ${subject}`;
     toggle.title = label;
     toggle.setAttribute("aria-label", label);
     toggle.setAttribute("aria-expanded", gameEventRailCollapsed ? "false" : "true");
@@ -605,6 +1190,11 @@ function syncGameEventRail(currentTime = video.currentTime || 0, options = {}) {
   const rail = $("game-event-rail");
   if (!rail || rail.hidden || rail.classList.contains("is-collapsed")) return;
   if (!gameEventRows.length) return;
+  const eventRail = eventRailPolicy(currentClip);
+  if (eventRail && eventRail.group) {
+    syncGroupClipRail();
+    return;
+  }
   const markers = clipMatchEventMarkers();
   const selectedIndex = selectedGameEventIndexForTime(currentTime);
   const next = gameEventActiveIndex(markers, currentTime, selectedIndex);
@@ -925,7 +1515,7 @@ function cloudClipCard(entry) {
 }
 
 // Clip names come from disk; build rows with textContent, never innerHTML.
-const CARD_KIND_LABELS = { replay: "Replay", session: "Session", trim: "Trim" };
+const CARD_KIND_LABELS = { replay: "Replay", session: "Session", trim: "Trim", compilation: "Compilation" };
 // Marker categories → tint var, matching the timeline glyph colors.
 const MARKER_CATEGORY_TICK_VARS = {
   kill: "--mc-kill",
@@ -1247,11 +1837,8 @@ function clipCard(c) {
   const info = document.createElement("div");
   info.className = "card-sub";
   const digest = markerDigest(markers, presentation);
-  const infoParts = [];
+  const infoParts = libraryItemMeta(duration, c.size_mb, c.modified_unix);
   if (c.game && c.game.queue && c.game.queue.label) infoParts.push(c.game.queue.label);
-  if (Number.isFinite(c.duration_s)) infoParts.push(fmtDur(c.duration_s));
-  infoParts.push(fmtMegabytes(c.size_mb));
-  infoParts.push(fmtAgo(Date.now() / 1000, c.modified_unix));
   if (!cardPreview.summary && digest) infoParts.push(digest);
   info.textContent = infoParts.join(" · ");
 
@@ -1647,10 +2234,11 @@ function onGallerySearchKeydown(ev) {
   }
 }
 
-function filterGalleryClips(clips) {
+function filterGalleryClips(clips, { groupName = "" } = {}) {
   const items = [];
   let maxModifiedUnix = 0;
   for (const c of clips) {
+    if (galleryFilter === "group" && !groupName) continue;
     const kind = clipKind(c);
     if ((galleryFilter === "replay" || galleryFilter === "session" || galleryFilter === "trim")
       && kind !== galleryFilter) continue;
@@ -1665,7 +2253,7 @@ function filterGalleryClips(clips) {
     if (gallerySearch) {
       const champ = c.markers && c.markers.player_summary ? c.markers.player_summary.champion_name : "";
       const queue = c.game && c.game.queue ? c.game.queue.label : "";
-      const hay = `${clipDisplayTitle(c)} ${c.name} ${champ} ${c.session || ""} ${c.game ? c.game.name : ""} ${queue}`.toLowerCase();
+      const hay = `${groupName} ${clipDisplayTitle(c)} ${c.name} ${champ} ${c.session || ""} ${c.game ? c.game.name : ""} ${queue}`.toLowerCase();
       if (!hay.includes(gallerySearch)) continue;
     }
     items.push(c);
@@ -1855,8 +2443,11 @@ function renderClips() {
   syncLeagueGameTypeFilter();
   beginBoundedGalleryRender();
   pruneLocalPosterCache(clipsCache);
-  const filteredResult = filterGalleryClips(clipsCache);
+  const topLevelClips = topLevelLocalClips(clipsCache);
+  const allLibraryGroups = localGroups();
+  const filteredResult = filterGalleryClips(topLevelClips);
   const filtered = filteredResult.items;
+  const libraryGroups = visibleLocalGroups();
   const sorted = sortGalleryClips(filtered);
   const groups = galleryGroups(sorted);
   const firstGroup = groups[0];
@@ -1864,7 +2455,7 @@ function renderClips() {
   const firstItems = firstGroup && firstGroup.clips || [];
   const lastItems = lastGroup && lastGroup.clips || [];
   const identity = groupedGalleryIdentity(
-    `local|${galleryFilter}|${galleryGameType}|${gallerySort}|${galleryGroup}|${gallerySearch}`,
+    `local|${galleryFilter}|${galleryGameType}|${gallerySort}|${galleryGroup}|${gallerySearch}|${libraryGroups.map((group) => `${group.name}:${group.members.map((clip) => clip.group.order).join(",")}`).join("|")}`,
     filtered.length,
     firstItems[0],
     lastItems[lastItems.length - 1],
@@ -1876,9 +2467,11 @@ function renderClips() {
   });
   const page = GalleryWindowCore.windowGroups(groups, galleryPageState);
   syncGalleryPagination(page);
-  $("gallery-count").textContent = clipsCache.length
-    ? `${filtered.length} of ${clipsCache.length}`
-    : "";
+  const visibleItems = filtered.length + libraryGroups.length;
+  const totalItems = topLevelClips.length + allLibraryGroups.length;
+  $("gallery-count").textContent = galleryFilter === "group"
+    ? `${libraryGroups.length} of ${allLibraryGroups.length} group${allLibraryGroups.length === 1 ? "" : "s"}`
+    : totalItems ? `${visibleItems} of ${totalItems}` : "";
   if (!clipsCache.length) {
     const empty = document.createElement("div");
     empty.className = "gallery-empty";
@@ -1886,11 +2479,15 @@ function renderClips() {
     root.appendChild(empty);
     return;
   }
-  if (!filtered.length) {
+  if (!filtered.length && !libraryGroups.length) {
     const empty = document.createElement("div");
     empty.className = "gallery-empty";
     empty.textContent = "No clips match those filters.";
     root.appendChild(empty);
+    return;
+  }
+  if (galleryPageState.page === 0) renderGroupCards(root, libraryGroups);
+  if (galleryFilter === "group") {
     return;
   }
   for (const group of page.groups) {
@@ -2012,6 +2609,7 @@ function showClipContextMenu(ev, clip) {
   $("clip-menu-export-play").hidden = true;
   $("clip-menu-copy").hidden = false;
   $("clip-menu-copy-shareable").hidden = false;
+  $("clip-menu-remove-group").hidden = true;
   const upload = $("clip-menu-upload");
   upload.hidden = !cloudUploadControlVisible(uploaded);
   upload.textContent = shareable ? "Copy cloud link" : uploaded ? "Open cloud page" : "Upload";
@@ -2021,6 +2619,32 @@ function showClipContextMenu(ev, clip) {
   const favorite = $("clip-menu-favorite");
   favorite.hidden = false;
   favorite.textContent = clip.favorite ? "Remove from favorites" : "Add to favorites";
+  $("clip-menu-delete").hidden = false;
+  const menu = $("clip-context-menu");
+  menu.hidden = false;
+  positionContextMenu(menu, ev.clientX, ev.clientY);
+}
+
+function showGroupClipContextMenu(ev, clip) {
+  ev.preventDefault();
+  ev.stopPropagation();
+  hideRegionMenu();
+  clipContextTarget = clip;
+  cloudContextTarget = null;
+  gamePlayContextTarget = null;
+  for (const id of [
+    "clip-menu-select",
+    "clip-menu-play",
+    "clip-menu-open-cloud-page",
+    "clip-menu-copy-cloud-link",
+    "clip-menu-export-play",
+    "clip-menu-upload",
+    "clip-menu-rename",
+    "clip-menu-rename-file",
+    "clip-menu-copy",
+    "clip-menu-copy-shareable",
+  ]) $(id).hidden = true;
+  $("clip-menu-remove-group").hidden = false;
   $("clip-menu-delete").hidden = false;
   const menu = $("clip-context-menu");
   menu.hidden = false;
@@ -2044,6 +2668,7 @@ function showCloudClipContextMenu(ev, entry) {
   $("clip-menu-export-play").hidden = true;
   $("clip-menu-copy").hidden = true;
   $("clip-menu-copy-shareable").hidden = true;
+  $("clip-menu-remove-group").hidden = true;
   $("clip-menu-upload").hidden = true;
   $("clip-menu-rename").hidden = true;
   $("clip-menu-rename-file").hidden = true;
@@ -2071,6 +2696,7 @@ function showGamePlayContextMenu(ev, play) {
   exportPlay.textContent = "Export play as clip";
   $("clip-menu-copy").hidden = true;
   $("clip-menu-copy-shareable").hidden = true;
+  $("clip-menu-remove-group").hidden = true;
   $("clip-menu-upload").hidden = true;
   $("clip-menu-rename").hidden = true;
   $("clip-menu-rename-file").hidden = true;

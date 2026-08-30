@@ -2293,6 +2293,8 @@ fn mark_remote_not_found_once(record: &mut CloudUploadRecord) {
 }
 
 fn delete_uploaded_local_files(target: &Path, media_root: &Path) -> std::io::Result<()> {
+    crate::library::groups::recover_group_order_transaction(media_root)
+        .map_err(std::io::Error::other)?;
     let _guard = crate::gc::lock_clip_mutations();
     std::fs::remove_file(target).map_err(|error| {
         std::io::Error::new(
@@ -2542,6 +2544,14 @@ mod tests {
 
         assert_eq!(upload_title(None, &clip), "Ranked win vs Lux");
         assert_eq!(source_type(&clip), "session");
+
+        std::fs::write(
+            clip.with_extension("clipline.json"),
+            r#"{"title":"Highlights compilation","kind":"compilation"}"#,
+        )
+        .unwrap();
+        assert_eq!(upload_title(None, &clip), "Highlights compilation");
+        assert_eq!(source_type(&clip), "compilation");
     }
 
     #[test]

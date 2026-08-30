@@ -957,6 +957,11 @@ fn library_rs() -> String {
     fs::read_to_string(path).expect("read src/library.rs")
 }
 
+fn library_groups_rs() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/library/groups.rs");
+    fs::read_to_string(path).expect("read src/library/groups.rs")
+}
+
 fn cloud_rs() -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/cloud.rs");
     fs::read_to_string(path).expect("read src/cloud.rs")
@@ -1741,9 +1746,8 @@ fn review_player_owns_all_controls() {
             && player_core_js().contains("const markerRailConfig =")
             && main_js().contains("detail.className = \"game-meta\"")
             && main_js().contains("if (cardPreview.summary && !cardTitleUsesSummary)")
-            && main_js().contains("const infoParts = []")
             && main_js().contains(
-                "if (Number.isFinite(c.duration_s)) infoParts.push(fmtDur(c.duration_s))"
+                "const infoParts = libraryItemMeta(duration, c.size_mb, c.modified_unix)"
             )
             && main_js().contains("if (!cardPreview.summary && digest) infoParts.push(digest)")
             && !main_js().contains("LEAGUE_OF_LEGENDS_ID")
@@ -3783,7 +3787,8 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
         .and_then(|rest| rest.split("function clipGalleryCardPreview").next())
         .expect("metadata panel renderer");
     assert!(
-        render_metadata_panel.contains("if (!clip) {")
+        render_metadata_panel.contains("const metadataPanel = metadataPanelPolicy(clip);")
+            && render_metadata_panel.contains("if (!metadataPanel || !metadataPanel.enabled")
             && render_metadata_panel.contains("panel.hidden = true;")
             && !render_metadata_panel.contains("panel.hidden = legacyTimelineEnabled();"),
         "the metadata bar should return to metadata-only visibility"
@@ -3794,8 +3799,8 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
         .and_then(|rest| rest.split("function setSimpleTrimMode").next())
         .expect("timeline preference function");
     assert!(
-        timeline_preference.contains("$(\"trim-action-panel\").hidden = legacy;"),
-        "legacy timeline mode should hide the below-timeline scissors strip"
+        timeline_preference.contains("$(\"trim-action-panel\").hidden = legacy || group;"),
+        "legacy timeline and group playlist modes should hide the below-timeline scissors strip"
     );
     assert!(
         timeline_preference.contains("$(\"trim-mode-label\")")
@@ -4986,9 +4991,9 @@ fn clipboard_copy_distinguishes_shareable_and_original_paths() {
             && js.contains("setDeckStatus(\"preparing shareable clip...\")")
             && js.contains("setDeckStatus(message, { transient: true })")
             && js.contains("if (error === \"shareable clipboard export cancelled\")")
-            && js.contains(
-                "$(\"copy-clip\").addEventListener(\"click\", (event) => copyClipToClipboard(event));"
-            ),
+            && js.contains("$(\"copy-clip\").addEventListener(\"click\", (event) => activeGroup()")
+            && js.contains("? copyOpenGroup(event)")
+            && js.contains(": copyClipToClipboard(event)"),
         "toolbar copy should adapt to long clips and quietly ignore superseded exports"
     );
     assert!(
@@ -5000,7 +5005,7 @@ fn clipboard_copy_distinguishes_shareable_and_original_paths() {
     assert!(
         app.contains(".manage(crate::library::ClipboardExportState::default())")
             && app.contains("state::<crate::library::ClipboardExportState>().cancel()")
-            && library.contains("run_share_ffmpeg(&mut command, remaining, || job.is_cancelled())"),
+            && library.contains("run_export_ffmpeg(&mut command, remaining, label, &is_cancelled)"),
         "closing Clipline must cancel the active backend export and its FFmpeg child"
     );
     assert!(
@@ -5678,6 +5683,226 @@ fn gallery_supports_multi_select_bulk_actions() {
         "select-mode visual class ownership should live in the selection sync helpers"
     );
 
+}
+
+#[test]
+fn groups_are_created_from_trim_and_managed_in_the_library() {
+    let html = index_html();
+    let js = main_js();
+    let css = styles_css();
+    let library = library_rs();
+    let groups = library_groups_rs();
+    let app = app_rs();
+    let config: serde_json::Value =
+        serde_json::from_str(&tauri_config()).expect("tauri.conf.json should parse");
+
+    for required in [
+        "id=\"add-to-group\"",
+        "id=\"group-picker-dialog\"",
+        "id=\"group-picker-select\"",
+        "id=\"group-picker-name\"",
+        "id=\"group-preload-video\"",
+        "id=\"copy-clip\"",
+        "id=\"upload-clip\"",
+        "id=\"delete-clip\"",
+        "id=\"clip-menu-remove-group\"",
+    ] {
+        assert!(html.contains(required), "groups markup must include `{required}`");
+    }
+    for required in [
+        "function openGroupPicker",
+        "function submitGroupPicker",
+        "function libraryItemMeta",
+        "function topLevelLocalClips",
+        "function renderGroupCards",
+        "function openGroupView",
+        "function openGroupMember",
+        "function renderGroupClipRail",
+        "function advanceGroupPlayback",
+        "function moveGroupClip",
+        "function reorderGroupMembers",
+        "function removeClipFromGroup",
+        "function showGroupClipContextMenu",
+        "function copyOpenGroup",
+        "function uploadOpenGroup",
+        "function deleteOpenGroup",
+        "function groupCompilationClip",
+        "function groupFingerprint",
+        "function groupNameKey",
+        "groupNameKey(clip.source_group) === groupNameKey(group.name)",
+        "clip.source_group_fingerprint === fingerprint",
+        "await invoke(\"reorder_group\"",
+        "await invoke(\"remove_from_group\"",
+        "filterGalleryClips(group.members, { groupName: group.name })",
+        r#"if ($("group-picker-confirm").disabled) return;"#,
+        "if (groupCompilationInflight.has(key)) return groupCompilationInflight.get(key);",
+        "const compilation = groupCompilationClip(group)",
+        "const record = compilation ? clipCloudRecord(compilation) : null",
+        "openUploadDialog(exportedClip)",
+        "copyClipToClipboard(event, exportedClip)",
+        "openGroupMember(replacement)",
+        "await invoke(\"delete_clips\"",
+        "addEventListener(\"contextmenu\"",
+        "setDeckStatusAction(\"Open group\"",
+        "addEventListener(\"dragstart\"",
+        "addEventListener(\"dragover\"",
+        "addEventListener(\"drop\"",
+        "openClip(clip, { preserveGroup: true, autoplay })",
+        "video.addEventListener(\"ended\", advanceGroupPlayback)",
+        "observePoster(clip.path, cell)",
+        "function preloadNextGroupMember",
+        "function beginGroupPlaybackBridge",
+        "function finishGroupPlaybackBridge",
+        "video.addEventListener(\"loadeddata\", finishGroupPlaybackBridge)",
+    ] {
+        assert!(js.contains(required), "groups UI must include `{required}`");
+    }
+    assert!(
+        !html.contains("id=\"group-view-dialog\""),
+        "groups must reuse the review player instead of a standalone dialog"
+    );
+    for removed in [
+        "id=\"group-review-actions\"",
+        "id=\"group-export\"",
+        "id=\"group-upload\"",
+    ] {
+        assert!(
+            !html.contains(removed),
+            "group review should reuse header actions instead of `{removed}`"
+        );
+    }
+    for required in [
+        ".group-card",
+        ".group-poster-mosaic",
+        ".group-poster-cell",
+        ".group-clip-row",
+        ".group-clip-row.drag-before",
+        ".group-clip-row.drag-after",
+        "#group-preload-video",
+    ] {
+        assert!(css.contains(required), "groups styling must include `{required}`");
+    }
+    assert!(
+        js.contains("filter((clip) => !clip.group)"),
+        "group members must stay in clipsCache but be hidden from top-level clip cards"
+    );
+    for required in [
+        "group.size_mb = group.members.reduce",
+        "libraryItemMeta(group.duration_s, group.size_mb, group.modified_unix)",
+        "libraryItemMeta(duration, c.size_mb, c.modified_unix)",
+    ] {
+        assert!(
+            js.contains(required),
+            "Library metadata must use duration · size · modified through `{required}`"
+        );
+    }
+    let group_open = css_rule_body(&css, ".game-event-rail ol button.group-clip-open");
+    let group_poster = css_rule_body(&css, ".group-clip-poster");
+    let group_body = css_rule_body(&css, ".group-clip-body");
+    assert_eq!(css_decl_value(group_open, "display"), Some("flex"));
+    assert_eq!(css_decl_value(group_open, "gap"), Some("10px"));
+    assert_eq!(css_decl_value(group_poster, "flex"), Some("0 0 52px"));
+    assert_eq!(css_decl_value(group_body, "min-width"), Some("0"));
+    assert_eq!(css_decl_value(group_body, "overflow"), Some("hidden"));
+    assert_eq!(
+        config
+            .pointer("/app/windows/0/dragDropEnabled")
+            .and_then(serde_json::Value::as_bool),
+        Some(false),
+        "Tauri's unused native drag handler must not intercept HTML group-row drag events"
+    );
+    for removed in ["group-clip-controls", "group-clip-drag", "group-clip-move"] {
+        assert!(
+            !js.contains(removed),
+            "group rows should not render the removed `{removed}` control"
+        );
+    }
+    for removed in [
+        "move_group_clip",
+        "invalidatedGroupCompilations",
+        "groupCompilationClips",
+        "compilation_version",
+    ] {
+        assert!(
+            !js.contains(removed),
+            "groups should delete stale reorder/cache mechanism `{removed}`"
+        );
+    }
+    for required in [
+        "pub struct ClipGroup",
+        "group: Option<ClipGroup>",
+        "source_group_fingerprint: Option<String>",
+    ] {
+        assert!(library.contains(required), "group backend must include `{required}`");
+    }
+    for required in [
+        "pub async fn export_group",
+        "pub async fn reorder_group",
+        "pub async fn remove_from_group",
+    ] {
+        assert!(groups.contains(required), "group commands must include `{required}`");
+    }
+    for required in [
+        "crate::library::groups::export_group",
+        "crate::library::groups::reorder_group",
+        "crate::library::groups::remove_from_group",
+    ] {
+        assert!(app.contains(required), "command registry must include `{required}`");
+    }
+    assert!(
+        !js_function_body(&js, "renderClips").contains("renderGroupClipRail"),
+        "gallery rendering must not own review-player rail rendering"
+    );
+    assert!(
+        js.contains("document.addEventListener(\"dragover\", preventExternalFileDrop)")
+            && js.contains("document.addEventListener(\"drop\", preventExternalFileDrop)")
+            && js_function_body(&js, "preventExternalFileDrop").contains("event.preventDefault();"),
+        "external file drags must never navigate the WebView away from Clipline"
+    );
+    let export_clip_file = library
+        .split("fn export_clip_file")
+        .nth(1)
+        .and_then(|rest| rest.split("fn export_markers_for_range").next())
+        .expect("export_clip_file body");
+    assert!(
+        export_clip_file.contains("if group.is_some() {")
+            && !export_clip_file.contains("if title.is_some() || group.is_some()"),
+        "non-group titled exports must retain legacy kind/sidecar behavior"
+    );
+    assert!(
+        js_function_body(&js, "eventRailPolicy").contains("activeGroupName")
+            && js_function_body(&js, "playRailPolicy").contains("activeGroupName")
+            && js_function_body(&js, "metadataPanelPolicy").contains("activeGroupName"),
+        "group chrome belongs in the existing review policy layer"
+    );
+    let compilation_runner = groups
+        .split("fn run_compilation_ffmpeg")
+        .nth(1)
+        .and_then(|rest| rest.split("fn ffmpeg_compilation_args").next())
+        .expect("group compilation runner");
+    assert!(
+        compilation_runner.contains("run_ffmpeg_fallback")
+            && compilation_runner.contains("share_export_timeout_for_duration")
+            && compilation_runner.contains("job.is_cancelled()")
+            && !compilation_runner.contains("|| false"),
+        "group compilation must reuse the shared deadline and cancellation-aware FFmpeg fallback"
+    );
+    assert!(
+        !groups.contains("fn available_h264_encoders"),
+        "H.264 encoder discovery must stay shared with normal exports"
+    );
+    assert!(
+        groups.contains("GROUP_ORDER_JOURNAL_FILE")
+            && groups.contains("GROUP_ORDER_COMMITTED_FILE")
+            && groups.contains("recover_group_order_transaction_unlocked")
+            && groups.contains("let _guard = crate::gc::lock_clip_mutations();")
+            && groups.contains("sync published group order journal")
+            && library.contains("groups::recover_group_order_transaction(&dir)?;")
+            && library.contains("groups::recover_group_order_transaction(&clips_dir)?;")
+            && library.contains("sync replaced clip metadata")
+            && library.contains("crate::windows::replace_file(tmp, target)"),
+        "the journal transaction must share the app-wide clip mutation lock and flush before discard"
+    );
 }
 
 #[test]
