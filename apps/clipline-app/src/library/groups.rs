@@ -438,7 +438,7 @@ fn export_group_file(
             .map_err(|error| format!("write compilation markers: {error}"))
     })();
     if let Err(error) = publish_metadata {
-        let _ = remove_clip_files(&target);
+        let _ = remove_clip_files(&target, root);
         return Err(error);
     }
 
@@ -458,6 +458,7 @@ fn export_group_file(
             .unwrap_or_default(),
         title: Some(title),
         kind: "compilation".to_string(),
+        favorite: false,
         session: None,
         size_mb: metadata.len() as f64 / (1024.0 * 1024.0),
         modified_unix,

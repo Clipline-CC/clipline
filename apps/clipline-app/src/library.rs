@@ -1212,7 +1212,15 @@ pub async fn export_clip<R: Runtime>(
         let group = group
             .map(|name| groups::group_for_export(&group_root, &name))
             .transpose()?;
-        export_clip_file(source, start_s, end_s, title, include_markers, group)
+        export_clip_file(
+            source,
+            start_s,
+            end_s,
+            title,
+            include_markers,
+            group,
+            &group_root,
+        )
     })
     .await
     .map_err(|e| format!("export clip task: {e}"))??;
@@ -2130,6 +2138,7 @@ fn export_clip_file(
     title: Option<String>,
     include_markers: bool,
     group: Option<ClipGroup>,
+    media_root: &Path,
 ) -> Result<ExportedClipInfo, String> {
     let tmp = unique_temp_export_path(&source)?;
     let info = match trim_keyframe_aligned_file(&source, &tmp, start_s, end_s) {
@@ -2158,7 +2167,7 @@ fn export_clip_file(
     ) {
         Ok(markers) => markers,
         Err(error) => {
-            let _ = remove_clip_files(&target);
+            let _ = remove_clip_files(&target, media_root);
             return Err(error);
         }
     };
@@ -2183,7 +2192,7 @@ fn export_clip_file(
         Ok::<(), String>(())
     })();
     if let Err(error) = sidecars {
-        let _ = remove_clip_files(&target);
+        let _ = remove_clip_files(&target, media_root);
         return Err(error);
     }
     let meta =
