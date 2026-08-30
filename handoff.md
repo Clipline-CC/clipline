@@ -4,6 +4,28 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-29): Group drag interception and playback bridge
+
+Plan: `docs/superpowers/plans/2026-08-29-groups-drag-and-playback.md`.
+
+The non-working group drag was a Tauri/WebView ownership conflict, not the reorder command. Tauri's
+native Windows file-drop handler defaults on and consumed the gesture before HTML `dragstart`, so
+`groupDragSourcePath` remained empty and the backend was unreachable. The main-window config now
+sets `dragDropEnabled: false`; Clipline has no native `DragDropEvent` consumer to lose. The entire
+clip row remains the HTML drag target. Visible arrows and the drag glyph are removed; focused rows
+retain Alt+Up/Down as the no-extra-chrome keyboard equivalent.
+
+Group playback now primes the next member in one reusable muted video layered over the main stage.
+At the boundary, that prepared video (or its poster while still buffering) covers the ordinary
+main-player source replacement, then hides as soon as the main video emits `loadeddata`. This
+removes the black/blank visual gap without introducing a second player state machine; audio and
+selected sidecars remain authoritative on the existing main player, so this is visual gaplessness,
+not sample-continuous audio mixing.
+
+Verification: Node syntax checks clean, focused Groups contract green, `cargo test --workspace`
+green, and warning-denied workspace Clippy clean. Live mouse drag/transition acceptance remains the
+user handoff because Computer Use's native pipe is unavailable.
+
 ## Checkpoint (2026-08-29): Groups use the review player
 
 Plan: `docs/superpowers/plans/2026-08-29-groups-player-view.md`.
@@ -18,7 +40,7 @@ The standalone group dialog is deleted. Opening a group puts its first member in
 review player, shows the group name and aggregate/member position in the header, and reuses the
 Match events rail for ordered clip rows. Clicking a row loads that member, reaching `ended`
 advances to the next member, and HTML drag/drop reorders through the existing path-validated move
-command. Small Up/Down buttons remain as the keyboard-accessible equivalent. Per-member
+command. Alt+Up/Down on the focused row is the keyboard-accessible equivalent. Per-member
 rename/delete/share/trim chrome is hidden in group mode; compilation Export and Upload now live in
 the review deck and still use the authoritative FFmpeg/cloud paths from the first pass.
 

@@ -279,10 +279,62 @@ function syncGroupReviewHeader() {
   $("pmeta").textContent = groupReviewMeta(group, video.duration);
 }
 
+function clearGroupPlaybackPreload() {
+  const preload = $("group-preload-video");
+  preload.pause();
+  preload.hidden = true;
+  preload.dataset.groupClipPath = "";
+  preload.removeAttribute("poster");
+  preload.removeAttribute("src");
+  preload.load();
+}
+
+function preloadNextGroupMember() {
+  const group = activeGroup();
+  const preload = $("group-preload-video");
+  const index = group && currentClip
+    ? group.members.findIndex((clip) => PlayerCore.sameClipPath(clip.path, currentClip.path))
+    : -1;
+  const next = index >= 0 ? group.members[index + 1] : null;
+  if (!next) {
+    clearGroupPlaybackPreload();
+    return;
+  }
+  if (PlayerCore.sameClipPath(preload.dataset.groupClipPath, next.path)) return;
+  preload.pause();
+  preload.hidden = true;
+  preload.dataset.groupClipPath = next.path;
+  const poster = posterCacheGet(next.path);
+  if (typeof poster === "string") preload.poster = poster;
+  else preload.removeAttribute("poster");
+  preload.src = convertFileSrc(next.path);
+  preload.load();
+}
+
+function beginGroupPlaybackBridge(nextClip) {
+  const preload = $("group-preload-video");
+  if (!nextClip || !PlayerCore.sameClipPath(preload.dataset.groupClipPath, nextClip.path)) return;
+  if (preload.readyState < 2 && !preload.hasAttribute("poster")) return;
+  preload.playbackRate = video.playbackRate;
+  try { preload.currentTime = 0; } catch (_) { /* Metadata may still be loading; the poster remains. */ }
+  preload.hidden = false;
+  if (preload.readyState >= 2) preload.play().catch(() => {});
+}
+
+function finishGroupPlaybackBridge() {
+  const preload = $("group-preload-video");
+  preload.hidden = true;
+  preload.pause();
+  preloadNextGroupMember();
+}
+
 function openGroupMember(clip, { autoplay = true } = {}) {
   const group = activeGroup();
   if (!group || !group.members.some((member) => PlayerCore.sameClipPath(member.path, clip.path))) {
     return;
+  }
+  if (currentClip && !PlayerCore.sameClipPath(currentClip.path, clip.path)) {
+    beginGroupPlaybackBridge(clip);
   }
   openClip(clip, { preserveGroup: true, autoplay });
 }
@@ -324,6 +376,7 @@ async function moveGroupClip(clip, direction, steps = 1) {
     }
     renderClips();
     syncGroupReviewHeader();
+    preloadNextGroupMember();
     setDeckStatus("group order updated", { transient: true });
   } catch (error) {
     setDeckStatus("");
@@ -859,29 +912,18 @@ function renderGroupClipRail() {
     ].filter(Boolean).join(" · ");
     body.append(title, meta);
     open.append(poster, body);
+    open.title = "Click to play · Alt+Up/Down to reorder";
     open.addEventListener("click", () => openGroupMember(clip));
+    open.addEventListener("keydown", (event) => {
+      if (!event.altKey || !["ArrowUp", "ArrowDown"].includes(event.key)) return;
+      const direction = event.key === "ArrowUp" ? "up" : "down";
+      if ((direction === "up" && index === 0)
+          || (direction === "down" && index === group.members.length - 1)) return;
+      event.preventDefault();
+      moveGroupClip(clip, direction);
+    });
     gameEventRows.push(open);
-
-    const controls = document.createElement("div");
-    controls.className = "group-clip-controls";
-    const drag = document.createElement("span");
-    drag.className = "group-clip-drag";
-    drag.textContent = "⠿";
-    drag.title = "Drag to reorder";
-    drag.setAttribute("aria-hidden", "true");
-    controls.appendChild(drag);
-    for (const [direction, label] of [["up", "Move up"], ["down", "Move down"]]) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "group-clip-move";
-      button.textContent = direction === "up" ? "↑" : "↓";
-      button.title = label;
-      button.setAttribute("aria-label", `${label}: ${clipDisplayTitle(clip) || clip.name}`);
-      button.disabled = direction === "up" ? index === 0 : index === group.members.length - 1;
-      button.addEventListener("click", () => moveGroupClip(clip, direction));
-      controls.appendChild(button);
-    }
-    item.append(open, controls);
+    item.appendChild(open);
     item.addEventListener("dragstart", (event) => {
       groupDragSourcePath = clip.path;
       item.classList.add("dragging");

@@ -461,6 +461,7 @@ video.addEventListener("ended", advanceGroupPlayback);
 video.addEventListener("seeking", () => syncReviewAudioSidecars({ forceSeek: true }));
 video.addEventListener("ratechange", () => syncReviewAudioSidecars());
 video.addEventListener("volumechange", syncVolume);
+video.addEventListener("loadeddata", finishGroupPlaybackBridge);
 video.addEventListener("loadedmetadata", () => {
   $("stage-note").textContent = `${video.videoWidth}x${video.videoHeight} · ${fmtDur(video.duration)}`;
   updateStageFrame();

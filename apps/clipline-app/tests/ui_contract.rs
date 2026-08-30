@@ -5711,6 +5711,8 @@ fn groups_are_created_from_trim_and_managed_in_the_library() {
     let library = library_rs();
     let groups = library_groups_rs();
     let app = app_rs();
+    let config: serde_json::Value =
+        serde_json::from_str(&tauri_config()).expect("tauri.conf.json should parse");
 
     for required in [
         "id=\"add-to-group\"",
@@ -5720,6 +5722,7 @@ fn groups_are_created_from_trim_and_managed_in_the_library() {
         "id=\"group-review-actions\"",
         "id=\"group-export\"",
         "id=\"group-upload\"",
+        "id=\"group-preload-video\"",
     ] {
         assert!(html.contains(required), "groups markup must include `{required}`");
     }
@@ -5743,6 +5746,10 @@ fn groups_are_created_from_trim_and_managed_in_the_library() {
         "openClip(clip, { preserveGroup: true, autoplay })",
         "video.addEventListener(\"ended\", advanceGroupPlayback)",
         "observePoster(clip.path, cell)",
+        "function preloadNextGroupMember",
+        "function beginGroupPlaybackBridge",
+        "function finishGroupPlaybackBridge",
+        "video.addEventListener(\"loadeddata\", finishGroupPlaybackBridge)",
     ] {
         assert!(js.contains(required), "groups UI must include `{required}`");
     }
@@ -5755,7 +5762,7 @@ fn groups_are_created_from_trim_and_managed_in_the_library() {
         ".group-poster-mosaic",
         ".group-poster-cell",
         ".group-clip-row",
-        ".group-clip-drag",
+        "#group-preload-video",
     ] {
         assert!(css.contains(required), "groups styling must include `{required}`");
     }
@@ -5763,6 +5770,19 @@ fn groups_are_created_from_trim_and_managed_in_the_library() {
         js.contains("filter((clip) => !clip.group)"),
         "group members must stay in clipsCache but be hidden from top-level clip cards"
     );
+    assert_eq!(
+        config
+            .pointer("/app/windows/0/dragDropEnabled")
+            .and_then(serde_json::Value::as_bool),
+        Some(false),
+        "Tauri's unused native drag handler must not intercept HTML group-row drag events"
+    );
+    for removed in ["group-clip-controls", "group-clip-drag", "group-clip-move"] {
+        assert!(
+            !js.contains(removed),
+            "group rows should not render the removed `{removed}` control"
+        );
+    }
     for required in ["pub struct ClipGroup", "group: Option<ClipGroup>"] {
         assert!(library.contains(required), "group backend must include `{required}`");
     }

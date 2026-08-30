@@ -18,7 +18,8 @@
         "resizable": true,
         "decorations": false,
         "visible": false,
-        "create": false
+        "create": false,
+        "dragDropEnabled": false
       }
     ],
     "security": {

@@ -269,8 +269,11 @@ Riot's Vanguard FAQ confirms in-game/LCU APIs "should continue to function" and 
   top-level Library: one group card represents them with an asymmetric mosaic of up to four real
   clip posters. Opening it reuses the normal review player as a sequential playlist and repurposes
   the Match events rail for member posters/titles; rows are mouse-draggable with keyboard Up/Down
-  fallbacks, and playback advances to the next member at end. Group export/upload controls live in
-  the review deck. Export normalizes members to 1080p60 H.264/Opus and concatenates them into a
+  fallbacks, and playback advances to the next member at end. Clipline disables Tauri's unused
+  native file-drop interception so WebView drag events reach those rows. The next member is
+  preloaded into a muted layered video that covers the main player's source swap until its first
+  frame decodes, avoiding a blank visual boundary. Group export/upload controls live in the review
+  deck. Export normalizes members to 1080p60 H.264/Opus and concatenates them into a
   normal editable local `compilation` clip; Upload creates that same compilation and hands it to
   the existing Clipline Cloud title/description/visibility dialog. V1 compiles at most 64 members
   per group and does not include group rename or moving an already-existing library clip between

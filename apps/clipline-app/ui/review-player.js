@@ -531,6 +531,7 @@ function suspendReviewPlayback({ renderGallery = true } = {}) {
   reviewSeekState = PlayerCore.createLogicalSeekState();
   currentClip = null;
   activeGroupName = "";
+  clearGroupPlaybackPreload();
   currentReviewMediaPath = null;
   currentReviewAudioKey = null;
   currentReviewAudioTrackIds = [];
@@ -745,7 +746,10 @@ function openClip(clip, { preserveGroup = false, autoplay = true } = {}) {
     }
     toggleSettings(false);
   }
-  if (!preserveGroup) activeGroupName = "";
+  if (!preserveGroup) {
+    activeGroupName = "";
+    clearGroupPlaybackPreload();
+  }
   cancelDesiredAudioPreview();
   clearReviewAudioSidecars("direct");
   clearOverlayIdleCheck();
@@ -800,6 +804,7 @@ function closeReview() {
   reviewSeekState = PlayerCore.createLogicalSeekState();
   currentClip = null;
   activeGroupName = "";
+  clearGroupPlaybackPreload();
   simpleTrimMode = false;
   currentReviewMediaPath = null;
   currentReviewAudioKey = null;
