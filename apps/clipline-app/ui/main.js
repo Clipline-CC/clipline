@@ -194,11 +194,6 @@ $("group-picker-dialog").addEventListener("click", (event) => {
 });
 $("group-export").addEventListener("click", exportOpenGroup);
 $("group-upload").addEventListener("click", uploadOpenGroup);
-$("group-view-close").addEventListener("click", closeGroupView);
-$("group-view-dialog").addEventListener("click", (event) => {
-  if (event.target === $("group-view-dialog")) closeGroupView();
-});
-$("group-view-dialog").addEventListener("close", () => { openGroupName = ""; });
 $("poster-runtime-install").addEventListener("click", () => {
   void installFfmpegForPosters().catch(() => {});
 });
@@ -462,6 +457,7 @@ video.addEventListener("timeupdate", () => {
   syncGamePlayRail(current);
   syncReviewAudioSidecars();
 });
+video.addEventListener("ended", advanceGroupPlayback);
 video.addEventListener("seeking", () => syncReviewAudioSidecars({ forceSeek: true }));
 video.addEventListener("ratechange", () => syncReviewAudioSidecars());
 video.addEventListener("volumechange", syncVolume);
@@ -469,7 +465,10 @@ video.addEventListener("loadedmetadata", () => {
   $("stage-note").textContent = `${video.videoWidth}x${video.videoHeight} · ${fmtDur(video.duration)}`;
   updateStageFrame();
   if (currentClip) {
-    $("pmeta").textContent = `${fmtDur(video.duration)} · ${fmtMegabytes(currentClip.size_mb)} · ${PlayerCore.clipFileLabel(currentClip)}`;
+    const group = activeGroup();
+    $("pmeta").textContent = group
+      ? groupReviewMeta(group, video.duration)
+      : `${fmtDur(video.duration)} · ${fmtMegabytes(currentClip.size_mb)} · ${PlayerCore.clipFileLabel(currentClip)}`;
     setTrim(0, video.duration);
     // Duration is now exact: rebuild the whole-clip navigator and re-render.
     renderOverviewMarkers();

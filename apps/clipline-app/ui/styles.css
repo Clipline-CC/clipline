@@ -3594,16 +3594,71 @@ button.primary.settings-save-glow {
 .card-kind.group { background: var(--accent); color: var(--accent-text); }
 
 .group-card-art {
-  display: grid;
-  place-items: center;
-  color: var(--accent);
+  isolation: isolate;
   background: radial-gradient(circle at 35% 30%, rgba(var(--accent-rgb), .28), var(--well) 72%);
 }
-.group-card-art > svg {
-  width: 64px;
-  height: 64px;
-  fill: currentColor;
-  filter: drop-shadow(0 6px 16px rgba(var(--scrim-c-rgb), .55));
+.group-poster-mosaic,
+.group-poster-cell { position: absolute; inset: 0; overflow: hidden; }
+.group-poster-mosaic { z-index: 0; }
+.group-poster-cell {
+  background: radial-gradient(120% 120% at 30% 20%, var(--g1), var(--g2) 70%);
+}
+.group-poster-cell .card-thumb-img { object-fit: cover; }
+.group-poster-mosaic[data-count="2"] .group-poster-cell-1,
+.group-poster-mosaic[data-count="3"] .group-poster-cell-1,
+.group-poster-mosaic[data-count="4"] .group-poster-cell-1 {
+  right: 34%;
+}
+.group-poster-mosaic[data-count="2"] .group-poster-cell-2 {
+  left: 52%;
+  box-shadow: -10px 0 24px rgba(var(--scrim-c-rgb), .65);
+  clip-path: polygon(17% 0, 100% 0, 100% 100%, 0 100%);
+}
+.group-poster-mosaic[data-count="3"] .group-poster-cell-2,
+.group-poster-mosaic[data-count="4"] .group-poster-cell-2 {
+  left: 58%;
+  bottom: 49%;
+  border-left: 2px solid rgba(255,255,255,.28);
+  border-bottom: 2px solid rgba(255,255,255,.28);
+  box-shadow: -8px 8px 20px rgba(var(--scrim-c-rgb), .55);
+}
+.group-poster-mosaic[data-count="3"] .group-poster-cell-3,
+.group-poster-mosaic[data-count="4"] .group-poster-cell-3 {
+  left: 58%;
+  top: 51%;
+  border-left: 2px solid rgba(255,255,255,.28);
+  box-shadow: -8px -8px 20px rgba(var(--scrim-c-rgb), .45);
+}
+.group-poster-mosaic[data-count="4"] .group-poster-cell-4 {
+  left: 16%;
+  right: 51%;
+  top: 54%;
+  bottom: 8%;
+  z-index: 2;
+  border: 2px solid rgba(255,255,255,.72);
+  border-radius: 5px;
+  box-shadow: 0 8px 20px rgba(var(--scrim-c-rgb), .72);
+  transform: rotate(-3deg);
+}
+.group-poster-mosaic::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  background: linear-gradient(118deg, transparent 38%, rgba(255,255,255,.14) 49%, transparent 60%);
+  pointer-events: none;
+}
+.group-poster-overflow {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 4;
+  padding: 3px 7px;
+  border: 1px solid rgba(255,255,255,.35);
+  border-radius: 999px;
+  background: rgba(var(--scrim-c-rgb), .78);
+  color: #fff;
+  font: 700 11px var(--font-mono);
 }
 
 .card-dur {
@@ -3798,7 +3853,6 @@ button.primary.settings-save-glow {
 #elevation-dialog,
 #upload-dialog,
 #group-picker-dialog,
-#group-view-dialog,
 #storage-quota-dialog,
 #rename-file-dialog {
   width: 380px;
@@ -3815,12 +3869,10 @@ button.primary.settings-save-glow {
 #elevation-dialog::backdrop,
 #upload-dialog::backdrop,
 #group-picker-dialog::backdrop,
-#group-view-dialog::backdrop,
 #storage-quota-dialog::backdrop,
 #rename-file-dialog::backdrop { background: rgba(var(--scrim-b-rgb), 0.62); }
 
 #storage-quota-dialog { width: min(500px, calc(100vw - 32px)); }
-#group-view-dialog { width: min(640px, calc(100vw - 32px)); }
 .storage-quota-actions { flex-wrap: wrap; }
 
 #detected-games-dialog,
@@ -3877,54 +3929,12 @@ button.primary.settings-save-glow {
 .upload-body textarea { resize: none; }
 .group-picker-new { display: grid; gap: 8px; }
 .group-picker-new[hidden] { display: none; }
-.group-view-body { gap: 12px; max-height: min(70vh, 680px); }
-.group-view-heading { display: grid; gap: 2px; }
-.group-view-members {
-  display: grid;
-  gap: 6px;
-  overflow-y: auto;
-  min-height: 0;
-}
-.group-view-member {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 8px;
-  padding: 6px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--panel-2);
-}
-.group-member-open {
-  display: grid;
-  justify-items: start;
-  gap: 2px;
-  min-width: 0;
-  height: auto;
-  padding: 5px 7px;
-  border: 0;
-  background: transparent;
-  color: var(--text);
-  text-align: left;
-}
-.group-member-open strong,
-.group-member-open span {
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.group-member-open span { color: var(--muted); font-family: var(--font-mono); font-size: 11px; }
-.group-member-move { display: flex; gap: 5px; }
-.group-member-move button { width: 30px; min-width: 30px; padding: 0; }
-.group-view-actions { flex-wrap: wrap; }
 .upload-audio-section[hidden] { display: none; }
 .upload-audio-section > span {
   display: block;
   color: var(--muted);
   font-size: 11.5px;
 }
-#group-view-status:empty,
 #group-picker-status:empty,
 #upload-dialog-status:empty,
 #rename-file-status:empty { display: none; }
@@ -4062,6 +4072,54 @@ button.primary.settings-save-glow {
 .game-event-rail li {
   min-width: 0;
 }
+.game-event-rail .group-clip-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 5px;
+  padding: 4px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  cursor: grab;
+  transition: opacity 120ms ease, border-color 120ms ease, transform 120ms ease;
+}
+.game-event-rail .group-clip-row.dragging { opacity: .42; }
+.game-event-rail .group-clip-row.drag-over {
+  border-color: var(--accent);
+  transform: translateY(2px);
+}
+.game-event-rail ol button.group-clip-open {
+  grid-template-columns: 52px minmax(0, 1fr);
+  min-height: 54px;
+  padding: 5px;
+}
+.group-clip-poster {
+  position: relative;
+  display: block;
+  width: 52px;
+  height: 38px;
+  overflow: hidden;
+  border-radius: 5px;
+  background: radial-gradient(120% 120% at 30% 20%, var(--g1), var(--g2) 70%);
+}
+.group-clip-poster .card-thumb-img { object-fit: cover; }
+.group-clip-body { display: grid; gap: 2px; min-width: 0; }
+.group-clip-body strong,
+.group-clip-body span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.group-clip-body span { font-family: var(--font-mono); font-size: 10.5px; }
+.group-clip-controls { display: grid; grid-template-columns: 20px 24px 24px; gap: 3px; align-items: center; }
+.group-clip-drag { color: var(--muted); font-size: 16px; text-align: center; cursor: grab; }
+.game-event-rail ol .group-clip-controls button.group-clip-move {
+  display: grid;
+  grid-template-columns: 1fr;
+  place-items: center;
+  width: 24px;
+  min-width: 24px;
+  min-height: 28px;
+  padding: 0;
+  text-align: center;
+}
+.group-clip-move:disabled { opacity: .3; }
 .game-event-rail ol button {
   display: grid;
   grid-template-columns: 44px minmax(0, 1fr);
@@ -4909,9 +4967,18 @@ button.primary.settings-save-glow {
 .deck.simple-timeline:not(.simple-trim-active) .trim-readout {
   display: none !important;
 }
-.deck.simple-timeline:not(.simple-trim-active) .export-row {
+.deck.simple-timeline:not(.simple-trim-active) #clip-export-row {
   display: none !important;
 }
+.group-review-actions[hidden],
+#clip-export-row[hidden] { display: none; }
+.group-review-actions { flex-wrap: wrap; }
+.review-viewer.group-review #dim-in,
+.review-viewer.group-review #dim-out,
+.review-viewer.group-review #handle-in,
+.review-viewer.group-review #handle-out,
+.review-viewer.group-review #trim-band,
+.review-viewer.group-review #overview-trim { display: none !important; }
 .deck.legacy-timeline .nav-row {
   display: flex;
 }

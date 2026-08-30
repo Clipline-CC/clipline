@@ -265,12 +265,16 @@ Riot's Vanguard FAQ confirms in-game/LCU APIs "should continue to function" and 
 - Timeline with event markers; in/out points; merge multiple replay clips into a montage (joining files, ShadowPlay-montage style).
 - **Groups:** the trim action has a secondary **Add to group** path. Group membership and order
   live in each clip's existing `.clipline.json` sidecar, so the first member creates the group and
-  deleting the last member removes it without a second database. The local Library renders group
-  cards and an ordered member view with accessible Up/Down controls. Export normalizes members to
-  1080p60 H.264/Opus and concatenates them into a normal editable local `compilation` clip; Upload creates
-  that same compilation and hands it to the existing Clipline Cloud title/description/visibility
-  dialog. V1 compiles at most 64 members per group and does not include group rename or moving an
-  already-existing library clip between groups.
+  deleting the last member removes it without a second database. Group members stay out of the
+  top-level Library: one group card represents them with an asymmetric mosaic of up to four real
+  clip posters. Opening it reuses the normal review player as a sequential playlist and repurposes
+  the Match events rail for member posters/titles; rows are mouse-draggable with keyboard Up/Down
+  fallbacks, and playback advances to the next member at end. Group export/upload controls live in
+  the review deck. Export normalizes members to 1080p60 H.264/Opus and concatenates them into a
+  normal editable local `compilation` clip; Upload creates that same compilation and hands it to
+  the existing Clipline Cloud title/description/visibility dialog. V1 compiles at most 64 members
+  per group and does not include group rename or moving an already-existing library clip between
+  groups.
 - **Export:** MP4 (H.264 for compatibility, AV1/HEVC for size), plus **GIF/WebM** for sharing.
 - A successful trim export adds the result to the local library immediately and exposes an **Open clip** action beside the success status, avoiding a back-to-library search. The review stage supports standard fullscreen playback through its transport control or `F`; `Esc` returns from fullscreen before the existing close-clip shortcut applies.
 - **Preview decodes natively** (FFmpeg + D3D11VA hardware decode), presenting frames to the UI as shared textures — WebView2's `<video>` cannot be assumed to play AV1/HEVC (§4), and frame-accurate scrubbing of high-bitrate streams needs our own decode loop regardless.

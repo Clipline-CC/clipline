@@ -3788,7 +3788,7 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
         .and_then(|rest| rest.split("function clipGalleryCardPreview").next())
         .expect("metadata panel renderer");
     assert!(
-        render_metadata_panel.contains("if (!clip) {")
+        render_metadata_panel.contains("if (!clip || activeGroup()) {")
             && render_metadata_panel.contains("panel.hidden = true;")
             && !render_metadata_panel.contains("panel.hidden = legacyTimelineEnabled();"),
         "the metadata bar should return to metadata-only visibility"
@@ -3799,8 +3799,8 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
         .and_then(|rest| rest.split("function setSimpleTrimMode").next())
         .expect("timeline preference function");
     assert!(
-        timeline_preference.contains("$(\"trim-action-panel\").hidden = legacy;"),
-        "legacy timeline mode should hide the below-timeline scissors strip"
+        timeline_preference.contains("$(\"trim-action-panel\").hidden = legacy || group;"),
+        "legacy timeline and group playlist modes should hide the below-timeline scissors strip"
     );
     assert!(
         timeline_preference.contains("$(\"trim-mode-label\")")
@@ -5717,8 +5717,7 @@ fn groups_are_created_from_trim_and_managed_in_the_library() {
         "id=\"group-picker-dialog\"",
         "id=\"group-picker-select\"",
         "id=\"group-picker-name\"",
-        "id=\"group-view-dialog\"",
-        "id=\"group-view-members\"",
+        "id=\"group-review-actions\"",
         "id=\"group-export\"",
         "id=\"group-upload\"",
     ] {
@@ -5727,18 +5726,43 @@ fn groups_are_created_from_trim_and_managed_in_the_library() {
     for required in [
         "function openGroupPicker",
         "function submitGroupPicker",
+        "function topLevelLocalClips",
         "function renderGroupCards",
         "function openGroupView",
+        "function openGroupMember",
+        "function renderGroupClipRail",
+        "function advanceGroupPlayback",
         "function moveGroupClip",
         "function exportOpenGroup",
         "function uploadOpenGroup",
         "openUploadDialog(exportedClip)",
+        "setDeckStatusAction(\"Open group\"",
+        "addEventListener(\"dragstart\"",
+        "addEventListener(\"dragover\"",
+        "addEventListener(\"drop\"",
+        "openClip(clip, { preserveGroup: true, autoplay })",
+        "video.addEventListener(\"ended\", advanceGroupPlayback)",
+        "observePoster(clip.path, cell)",
     ] {
         assert!(js.contains(required), "groups UI must include `{required}`");
     }
-    for required in [".group-card", ".group-view-member", ".group-member-move"] {
+    assert!(
+        !html.contains("id=\"group-view-dialog\""),
+        "groups must reuse the review player instead of a standalone dialog"
+    );
+    for required in [
+        ".group-card",
+        ".group-poster-mosaic",
+        ".group-poster-cell",
+        ".group-clip-row",
+        ".group-clip-drag",
+    ] {
         assert!(css.contains(required), "groups styling must include `{required}`");
     }
+    assert!(
+        js.contains("filter((clip) => !clip.group)"),
+        "group members must stay in clipsCache but be hidden from top-level clip cards"
+    );
     for required in ["pub struct ClipGroup", "group: Option<ClipGroup>"] {
         assert!(library.contains(required), "group backend must include `{required}`");
     }

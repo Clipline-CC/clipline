@@ -10,6 +10,11 @@ var renameFilePending = false;
 function syncUploadClipButton() {
   const btn = $("upload-clip");
   if (!btn) return;
+  if (activeGroup()) {
+    btn.hidden = true;
+    btn.disabled = true;
+    return;
+  }
   const clip = currentClip;
   if (isCloudOnlyReviewClip(clip)) {
     const shareable = !!(
@@ -49,11 +54,13 @@ function syncUploadClipButton() {
 
 function syncReviewLocalActions() {
   const cloudOnly = isCloudOnlyReviewClip();
+  const group = Boolean(activeGroup());
   for (const id of ["rename-clip", "open-folder", "copy-clip", "delete-clip"]) {
     const el = $(id);
-    if (el) el.hidden = cloudOnly;
+    if (el) el.hidden = cloudOnly || group;
   }
-  if (cloudOnly) setClipTitleEditing(false);
+  if (cloudOnly || group) setClipTitleEditing(false);
+  syncGroupReviewChrome();
 }
 
 function setClipRenameControlsDisabled(disabled) {
@@ -523,6 +530,7 @@ function suspendReviewPlayback({ renderGallery = true } = {}) {
   releaseReviewVideoSource();
   reviewSeekState = PlayerCore.createLogicalSeekState();
   currentClip = null;
+  activeGroupName = "";
   currentReviewMediaPath = null;
   currentReviewAudioKey = null;
   currentReviewAudioTrackIds = [];
@@ -728,7 +736,7 @@ async function submitRenameFileDialog() {
   }
 }
 
-function openClip(clip) {
+function openClip(clip, { preserveGroup = false, autoplay = true } = {}) {
   if (settingsOpen) {
     syncSettingsDraftFromForm({ resetDiscard: false });
     if (settingsHaveUnsavedChanges()) {
@@ -737,6 +745,7 @@ function openClip(clip) {
     }
     toggleSettings(false);
   }
+  if (!preserveGroup) activeGroupName = "";
   cancelDesiredAudioPreview();
   clearReviewAudioSidecars("direct");
   clearOverlayIdleCheck();
@@ -751,8 +760,11 @@ function openClip(clip) {
   setDeckStatus("");
   $("stage-note").textContent = "loading…";
   setClipTitleEditing(false);
-  $("pname").textContent = clipDisplayTitle(clip) || clip.name;
-  $("pmeta").textContent = `${fmtMegabytes(clip.size_mb)} · ${PlayerCore.clipFileLabel(clip)}`;
+  const group = activeGroup();
+  $("pname").textContent = group ? group.name : clipDisplayTitle(clip) || clip.name;
+  $("pmeta").textContent = group
+    ? groupReviewMeta(group)
+    : `${fmtMegabytes(clip.size_mb)} · ${PlayerCore.clipFileLabel(clip)}`;
   syncReviewLocalActions();
   syncUploadClipButton();
   updateViews();
@@ -771,7 +783,7 @@ function openClip(clip) {
   renderClips();
   noteActivity();
   requestAnimationFrame(updateStageFrame);
-  video.play().catch(() => syncPlayState());
+  if (autoplay) video.play().catch(() => syncPlayState());
   if (clipAudioTracks(clip).length > 0) {
     requestSelectedAudioPreview();
   }
@@ -787,6 +799,7 @@ function closeReview() {
   releaseReviewVideoSource();
   reviewSeekState = PlayerCore.createLogicalSeekState();
   currentClip = null;
+  activeGroupName = "";
   simpleTrimMode = false;
   currentReviewMediaPath = null;
   currentReviewAudioKey = null;
@@ -927,15 +940,16 @@ function applyTimelineEditorPreference() {
   const deck = document.querySelector(".deck");
   if (!deck) return;
   const legacy = legacyTimelineEnabled();
-  if (legacy) simpleTrimMode = false;
+  const group = Boolean(activeGroup());
+  if (legacy || group) simpleTrimMode = false;
   deck.classList.toggle("legacy-timeline", legacy);
   deck.classList.toggle("simple-timeline", !legacy);
   deck.classList.toggle("simple-trim-active", !legacy && simpleTrimMode);
 
   const toggle = $("trim-mode-toggle");
-  $("trim-action-panel").hidden = legacy;
-  toggle.disabled = legacy;
-  toggle.hidden = legacy;
+  $("trim-action-panel").hidden = legacy || group;
+  toggle.disabled = legacy || group;
+  toggle.hidden = legacy || group;
   toggle.classList.toggle("active", !legacy && simpleTrimMode);
   toggle.setAttribute("aria-pressed", String(!legacy && simpleTrimMode));
   toggle.title = simpleTrimMode ? "Close" : "Clip";
@@ -954,7 +968,7 @@ function applyTimelineEditorPreference() {
 }
 
 function setSimpleTrimMode(active) {
-  if (legacyTimelineEnabled()) {
+  if (legacyTimelineEnabled() || activeGroup()) {
     simpleTrimMode = false;
     scheduleTrimBoundaryCheck();
     applyTimelineEditorPreference();
@@ -1734,7 +1748,11 @@ async function exportRangeAsClip(startS, endS, {
     invalidateLocalClipsRefresh();
     clipsCache = [exportedClip, ...clipsCache.filter((clip) => clip.path !== exportedClip.path)];
     renderClips();
-    setDeckStatusAction("Open clip", () => openClip(exportedClip));
+    if (exportedClip.group) {
+      setDeckStatusAction("Open group", () => openGroupView(exportedClip.group.name));
+    } else {
+      setDeckStatusAction("Open clip", () => openClip(exportedClip));
+    }
     await refreshStorage();
     return exportedClip;
   } catch (e) {

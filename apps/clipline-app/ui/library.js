@@ -105,6 +105,26 @@ function groupForName(name) {
   return localGroups().find((group) => group.name.toLocaleLowerCase() === key) || null;
 }
 
+function activeGroup() {
+  return activeGroupName ? groupForName(activeGroupName) : null;
+}
+
+function topLevelLocalClips(clips = clipsCache) {
+  return clips.filter((clip) => !clip.group);
+}
+
+function groupReviewMeta(group, currentDuration = NaN) {
+  const index = group.members.findIndex((clip) => currentClip
+    && PlayerCore.sameClipPath(clip.path, currentClip.path));
+  const parts = [
+    `${group.members.length} clip${group.members.length === 1 ? "" : "s"}`,
+    group.duration_s > 0 ? fmtDur(group.duration_s) : "",
+    index >= 0 ? `playing ${index + 1} of ${group.members.length}` : "",
+    Number.isFinite(currentDuration) ? fmtDur(currentDuration) : "",
+  ];
+  return parts.filter(Boolean).join(" · ");
+}
+
 function visibleLocalGroups() {
   if (!['all', 'group'].includes(galleryFilter) || galleryGameType !== "all") return [];
   if (!gallerySearch) return localGroups();
@@ -117,6 +137,27 @@ function visibleLocalGroups() {
   });
 }
 
+function groupPosterMosaic(group) {
+  const mosaic = document.createElement("div");
+  const shown = group.members.slice(0, 4);
+  mosaic.className = "group-poster-mosaic";
+  mosaic.dataset.count = String(shown.length);
+  shown.forEach((clip, index) => {
+    const cell = document.createElement("div");
+    cell.className = `group-poster-cell group-poster-cell-${index + 1}`;
+    cell.style.cssText = thumbGradient(clip);
+    observePoster(clip.path, cell);
+    mosaic.appendChild(cell);
+  });
+  if (group.members.length > shown.length) {
+    const overflow = document.createElement("span");
+    overflow.className = "group-poster-overflow";
+    overflow.textContent = `+${group.members.length - shown.length}`;
+    mosaic.appendChild(overflow);
+  }
+  return mosaic;
+}
+
 function groupCard(group) {
   const card = document.createElement("article");
   card.className = "card group-card";
@@ -125,7 +166,7 @@ function groupCard(group) {
   card.setAttribute("aria-label", `Open group ${group.name}`);
   const art = document.createElement("div");
   art.className = "card-thumb group-card-art";
-  art.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h12v10H4zM8 9h12v10H8z"/></svg>';
+  art.appendChild(groupPosterMosaic(group));
   const kind = document.createElement("span");
   kind.className = "card-kind group";
   kind.textContent = "Group";
@@ -221,96 +262,102 @@ async function submitGroupPicker() {
   else $("group-picker-status").textContent = String($("error").textContent || "Could not add clip to group.");
 }
 
-function closeGroupView() {
-  openGroupName = "";
-  if ($("group-view-dialog").open) $("group-view-dialog").close();
+function syncGroupReviewChrome() {
+  const group = activeGroup();
+  const active = Boolean(group);
+  $("review-viewer").classList.toggle("group-review", active);
+  $("clip-export-row").hidden = active;
+  $("group-review-actions").hidden = !active;
+  $("group-upload").disabled = !active || !cloudConnected();
+  if (active) simpleTrimMode = false;
 }
 
-function renderGroupView() {
-  if (!openGroupName) return;
-  const group = groupForName(openGroupName);
-  if (!group) {
-    closeGroupView();
+function syncGroupReviewHeader() {
+  const group = activeGroup();
+  if (!group) return;
+  $("pname").textContent = group.name;
+  $("pmeta").textContent = groupReviewMeta(group, video.duration);
+}
+
+function openGroupMember(clip, { autoplay = true } = {}) {
+  const group = activeGroup();
+  if (!group || !group.members.some((member) => PlayerCore.sameClipPath(member.path, clip.path))) {
     return;
   }
-  openGroupName = group.name;
-  $("group-view-title").textContent = group.name;
-  $("group-view-summary").textContent = `${group.members.length} clip${group.members.length === 1 ? "" : "s"}`
-    + (group.duration_s > 0 ? ` · ${fmtDur(group.duration_s)}` : "");
-  $("group-view-status").textContent = "";
-  $("group-upload").disabled = !cloudConnected();
-  const list = $("group-view-members");
-  list.replaceChildren();
-  group.members.forEach((clip, index) => {
-    const row = document.createElement("div");
-    row.className = "group-view-member";
-    const open = document.createElement("button");
-    open.type = "button";
-    open.className = "group-member-open";
-    const title = document.createElement("strong");
-    title.textContent = clipDisplayTitle(clip) || clip.name;
-    const meta = document.createElement("span");
-    const duration = Number(clip.duration_s ?? clip.markers?.duration_s);
-    meta.textContent = [Number.isFinite(duration) ? fmtDur(duration) : "", fmtMegabytes(clip.size_mb)]
-      .filter(Boolean).join(" · ");
-    open.append(title, meta);
-    open.addEventListener("click", () => {
-      closeGroupView();
-      openClip(clip);
-    });
-    const controls = document.createElement("div");
-    controls.className = "group-member-move";
-    for (const [direction, label] of [["up", "Move up"], ["down", "Move down"]]) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.textContent = direction === "up" ? "↑" : "↓";
-      button.title = label;
-      button.setAttribute("aria-label", `${label}: ${clipDisplayTitle(clip) || clip.name}`);
-      button.disabled = direction === "up" ? index === 0 : index === group.members.length - 1;
-      button.addEventListener("click", () => moveGroupClip(clip, direction));
-      controls.appendChild(button);
-    }
-    row.append(open, controls);
-    list.appendChild(row);
-  });
+  openClip(clip, { preserveGroup: true, autoplay });
 }
 
 function openGroupView(name) {
-  openGroupName = name;
-  renderGroupView();
-  if (!$("group-view-dialog").open) $("group-view-dialog").showModal();
+  const group = groupForName(name);
+  if (!group || !group.members.length) return;
+  activeGroupName = group.name;
+  gameEventRailCollapsed = false;
+  openGroupMember(group.members[0]);
 }
 
-async function moveGroupClip(clip, direction) {
-  $("group-view-status").textContent = "Reordering…";
-  try {
-    const updates = await invoke("move_group_clip", { path: clip.path, direction });
-    for (const update of updates || []) {
-      const target = clipsCache.find((candidate) => PlayerCore.sameClipPath(candidate.path, update.path));
-      if (target && target.group) target.group.order = update.order;
-    }
-    renderClips();
-    renderGroupView();
-  } catch (error) {
-    $("group-view-status").textContent = String(error);
+function advanceGroupPlayback() {
+  const group = activeGroup();
+  if (!group || !currentClip) return;
+  const index = group.members.findIndex((clip) => PlayerCore.sameClipPath(clip.path, currentClip.path));
+  if (index < 0 || index + 1 >= group.members.length) {
+    setDeckStatus("group playback finished", { transient: true });
+    return;
+  }
+  openGroupMember(group.members[index + 1]);
+}
+
+function applyGroupOrderUpdates(updates) {
+  for (const update of updates || []) {
+    const target = clipsCache.find((candidate) => PlayerCore.sameClipPath(candidate.path, update.path));
+    if (target && target.group) target.group.order = update.order;
   }
 }
 
+async function moveGroupClip(clip, direction, steps = 1) {
+  if (groupReorderPending || !clip) return;
+  groupReorderPending = true;
+  setDeckStatus("reordering group…");
+  try {
+    for (let step = 0; step < Math.max(1, steps); step += 1) {
+      const updates = await invoke("move_group_clip", { path: clip.path, direction });
+      applyGroupOrderUpdates(updates);
+    }
+    renderClips();
+    syncGroupReviewHeader();
+    setDeckStatus("group order updated", { transient: true });
+  } catch (error) {
+    setDeckStatus("");
+    $("error").textContent = String(error);
+  } finally {
+    groupReorderPending = false;
+  }
+}
+
+function dropGroupClip(sourcePath, targetPath) {
+  const group = activeGroup();
+  if (!group || sourcePath === targetPath) return;
+  const from = group.members.findIndex((clip) => PlayerCore.sameClipPath(clip.path, sourcePath));
+  const to = group.members.findIndex((clip) => PlayerCore.sameClipPath(clip.path, targetPath));
+  if (from < 0 || to < 0 || from === to) return;
+  moveGroupClip(group.members[from], to < from ? "up" : "down", Math.abs(to - from));
+}
+
 async function createOpenGroupCompilation() {
-  if (!openGroupName) return null;
+  if (!activeGroupName) return null;
   $("group-export").disabled = true;
   $("group-upload").disabled = true;
-  $("group-view-status").textContent = "Exporting compilation…";
+  setDeckStatus("exporting compilation…");
   await afterNextPaint();
   try {
-    const exportedClip = await invoke("export_group", { name: openGroupName });
+    const exportedClip = await invoke("export_group", { name: activeGroupName });
     invalidateLocalClipsRefresh();
     clipsCache = [exportedClip, ...clipsCache.filter((clip) => clip.path !== exportedClip.path)];
     renderClips();
     await refreshStorage();
     return exportedClip;
   } catch (error) {
-    $("group-view-status").textContent = String(error);
+    setDeckStatus("");
+    $("error").textContent = String(error);
     return null;
   } finally {
     $("group-export").disabled = false;
@@ -320,13 +367,14 @@ async function createOpenGroupCompilation() {
 
 async function exportOpenGroup() {
   const exportedClip = await createOpenGroupCompilation();
-  if (exportedClip) $("group-view-status").textContent = `Exported ${exportedClip.name}`;
+  if (!exportedClip) return;
+  setDeckStatus(`exported ${exportedClip.name}`, { transient: true });
+  setDeckStatusAction("Open clip", () => openClip(exportedClip));
 }
 
 async function uploadOpenGroup() {
   const exportedClip = await createOpenGroupCompilation();
   if (!exportedClip) return;
-  closeGroupView();
   openUploadDialog(exportedClip);
 }
 
@@ -759,6 +807,115 @@ function selectedGamePlayIndexForTime(currentTime, options = {}) {
   return -1;
 }
 
+function syncGroupClipRail() {
+  const activePath = currentClip && currentClip.path;
+  const next = gameEventRows.findIndex((row) => activePath
+    && PlayerCore.sameClipPath(row.dataset.groupClipPath, activePath));
+  if (next === activeGameEventIndex) return;
+  activeGameEventIndex = next;
+  gameEventRows.forEach((row, index) => {
+    const active = index === next;
+    row.classList.toggle("active", Boolean(active));
+    row.setAttribute("aria-current", active ? "true" : "false");
+    if (active) row.scrollIntoView({ block: "nearest", inline: "nearest" });
+  });
+}
+
+function renderGroupClipRail() {
+  const group = activeGroup();
+  if (!group) return;
+  activeGameEventIndex = -1;
+  const rail = $("game-event-rail");
+  const list = $("game-event-list");
+  rail.classList.add("group-clip-rail");
+  $("game-event-rail-title").textContent = group.name;
+  $("game-event-rail-summary").textContent = `${group.members.length} clip${group.members.length === 1 ? "" : "s"} · drag to reorder`;
+  list.replaceChildren();
+  gameEventRows = [];
+  group.members.forEach((clip, index) => {
+    const item = document.createElement("li");
+    item.className = "group-clip-row";
+    item.draggable = true;
+    item.dataset.groupClipPath = clip.path;
+
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "group-clip-open";
+    open.dataset.groupClipPath = clip.path;
+    const poster = document.createElement("span");
+    poster.className = "group-clip-poster";
+    poster.style.cssText = thumbGradient(clip);
+    observePoster(clip.path, poster);
+    const body = document.createElement("span");
+    body.className = "group-clip-body";
+    const title = document.createElement("strong");
+    title.textContent = clipDisplayTitle(clip) || clip.name;
+    const duration = Number(clip.duration_s ?? clip.markers?.duration_s);
+    const meta = document.createElement("span");
+    meta.textContent = [
+      `${index + 1}`.padStart(2, "0"),
+      Number.isFinite(duration) ? fmtDur(duration) : "",
+      fmtMegabytes(clip.size_mb),
+    ].filter(Boolean).join(" · ");
+    body.append(title, meta);
+    open.append(poster, body);
+    open.addEventListener("click", () => openGroupMember(clip));
+    gameEventRows.push(open);
+
+    const controls = document.createElement("div");
+    controls.className = "group-clip-controls";
+    const drag = document.createElement("span");
+    drag.className = "group-clip-drag";
+    drag.textContent = "⠿";
+    drag.title = "Drag to reorder";
+    drag.setAttribute("aria-hidden", "true");
+    controls.appendChild(drag);
+    for (const [direction, label] of [["up", "Move up"], ["down", "Move down"]]) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "group-clip-move";
+      button.textContent = direction === "up" ? "↑" : "↓";
+      button.title = label;
+      button.setAttribute("aria-label", `${label}: ${clipDisplayTitle(clip) || clip.name}`);
+      button.disabled = direction === "up" ? index === 0 : index === group.members.length - 1;
+      button.addEventListener("click", () => moveGroupClip(clip, direction));
+      controls.appendChild(button);
+    }
+    item.append(open, controls);
+    item.addEventListener("dragstart", (event) => {
+      groupDragSourcePath = clip.path;
+      item.classList.add("dragging");
+      if (event.dataTransfer) {
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("text/plain", "clipline-group-member");
+      }
+    });
+    item.addEventListener("dragover", (event) => {
+      if (!groupDragSourcePath || PlayerCore.sameClipPath(groupDragSourcePath, clip.path)) return;
+      event.preventDefault();
+      item.classList.add("drag-over");
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+    });
+    item.addEventListener("dragleave", () => item.classList.remove("drag-over"));
+    item.addEventListener("drop", (event) => {
+      event.preventDefault();
+      const sourcePath = groupDragSourcePath;
+      document.querySelectorAll(".group-clip-row.drag-over").forEach((row) => row.classList.remove("drag-over"));
+      groupDragSourcePath = "";
+      dropGroupClip(sourcePath, clip.path);
+    });
+    item.addEventListener("dragend", () => {
+      groupDragSourcePath = "";
+      item.classList.remove("dragging", "drag-over");
+    });
+    list.appendChild(item);
+  });
+  rail.hidden = false;
+  syncReviewSideRailLayout();
+  setGameEventRailCollapsed(gameEventRailCollapsed);
+  syncGroupClipRail();
+}
+
 function renderGameEventRail(clip = currentClip) {
   const rail = $("game-event-rail");
   const title = $("game-event-rail-title");
@@ -769,6 +926,11 @@ function renderGameEventRail(clip = currentClip) {
   const markers = clipMatchEventMarkers(clip);
   activeGameEventIndex = -1;
   clearGameEventSelection();
+  if (activeGroup()) {
+    renderGroupClipRail();
+    return;
+  }
+  rail.classList.remove("group-clip-rail");
   if (!eventRail || !eventRail.enabled || !markers.length) {
     rail.hidden = true;
     rail.classList.remove("is-collapsed");
@@ -851,7 +1013,8 @@ function setGameEventRailCollapsed(collapsed) {
   rail.classList.toggle("is-collapsed", gameEventRailCollapsed);
   syncReviewSideRailLayout();
   if (toggle) {
-    const label = gameEventRailCollapsed ? "Expand match events" : "Collapse match events";
+    const subject = activeGroup() ? "group clips" : "match events";
+    const label = `${gameEventRailCollapsed ? "Expand" : "Collapse"} ${subject}`;
     toggle.title = label;
     toggle.setAttribute("aria-label", label);
     toggle.setAttribute("aria-expanded", gameEventRailCollapsed ? "false" : "true");
@@ -865,6 +1028,10 @@ function syncGameEventRail(currentTime = video.currentTime || 0, options = {}) {
   const rail = $("game-event-rail");
   if (!rail || rail.hidden || rail.classList.contains("is-collapsed")) return;
   if (!gameEventRows.length) return;
+  if (activeGroup()) {
+    syncGroupClipRail();
+    return;
+  }
   const markers = clipMatchEventMarkers();
   const selectedIndex = selectedGameEventIndexForTime(currentTime);
   const next = gameEventActiveIndex(markers, currentTime, selectedIndex);
@@ -888,6 +1055,13 @@ function renderGamePlayRail(clip = currentClip) {
   activeGamePlayIndex = -1;
   clearGamePlaySelection();
   if (!rail || !title || !summary || !list) return;
+  if (activeGroup()) {
+    rail.hidden = true;
+    list.replaceChildren();
+    gamePlayRows = [];
+    syncReviewSideRailLayout();
+    return;
+  }
   if (!playRail || !playRail.enabled || !plays.length) {
     rail.hidden = true;
     title.textContent = "Set plays";
@@ -1035,7 +1209,7 @@ function renderMetadataIconList(field) {
 function renderGameMetadataPanel(clip = currentClip) {
   const panel = $("game-metadata-panel");
   const fieldsRoot = $("game-metadata-fields");
-  if (!clip) {
+  if (!clip || activeGroup()) {
     panel.hidden = true;
     fieldsRoot.replaceChildren();
     return;
@@ -2101,7 +2275,9 @@ function renderClips() {
   syncLeagueGameTypeFilter();
   beginBoundedGalleryRender();
   pruneLocalPosterCache(clipsCache);
-  const filteredResult = filterGalleryClips(clipsCache);
+  const topLevelClips = topLevelLocalClips(clipsCache);
+  const allLibraryGroups = localGroups();
+  const filteredResult = filterGalleryClips(topLevelClips);
   const filtered = filteredResult.items;
   const libraryGroups = visibleLocalGroups();
   const sorted = sortGalleryClips(filtered);
@@ -2123,9 +2299,11 @@ function renderClips() {
   });
   const page = GalleryWindowCore.windowGroups(groups, galleryPageState);
   syncGalleryPagination(page);
+  const visibleItems = filtered.length + libraryGroups.length;
+  const totalItems = topLevelClips.length + allLibraryGroups.length;
   $("gallery-count").textContent = galleryFilter === "group"
-    ? `${libraryGroups.length} group${libraryGroups.length === 1 ? "" : "s"}`
-    : clipsCache.length ? `${filtered.length} of ${clipsCache.length}` : "";
+    ? `${libraryGroups.length} of ${allLibraryGroups.length} group${allLibraryGroups.length === 1 ? "" : "s"}`
+    : totalItems ? `${visibleItems} of ${totalItems}` : "";
   if (!clipsCache.length) {
     const empty = document.createElement("div");
     empty.className = "gallery-empty";
@@ -2141,7 +2319,10 @@ function renderClips() {
     return;
   }
   if (galleryPageState.page === 0) renderGroupCards(root, libraryGroups);
-  if (galleryFilter === "group") return;
+  if (galleryFilter === "group") {
+    if (activeGroup()) renderGroupClipRail();
+    return;
+  }
   for (const group of page.groups) {
     if (group.label !== null) {
       const head = document.createElement("div");
@@ -2156,6 +2337,7 @@ function renderClips() {
     }
     for (const c of group.items) root.appendChild(clipCard(c));
   }
+  if (activeGroup()) renderGroupClipRail();
 }
 
 function renderCloudClips() {

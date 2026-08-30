@@ -4,6 +4,30 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-29): Groups use the review player
+
+Plan: `docs/superpowers/plans/2026-08-29-groups-player-view.md`.
+
+The first Groups pass is refined around one top-level Library owner. Grouped trim files remain in
+`clipsCache` and on disk but no longer render individual cards; search and group playback still see
+them. The post-export deck action now says **Open group**. A group card combines up to four normal
+lazy-loaded clip posters into a full-bleed/cutout mosaic with a fourth-photo polaroid treatment and
+an overflow count instead of using a placeholder glyph.
+
+The standalone group dialog is deleted. Opening a group puts its first member in the existing
+review player, shows the group name and aggregate/member position in the header, and reuses the
+Match events rail for ordered clip rows. Clicking a row loads that member, reaching `ended`
+advances to the next member, and HTML drag/drop reorders through the existing path-validated move
+command. Small Up/Down buttons remain as the keyboard-accessible equivalent. Per-member
+rename/delete/share/trim chrome is hidden in group mode; compilation Export and Upload now live in
+the review deck and still use the authoritative FFmpeg/cloud paths from the first pass.
+
+Verification: Node syntax checks clean, all 125 UI contracts green, `cargo test --workspace`
+green, and warning-denied workspace Clippy clean. The rebuilt app started against the real local
+Library with one two-member group; startup/mosaic rendering produced no frontend warning or error
+diagnostics. Computer Use's native pipe was unavailable, so click/drag visual acceptance remains
+the user handoff.
+
 ## Checkpoint (2026-08-29): Ordered clip groups and compilation export
 
 Plan: `docs/superpowers/plans/2026-08-29-groups.md` (plan commit `1f0ffe2`).
