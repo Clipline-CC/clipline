@@ -4,7 +4,6 @@ use std::io::Write;
 const MAX_GROUP_NAME_CHARS: usize = 80;
 const MAX_COMPILATION_CLIPS: usize = 64;
 const GROUP_ORDER_JOURNAL_FILE: &str = ".clipline-group-order.json";
-static GROUP_ORDER_IO_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Debug, PartialEq)]
 struct GroupMember {
@@ -88,22 +87,28 @@ fn canonical_group(existing: &[ClipGroup], requested: &str) -> (String, u32) {
 }
 
 fn group_members(root: &Path, name: &str) -> Result<Vec<GroupMember>, String> {
+    recover_group_order_transaction(root)?;
+    group_members_unrecovered(root, name)
+}
+
+fn group_members_unrecovered(root: &Path, name: &str) -> Result<Vec<GroupMember>, String> {
     let name_key = group_name_key(name);
-    let mut members: Vec<GroupMember> = list_clips_from_dir(root.to_path_buf())?
-        .clips
-        .into_iter()
-        .filter_map(|clip| {
-            let group = clip.group?;
-            if group_name_key(&group.name) != name_key {
-                return None;
-            }
-            Some(GroupMember {
-                path: PathBuf::from(clip.path),
-                group,
-                modified_unix: clip.modified_unix,
+    let mut members: Vec<GroupMember> =
+        list_clips_from_dir_with_child_reader(root.to_path_buf(), push_clips_from)?
+            .clips
+            .into_iter()
+            .filter_map(|clip| {
+                let group = clip.group?;
+                if group_name_key(&group.name) != name_key {
+                    return None;
+                }
+                Some(GroupMember {
+                    path: PathBuf::from(clip.path),
+                    group,
+                    modified_unix: clip.modified_unix,
+                })
             })
-        })
-        .collect();
+            .collect();
     sort_group_members(&mut members);
     Ok(members)
 }
@@ -266,18 +271,19 @@ fn recover_group_order_transaction_unlocked(root: &Path) -> Result<(), String> {
         .map_err(|error| format!("finish group order recovery: {error}"))
 }
 
-pub(super) fn recover_group_order_transaction(root: &Path) -> Result<(), String> {
-    let _guard = GROUP_ORDER_IO_LOCK
-        .lock()
-        .map_err(|_| "group order recovery lock poisoned".to_string())?;
+pub(crate) fn recover_group_order_transaction(root: &Path) -> Result<(), String> {
+    let _guard = crate::gc::lock_clip_mutations();
     recover_group_order_transaction_unlocked(root)
 }
 
+#[cfg(test)]
 fn persist_group_order(root: &Path, members: &[GroupMember]) -> Result<(), String> {
-    let _guard = GROUP_ORDER_IO_LOCK
-        .lock()
-        .map_err(|_| "group order persistence lock poisoned".to_string())?;
+    let _guard = crate::gc::lock_clip_mutations();
     recover_group_order_transaction_unlocked(root)?;
+    persist_group_order_unlocked(root, members)
+}
+
+fn persist_group_order_unlocked(root: &Path, members: &[GroupMember]) -> Result<(), String> {
     let mut updates = Vec::new();
     for member in members {
         let metadata_path = clip_metadata_path(&member.path);
@@ -322,6 +328,7 @@ fn persist_group_order(root: &Path, members: &[GroupMember]) -> Result<(), Strin
 }
 
 fn remove_from_group_file(path: &Path) -> Result<(), String> {
+    let _guard = crate::gc::lock_clip_mutations();
     let mut metadata = read_clip_metadata(path).unwrap_or_default();
     if metadata.group.take().is_none() {
         return Err("clip is not in a group".into());
@@ -342,8 +349,10 @@ pub async fn reorder_group(
         .collect::<Result<Vec<_>, _>>()?;
     let root = settings.clips_dir()?;
     tauri::async_runtime::spawn_blocking(move || {
-        let members = reordered_members(group_members(&root, &name)?, &ordered_paths)?;
-        persist_group_order(&root, &members)?;
+        let _guard = crate::gc::lock_clip_mutations();
+        recover_group_order_transaction_unlocked(&root)?;
+        let members = reordered_members(group_members_unrecovered(&root, &name)?, &ordered_paths)?;
+        persist_group_order_unlocked(&root, &members)?;
         Ok(members
             .into_iter()
             .map(|member| GroupOrderUpdate {

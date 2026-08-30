@@ -12,7 +12,8 @@ Best-effort reverse writes could still leave mixed order if the initial write an
 failed. Reorder now atomically publishes `.clipline-group-order.json` with every prior sidecar value
 before changing any member. Immediate rollback and every production Library scan replay that journal
 idempotently; a blocked recovery keeps the journal and fails the scan, so playback/export never
-consume partial order. A process-local lock prevents scans and reorder commits racing the journal.
+consume partial order. The app-wide clip-mutation lock prevents scans, reorder commits, rename,
+ungroup, deletion, upload cleanup, favorites, and GC racing the journal.
 Journal publication and every replaced sidecar are flushed before journal deletion, so power loss
 cannot persist deletion ahead of the order writes.
 

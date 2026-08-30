@@ -2293,6 +2293,8 @@ fn mark_remote_not_found_once(record: &mut CloudUploadRecord) {
 }
 
 fn delete_uploaded_local_files(target: &Path, media_root: &Path) -> std::io::Result<()> {
+    crate::library::groups::recover_group_order_transaction(media_root)
+        .map_err(std::io::Error::other)?;
     let _guard = crate::gc::lock_clip_mutations();
     std::fs::remove_file(target).map_err(|error| {
         std::io::Error::new(
