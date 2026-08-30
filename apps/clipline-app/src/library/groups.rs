@@ -1,7 +1,10 @@
 use super::*;
+use std::io::Write;
 
 const MAX_GROUP_NAME_CHARS: usize = 80;
 const MAX_COMPILATION_CLIPS: usize = 64;
+const GROUP_ORDER_JOURNAL_FILE: &str = ".clipline-group-order.json";
+static GROUP_ORDER_IO_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Debug, PartialEq)]
 struct GroupMember {
@@ -21,6 +24,17 @@ struct CompilationInput {
     path: PathBuf,
     audio_tracks: usize,
     duration_s: f64,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct GroupOrderJournal {
+    entries: Vec<GroupOrderJournalEntry>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct GroupOrderJournalEntry {
+    relative_path: PathBuf,
+    previous: ClipMetadata,
 }
 
 pub(super) fn group_for_export(root: &Path, requested: &str) -> Result<ClipGroup, String> {
@@ -162,7 +176,102 @@ fn reordered_members(
     Ok(reordered)
 }
 
-fn persist_group_order(members: &[GroupMember]) -> Result<(), String> {
+fn group_order_journal_path(root: &Path) -> PathBuf {
+    root.join(GROUP_ORDER_JOURNAL_FILE)
+}
+
+fn canonical_group_clip(root: &Path, path: &Path) -> Result<(PathBuf, PathBuf), String> {
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|error| format!("resolve group root {root:?}: {error}"))?;
+    let canonical_path = path
+        .canonicalize()
+        .map_err(|error| format!("resolve group clip {path:?}: {error}"))?;
+    let relative = canonical_path
+        .strip_prefix(&canonical_root)
+        .map_err(|_| format!("group clip {canonical_path:?} escaped root {canonical_root:?}"))?
+        .to_path_buf();
+    let components = relative.components().collect::<Vec<_>>();
+    if !(components.len() == 1 || components.len() == 2)
+        || components
+            .iter()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        || canonical_path.extension().and_then(|value| value.to_str()) != Some("mp4")
+    {
+        return Err(format!("invalid group journal clip path {relative:?}"));
+    }
+    Ok((canonical_path, relative))
+}
+
+fn write_group_order_journal(
+    root: &Path,
+    entries: &[(PathBuf, ClipMetadata)],
+) -> Result<(), String> {
+    let target = group_order_journal_path(root);
+    if target.exists() {
+        return Err("a group reorder recovery is already pending".into());
+    }
+    let entries = entries
+        .iter()
+        .map(|(path, previous)| {
+            let (_, relative_path) = canonical_group_clip(root, path)?;
+            Ok(GroupOrderJournalEntry {
+                relative_path,
+                previous: previous.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let bytes = serde_json::to_vec_pretty(&GroupOrderJournal { entries })
+        .map_err(|error| format!("serialize group order journal: {error}"))?;
+    let tmp = crate::settings::persistence::sibling_tmp_path(&target)?;
+    let result = (|| {
+        let mut file = std::fs::File::create(&tmp)
+            .map_err(|error| format!("create group order journal: {error}"))?;
+        file.write_all(&bytes)
+            .map_err(|error| format!("write group order journal: {error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("sync group order journal: {error}"))?;
+        std::fs::rename(&tmp, &target)
+            .map_err(|error| format!("publish group order journal: {error}"))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(tmp);
+    }
+    result
+}
+
+fn recover_group_order_transaction_unlocked(root: &Path) -> Result<(), String> {
+    let journal_path = group_order_journal_path(root);
+    if !journal_path.exists() {
+        return Ok(());
+    }
+    if !journal_path.is_file() {
+        return Err("group order recovery path is not a file".into());
+    }
+    let json = std::fs::read_to_string(&journal_path)
+        .map_err(|error| format!("read group order journal: {error}"))?;
+    let journal: GroupOrderJournal = serde_json::from_str(&json)
+        .map_err(|error| format!("parse group order journal: {error}"))?;
+    for entry in journal.entries {
+        let (path, _) = canonical_group_clip(root, &root.join(entry.relative_path))?;
+        write_clip_metadata(&path, &entry.previous)?;
+    }
+    std::fs::remove_file(&journal_path)
+        .map_err(|error| format!("finish group order recovery: {error}"))
+}
+
+pub(super) fn recover_group_order_transaction(root: &Path) -> Result<(), String> {
+    let _guard = GROUP_ORDER_IO_LOCK
+        .lock()
+        .map_err(|_| "group order recovery lock poisoned".to_string())?;
+    recover_group_order_transaction_unlocked(root)
+}
+
+fn persist_group_order(root: &Path, members: &[GroupMember]) -> Result<(), String> {
+    let _guard = GROUP_ORDER_IO_LOCK
+        .lock()
+        .map_err(|_| "group order persistence lock poisoned".to_string())?;
+    recover_group_order_transaction_unlocked(root)?;
     let mut updates = Vec::new();
     for member in members {
         let metadata_path = clip_metadata_path(&member.path);
@@ -177,25 +286,31 @@ fn persist_group_order(members: &[GroupMember]) -> Result<(), String> {
         next.group = Some(member.group.clone());
         updates.push((member.path.clone(), previous, next));
     }
+    if updates.is_empty() {
+        return Ok(());
+    }
+    let previous = updates
+        .iter()
+        .map(|(path, previous, _)| (path.clone(), previous.clone()))
+        .collect::<Vec<_>>();
+    write_group_order_journal(root, &previous)?;
 
-    for index in 0..updates.len() {
-        let (path, _, next) = &updates[index];
+    for (path, _, next) in &updates {
         if let Err(error) = write_clip_metadata(path, next) {
-            let mut rollback_errors = Vec::new();
-            for (rollback_path, previous, _) in updates[..index].iter().rev() {
-                if let Err(rollback) = write_clip_metadata(rollback_path, previous) {
-                    rollback_errors.push(rollback);
-                }
-            }
-            return if rollback_errors.is_empty() {
-                Err(error)
-            } else {
-                Err(format!(
-                    "{error}; rollback group order: {}",
-                    rollback_errors.join("; ")
-                ))
+            return match recover_group_order_transaction_unlocked(root) {
+                Ok(()) => Err(error),
+                Err(rollback) => Err(format!("{error}; rollback group order: {rollback}")),
             };
         }
+    }
+    let journal_path = group_order_journal_path(root);
+    if let Err(error) = std::fs::remove_file(&journal_path) {
+        return match recover_group_order_transaction_unlocked(root) {
+            Ok(()) => Err(format!("finish group reorder: {error}")),
+            Err(rollback) => Err(format!(
+                "finish group reorder: {error}; rollback group order: {rollback}"
+            )),
+        };
     }
     Ok(())
 }
@@ -222,7 +337,7 @@ pub async fn reorder_group(
     let root = settings.clips_dir()?;
     tauri::async_runtime::spawn_blocking(move || {
         let members = reordered_members(group_members(&root, &name)?, &ordered_paths)?;
-        persist_group_order(&members)?;
+        persist_group_order(&root, &members)?;
         Ok(members
             .into_iter()
             .map(|member| GroupOrderUpdate {
@@ -751,12 +866,60 @@ mod tests {
             GroupMember::test(a.to_str().unwrap(), 1),
         ];
 
-        assert!(persist_group_order(&reordered).is_err());
+        assert!(persist_group_order(dir.path(), &reordered).is_err());
         assert_eq!(
             read_clip_metadata(&b)
                 .and_then(|metadata| metadata.group)
                 .map(|group| group.order),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn durable_journal_blocks_scans_until_rollback_can_finish() {
+        let dir = clipline_test_utils::TestDir::new("clipline-groups", "reorder-journal");
+        let clip = dir.path().join("clip.mp4");
+        std::fs::write(&clip, b"clip").unwrap();
+        let previous = ClipMetadata {
+            group: Some(ClipGroup {
+                name: "Highlights".into(),
+                order: 0,
+            }),
+            ..ClipMetadata::default()
+        };
+        write_clip_metadata(&clip, &previous).unwrap();
+        write_group_order_journal(dir.path(), &[(clip.clone(), previous)]).unwrap();
+        write_clip_metadata(
+            &clip,
+            &ClipMetadata {
+                group: Some(ClipGroup {
+                    name: "Highlights".into(),
+                    order: 1,
+                }),
+                ..ClipMetadata::default()
+            },
+        )
+        .unwrap();
+        let blocked_tmp = clip_metadata_path(&clip).with_extension("clipline.json.tmp");
+        std::fs::create_dir(&blocked_tmp).unwrap();
+
+        assert!(list_clips_from_dir(dir.path().to_path_buf()).is_err());
+        assert!(group_order_journal_path(dir.path()).is_file());
+        assert_eq!(
+            read_clip_metadata(&clip)
+                .and_then(|metadata| metadata.group)
+                .map(|group| group.order),
+            Some(1)
+        );
+
+        std::fs::remove_dir(blocked_tmp).unwrap();
+        recover_group_order_transaction(dir.path()).unwrap();
+        assert!(!group_order_journal_path(dir.path()).exists());
+        assert_eq!(
+            read_clip_metadata(&clip)
+                .and_then(|metadata| metadata.group)
+                .map(|group| group.order),
+            Some(0)
         );
     }
 
@@ -768,7 +931,7 @@ mod tests {
         std::fs::write(clip_metadata_path(&clip), b"{").unwrap();
         let members = vec![GroupMember::test(clip.to_str().unwrap(), 1)];
 
-        assert!(persist_group_order(&members).is_err());
+        assert!(persist_group_order(dir.path(), &members).is_err());
         assert_eq!(std::fs::read(clip_metadata_path(&clip)).unwrap(), b"{");
     }
 

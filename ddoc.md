@@ -273,7 +273,9 @@ Riot's Vanguard FAQ confirms in-game/LCU APIs "should continue to function" and 
   relative modified time. Opening a group reuses the normal review player as a sequential playlist and repurposes
   the Match events rail for member posters/titles; rows are mouse-draggable with keyboard Up/Down
   fallbacks, and one ordered-path backend command validates and commits the complete reorder with
-  rollback on a sidecar failure. Playback advances to the next member at end. Clipline disables Tauri's unused
+  a durable pre-order journal. If rollback is blocked, every Library scan retries recovery and
+  refuses to expose mixed order until restoration completes. Playback advances to the next member
+  at end. Clipline disables Tauri's unused
   native file-drop interception so WebView drag events reach those rows; document-level drag/drop
   cancellation keeps external Explorer files from navigating the WebView. The next member is
   preloaded into a muted layered video that covers the main player's source swap until its first

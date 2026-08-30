@@ -337,6 +337,7 @@ pub async fn list_clips<R: Runtime>(
 }
 
 fn list_clips_from_dir(dir: PathBuf) -> Result<LocalClipScan, String> {
+    groups::recover_group_order_transaction(&dir)?;
     list_clips_from_dir_with_child_reader(dir, push_clips_from)
 }
 
@@ -2233,8 +2234,9 @@ pub(crate) fn validate_clip_path(
     settings: &StorageSettings,
     path: &str,
 ) -> Result<PathBuf, String> {
-    let dir = settings
-        .clips_dir()?
+    let clips_dir = settings.clips_dir()?;
+    groups::recover_group_order_transaction(&clips_dir)?;
+    let dir = clips_dir
         .canonicalize()
         .map_err(|e| e.to_string())?;
     let target = Path::new(path).canonicalize().map_err(|e| e.to_string())?;

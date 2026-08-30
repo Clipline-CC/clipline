@@ -4,6 +4,23 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-30): Durable group reorder recovery
+
+Plan: `docs/superpowers/plans/2026-08-30-group-order-journal.md`.
+
+Best-effort reverse writes could still leave mixed order if the initial write and rollback both
+failed. Reorder now atomically publishes `.clipline-group-order.json` with every prior sidecar value
+before changing any member. Immediate rollback and every production Library scan replay that journal
+idempotently; a blocked recovery keeps the journal and fails the scan, so playback/export never
+consume partial order. A process-local lock prevents scans and reorder commits racing the journal.
+
+The regression test creates a partial order plus a deliberately blocked sidecar restore, proves the
+Library scan fails without deleting the journal, removes the obstruction, then verifies the next
+recovery restores order and removes the journal.
+
+Verification: 11 focused Groups tests green, all 125 UI contracts and 639 app tests green,
+`cargo test --workspace` green, and warning-denied workspace Clippy clean.
+
 ## Checkpoint (2026-08-30): Unicode compilation fingerprint parity
 
 Plan: `docs/superpowers/plans/2026-08-30-group-fingerprint-unicode.md`.

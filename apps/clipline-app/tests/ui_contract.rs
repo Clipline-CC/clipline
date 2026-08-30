@@ -5909,6 +5909,13 @@ fn groups_are_created_from_trim_and_managed_in_the_library() {
         !groups.contains("fn available_h264_encoders"),
         "H.264 encoder discovery must stay shared with normal exports"
     );
+    assert!(
+        groups.contains("GROUP_ORDER_JOURNAL_FILE")
+            && groups.contains("recover_group_order_transaction_unlocked")
+            && library.contains("groups::recover_group_order_transaction(&dir)?;")
+            && library.contains("groups::recover_group_order_transaction(&clips_dir)?;"),
+        "Library scans and clip mutations must recover an interrupted group reorder before using sidecars"
+    );
 }
 
 #[test]
