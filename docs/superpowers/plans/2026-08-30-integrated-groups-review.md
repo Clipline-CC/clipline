@@ -7,8 +7,8 @@ Library grouping and sort control.
       group game/session metadata, and counting member markers for Most markers sorting.
 - [ ] Hide only the exact current compilation selected by a live group's fingerprint; render stale,
       duplicate, legacy, and orphaned generated outputs as ordinary Compilation cards.
-- [ ] Project each group into one game/session bucket using the member that supplies its latest
-      modified timestamp, preserving one-card pagination for mixed groups.
+- [ ] Project homogeneous groups into their shared game/session bucket and heterogeneous groups
+      into explicit Multiple games/sessions buckets, preserving one-card pagination.
 - [ ] Sum member marker counts when sorting integrated group cards by Most markers.
 - [ ] Run focused contracts, workspace tests, and warning-denied Clippy; update the design/handoff,
       push the PR, and resolve the review threads.
