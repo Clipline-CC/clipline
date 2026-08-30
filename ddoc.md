@@ -274,7 +274,8 @@ Riot's Vanguard FAQ confirms in-game/LCU APIs "should continue to function" and 
   the Match events rail for member posters/titles; rows are mouse-draggable with keyboard Up/Down
   fallbacks, and one ordered-path backend command validates and commits the complete reorder with
   a durable pre-order journal under the app-wide clip-mutation lock; the journal and each sidecar
-  replacement are flushed before the journal can be deleted. If rollback is blocked, every Library scan retries recovery and
+  replacement use write-through phase transitions before the journal becomes a committed marker.
+  If rollback is blocked, every Library scan retries recovery and
   refuses to expose mixed order until restoration completes. Playback advances to the next member
   at end. Clipline disables Tauri's unused
   native file-drop interception so WebView drag events reach those rows; document-level drag/drop

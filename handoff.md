@@ -15,7 +15,9 @@ idempotently; a blocked recovery keeps the journal and fails the scan, so playba
 consume partial order. The app-wide clip-mutation lock prevents scans, reorder commits, rename,
 ungroup, deletion, upload cleanup, favorites, and GC racing the journal.
 Journal publication and every replaced sidecar are flushed before journal deletion, so power loss
-cannot persist deletion ahead of the order writes.
+cannot persist deletion ahead of the order writes. Successful commit atomically renames the journal
+to a write-through `.committed` marker before best-effort cleanup; restart treats that marker as
+committed order, while an unrenamed journal always means rollback.
 
 The regression test creates a partial order plus a deliberately blocked sidecar restore, proves the
 Library scan fails without deleting the journal, removes the obstruction, then verifies the next

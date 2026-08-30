@@ -4,6 +4,7 @@ use std::io::Write;
 const MAX_GROUP_NAME_CHARS: usize = 80;
 const MAX_COMPILATION_CLIPS: usize = 64;
 const GROUP_ORDER_JOURNAL_FILE: &str = ".clipline-group-order.json";
+const GROUP_ORDER_COMMITTED_FILE: &str = ".clipline-group-order.committed";
 
 #[derive(Clone, Debug, PartialEq)]
 struct GroupMember {
@@ -185,6 +186,10 @@ fn group_order_journal_path(root: &Path) -> PathBuf {
     root.join(GROUP_ORDER_JOURNAL_FILE)
 }
 
+fn group_order_committed_path(root: &Path) -> PathBuf {
+    root.join(GROUP_ORDER_COMMITTED_FILE)
+}
+
 fn canonical_group_clip(root: &Path, path: &Path) -> Result<(PathBuf, PathBuf), String> {
     let canonical_root = root
         .canonicalize()
@@ -236,7 +241,7 @@ fn write_group_order_journal(
             .map_err(|error| format!("write group order journal: {error}"))?;
         file.sync_all()
             .map_err(|error| format!("sync group order journal: {error}"))?;
-        std::fs::rename(&tmp, &target)
+        crate::windows::replace_file(&tmp, &target)
             .map_err(|error| format!("publish group order journal: {error}"))?;
         std::fs::OpenOptions::new()
             .read(true)
@@ -252,6 +257,12 @@ fn write_group_order_journal(
 }
 
 fn recover_group_order_transaction_unlocked(root: &Path) -> Result<(), String> {
+    let committed_path = group_order_committed_path(root);
+    if committed_path.is_file() {
+        let _ = std::fs::remove_file(committed_path);
+    } else if committed_path.exists() {
+        return Err("group order commit marker is not a file".into());
+    }
     let journal_path = group_order_journal_path(root);
     if !journal_path.exists() {
         return Ok(());
@@ -316,7 +327,8 @@ fn persist_group_order_unlocked(root: &Path, members: &[GroupMember]) -> Result<
         }
     }
     let journal_path = group_order_journal_path(root);
-    if let Err(error) = std::fs::remove_file(&journal_path) {
+    let committed_path = group_order_committed_path(root);
+    if let Err(error) = crate::windows::replace_file(&journal_path, &committed_path) {
         return match recover_group_order_transaction_unlocked(root) {
             Ok(()) => Err(format!("finish group reorder: {error}")),
             Err(rollback) => Err(format!(
@@ -324,6 +336,7 @@ fn persist_group_order_unlocked(root: &Path, members: &[GroupMember]) -> Result<
             )),
         };
     }
+    let _ = std::fs::remove_file(committed_path);
     Ok(())
 }
 
@@ -936,6 +949,27 @@ mod tests {
                 .and_then(|metadata| metadata.group)
                 .map(|group| group.order),
             Some(0)
+        );
+
+        write_clip_metadata(
+            &clip,
+            &ClipMetadata {
+                group: Some(ClipGroup {
+                    name: "Highlights".into(),
+                    order: 2,
+                }),
+                ..ClipMetadata::default()
+            },
+        )
+        .unwrap();
+        std::fs::write(group_order_committed_path(dir.path()), b"").unwrap();
+        recover_group_order_transaction(dir.path()).unwrap();
+        assert!(!group_order_committed_path(dir.path()).exists());
+        assert_eq!(
+            read_clip_metadata(&clip)
+                .and_then(|metadata| metadata.group)
+                .map(|group| group.order),
+            Some(2)
         );
     }
 

@@ -2497,7 +2497,7 @@ fn write_clip_metadata(path: &Path, metadata: &ClipMetadata) -> Result<(), Strin
 }
 
 fn replace_clip_metadata(tmp: &Path, target: &Path) -> Result<(), String> {
-    match std::fs::rename(tmp, target) {
+    match crate::windows::replace_file(tmp, target) {
         Ok(()) => Ok(()),
         Err(error) if target.is_file() => replace_existing_clip_metadata(tmp, target, error),
         Err(error) => {
@@ -2521,14 +2521,14 @@ fn replace_existing_clip_metadata(
             ));
         }
     }
-    if let Err(error) = std::fs::rename(target, &backup) {
+    if let Err(error) = crate::windows::replace_file(target, &backup) {
         let _ = std::fs::remove_file(tmp);
         return Err(format!(
             "replace clip metadata: {original_error}; backup existing clip metadata: {error}"
         ));
     }
-    if let Err(error) = std::fs::rename(tmp, target) {
-        let _ = std::fs::rename(&backup, target);
+    if let Err(error) = crate::windows::replace_file(tmp, target) {
+        let _ = crate::windows::replace_file(&backup, target);
         let _ = std::fs::remove_file(tmp);
         return Err(format!("replace clip metadata: {error}"));
     }
