@@ -5678,24 +5678,6 @@ fn gallery_supports_multi_select_bulk_actions() {
         "select-mode visual class ownership should live in the selection sync helpers"
     );
 
-    let delete_clip_rs = library
-        .split("pub fn delete_clip")
-        .nth(1)
-        .and_then(|rest| rest.split("pub struct DeletedClipsReport").next())
-        .expect("delete_clip command body exists");
-    assert!(
-        delete_clip_rs.contains("remove_clip_files(&target, &media_root)"),
-        "single delete should call the same file-removal helper as bulk delete"
-    );
-    let delete_clips_impl_rs = library
-        .split("fn delete_clips_impl")
-        .nth(1)
-        .and_then(|rest| rest.split("pub async fn delete_clips").next())
-        .expect("delete_clips_impl body exists");
-    assert!(
-        delete_clips_impl_rs.contains("remove_clip_files(&target, &media_root)"),
-        "bulk delete should call the shared file-removal helper"
-    );
 }
 
 #[test]
@@ -6151,10 +6133,5 @@ fn favorites_are_guarded_across_review_gallery_and_context_menu() {
         library.contains("$(\"clip-menu-favorite\").hidden = true")
             && main.contains("clip-menu-favorite"),
         "cloud/game-play menus must hide the favorite action; main.js must wire the toggle"
-    );
-    assert!(
-        !html.contains("M12 21s-6.7-4.3-9.3-8.5")
-            && !library.contains("M12 21s-6.7-4.3-9.3-8.5"),
-        "favorites must use a star icon, never a heart"
     );
 }

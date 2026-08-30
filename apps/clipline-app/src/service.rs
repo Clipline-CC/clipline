@@ -30,8 +30,10 @@ use clipline_capture::{
 use clipline_events::{is_review_event, ClipAudioTrack, EventKind, MarkerLog, PlayerSummary};
 use clipline_lol::LeagueQueue;
 use clipline_storage::{
-    clip_ownership_marker_path, ensure_clip_owned, recover_recording_files,
-    remove_clip_ownership_marker, storage_status, sweep_emptied_session_dirs, StorageStatus,
+    clip_ownership_marker_path, ensure_clip_owned, ensure_session_clip_owned,
+    recover_recording_files, remove_clip_ownership_marker, remove_emptied_session_dir_after_clip,
+    reserve_session_recording_file, storage_status, sweep_emptied_session_dirs,
+    write_session_metadata, StorageStatus,
 };
 use clipline_storage::{session_label, SessionTracker};
 
@@ -1276,12 +1278,6 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                         }
                     }
                     let session_dir = clips_dir.join(session.current());
-                    if let Err(e) = std::fs::create_dir_all(&session_dir) {
-                        let _ = events.send(Event::Error {
-                            message: format!("create session folder {session_dir:?}: {e}"),
-                        });
-                        continue;
-                    }
                     let path = unique_media_path(&session_dir, "clip");
                     match save(&rec, &path, opts.replay_window_s) {
                         Ok((end, seconds)) => {
@@ -1361,6 +1357,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                         Err(e) => {
                             let _ = events.send(Event::Error { message: e });
                             let _ = std::fs::remove_file(&path);
+                            cleanup_discarded_session(&path, &clips_dir);
                         }
                     }
                 }
@@ -2196,35 +2193,34 @@ fn send_recording_status(
 }
 
 fn recover_abandoned_recordings(clips_dir: &Path, events: &Sender<Event>) {
+    static RECOVERED_THIS_PROCESS: AtomicBool = AtomicBool::new(false);
+    if !RECOVERED_THIS_PROCESS.swap(true, Ordering::AcqRel) {
+        match recover_recording_files(clips_dir) {
+            Ok(report) => {
+                if !report.recovered.is_empty() {
+                    warn_user(
+                        events,
+                        format!(
+                            "recovered {} unfinished full-session recording(s)",
+                            report.recovered.len()
+                        ),
+                    );
+                }
+                if report.deleted_empty > 0 {
+                    warn_user(
+                        events,
+                        format!(
+                            "cleaned up {} empty unfinished full-session recording(s)",
+                            report.deleted_empty
+                        ),
+                    );
+                }
+            }
+            Err(e) => warn_user(events, format!("recover unfinished recordings: {e}")),
+        }
+    }
     if let Err(error) = sweep_emptied_session_dirs(clips_dir) {
         warn_user(events, format!("clean empty session folders: {error}"));
-    }
-    static RECOVERED_THIS_PROCESS: AtomicBool = AtomicBool::new(false);
-    if RECOVERED_THIS_PROCESS.swap(true, Ordering::AcqRel) {
-        return;
-    }
-    match recover_recording_files(clips_dir) {
-        Ok(report) => {
-            if !report.recovered.is_empty() {
-                warn_user(
-                    events,
-                    format!(
-                        "recovered {} unfinished full-session recording(s)",
-                        report.recovered.len()
-                    ),
-                );
-            }
-            if report.deleted_empty > 0 {
-                warn_user(
-                    events,
-                    format!(
-                        "cleaned up {} empty unfinished full-session recording(s)",
-                        report.deleted_empty
-                    ),
-                );
-            }
-        }
-        Err(e) => warn_user(events, format!("recover unfinished recordings: {e}")),
     }
 }
 
@@ -2254,6 +2250,7 @@ fn shutdown_recorder(
                 rec,
                 full_session,
                 ctx.events,
+                ctx.clips_dir,
                 "full session could not finish cleanly and was kept for recovery",
             );
             Some(message)
@@ -2271,6 +2268,7 @@ fn finalize_runtime_failure(primary: String, finalize: impl FnOnce() -> Option<S
 /// Sidecar that records which game a session folder belongs to, so the
 /// library can show its icon. Written once per folder; custom-game clips have
 /// no markers, so this is their only game link.
+#[cfg(test)]
 const SESSION_META_FILE: &str = "clipline-session.json";
 
 fn write_session_game_meta(
@@ -2279,18 +2277,17 @@ fn write_session_game_meta(
     league_queue: Option<&LeagueQueue>,
 ) {
     let Some(game) = active_game else { return };
-    let _guard = clipline_storage::lock_session_mutations();
-    let meta_path = session_dir.join(SESSION_META_FILE);
-    if meta_path.exists() && league_queue.is_none() {
-        return;
-    }
     let mut doc = serde_json::json!({ "id": game.identity.id(), "name": game.name });
     if let Some(queue) = league_queue {
         doc["queue"] = serde_json::json!(queue);
     }
     match serde_json::to_string(&doc) {
         Ok(json) => {
-            if let Err(e) = std::fs::write(&meta_path, json) {
+            if let Err(e) = write_session_metadata(
+                session_dir,
+                json.as_bytes(),
+                league_queue.is_some(),
+            ) {
                 tracing::warn!(event = "session_game_metadata_write_failed", error = %e);
             }
         }
@@ -2311,13 +2308,6 @@ fn begin_full_session_recording(
     }
 
     let session_dir = clips_dir.join(session_label);
-    if let Err(e) = std::fs::create_dir_all(&session_dir) {
-        warn_user(
-            events,
-            format!("full-session recording unavailable; create {session_dir:?}: {e}"),
-        );
-        return None;
-    }
     let stamp = unix_now_u64();
     let (final_path, temp_path, file) =
         match reserve_full_session_path_at(&session_dir, "session", stamp) {
@@ -2332,8 +2322,8 @@ fn begin_full_session_recording(
                 return None;
             }
         };
-    // Reservation creates the ownership marker first; empty-session cleanup
-    // relies on that ordering.
+    // Reservation creates the recording file under the session lock, then its
+    // ownership marker before session metadata.
     write_session_game_meta(&session_dir, active_game, None);
     if let Err(e) = rec.start_full_session(file) {
         handle_full_session_finish_error(
@@ -2341,6 +2331,7 @@ fn begin_full_session_recording(
             events,
             &format!("full-session recording unavailable; start writer: {e}"),
         );
+        cleanup_discarded_session(&temp_path, clips_dir);
         return None;
     }
     Some(FullSessionRecording {
@@ -2363,6 +2354,7 @@ fn finish_full_session_recording(
                 ctx.events,
                 "full session ended before any footage was written",
             );
+            cleanup_discarded_session(&recording.temp_path, ctx.clips_dir);
             None
         }
         Ok(Some(summary)) => {
@@ -2377,6 +2369,7 @@ fn finish_full_session_recording(
                 0.0
             };
             if !rename_finalized_session(&recording, ctx.events) {
+                cleanup_discarded_session(&recording.temp_path, ctx.clips_dir);
                 return None;
             }
             let markers = write_marker_sidecar(
@@ -2408,10 +2401,12 @@ fn finish_full_session_recording(
                 ctx.events,
                 "full session ended before any footage was written",
             );
+            cleanup_discarded_session(&recording.temp_path, ctx.clips_dir);
             None
         }
         Err(error) => {
             handle_full_session_finish_error(&recording.temp_path, ctx.events, &error.to_string());
+            cleanup_discarded_session(&recording.temp_path, ctx.clips_dir);
             None
         }
     }
@@ -2468,6 +2463,7 @@ fn preserve_full_session_recording(
     rec: &mut LiveRecorder,
     recording: &mut Option<FullSessionRecording>,
     events: &Sender<Event>,
+    clips_dir: &Path,
     reason: &str,
 ) {
     let Some(recording) = recording.take() else {
@@ -2477,11 +2473,18 @@ fn preserve_full_session_recording(
         warn_user(events, format!("stop full-session writer: {e}"));
     }
     handle_full_session_finish_error(&recording.temp_path, events, reason);
+    cleanup_discarded_session(&recording.temp_path, clips_dir);
 }
 
 fn remove_discarded_clip(path: &Path) {
     let _ = std::fs::remove_file(path);
     let _ = remove_clip_ownership_marker(path);
+}
+
+fn cleanup_discarded_session(path: &Path, media_root: &Path) {
+    if let Some(session_dir) = path.parent() {
+        let _ = remove_emptied_session_dir_after_clip(session_dir, media_root);
+    }
 }
 
 struct FullSessionRecording {
@@ -2592,10 +2595,7 @@ fn reserve_full_session_path_at(
     stamp: u64,
 ) -> std::io::Result<(PathBuf, PathBuf, std::fs::File)> {
     reserve_full_session_path_at_with(session_dir, prefix, stamp, |_, temp_path| {
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(temp_path)
+        reserve_session_recording_file(temp_path)
     })
 }
 
@@ -2779,8 +2779,8 @@ fn save(
     path: &Path,
     window_s: f64,
 ) -> Result<(f64, f64), String> {
-    let marker_created =
-        ensure_clip_owned(path).map_err(|e| format!("mark Clipline-owned clip {path:?}: {e}"))?;
+    let marker_created = ensure_session_clip_owned(path)
+        .map_err(|e| format!("mark Clipline-owned clip {path:?}: {e}"))?;
     let saved_from = rec
         .save_window_bounds(window_s, None)
         .map(|(start, _)| start);
@@ -3055,10 +3055,10 @@ mod tests {
         clipline_storage::ensure_clip_owned(&trim).unwrap();
 
         let (tx, _rx) = std::sync::mpsc::channel();
-        // 300 bytes of clips; a 230-byte budget still leaves room after the
-        // two deletable clips are removed, but the favorited session stays.
+        // A 150-byte budget requires both deletable clips to be removed, while
+        // the favorited session stays.
         assert!(
-            storage_quota_full_event(&tx, dir.path(), Some(230), 1, true).is_none(),
+            storage_quota_full_event(&tx, dir.path(), Some(150), 1, true).is_none(),
             "auto-delete should free room without touching the favorite"
         );
         assert!(session.exists(), "favorites must never be auto-deleted");
@@ -3588,34 +3588,6 @@ mod tests {
     }
 
     #[test]
-    fn session_game_metadata_waits_for_cleanup_mutations() {
-        let dir = TestDir::new("clipline-service", "session-meta-lock");
-        let session = dir.path().to_path_buf();
-        let game = ActiveGame {
-            identity: crate::game_identity::GameIdentity::custom("test-game"),
-            name: "Test game".into(),
-            exe_path: None,
-            process_id: None,
-        };
-        let guard = clipline_storage::lock_session_mutations();
-        let (result_tx, result_rx) = std::sync::mpsc::channel();
-        let writer = std::thread::spawn(move || {
-            write_session_game_meta(&session, Some(&game), None);
-            result_tx.send(()).unwrap();
-        });
-
-        assert!(
-            result_rx
-                .recv_timeout(std::time::Duration::from_millis(100))
-                .is_err(),
-            "session metadata writes must wait for cleanup"
-        );
-        drop(guard);
-        result_rx.recv().unwrap();
-        writer.join().unwrap();
-    }
-
-    #[test]
     fn recovery_sweeps_each_media_root_in_the_same_process() {
         let first = TestDir::new("clipline-service", "recovery-sweep-first");
         let second = TestDir::new("clipline-service", "recovery-sweep-second");
@@ -3624,6 +3596,8 @@ mod tests {
             .parent()
             .unwrap()
             .to_path_buf();
+        let crashed = first.write("2026-06-12 19-15/session_1.mp4.recording", 0);
+        clipline_storage::ensure_clip_owned(&crashed).unwrap();
         let second_session = second
             .write("2026-06-12 19-16/clipline-session.json", 2)
             .parent()

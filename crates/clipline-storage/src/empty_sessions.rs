@@ -22,23 +22,58 @@ const IN_PROGRESS_MARKER_GRACE: Duration = Duration::from_secs(60 * 60);
 
 /// Remove a session folder when it is a direct child of `media_root`, uses a
 /// recorder session name, and no longer holds anything except Clipline leftover
-/// metadata (or is empty).
+/// metadata. Evidence-free empty folders are left alone.
 ///
 /// Videos, in-progress recordings, recent ownership markers, screenshots,
 /// nested directories, media temps, and any unrecognized file keep the folder.
 /// The media root itself is never removed.
 pub fn remove_emptied_session_dir(session_dir: &Path, media_root: &Path) -> io::Result<bool> {
     let _guard = crate::lock_session_mutations();
-    remove_emptied_session_dir_with(session_dir, media_root, |dir| {
+    remove_emptied_session_dir_with_evidence(session_dir, media_root, false, |dir| {
         fs::remove_dir(dir).map(|_| ())
+    })
+    .map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("clean emptied session folder {session_dir:?}: {error}"),
+        )
+    })
+}
+
+/// Remove a now-empty session folder immediately after a managed clip was
+/// deleted from it. The deleted clip supplies the Clipline evidence, so an
+/// already-empty folder is eligible here but not during a blind sweep.
+pub fn remove_emptied_session_dir_after_clip(
+    session_dir: &Path,
+    media_root: &Path,
+) -> io::Result<bool> {
+    let _guard = crate::lock_session_mutations();
+    remove_emptied_session_dir_with_evidence(session_dir, media_root, true, |dir| {
+        fs::remove_dir(dir).map(|_| ())
+    })
+    .map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("clean emptied session folder {session_dir:?}: {error}"),
+        )
     })
 }
 
 /// Same protocol with an injected `remove_dir`, so tests can simulate
 /// mid-cleanup races (a save landing between inventory and removal).
+#[cfg(test)]
 pub(crate) fn remove_emptied_session_dir_with(
     session_dir: &Path,
     media_root: &Path,
+    remove_dir: impl Fn(&Path) -> io::Result<()>,
+) -> io::Result<bool> {
+    remove_emptied_session_dir_with_evidence(session_dir, media_root, false, remove_dir)
+}
+
+fn remove_emptied_session_dir_with_evidence(
+    session_dir: &Path,
+    media_root: &Path,
+    allow_empty: bool,
     remove_dir: impl Fn(&Path) -> io::Result<()>,
 ) -> io::Result<bool> {
     let Some(name) = session_dir.file_name().and_then(|name| name.to_str()) else {
@@ -54,9 +89,15 @@ pub(crate) fn remove_emptied_session_dir_with(
     let Some(leftovers) = collect_disposable_leftovers(session_dir)? else {
         return Ok(false);
     };
+    if leftovers.is_empty() && !allow_empty {
+        return Ok(false);
+    }
 
     for leftover in leftovers.iter().filter(|leftover| {
-        leftover.file_name().and_then(|name| name.to_str()) != Some(SESSION_META_FILE)
+        !leftover
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case(SESSION_META_FILE))
     }) {
         let _ = remove_file_if_exists(leftover);
     }
@@ -100,7 +141,13 @@ pub fn sweep_emptied_session_dirs(media_root: &Path) -> io::Result<usize> {
     }
 
     let mut removed = 0usize;
-    for entry in fs::read_dir(media_root)? {
+    let entries = fs::read_dir(media_root).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("read media root {media_root:?}: {error}"),
+        )
+    })?;
+    for entry in entries {
         let path = match entry {
             Ok(entry) => entry.path(),
             Err(_) => continue,
@@ -219,6 +266,26 @@ fn is_clipline_sidecar_debris(name: &str) -> bool {
             .any(|tag| strip_numbered_suffix(name, tag, 2).is_some_and(is_clip_sidecar_filename))
         || strip_ascii_suffix(name, ".osu-enrichment.rename.tmp").is_some()
         || strip_ascii_suffix(name, ".osu-enrichment.rename.backup").is_some()
+        || is_legacy_upload_payload(name)
+}
+
+fn is_legacy_upload_payload(name: &str) -> bool {
+    let Some(stem) = strip_ascii_suffix(name, ".tmp") else {
+        return false;
+    };
+    let Some((source, ids)) = stem.rsplit_once(".clipline-upload-") else {
+        return false;
+    };
+    let mut ids = ids.split('-');
+    let Some(pid) = ids.next() else { return false };
+    let Some(counter) = ids.next() else {
+        return false;
+    };
+    strip_ascii_suffix(source, ".mp4").is_some()
+        && [pid, counter]
+            .iter()
+            .all(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()))
+        && ids.next().is_none()
 }
 
 fn strip_numbered_suffix<'a>(name: &'a str, tag: &str, count: usize) -> Option<&'a str> {
@@ -488,12 +555,28 @@ mod tests {
             "clip.osu-enrichment.json.clipline-osu-tmp.123.4",
             "clip.osu-enrichment.rename.tmp",
             "clip.osu-enrichment.rename.backup",
+            "clip.mp4.clipline-upload-123-4.tmp",
         ] {
             std::fs::write(session.join(name), b"interrupted write").unwrap();
         }
 
         assert!(remove_emptied_session_dir(&session, dir.path()).unwrap());
         assert!(!session.exists());
+    }
+
+    #[test]
+    fn legacy_upload_payload_shape_requires_mp4_and_two_numeric_ids() {
+        assert!(is_legacy_upload_payload(
+            "clip.mp4.clipline-upload-123-4.tmp"
+        ));
+        for name in [
+            "clip.mp4.clipline-upload-123.tmp",
+            "clip.mp4.clipline-upload-123-x.tmp",
+            "notes.txt.clipline-upload-123-4.tmp",
+            "clip.mp4.clipline-upload-123-4.tmp.keep",
+        ] {
+            assert!(!is_legacy_upload_payload(name), "{name}");
+        }
     }
 
     #[test]
@@ -589,8 +672,11 @@ mod tests {
 
         let removed = sweep_emptied_session_dirs(dir.path()).unwrap();
 
-        assert_eq!(removed, 2);
-        assert!(!empty.exists());
+        assert_eq!(removed, 1);
+        assert!(
+            empty.exists(),
+            "an empty session-shaped folder without Clipline evidence belongs to the user"
+        );
         assert!(!leftover.exists());
         assert!(keep.exists());
         assert!(keep.parent().unwrap().exists());
@@ -625,26 +711,22 @@ mod tests {
         );
     }
 
-    // Guard against the removed staging protocol returning: its sibling file
-    // and any restore-rename must stay gone from this module.
     #[test]
-    fn staging_protocol_is_gone() {
-        let dir = TestDir::new("clipline-storage", "empty-session-no-staging");
+    fn session_metadata_matching_is_case_insensitive() {
+        let dir = TestDir::new("clipline-storage", "empty-session-meta-case");
         let session = dir
-            .write("2026-06-12 19-15/clipline-session.json", 12)
+            .write("2026-06-12 19-15/Clipline-Session.JSON", 12)
             .parent()
             .unwrap()
             .to_path_buf();
-
-        let (tx, rx) = mpsc::channel();
-        let result = remove_emptied_session_dir_with(&session, dir.path(), move |dir_path| {
-            tx.send(dir_path.to_path_buf()).unwrap();
-            fs::remove_dir(dir_path)
+        let removed = remove_emptied_session_dir_with(&session, dir.path(), |_| {
+            Err(io::Error::other("keep folder for assertion"))
         })
         .unwrap();
-
-        assert!(result);
-        assert_eq!(rx.try_recv().ok().as_deref(), Some(session.as_path()));
-        assert!(!session.exists());
+        assert!(!removed);
+        assert!(
+            session.join("Clipline-Session.JSON").exists(),
+            "session metadata casing must not change whether cleanup preserves it"
+        );
     }
 }

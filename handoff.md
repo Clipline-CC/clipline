@@ -4,6 +4,39 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-30): PR #188 merge blockers
+
+Plan: `docs/superpowers/plans/2026-08-30-pr-188-merge-blockers.md`.
+
+Replay saves now create the session folder and ownership marker under storage's session lock;
+full-session recording creates its `.mp4.recording` file under the same lock. Empty-session
+cleanup therefore cannot remove either destination between directory creation and the first
+cleanup-blocking file. Recorder startup performs its sweep after abandoned-recording recovery,
+so metadata-only husks produced by deleting zero-byte recordings disappear in the same run.
+Blind sweeps keep evidence-free empty session-shaped folders; cleanup invoked after deleting a
+known managed clip may still remove an already-empty session.
+
+Remuxed upload payloads are staged under `%TEMP%\Clipline\upload-payloads`, not beside the source
+clip, and every upload prunes abandoned payloads from that shared location. A crashed upload can
+no longer keep a session folder alive after delete-local-after-upload; the exact legacy in-session
+payload name is also recognized as disposable so existing crash debris is repaired.
+
+Favorites now use a dedicated zero-byte `.clipline-favorite` sidecar. The ownership metadata file
+again has one meaning—its existence proves Clipline ownership—so storage no longer parses the
+app's JSON schema or depends on `serde_json`, and imported favorites remain unmanaged without an
+`owned: false` override. Storage exports the canonical sidecar derivation used by library delete,
+rename, poster, and osu! paths; the sidecar table remains a fixed-size array.
+
+Clip mutation synchronization is app-owned and covers GC, favorite/title/file rename, explicit
+delete, post-upload delete, and upload-lease acquisition. GC receives one `ClipGcPolicy` per clip,
+so favorite protection and kind priority are computed once. A session-folder cleanup error after
+the MP4 is gone is diagnostic rather than a failed deletion: GC still reports the deleted clip and
+freed bytes, and library deletion logs the path without leaving a ghost card.
+
+Verification: `cargo test --workspace` passes, including device tests on the development machine.
+Fresh-cache Clippy passes for `clipline-storage` and `clipline-app`; workspace Clippy also passes
+with warnings denied.
+
 ## Checkpoint (2026-08-28): PR #188 second-review hardening
 
 Plan: `docs/superpowers/plans/2026-08-28-pr-188-second-review-fixes.md`.

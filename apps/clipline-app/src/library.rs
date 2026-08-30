@@ -30,7 +30,9 @@ use clipline_mp4::{
     remux_with_selected_audio_tracks_file, trim_keyframe_aligned_file, MediaTrackCounts,
     MediaVideoCodec,
 };
-use clipline_storage::{remove_emptied_session_dir, storage_status as read_storage_status};
+use clipline_storage::{
+    remove_emptied_session_dir_after_clip, storage_status as read_storage_status,
+};
 use windows_sys::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
 use windows_sys::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
@@ -212,18 +214,6 @@ struct ClipMetadata {
     title: Option<String>,
     #[serde(default)]
     kind: Option<String>,
-    /// User favorite; favorites are never auto-deleted by quota GC. Skipped
-    /// when false so non-favorite sidecars stay byte-identical.
-    #[serde(default, skip_serializing_if = "is_false")]
-    favorite: bool,
-    /// Favorite-only metadata on an imported MP4 must not opt that file into
-    /// destructive storage management. Missing remains owned for compatibility.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    owned: Option<bool>,
-}
-
-fn is_false(value: &bool) -> bool {
-    !*value
 }
 
 const AUDIO_PREVIEW_CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -428,7 +418,7 @@ fn push_clips_from(
                 .unwrap_or_default(),
             title,
             kind,
-            favorite: clip_metadata.favorite,
+            favorite: is_favorite_clip(&path),
             session: session.clone(),
             size_mb,
             modified_unix,
@@ -749,17 +739,27 @@ pub(crate) fn set_clip_favorite_impl(
     target: &Path,
     favorite: bool,
 ) -> Result<SetClipFavoriteInfo, String> {
-    let _guard = clipline_storage::lock_clip_mutations();
+    let _guard = crate::gc::lock_clip_mutations();
     if !target.is_file() {
         return Err("clip no longer exists".into());
     }
-    let owned = clipline_storage::is_clip_owned(target);
-    let mut metadata = read_clip_metadata(target).unwrap_or_default();
-    if !owned {
-        metadata.owned = Some(false);
+    let marker = favorite_marker_path(target);
+    if favorite {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&marker)
+        {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && marker.is_file() => {
+            }
+            Err(error) => return Err(format!("favorite clip {target:?}: {error}")),
+        }
+    } else if let Err(error) = std::fs::remove_file(&marker) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            return Err(format!("unfavorite clip {target:?}: {error}"));
+        }
     }
-    metadata.favorite = favorite;
-    write_clip_metadata(target, &metadata)?;
     Ok(SetClipFavoriteInfo {
         path: target.display().to_string(),
         favorite,
@@ -769,16 +769,15 @@ pub(crate) fn set_clip_favorite_impl(
 /// Every file that lives and dies with a clip: the MP4 plus one sidecar per
 /// storage-recognized suffix. `with_extension` replaces the extension, so each
 /// suffix is written relative to the clip stem.
-pub(crate) fn clip_sidecar_paths(target: &Path) -> Vec<PathBuf> {
+pub(crate) fn clip_sidecar_paths(
+    target: &Path,
+) -> [PathBuf; clipline_storage::CLIP_SIDECAR_SUFFIXES.len()] {
     clipline_storage::CLIP_SIDECAR_SUFFIXES
-        .iter()
-        .map(|suffix| {
-            target.with_extension(suffix.trim_start_matches('.'))
-        })
-        .collect()
+        .map(|suffix| clipline_storage::clip_sidecar_path(target, suffix))
 }
 
 fn remove_clip_files(target: &Path, media_root: &Path) -> Result<(), String> {
+    let _guard = crate::gc::lock_clip_mutations();
     if let Some(error) = crate::cloud_upload::active_upload_source_error(target) {
         return Err(error);
     }
@@ -789,8 +788,13 @@ fn remove_clip_files(target: &Path, media_root: &Path) -> Result<(), String> {
         let _ = std::fs::remove_file(sidecar);
     }
     if let Some(parent) = target.parent() {
-        remove_emptied_session_dir(parent, media_root)
-            .map_err(|error| format!("clean emptied session folder: {error}"))?;
+        if let Err(error) = remove_emptied_session_dir_after_clip(parent, media_root) {
+            tracing::warn!(
+                event = "library_session_cleanup_failed",
+                session_dir = ?parent,
+                error = %error
+            );
+        }
     }
     Ok(())
 }
@@ -805,7 +809,7 @@ pub struct DeletedClipsReport {
 }
 
 /// Testable core of [`delete_clips`]: deletes each already-validated clip plus
-/// its four sidecars (best effort), recording any removal failures. `failed`
+/// its sidecars (best effort), recording any removal failures. `failed`
 /// carries inputs that already failed validation so the caller's report stays
 /// complete in one place.
 fn delete_clips_impl(
@@ -888,7 +892,7 @@ fn rename_clip_title(
     old_path: String,
     title: String,
 ) -> Result<RenamedClipInfo, String> {
-    let _guard = clipline_storage::lock_clip_mutations();
+    let _guard = crate::gc::lock_clip_mutations();
     if !source.is_file() {
         return Err("clip no longer exists".into());
     }
@@ -896,7 +900,6 @@ fn rename_clip_title(
     let kind = clip_kind_from_metadata(&source, &metadata).to_string();
     metadata.title = Some(title.clone());
     metadata.kind = Some(kind.clone());
-    metadata.owned = None;
     write_clip_metadata(&source, &metadata)?;
     let name = source
         .file_name()
@@ -1000,7 +1003,7 @@ fn rename_clip_files(
     old_path: String,
     target_name: String,
 ) -> Result<RenamedClipInfo, String> {
-    let _guard = clipline_storage::lock_clip_mutations();
+    let _guard = crate::gc::lock_clip_mutations();
     if let Some(error) = crate::cloud_upload::active_upload_source_error(&source) {
         return Err(error);
     }
@@ -1019,8 +1022,10 @@ fn rename_clip_files(
         return Err("a clip with that name already exists".into());
     }
 
-    let source_markers = source.with_extension("markers.json");
-    let target_markers = target.with_extension("markers.json");
+    let source_markers =
+        clipline_storage::clip_sidecar_path(&source, clipline_storage::MARKERS_SUFFIX);
+    let target_markers =
+        clipline_storage::clip_sidecar_path(&target, clipline_storage::MARKERS_SUFFIX);
     let target_markers_same_file = same_existing_path(&target_markers, &source_markers);
     if source_markers.exists() && target_markers.exists() && !target_markers_same_file {
         return Err("a marker sidecar with that name already exists".into());
@@ -1029,6 +1034,13 @@ fn rename_clip_files(
     let target_metadata_same_file = same_existing_path(&target_metadata, &source_metadata);
     if source_metadata.exists() && target_metadata.exists() && !target_metadata_same_file {
         return Err("a clip metadata sidecar with that name already exists".into());
+    }
+
+    let source_favorite = favorite_marker_path(&source);
+    let target_favorite = favorite_marker_path(&target);
+    let target_favorite_same_file = same_existing_path(&target_favorite, &source_favorite);
+    if source_favorite.exists() && target_favorite.exists() && !target_favorite_same_file {
+        return Err("a favorite marker with that name already exists".into());
     }
 
     let pending_osu_move = PreparedOsuSidecarMove::stage(&source, &target)?;
@@ -1053,6 +1065,20 @@ fn rename_clip_files(
             return Err(format!("rename clip metadata: {error}"));
         }
     }
+    let moved_favorite = source_favorite.exists() && source_favorite != target_favorite;
+    if moved_favorite {
+        if let Err(error) = std::fs::rename(&source_favorite, &target_favorite) {
+            rollback_renamed_clip_files(
+                &source,
+                &target,
+                &source_markers,
+                &target_markers,
+                moved_metadata.then_some((source_metadata.as_path(), target_metadata.as_path())),
+                None,
+            );
+            return Err(format!("rename favorite marker: {error}"));
+        }
+    }
 
     if let Some(pending) = &pending_osu_move {
         if let Err(error) = pending.commit() {
@@ -1062,6 +1088,7 @@ fn rename_clip_files(
                 &source_markers,
                 &target_markers,
                 moved_metadata.then_some((source_metadata.as_path(), target_metadata.as_path())),
+                moved_favorite.then_some((source_favorite.as_path(), target_favorite.as_path())),
             );
             return Err(error);
         }
@@ -1070,7 +1097,6 @@ fn rename_clip_files(
     let mut target_metadata_value = read_clip_metadata(&target).unwrap_or(metadata);
     target_metadata_value.title = title.clone();
     target_metadata_value.kind = Some(kind.clone());
-    target_metadata_value.owned = None;
     if let Err(error) = write_clip_metadata(&target, &target_metadata_value) {
         if let Some(pending) = &pending_osu_move {
             pending.rollback();
@@ -1081,6 +1107,7 @@ fn rename_clip_files(
             &source_markers,
             &target_markers,
             moved_metadata.then_some((source_metadata.as_path(), target_metadata.as_path())),
+            moved_favorite.then_some((source_favorite.as_path(), target_favorite.as_path())),
         );
         return Err(error);
     }
@@ -1116,7 +1143,13 @@ fn rollback_renamed_clip_files(
     source_markers: &Path,
     target_markers: &Path,
     metadata: Option<(&Path, &Path)>,
+    favorite: Option<(&Path, &Path)>,
 ) {
+    if let Some((source_favorite, target_favorite)) = favorite {
+        if target_favorite.exists() && source_favorite != target_favorite {
+            let _ = std::fs::rename(target_favorite, source_favorite);
+        }
+    }
     if let Some((source_metadata, target_metadata)) = metadata {
         if target_metadata.exists() && source_metadata != target_metadata {
             let _ = std::fs::rename(target_metadata, source_metadata);
@@ -2310,7 +2343,11 @@ fn open_folder_path(dir: &Path) -> Result<(), String> {
 }
 
 fn clip_metadata_path(path: &Path) -> PathBuf {
-    path.with_extension("clipline.json")
+    clipline_storage::clip_sidecar_path(path, clipline_storage::CLIP_OWNERSHIP_MARKER_SUFFIX)
+}
+
+fn favorite_marker_path(path: &Path) -> PathBuf {
+    clipline_storage::clip_sidecar_path(path, clipline_storage::FAVORITE_MARKER_SUFFIX)
 }
 
 fn read_clip_metadata(path: &Path) -> Option<ClipMetadata> {
@@ -2406,7 +2443,7 @@ pub(crate) fn clip_kind_for_path(path: &Path) -> String {
 }
 
 pub(crate) fn is_favorite_clip(path: &Path) -> bool {
-    read_clip_metadata(path).is_some_and(|metadata| metadata.favorite)
+    favorite_marker_path(path).is_file()
 }
 
 fn display_renamed_clip_path(old_path: &str, name: &str, fallback_parent: &Path) -> String {
@@ -4441,12 +4478,15 @@ mod tests {
         touch_mp4(&clip);
         std::fs::write(clip.with_extension("markers.json"), b"{}").unwrap();
         std::fs::write(clip_metadata_path(&clip), br#"{"title":"Old title"}"#).unwrap();
+        set_clip_favorite_impl(&clip, true).unwrap();
+        let favorite = favorite_marker_path(&clip);
 
         remove_clip_files(&clip, dir.path()).unwrap();
 
         assert!(!clip.exists());
         assert!(!clip.with_extension("markers.json").exists());
         assert!(!clip_metadata_path(&clip).exists());
+        assert!(!favorite.exists());
     }
 
     #[test]
@@ -4548,7 +4588,6 @@ mod tests {
             &ClipMetadata {
                 title: Some("First title".to_string()),
                 kind: Some("replay".to_string()),
-                ..Default::default()
             },
         )
         .unwrap();
@@ -4557,7 +4596,6 @@ mod tests {
             &ClipMetadata {
                 title: Some("Second title".to_string()),
                 kind: Some("session".to_string()),
-                ..Default::default()
             },
         )
         .unwrap();
@@ -4568,59 +4606,22 @@ mod tests {
     }
 
     #[test]
-    fn clip_metadata_favorite_round_trips_and_stays_hidden_when_false() {
-        let dir = TestDir::new("clipline-library", "favorite-metadata");
-        let clip = dir.path().join("clip.mp4");
-        touch_mp4(&clip);
-
-        write_clip_metadata(
-            &clip,
-            &ClipMetadata {
-                title: None,
-                kind: None,
-                favorite: true,
-                owned: None,
-            },
-        )
-        .unwrap();
-        let metadata = read_clip_metadata(&clip).unwrap();
-        assert!(metadata.favorite);
-
-        write_clip_metadata(
-            &clip,
-            &ClipMetadata {
-                title: Some("Keep".to_string()),
-                kind: Some("replay".to_string()),
-                favorite: false,
-                owned: None,
-            },
-        )
-        .unwrap();
-        let metadata = read_clip_metadata(&clip).unwrap();
-        assert!(!metadata.favorite);
-        let json = std::fs::read_to_string(clip_metadata_path(&clip)).unwrap();
-        assert!(
-            !json.contains("favorite"),
-            "non-favorite metadata must stay byte-identical to today"
-        );
-        assert!(json.contains("\"kind\": \"replay\""));
-    }
-
-    #[test]
     fn set_clip_favorite_impl_sets_and_clears_the_flag() {
         let dir = TestDir::new("clipline-library", "set-favorite");
         let clip = dir.path().join("clip.mp4");
         touch_mp4(&clip);
         clipline_storage::ensure_clip_owned(&clip).unwrap();
+        let ownership = std::fs::read(clip_metadata_path(&clip)).unwrap();
 
         let result = set_clip_favorite_impl(&clip, true).unwrap();
         assert!(result.favorite);
         assert_eq!(result.path, clip.display().to_string());
-        assert!(read_clip_metadata(&clip).unwrap().favorite);
+        assert!(is_favorite_clip(&clip));
+        assert_eq!(std::fs::read(clip_metadata_path(&clip)).unwrap(), ownership);
 
         let result = set_clip_favorite_impl(&clip, false).unwrap();
         assert!(!result.favorite);
-        assert!(!read_clip_metadata(&clip).unwrap().favorite);
+        assert!(!is_favorite_clip(&clip));
     }
 
     #[test]
@@ -4630,7 +4631,11 @@ mod tests {
         touch_mp4(&clip);
 
         set_clip_favorite_impl(&clip, true).unwrap();
-        assert!(read_clip_metadata(&clip).unwrap().favorite);
+        assert!(is_favorite_clip(&clip));
+        assert!(
+            !clip_metadata_path(&clip).exists(),
+            "favorite state must not reuse the ownership metadata sidecar"
+        );
         assert_eq!(
             clipline_storage::storage_status(dir.path(), Some(0))
                 .unwrap()
@@ -4684,6 +4689,8 @@ mod tests {
         .unwrap();
 
         assert!(target.exists());
+        assert!(is_favorite_clip(&target));
+        assert!(!is_favorite_clip(&source));
         assert_eq!(
             clipline_storage::storage_status(dir.path(), Some(0))
                 .unwrap()
@@ -5097,7 +5104,6 @@ mod tests {
             &ClipMetadata {
                 title: Some("Case-only metadata".to_string()),
                 kind: Some("session".to_string()),
-                ..Default::default()
             },
         )
         .unwrap();

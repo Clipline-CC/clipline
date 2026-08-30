@@ -27,7 +27,7 @@ static POSTER_FFMPEG: OnceLock<PathBuf> = OnceLock::new();
 /// The cached poster path for a clip: `clip.mp4` -> `clip.poster.jpg`. Mirrors
 /// the `<clip>.markers.json` sidecar convention so the two travel together.
 pub fn poster_path(clip: &Path) -> PathBuf {
-    clip.with_extension("poster.jpg")
+    clipline_storage::clip_sidecar_path(clip, clipline_storage::POSTER_SUFFIX)
 }
 
 /// Return the ready cache entry without starting ffmpeg. This keeps gallery

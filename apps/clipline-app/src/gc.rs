@@ -4,8 +4,20 @@
 
 use std::io;
 use std::path::Path;
+use std::sync::{Mutex, MutexGuard};
 
 use crate::library;
+
+/// App-owned serialization for GC, clip mutations, and upload lease starts.
+/// Lock order is clip mutation -> upload sources -> session mutation.
+/// ponytail: process-wide lock; split per media root only if contention is measured.
+static CLIP_MUTATION_LOCK: Mutex<()> = Mutex::new(());
+
+pub(crate) fn lock_clip_mutations() -> MutexGuard<'static, ()> {
+    CLIP_MUTATION_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// Quota GC deletes oldest clips within a kind, but drains kinds in order:
 /// sessions first, then replays, then trims. Lower keys are deleted first.
@@ -24,23 +36,25 @@ pub(crate) fn enforce_quota_with_clip_policy(
     quota_bytes: Option<u64>,
     protect: Option<&Path>,
 ) -> io::Result<clipline_storage::GcReport> {
-    clipline_storage::enforce_quota_with_policy(
-        dir,
-        quota_bytes,
-        protect,
-        |path| {
-            crate::cloud_upload::is_active_upload_source(path) || library::is_favorite_clip(path)
-        },
-        clip_gc_priority,
-    )
+    let _guard = lock_clip_mutations();
+    let report = clipline_storage::enforce_quota_with_policy(dir, quota_bytes, protect, |path| {
+        clipline_storage::ClipGcPolicy {
+            protected: crate::cloud_upload::is_active_upload_source(path)
+                || library::is_favorite_clip(path),
+            priority: clip_gc_priority(path),
+        }
+    })?;
+    for error in &report.cleanup_errors {
+        tracing::warn!(event = "storage_session_cleanup_failed", error);
+    }
+    Ok(report)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use clipline_test_utils::TestDir;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{mpsc, Arc};
+    use std::sync::mpsc;
     use std::time::Duration;
 
     #[test]
@@ -97,7 +111,10 @@ mod tests {
 
         assert_eq!(report.deleted_clips, 0);
         assert!(favorite.exists());
-        assert!(other.exists(), "futile deletion cannot make room below quota");
+        assert!(
+            other.exists(),
+            "futile deletion cannot make room below quota"
+        );
     }
 
     #[test]
@@ -120,9 +137,15 @@ mod tests {
         let report = enforce_quota_with_clip_policy(dir.path(), Some(150), None).unwrap();
 
         assert_eq!(report.deleted_clips, 2);
-        assert!(!session.exists(), "sessions must drain before replays and trims");
+        assert!(
+            !session.exists(),
+            "sessions must drain before replays and trims"
+        );
         assert!(!replay.exists());
-        assert!(trim.exists(), "trims must be the last kind auto-delete touches");
+        assert!(
+            trim.exists(),
+            "trims must be the last kind auto-delete touches"
+        );
         assert_eq!(report.status.clip_count, 1);
     }
 
@@ -133,26 +156,19 @@ mod tests {
         std::fs::write(&clip, [0; 100]).unwrap();
         clipline_storage::ensure_clip_owned(&clip).unwrap();
 
-        let checks = Arc::new(AtomicUsize::new(0));
         let (checked_tx, checked_rx) = mpsc::channel();
         let (continue_tx, continue_rx) = mpsc::channel();
         let gc_root = dir.path().to_path_buf();
-        let gc_checks = Arc::clone(&checks);
         let gc = std::thread::spawn(move || {
-            clipline_storage::enforce_quota_with_policy(
-                &gc_root,
-                Some(0),
-                None,
-                |_| {
-                    let favorite = false;
-                    if gc_checks.fetch_add(1, Ordering::SeqCst) == 1 {
-                        checked_tx.send(()).unwrap();
-                        continue_rx.recv().unwrap();
-                    }
-                    favorite
-                },
-                |_| 0,
-            )
+            let _guard = lock_clip_mutations();
+            clipline_storage::enforce_quota_with_policy(&gc_root, Some(0), None, |path| {
+                checked_tx.send(()).unwrap();
+                continue_rx.recv().unwrap();
+                clipline_storage::ClipGcPolicy {
+                    protected: library::is_favorite_clip(path),
+                    priority: 0,
+                }
+            })
             .unwrap()
         });
 

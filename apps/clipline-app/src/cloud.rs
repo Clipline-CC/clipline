@@ -1933,21 +1933,21 @@ async fn upload_payload_for_audio_selection_from_path(
 }
 
 fn reserve_upload_payload_path(source: &Path) -> Result<PathBuf, String> {
-    let file_name = source
-        .file_name()
-        .ok_or_else(|| "clip path must include a file name".to_string())?;
-    let parent = source
-        .parent()
-        .ok_or_else(|| "clip path must include a parent directory".to_string())?;
-    prune_abandoned_upload_payloads(parent);
+    if source.file_name().is_none() {
+        return Err("clip path must include a file name".into());
+    }
+    let directory = std::env::temp_dir()
+        .join("Clipline")
+        .join("upload-payloads");
+    std::fs::create_dir_all(&directory)
+        .map_err(|error| format!("create upload payload directory {directory:?}: {error}"))?;
+    prune_abandoned_upload_payloads(&directory);
     for _ in 0..128 {
         let suffix = CLOUD_CACHE_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let mut name = file_name.to_os_string();
-        name.push(format!(
-            ".clipline-upload-{}-{suffix}.tmp",
+        let path = directory.join(format!(
+            "clipline-upload-{}-{suffix}.mp4.tmp",
             std::process::id()
         ));
-        let path = source.with_file_name(name);
         match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -2292,6 +2292,7 @@ fn mark_remote_not_found_once(record: &mut CloudUploadRecord) {
 }
 
 fn delete_uploaded_local_files(target: &Path, media_root: &Path) -> std::io::Result<()> {
+    let _guard = crate::gc::lock_clip_mutations();
     std::fs::remove_file(target).map_err(|error| {
         std::io::Error::new(
             error.kind(),
@@ -2311,7 +2312,9 @@ fn delete_uploaded_local_files(target: &Path, media_root: &Path) -> std::io::Res
         }
     }
     if let Some(parent) = target.parent() {
-        if let Err(error) = clipline_storage::remove_emptied_session_dir(parent, media_root) {
+        if let Err(error) =
+            clipline_storage::remove_emptied_session_dir_after_clip(parent, media_root)
+        {
             first_error.get_or_insert(error);
         }
     }
@@ -2608,6 +2611,11 @@ mod tests {
         let payload_bytes = std::fs::read(&payload_path).unwrap();
 
         assert_ne!(payload_path, source);
+        assert_ne!(
+            payload_path.parent(),
+            source.parent(),
+            "upload payloads must not keep a source session folder alive"
+        );
         assert!(payload_bytes.windows(6).any(|window| window == b"V00000"));
         assert!(!payload_bytes.windows(6).any(|window| window == b"A00000"));
         assert!(payload_bytes.windows(6).any(|window| window == b"B00000"));
