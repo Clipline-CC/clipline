@@ -166,7 +166,7 @@ pub struct ClipInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_group: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub compilation_version: Option<u32>,
+    pub source_group_fingerprint: Option<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -225,7 +225,7 @@ struct ClipMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source_group: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    compilation_version: Option<u32>,
+    source_group_fingerprint: Option<String>,
 }
 
 const AUDIO_PREVIEW_CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -419,7 +419,7 @@ fn push_clips_from(
         let kind = clip_kind_from_metadata(&path, &clip_metadata).to_string();
         let group = clip_metadata.group.clone();
         let source_group = clip_metadata.source_group.clone();
-        let compilation_version = clip_metadata.compilation_version;
+        let source_group_fingerprint = clip_metadata.source_group_fingerprint.clone();
         // Prefer the session sidecar; fall back to the game named in markers
         // so clips recorded before session tagging still show an icon.
         let game = session_game
@@ -441,7 +441,7 @@ fn push_clips_from(
             game,
             group,
             source_group,
-            compilation_version,
+            source_group_fingerprint,
         });
     }
     Ok(())
@@ -1637,42 +1637,15 @@ fn transcode_share_file_with_ffmpeg(
         .ok_or_else(|| "ffmpeg is not available for a shareable clipboard export".to_string())?;
     let video_modes = share_video_export_modes(source)?;
     let timeout = share_export_timeout(source);
-    let deadline = Instant::now()
-        .checked_add(timeout)
-        .unwrap_or_else(Instant::now);
-    let mut last_error = String::new();
-
-    for mode in video_modes {
-        job.ensure_active()?;
-        let Some(remaining) = remaining_share_export_timeout(deadline, Instant::now()) else {
-            last_error = format!(
-                "ffmpeg share export exhausted its {} second timeout",
-                timeout.as_secs()
-            );
-            break;
-        };
-        let _ = std::fs::remove_file(target);
-        let mut command = Command::new(&ffmpeg);
-        suppress_console(&mut command);
-        command
-            .args(ffmpeg_share_export_args(input, target, has_audio, &mode))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
-        match run_share_ffmpeg(&mut command, remaining, || job.is_cancelled()) {
-            Ok(output) if output.status.success() => return Ok(()),
-            Ok(output) => {
-                last_error = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                if last_error.is_empty() {
-                    last_error = format!("ffmpeg exited with {}", output.status);
-                }
-            }
-            Err(error) => last_error = error,
-        }
-    }
-
-    let _ = std::fs::remove_file(target);
-    Err(format!("prepare shareable clipboard clip: {last_error}"))
+    run_ffmpeg_fallback(
+        &ffmpeg,
+        target,
+        timeout,
+        video_modes,
+        "shareable clipboard export",
+        || job.is_cancelled(),
+        |mode| ffmpeg_share_export_args(input, target, has_audio, mode),
+    )
 }
 
 fn share_video_export_modes(source: &Path) -> Result<Vec<ShareVideoExportMode>, String> {
@@ -1688,7 +1661,18 @@ fn share_video_export_modes(source: &Path) -> Result<Vec<ShareVideoExportMode>, 
         ));
     }
 
-    let mut encoders: Vec<(String, EncoderBackend)> = Vec::new();
+    let encoders = available_h264_encoders();
+    if encoders.is_empty() {
+        return Err("no usable FFmpeg H.264 encoder is available for this clip".into());
+    }
+    Ok(encoders
+        .into_iter()
+        .map(|(encoder, backend)| ShareVideoExportMode::Encode { encoder, backend })
+        .collect())
+}
+
+fn available_h264_encoders() -> Vec<(String, EncoderBackend)> {
+    let mut encoders = Vec::new();
     for capability in clipline_capture::ffmpeg::probe() {
         if !capability.codecs.contains(&Codec::H264) {
             continue;
@@ -1701,13 +1685,7 @@ fn share_video_export_modes(source: &Path) -> Result<Vec<ShareVideoExportMode>, 
             encoders.push((name.to_string(), capability.backend));
         }
     }
-    if encoders.is_empty() {
-        return Err("no usable FFmpeg H.264 encoder is available for this clip".into());
-    }
-    Ok(encoders
-        .into_iter()
-        .map(|(encoder, backend)| ShareVideoExportMode::Encode { encoder, backend })
-        .collect())
+    encoders
 }
 
 fn ffmpeg_share_export_args(
@@ -1774,12 +1752,16 @@ fn ffmpeg_share_export_args(
 }
 
 fn share_export_timeout(source: &Path) -> Duration {
-    const MIN_SECONDS: u64 = 2 * 60;
-    const MAX_SECONDS: u64 = 6 * 60 * 60;
     let duration = clipline_mp4::movie_duration_s_file(source)
         .ok()
         .flatten()
         .unwrap_or(60.0);
+    share_export_timeout_for_duration(duration)
+}
+
+fn share_export_timeout_for_duration(duration: f64) -> Duration {
+    const MIN_SECONDS: u64 = 2 * 60;
+    const MAX_SECONDS: u64 = 6 * 60 * 60;
     let seconds = (duration * 4.0 + 60.0).ceil().max(0.0) as u64;
     Duration::from_secs(seconds.clamp(MIN_SECONDS, MAX_SECONDS))
 }
@@ -1790,25 +1772,73 @@ fn remaining_share_export_timeout(deadline: Instant, now: Instant) -> Option<Dur
         .filter(|remaining| !remaining.is_zero())
 }
 
+fn run_ffmpeg_fallback<T>(
+    ffmpeg: &Path,
+    target: &Path,
+    timeout: Duration,
+    modes: impl IntoIterator<Item = T>,
+    label: &str,
+    is_cancelled: impl Fn() -> bool,
+    mut args_for: impl FnMut(&T) -> Vec<String>,
+) -> Result<(), String> {
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .unwrap_or_else(Instant::now);
+    let mut last_error = String::new();
+    for mode in modes {
+        if is_cancelled() {
+            return Err(format!("{label} cancelled"));
+        }
+        let Some(remaining) = remaining_share_export_timeout(deadline, Instant::now()) else {
+            last_error = format!("exhausted its {} second timeout", timeout.as_secs());
+            break;
+        };
+        let _ = std::fs::remove_file(target);
+        let mut command = Command::new(ffmpeg);
+        suppress_console(&mut command);
+        command
+            .args(args_for(&mode))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        match run_export_ffmpeg(&mut command, remaining, label, &is_cancelled) {
+            Ok(output) if output.status.success() => return Ok(()),
+            Ok(output) => {
+                last_error = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                if last_error.is_empty() {
+                    last_error = format!("ffmpeg exited with {}", output.status);
+                }
+            }
+            Err(error) => last_error = error,
+        }
+    }
+    let _ = std::fs::remove_file(target);
+    if last_error.is_empty() {
+        last_error = "no encoder attempts were available".into();
+    }
+    Err(format!("{label}: {last_error}"))
+}
+
 struct ShareFfmpegOutput {
     status: ExitStatus,
     stderr: Vec<u8>,
 }
 
-fn run_share_ffmpeg(
+fn run_export_ffmpeg(
     command: &mut Command,
     timeout: Duration,
+    label: &str,
     is_cancelled: impl Fn() -> bool,
 ) -> Result<ShareFfmpegOutput, String> {
     const MAX_STDERR_BYTES: usize = 128 * 1024;
 
     let mut child = command
         .spawn()
-        .map_err(|error| format!("spawn ffmpeg share export: {error}"))?;
+        .map_err(|error| format!("spawn ffmpeg {label}: {error}"))?;
     let Some(stderr) = child.stderr.take() else {
         let _ = child.kill();
         let _ = child.wait();
-        return Err("spawn ffmpeg share export: stderr pipe unavailable".into());
+        return Err(format!("spawn ffmpeg {label}: stderr pipe unavailable"));
     };
     let reader = match std::thread::Builder::new()
         .name("clipline-share-ffmpeg-stderr".into())
@@ -1818,7 +1848,7 @@ fn run_share_ffmpeg(
         Err(error) => {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(format!("spawn ffmpeg share stderr reader: {error}"));
+            return Err(format!("spawn ffmpeg {label} stderr reader: {error}"));
         }
     };
 
@@ -1829,7 +1859,7 @@ fn run_share_ffmpeg(
         if is_cancelled() {
             let _ = child.kill();
             let _ = child.wait();
-            break Err("ffmpeg share export cancelled".into());
+            break Err(format!("{label} cancelled"));
         }
         match child.try_wait() {
             Ok(Some(status)) => break Ok(status),
@@ -1840,21 +1870,21 @@ fn run_share_ffmpeg(
                 let _ = child.kill();
                 let _ = child.wait();
                 break Err(format!(
-                    "ffmpeg share export timed out after {} seconds",
+                    "{label} timed out after {} seconds",
                     timeout.as_secs()
                 ));
             }
             Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                break Err(format!("wait for ffmpeg share export: {error}"));
+                break Err(format!("wait for ffmpeg {label}: {error}"));
             }
         }
     };
     let stderr = reader
         .join()
-        .map_err(|_| "ffmpeg share stderr reader panicked".to_string())?
-        .map_err(|error| format!("read ffmpeg share stderr: {error}"))?;
+        .map_err(|_| format!("ffmpeg {label} stderr reader panicked"))?
+        .map_err(|error| format!("read ffmpeg {label} stderr: {error}"))?;
     Ok(ShareFfmpegOutput {
         status: status?,
         stderr,
@@ -2037,7 +2067,7 @@ fn export_clip_file(
                     kind: Some("trim".to_string()),
                     group: group.clone(),
                     source_group: None,
-                    compilation_version: None,
+                    source_group_fingerprint: None,
                 },
             )?;
         }
@@ -4467,7 +4497,7 @@ mod tests {
                 kind: Some("replay".to_string()),
                 group: None,
                 source_group: None,
-                compilation_version: None,
+                source_group_fingerprint: None,
             },
         )
         .unwrap();
@@ -4478,7 +4508,7 @@ mod tests {
                 kind: Some("session".to_string()),
                 group: None,
                 source_group: None,
-                compilation_version: None,
+                source_group_fingerprint: None,
             },
         )
         .unwrap();
@@ -4504,7 +4534,7 @@ mod tests {
                     order: 2,
                 }),
                 source_group: Some("Highlights".to_string()),
-                compilation_version: Some(2),
+                source_group_fingerprint: Some("fingerprint".to_string()),
             },
         )
         .unwrap();
@@ -4513,7 +4543,10 @@ mod tests {
         assert_eq!(metadata.group.as_ref().map(|group| group.name.as_str()), Some("Highlights"));
         assert_eq!(metadata.group.map(|group| group.order), Some(2));
         assert_eq!(metadata.source_group.as_deref(), Some("Highlights"));
-        assert_eq!(metadata.compilation_version, Some(2));
+        assert_eq!(
+            metadata.source_group_fingerprint.as_deref(),
+            Some("fingerprint")
+        );
     }
 
     #[test]
@@ -4922,7 +4955,7 @@ mod tests {
                 kind: Some("session".to_string()),
                 group: None,
                 source_group: None,
-                compilation_version: None,
+                source_group_fingerprint: None,
             },
         )
         .unwrap();

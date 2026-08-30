@@ -4,6 +4,38 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-30): Groups PR review blockers
+
+Plan: `docs/superpowers/plans/2026-08-30-groups-pr-review.md`.
+
+Freshly exported members can reach the UI as `\\?\D:\...` while Library scans return `D:\...`.
+The old exact backend comparison made first-use drag and Alt+Arrow reorders fail. Reordering is now
+one `reorder_group(name, ordered_paths)` call: every path is validated once, Windows device prefixes
+and case are normalized, the group is scanned once, and changed sidecars roll back if a later write
+fails. This deletes the neighbor-move protocol and its N scans/N×member writes.
+
+Compilation reuse no longer depends on process-local maps, invalidation sets, or a format-version
+literal. Each compilation persists `source_group_fingerprint`, built from normalized ordered member
+paths; the UI compares it directly with the current group. Reorder, membership changes, restart,
+compilation deletion, and same-name group recreation therefore reject stale media without mutable
+cache state. Deleting a group also deletes its generated compilations.
+
+The member context menu now offers **Remove from group**, clearing only group metadata and keeping
+review on a surviving neighbor. Group rail visibility runs through the existing event/play/metadata
+policy functions, while the gallery renderer no longer reaches into review chrome.
+
+Group compilation and normal share export now use one encoder fallback runner, one overall deadline,
+bounded diagnostics, and the existing lifecycle cancellation generation. Every member video and
+audio stream is padded/trimmed to the same endpoint before concat. The real five-member smoke
+produced 96.533 s video and 96.530 s stereo Opus audio, a 3.3 ms endpoint delta. The group cap is
+backed by an actual UTF-16 command-length check before `CreateProcessW`, so unusually long paths
+fail clearly instead of overrunning Windows' command-line ceiling.
+
+Verification: Node syntax checks clean, all 125 UI contracts and 636 app tests green,
+`cargo test --workspace` green, and warning-denied workspace Clippy clean. The one unrelated memory
+cache timing test failed once in an earlier run, then passed twice in isolation and in both complete
+reruns.
+
 ## Checkpoint (2026-08-29): Group mixed-audio concat boundary
 
 Plan: `docs/superpowers/plans/2026-08-29-group-compilation-amix-boundary.md`.
@@ -31,13 +63,12 @@ The missing microphone was upstream of Cloud. Real repro members each contain `0
 multi-stream members use `amix` with longest duration/zero dropout/normalization, and the resulting
 single Opus stream feeds the existing cross-clip concat. Zero-audio members still receive silence.
 
-The group upload icon also bypassed normal record state. Group mode now resolves the newest local
-versioned `source_group` compilation clip, looks up its ordinary persisted cloud record, and uses the same
+The group upload icon also bypassed normal record state. Group mode now resolves the matching local
+`source_group` compilation clip, looks up its ordinary persisted cloud record, and uses the same
 queued/uploading/uploaded/shareable rendering and click behavior as normal clips. Public/unlisted
 uploads become Copy group cloud link; private uploads open the cloud page. Existing compilations
-are reused for Copy/Upload and invalidated in-session when membership or order changes. New
-compilations persist `source_group` plus `compilation_version: 2`; pre-fix stream-0-only outputs
-lack that marker and are deliberately not reused, so the next Upload regenerates corrected audio.
+are reused for Copy/Upload only when their persisted ordered-member fingerprint matches. Legacy
+stream-0-only outputs lack that fingerprint and are deliberately not reused.
 
 A real discrimination smoke used silent stream 0 plus an 880 Hz stream 1; the compilation measured
 `max_volume: -21.2 dB` and contained one stereo Opus stream, proving the formerly omitted second

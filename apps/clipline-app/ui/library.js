@@ -123,27 +123,21 @@ function activeGroup() {
   return activeGroupName ? groupForName(activeGroupName) : null;
 }
 
-function groupCompilationKey(name) {
-  return String(name || "").trim().toLocaleLowerCase();
-}
-
-function invalidateGroupCompilation(name) {
-  const key = groupCompilationKey(name);
-  if (!key) return;
-  invalidatedGroupCompilations.add(key);
-  groupCompilationClips.delete(key);
+function groupFingerprint(group) {
+  return group && group.members
+    ? group.members.map((clip) => GalleryWindowCore.clipPathKey(clip.path)).join("\0")
+    : "";
 }
 
 function groupCompilationClip(group = activeGroup()) {
   if (!group) return null;
-  const key = groupCompilationKey(group.name);
-  if (invalidatedGroupCompilations.has(key)) return null;
+  const fingerprint = groupFingerprint(group);
   const candidates = clipsCache
     .filter((clip) => clipKind(clip) === "compilation"
       && clip.source_group === group.name
-      && Number(clip.compilation_version) === 2)
+      && clip.source_group_fingerprint === fingerprint)
     .sort((left, right) => (Number(right.modified_unix) || 0) - (Number(left.modified_unix) || 0));
-  return groupCompilationClips.get(key) || candidates[0] || null;
+  return candidates[0] || null;
 }
 
 function topLevelLocalClips(clips = clipsCache) {
@@ -404,17 +398,27 @@ function applyGroupOrderUpdates(updates) {
   }
 }
 
-async function moveGroupClip(clip, direction, steps = 1) {
-  if (groupReorderPending || !clip) return;
+async function moveGroupClip(clip, direction) {
+  const group = activeGroup();
+  if (!group || !clip) return;
+  const from = group.members.findIndex((member) => PlayerCore.sameClipPath(member.path, clip.path));
+  const delta = direction === "up" ? -1 : 1;
+  const to = Math.max(0, Math.min(group.members.length - 1, from + delta));
+  if (from < 0 || from === to) return;
+  const ordered = [...group.members];
+  ordered.splice(to, 0, ordered.splice(from, 1)[0]);
+  await reorderGroupMembers(group, ordered.map((member) => member.path));
+}
+
+async function reorderGroupMembers(group, orderedPaths) {
+  if (groupReorderPending || !group) return;
   groupReorderPending = true;
   setDeckStatus("reordering group…");
   try {
-    for (let step = 0; step < Math.max(1, steps); step += 1) {
-      const updates = await invoke("move_group_clip", { path: clip.path, direction });
-      applyGroupOrderUpdates(updates);
-    }
-    invalidateGroupCompilation(activeGroupName);
+    const updates = await invoke("reorder_group", { name: group.name, orderedPaths });
+    applyGroupOrderUpdates(updates);
     renderClips();
+    renderGroupClipRail();
     syncGroupReviewHeader();
     preloadNextGroupMember();
     setDeckStatus("group order updated", { transient: true });
@@ -432,7 +436,9 @@ function dropGroupClip(sourcePath, targetPath) {
   const from = group.members.findIndex((clip) => PlayerCore.sameClipPath(clip.path, sourcePath));
   const to = group.members.findIndex((clip) => PlayerCore.sameClipPath(clip.path, targetPath));
   if (from < 0 || to < 0 || from === to) return;
-  moveGroupClip(group.members[from], to < from ? "up" : "down", Math.abs(to - from));
+  const ordered = [...group.members];
+  ordered.splice(to, 0, ordered.splice(from, 1)[0]);
+  reorderGroupMembers(group, ordered.map((member) => member.path));
 }
 
 async function createOpenGroupCompilation() {
@@ -441,11 +447,11 @@ async function createOpenGroupCompilation() {
   await afterNextPaint();
   try {
     const exportedClip = await invoke("export_group", { name: activeGroupName });
-    const groupKey = groupCompilationKey(activeGroupName);
-    invalidatedGroupCompilations.delete(groupKey);
-    groupCompilationClips.set(groupKey, exportedClip);
     invalidateLocalClipsRefresh();
-    clipsCache = [exportedClip, ...clipsCache.filter((clip) => clip.path !== exportedClip.path)];
+    clipsCache = [
+      exportedClip,
+      ...clipsCache.filter((clip) => !PlayerCore.sameClipPath(clip.path, exportedClip.path)),
+    ];
     renderClips();
     await refreshStorage();
     setDeckStatus("group compilation ready", { transient: true });
@@ -480,11 +486,42 @@ async function deleteOpenGroup() {
     `This deletes all ${count} clip${count === 1 ? "" : "s"} in the group.`,
   ))) return;
   try {
-    const report = await invoke("delete_clips", { paths: group.members.map((clip) => clip.path) });
+    const generated = clipsCache.filter((clip) => String(clip.source_group || "") === group.name);
+    const paths = [...group.members, ...generated].map((clip) => clip.path);
+    const report = await invoke("delete_clips", { paths });
     await applyDeletion(report.deleted);
     const notice = deletionNotice(report.deleted.length);
     if (notice) setNotice(notice, { transient: true });
     $("error").textContent = formatDeletionFailures(report.failed);
+  } catch (error) {
+    $("error").textContent = String(error);
+  }
+}
+
+async function removeClipFromGroup(clip) {
+  const group = activeGroup();
+  if (!group || !clip || !clip.group) return;
+  const index = group.members.findIndex((member) => PlayerCore.sameClipPath(member.path, clip.path));
+  if (index < 0) return;
+  const replacement = group.members[index + 1] || group.members[index - 1] || null;
+  const wasCurrent = currentClip && PlayerCore.sameClipPath(currentClip.path, clip.path);
+  try {
+    await invoke("remove_from_group", { path: clip.path });
+    clip.group = null;
+    invalidateLocalClipsRefresh();
+    if (wasCurrent && replacement) {
+      activeGroupName = group.name;
+      openGroupMember(replacement);
+    } else if (wasCurrent) {
+      closeReview();
+    } else {
+      renderClips();
+      renderGroupClipRail();
+      syncGroupReviewHeader();
+      preloadNextGroupMember();
+    }
+    setNotice("removed clip from group", { transient: true });
+    await refreshStorage();
   } catch (error) {
     $("error").textContent = String(error);
   }
@@ -836,16 +873,19 @@ var selectedGamePlayEnd = null;
 var gamePlayRows = [];
 
 function eventRailPolicy(clip) {
+  if (activeGroup()) return { enabled: true, group: true, title: "group clips" };
   const presentation = pluginPresentationForClip(clip);
   return presentation && presentation.event_rail ? presentation.event_rail : null;
 }
 
 function playRailPolicy(clip) {
+  if (activeGroup()) return { enabled: false };
   const presentation = pluginPresentationForClip(clip);
   return presentation && presentation.play_rail ? presentation.play_rail : null;
 }
 
 function metadataPanelPolicy(clip) {
+  if (activeGroup()) return { enabled: false };
   const presentation = pluginPresentationForClip(clip);
   return presentation && presentation.metadata_panel ? presentation.metadata_panel : null;
 }
@@ -1037,7 +1077,7 @@ function renderGameEventRail(clip = currentClip) {
   const markers = clipMatchEventMarkers(clip);
   activeGameEventIndex = -1;
   clearGameEventSelection();
-  if (activeGroup()) {
+  if (eventRail && eventRail.group) {
     renderGroupClipRail();
     return;
   }
@@ -1124,7 +1164,8 @@ function setGameEventRailCollapsed(collapsed) {
   rail.classList.toggle("is-collapsed", gameEventRailCollapsed);
   syncReviewSideRailLayout();
   if (toggle) {
-    const subject = activeGroup() ? "group clips" : "match events";
+    const policy = eventRailPolicy(currentClip);
+    const subject = policy && policy.group ? policy.title : "match events";
     const label = `${gameEventRailCollapsed ? "Expand" : "Collapse"} ${subject}`;
     toggle.title = label;
     toggle.setAttribute("aria-label", label);
@@ -1139,7 +1180,8 @@ function syncGameEventRail(currentTime = video.currentTime || 0, options = {}) {
   const rail = $("game-event-rail");
   if (!rail || rail.hidden || rail.classList.contains("is-collapsed")) return;
   if (!gameEventRows.length) return;
-  if (activeGroup()) {
+  const eventRail = eventRailPolicy(currentClip);
+  if (eventRail && eventRail.group) {
     syncGroupClipRail();
     return;
   }
@@ -1166,13 +1208,6 @@ function renderGamePlayRail(clip = currentClip) {
   activeGamePlayIndex = -1;
   clearGamePlaySelection();
   if (!rail || !title || !summary || !list) return;
-  if (activeGroup()) {
-    rail.hidden = true;
-    list.replaceChildren();
-    gamePlayRows = [];
-    syncReviewSideRailLayout();
-    return;
-  }
   if (!playRail || !playRail.enabled || !plays.length) {
     rail.hidden = true;
     title.textContent = "Set plays";
@@ -1320,7 +1355,7 @@ function renderMetadataIconList(field) {
 function renderGameMetadataPanel(clip = currentClip) {
   const panel = $("game-metadata-panel");
   const fieldsRoot = $("game-metadata-fields");
-  if (!clip || activeGroup()) {
+  if (!clip) {
     panel.hidden = true;
     fieldsRoot.replaceChildren();
     return;
@@ -2428,7 +2463,6 @@ function renderClips() {
   }
   if (galleryPageState.page === 0) renderGroupCards(root, libraryGroups);
   if (galleryFilter === "group") {
-    if (activeGroup()) renderGroupClipRail();
     return;
   }
   for (const group of page.groups) {
@@ -2445,7 +2479,6 @@ function renderClips() {
     }
     for (const c of group.items) root.appendChild(clipCard(c));
   }
-  if (activeGroup()) renderGroupClipRail();
 }
 
 function renderCloudClips() {
@@ -2551,6 +2584,7 @@ function showClipContextMenu(ev, clip) {
   $("clip-menu-export-play").hidden = true;
   $("clip-menu-copy").hidden = false;
   $("clip-menu-copy-shareable").hidden = false;
+  $("clip-menu-remove-group").hidden = true;
   const upload = $("clip-menu-upload");
   upload.hidden = !cloudUploadControlVisible(uploaded);
   upload.textContent = shareable ? "Copy cloud link" : uploaded ? "Open cloud page" : "Upload";
@@ -2582,6 +2616,7 @@ function showGroupClipContextMenu(ev, clip) {
     "clip-menu-copy",
     "clip-menu-copy-shareable",
   ]) $(id).hidden = true;
+  $("clip-menu-remove-group").hidden = false;
   $("clip-menu-delete").hidden = false;
   const menu = $("clip-context-menu");
   menu.hidden = false;
@@ -2605,6 +2640,7 @@ function showCloudClipContextMenu(ev, entry) {
   $("clip-menu-export-play").hidden = true;
   $("clip-menu-copy").hidden = true;
   $("clip-menu-copy-shareable").hidden = true;
+  $("clip-menu-remove-group").hidden = true;
   $("clip-menu-upload").hidden = true;
   $("clip-menu-rename").hidden = true;
   $("clip-menu-rename-file").hidden = true;
@@ -2631,6 +2667,7 @@ function showGamePlayContextMenu(ev, play) {
   exportPlay.textContent = "Export play as clip";
   $("clip-menu-copy").hidden = true;
   $("clip-menu-copy-shareable").hidden = true;
+  $("clip-menu-remove-group").hidden = true;
   $("clip-menu-upload").hidden = true;
   $("clip-menu-rename").hidden = true;
   $("clip-menu-rename-file").hidden = true;

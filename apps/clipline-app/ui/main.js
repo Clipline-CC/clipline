@@ -377,6 +377,11 @@ $("clip-menu-copy-shareable").addEventListener("click", () => {
   hideClipContextMenu();
   if (clip) copyClipToClipboard(null, clip, false);
 });
+$("clip-menu-remove-group").addEventListener("click", () => {
+  const clip = clipContextTarget;
+  hideClipContextMenu();
+  if (clip) removeClipFromGroup(clip);
+});
 $("clip-menu-upload").addEventListener("click", () => {
   const clip = clipContextTarget;
   const record = clipContextRecord();

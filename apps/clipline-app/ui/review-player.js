@@ -1771,7 +1771,6 @@ async function exportRangeAsClip(startS, endS, {
     clipsCache = [exportedClip, ...clipsCache.filter((clip) => clip.path !== exportedClip.path)];
     renderClips();
     if (exportedClip.group) {
-      invalidateGroupCompilation(exportedClip.group.name);
       setDeckStatusAction("Open group", () => openGroupView(exportedClip.group.name));
     } else {
       setDeckStatusAction("Open clip", () => openClip(exportedClip));
@@ -1855,10 +1854,6 @@ async function applyDeletion(removedPaths) {
       || groupBefore.members.slice(0, index).reverse().find(survives)
       || null;
   }
-  if (groupBefore && groupBefore.members.some((clip) =>
-    removed.has(GalleryWindowCore.clipPathKey(clip.path)))) {
-    invalidateGroupCompilation(groupBefore.name);
-  }
   invalidateLocalClipsRefresh();
   clipsCache = clipsCache.filter(
     (clip) => !removed.has(GalleryWindowCore.clipPathKey(clip.path)),
@@ -1867,7 +1862,10 @@ async function applyDeletion(removedPaths) {
     activeGroupName = groupBefore.name;
     openGroupMember(replacement);
   } else if (wasCurrent) closeReview();
-  else renderClips();
+  else {
+    renderClips();
+    if (groupBefore) renderGameEventRail();
+  }
   await refreshStorage();
 }
 
