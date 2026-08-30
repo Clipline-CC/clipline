@@ -4,6 +4,28 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-29): Group context actions and header controls
+
+Plan: `docs/superpowers/plans/2026-08-29-groups-context-actions.md`.
+
+Group member rows now right-click into the existing app-owned context menu with only Delete shown.
+The normal `clipContextTarget`/`clip-menu-delete`/`deleteClip` flow stays authoritative. Deleting
+the active member selects the next surviving member (or the previous one at the end); the group
+review closes only when no member survives.
+
+The bottom Export compilation / Upload compilation row is deleted. Group mode keeps the standard
+review-header Explorer, Copy, Upload, and Delete icons: Explorer reveals the current member, Copy
+creates the authoritative compilation then uses `copyClipToClipboard`, Upload creates it then opens
+the existing upload dialog, and Delete confirms once before bulk-deleting all group members.
+Rename remains hidden because group rename is still out of scope.
+
+Drag feedback now scales/fades the source, opens an animated eight-pixel insertion gap above or
+below the hovered target, and draws a glowing accent insertion line. Persistence still uses the
+same native HTML drag pipeline and path-validated backend order command.
+
+Verification: Node syntax checks clean, all 125 UI contracts green, `cargo test --workspace`
+green, and warning-denied workspace Clippy clean.
+
 ## Checkpoint (2026-08-29): Group drag interception and playback bridge
 
 Plan: `docs/superpowers/plans/2026-08-29-groups-drag-and-playback.md`.

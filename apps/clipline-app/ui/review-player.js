@@ -11,8 +11,11 @@ function syncUploadClipButton() {
   const btn = $("upload-clip");
   if (!btn) return;
   if (activeGroup()) {
-    btn.hidden = true;
-    btn.disabled = true;
+    btn.hidden = !cloudConnected();
+    btn.disabled = !cloudConnected();
+    btn.title = "Upload group compilation to Clipline Cloud";
+    btn.classList.remove("uploaded", "busy");
+    btn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M12 3 6.5 8.5 8 10l3-3v10h2V7l3 3 1.5-1.5L12 3zM5 19h14v2H5v-2z"/></svg>';
     return;
   }
   const clip = currentClip;
@@ -55,9 +58,10 @@ function syncUploadClipButton() {
 function syncReviewLocalActions() {
   const cloudOnly = isCloudOnlyReviewClip();
   const group = Boolean(activeGroup());
-  for (const id of ["rename-clip", "open-folder", "copy-clip", "delete-clip"]) {
+  $("rename-clip").hidden = cloudOnly || group;
+  for (const id of ["open-folder", "copy-clip", "delete-clip"]) {
     const el = $(id);
-    if (el) el.hidden = cloudOnly || group;
+    if (el) el.hidden = cloudOnly;
   }
   if (cloudOnly || group) setClipTitleEditing(false);
   syncGroupReviewChrome();
@@ -1827,11 +1831,24 @@ async function applyDeletion(removedPaths) {
   const removed = new Set((removedPaths || []).map(GalleryWindowCore.clipPathKey).filter(Boolean));
   if (!removed.size) return;
   const wasCurrent = currentClip && removed.has(GalleryWindowCore.clipPathKey(currentClip.path));
+  const groupBefore = activeGroup();
+  let replacement = null;
+  if (wasCurrent && groupBefore) {
+    const index = groupBefore.members.findIndex((clip) =>
+      PlayerCore.sameClipPath(clip.path, currentClip.path));
+    const survives = (clip) => !removed.has(GalleryWindowCore.clipPathKey(clip.path));
+    replacement = groupBefore.members.slice(index + 1).find(survives)
+      || groupBefore.members.slice(0, index).reverse().find(survives)
+      || null;
+  }
   invalidateLocalClipsRefresh();
   clipsCache = clipsCache.filter(
     (clip) => !removed.has(GalleryWindowCore.clipPathKey(clip.path)),
   );
-  if (wasCurrent) closeReview();
+  if (wasCurrent && replacement) {
+    activeGroupName = groupBefore.name;
+    openGroupMember(replacement);
+  } else if (wasCurrent) closeReview();
   else renderClips();
   await refreshStorage();
 }

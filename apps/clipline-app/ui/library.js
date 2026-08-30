@@ -267,8 +267,11 @@ function syncGroupReviewChrome() {
   const active = Boolean(group);
   $("review-viewer").classList.toggle("group-review", active);
   $("clip-export-row").hidden = active;
-  $("group-review-actions").hidden = !active;
-  $("group-upload").disabled = !active || !cloudConnected();
+  $("open-folder").title = active ? "Show current group clip in Explorer" : "Show this clip in Explorer";
+  $("copy-clip").title = active
+    ? "Copy group compilation to clipboard"
+    : "Copy shareable clip to clipboard (clips over 5 minutes copy the media file; Shift+click copies the original)";
+  $("delete-clip").title = active ? "Delete group and all clips" : "Delete source clip from disk";
   if (active) simpleTrimMode = false;
 }
 
@@ -397,8 +400,6 @@ function dropGroupClip(sourcePath, targetPath) {
 
 async function createOpenGroupCompilation() {
   if (!activeGroupName) return null;
-  $("group-export").disabled = true;
-  $("group-upload").disabled = true;
   setDeckStatus("exporting compilation…");
   await afterNextPaint();
   try {
@@ -407,28 +408,46 @@ async function createOpenGroupCompilation() {
     clipsCache = [exportedClip, ...clipsCache.filter((clip) => clip.path !== exportedClip.path)];
     renderClips();
     await refreshStorage();
+    setDeckStatus("group compilation ready", { transient: true });
     return exportedClip;
   } catch (error) {
     setDeckStatus("");
     $("error").textContent = String(error);
     return null;
-  } finally {
-    $("group-export").disabled = false;
-    $("group-upload").disabled = !cloudConnected();
   }
 }
 
-async function exportOpenGroup() {
+async function copyOpenGroup(event) {
+  $("copy-clip").disabled = true;
   const exportedClip = await createOpenGroupCompilation();
-  if (!exportedClip) return;
-  setDeckStatus(`exported ${exportedClip.name}`, { transient: true });
-  setDeckStatusAction("Open clip", () => openClip(exportedClip));
+  if (exportedClip) await copyClipToClipboard(event, exportedClip);
+  $("copy-clip").disabled = false;
 }
 
 async function uploadOpenGroup() {
+  $("upload-clip").disabled = true;
   const exportedClip = await createOpenGroupCompilation();
-  if (!exportedClip) return;
-  openUploadDialog(exportedClip);
+  if (exportedClip) openUploadDialog(exportedClip);
+  syncUploadClipButton();
+}
+
+async function deleteOpenGroup() {
+  const group = activeGroup();
+  if (!group) return;
+  const count = group.members.length;
+  if (!(await confirmDeleteDialog(
+    `Delete group “${group.name}”?`,
+    `This deletes all ${count} clip${count === 1 ? "" : "s"} in the group.`,
+  ))) return;
+  try {
+    const report = await invoke("delete_clips", { paths: group.members.map((clip) => clip.path) });
+    await applyDeletion(report.deleted);
+    const notice = deletionNotice(report.deleted.length);
+    if (notice) setNotice(notice, { transient: true });
+    $("error").textContent = formatDeletionFailures(report.failed);
+  } catch (error) {
+    $("error").textContent = String(error);
+  }
 }
 
 const CLOUD_POSTER_CACHE_PREFIX = "cloud-thumb:";
@@ -874,6 +893,11 @@ function syncGroupClipRail() {
   });
 }
 
+function clearGroupDragIndicators() {
+  document.querySelectorAll(".group-clip-row.drag-before, .group-clip-row.drag-after")
+    .forEach((row) => row.classList.remove("drag-before", "drag-after"));
+}
+
 function renderGroupClipRail() {
   const group = activeGroup();
   if (!group) return;
@@ -933,23 +957,28 @@ function renderGroupClipRail() {
       }
     });
     item.addEventListener("dragover", (event) => {
-      if (!groupDragSourcePath || PlayerCore.sameClipPath(groupDragSourcePath, clip.path)) return;
+      if (!groupDragSourcePath) return;
       event.preventDefault();
-      item.classList.add("drag-over");
+      clearGroupDragIndicators();
+      const sourceIndex = group.members.findIndex((member) =>
+        PlayerCore.sameClipPath(member.path, groupDragSourcePath));
+      if (sourceIndex === index) return;
+      item.classList.add(index < sourceIndex ? "drag-before" : "drag-after");
       if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
     });
-    item.addEventListener("dragleave", () => item.classList.remove("drag-over"));
     item.addEventListener("drop", (event) => {
       event.preventDefault();
       const sourcePath = groupDragSourcePath;
-      document.querySelectorAll(".group-clip-row.drag-over").forEach((row) => row.classList.remove("drag-over"));
+      clearGroupDragIndicators();
       groupDragSourcePath = "";
       dropGroupClip(sourcePath, clip.path);
     });
     item.addEventListener("dragend", () => {
       groupDragSourcePath = "";
-      item.classList.remove("dragging", "drag-over");
+      item.classList.remove("dragging");
+      clearGroupDragIndicators();
     });
+    item.addEventListener("contextmenu", (event) => showGroupClipContextMenu(event, clip));
     list.appendChild(item);
   });
   rail.hidden = false;
@@ -2491,6 +2520,31 @@ function showClipContextMenu(ev, clip) {
   upload.disabled = busy || (uploaded ? !record.remote_clip_id : !cloudConnected());
   $("clip-menu-rename").hidden = false;
   $("clip-menu-rename-file").hidden = false;
+  $("clip-menu-delete").hidden = false;
+  const menu = $("clip-context-menu");
+  menu.hidden = false;
+  positionContextMenu(menu, ev.clientX, ev.clientY);
+}
+
+function showGroupClipContextMenu(ev, clip) {
+  ev.preventDefault();
+  ev.stopPropagation();
+  hideRegionMenu();
+  clipContextTarget = clip;
+  cloudContextTarget = null;
+  gamePlayContextTarget = null;
+  for (const id of [
+    "clip-menu-select",
+    "clip-menu-play",
+    "clip-menu-open-cloud-page",
+    "clip-menu-copy-cloud-link",
+    "clip-menu-export-play",
+    "clip-menu-upload",
+    "clip-menu-rename",
+    "clip-menu-rename-file",
+    "clip-menu-copy",
+    "clip-menu-copy-shareable",
+  ]) $(id).hidden = true;
   $("clip-menu-delete").hidden = false;
   const menu = $("clip-context-menu");
   menu.hidden = false;

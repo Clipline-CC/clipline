@@ -272,8 +272,11 @@ Riot's Vanguard FAQ confirms in-game/LCU APIs "should continue to function" and 
   fallbacks, and playback advances to the next member at end. Clipline disables Tauri's unused
   native file-drop interception so WebView drag events reach those rows. The next member is
   preloaded into a muted layered video that covers the main player's source swap until its first
-  frame decodes, avoiding a blank visual boundary. Group export/upload controls live in the review
-  deck. Export normalizes members to 1080p60 H.264/Opus and concatenates them into a
+  frame decodes, avoiding a blank visual boundary. Group mode reuses the standard review-header
+  actions instead of a second toolbar: Explorer reveals the current member; Copy and Upload build
+  the authoritative compilation; Delete confirms once before removing the group and its members.
+  Right-clicking a rail member opens the app-owned Delete menu for that clip, and deleting the
+  active member continues with a surviving neighbor. Export normalizes members to 1080p60 H.264/Opus and concatenates them into a
   normal editable local `compilation` clip; Upload creates that same compilation and hands it to
   the existing Clipline Cloud title/description/visibility dialog. V1 compiles at most 64 members
   per group and does not include group rename or moving an already-existing library clip between

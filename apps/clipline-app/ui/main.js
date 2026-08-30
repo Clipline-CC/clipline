@@ -192,8 +192,6 @@ $("group-picker-name").addEventListener("keydown", (event) => {
 $("group-picker-dialog").addEventListener("click", (event) => {
   if (event.target === $("group-picker-dialog")) closeGroupPicker();
 });
-$("group-export").addEventListener("click", exportOpenGroup);
-$("group-upload").addEventListener("click", uploadOpenGroup);
 $("poster-runtime-install").addEventListener("click", () => {
   void installFfmpegForPosters().catch(() => {});
 });
@@ -500,9 +498,11 @@ $("volume-slider").addEventListener("input", () => {
 $("export-clip").addEventListener("click", exportTrim);
 $("add-to-group").addEventListener("click", openGroupPicker);
 $("deck-status-action").addEventListener("click", runDeckStatusAction);
-$("delete-clip").addEventListener("click", () => deleteClip());
+$("delete-clip").addEventListener("click", () => activeGroup() ? deleteOpenGroup() : deleteClip());
 $("open-folder").addEventListener("click", openFolder);
-$("copy-clip").addEventListener("click", (event) => copyClipToClipboard(event));
+$("copy-clip").addEventListener("click", (event) => activeGroup()
+  ? copyOpenGroup(event)
+  : copyClipToClipboard(event));
 $("rename-clip").addEventListener("click", () => beginClipRename());
 $("clip-title-edit").addEventListener("submit", saveClipRename);
 $("rename-cancel").addEventListener("click", cancelClipRename);
@@ -523,6 +523,10 @@ $("rename-file-input").addEventListener("keydown", (ev) => {
   }
 });
 $("upload-clip").addEventListener("click", () => {
+  if (activeGroup()) {
+    uploadOpenGroup();
+    return;
+  }
   if (!currentClip) return;
   if (isCloudOnlyReviewClip(currentClip)) {
     const entry = {

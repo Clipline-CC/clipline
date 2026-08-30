@@ -4991,9 +4991,9 @@ fn clipboard_copy_distinguishes_shareable_and_original_paths() {
             && js.contains("setDeckStatus(\"preparing shareable clip...\")")
             && js.contains("setDeckStatus(message, { transient: true })")
             && js.contains("if (error === \"shareable clipboard export cancelled\")")
-            && js.contains(
-                "$(\"copy-clip\").addEventListener(\"click\", (event) => copyClipToClipboard(event));"
-            ),
+            && js.contains("$(\"copy-clip\").addEventListener(\"click\", (event) => activeGroup()")
+            && js.contains("? copyOpenGroup(event)")
+            && js.contains(": copyClipToClipboard(event)"),
         "toolbar copy should adapt to long clips and quietly ignore superseded exports"
     );
     assert!(
@@ -5719,10 +5719,10 @@ fn groups_are_created_from_trim_and_managed_in_the_library() {
         "id=\"group-picker-dialog\"",
         "id=\"group-picker-select\"",
         "id=\"group-picker-name\"",
-        "id=\"group-review-actions\"",
-        "id=\"group-export\"",
-        "id=\"group-upload\"",
         "id=\"group-preload-video\"",
+        "id=\"copy-clip\"",
+        "id=\"upload-clip\"",
+        "id=\"delete-clip\"",
     ] {
         assert!(html.contains(required), "groups markup must include `{required}`");
     }
@@ -5736,9 +5736,15 @@ fn groups_are_created_from_trim_and_managed_in_the_library() {
         "function renderGroupClipRail",
         "function advanceGroupPlayback",
         "function moveGroupClip",
-        "function exportOpenGroup",
+        "function showGroupClipContextMenu",
+        "function copyOpenGroup",
         "function uploadOpenGroup",
+        "function deleteOpenGroup",
         "openUploadDialog(exportedClip)",
+        "copyClipToClipboard(event, exportedClip)",
+        "openGroupMember(replacement)",
+        "await invoke(\"delete_clips\"",
+        "addEventListener(\"contextmenu\"",
         "setDeckStatusAction(\"Open group\"",
         "addEventListener(\"dragstart\"",
         "addEventListener(\"dragover\"",
@@ -5757,11 +5763,23 @@ fn groups_are_created_from_trim_and_managed_in_the_library() {
         !html.contains("id=\"group-view-dialog\""),
         "groups must reuse the review player instead of a standalone dialog"
     );
+    for removed in [
+        "id=\"group-review-actions\"",
+        "id=\"group-export\"",
+        "id=\"group-upload\"",
+    ] {
+        assert!(
+            !html.contains(removed),
+            "group review should reuse header actions instead of `{removed}`"
+        );
+    }
     for required in [
         ".group-card",
         ".group-poster-mosaic",
         ".group-poster-cell",
         ".group-clip-row",
+        ".group-clip-row.drag-before",
+        ".group-clip-row.drag-after",
         "#group-preload-video",
     ] {
         assert!(css.contains(required), "groups styling must include `{required}`");

@@ -4073,18 +4073,44 @@ button.primary.settings-save-glow {
   min-width: 0;
 }
 .game-event-rail .group-clip-row {
+  position: relative;
   display: block;
   padding: 4px;
   border: 1px solid transparent;
   border-radius: 8px;
   cursor: grab;
   user-select: none;
-  transition: opacity 120ms ease, border-color 120ms ease, transform 120ms ease;
+  transition:
+    opacity 160ms ease,
+    transform 180ms cubic-bezier(.2, .8, .2, 1),
+    box-shadow 180ms ease,
+    background 180ms ease;
 }
-.game-event-rail .group-clip-row.dragging { opacity: .42; }
-.game-event-rail .group-clip-row.drag-over {
-  border-color: var(--accent);
-  transform: translateY(2px);
+.game-event-rail .group-clip-row.dragging {
+  opacity: .28;
+  transform: scale(.965);
+}
+.game-event-rail .group-clip-row.drag-before {
+  transform: translateY(8px);
+  background: rgba(var(--accent-rgb), .07);
+}
+.game-event-rail .group-clip-row.drag-after {
+  transform: translateY(-8px);
+  background: rgba(var(--accent-rgb), .07);
+}
+.game-event-rail .group-clip-row.drag-before::before,
+.game-event-rail .group-clip-row.drag-after::after {
+  content: "";
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow: 0 0 10px rgba(var(--accent-rgb), .7);
+}
+.game-event-rail .group-clip-row.drag-before::before { top: -7px; }
+.game-event-rail .group-clip-row.drag-after::after { bottom: -7px; }
 }
 .game-event-rail ol button.group-clip-open {
   grid-template-columns: 52px minmax(0, 1fr);
@@ -4967,9 +4993,7 @@ button.primary.settings-save-glow {
 .deck.simple-timeline:not(.simple-trim-active) #clip-export-row {
   display: none !important;
 }
-.group-review-actions[hidden],
 #clip-export-row[hidden] { display: none; }
-.group-review-actions { flex-wrap: wrap; }
 .review-viewer.group-review #dim-in,
 .review-viewer.group-review #dim-out,
 .review-viewer.group-review #handle-in,
