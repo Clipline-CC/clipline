@@ -423,7 +423,7 @@ fn ffmpeg_compilation_args(
                 mix_inputs.push_str(&format!("[a{index}_{track}]"));
             }
             filters.push(format!(
-                "{mix_inputs}amix=inputs={audio_tracks}:duration=longest:dropout_transition=0:normalize=1,asetpts=PTS-STARTPTS[a{index}]"
+                "{mix_inputs}amix=inputs={audio_tracks}:duration=longest:dropout_transition=0:normalize=1,asetpts=N/SR/TB[a{index}]"
             ));
         }
     }
@@ -592,7 +592,9 @@ mod tests {
         assert!(joined.contains("anullsrc=channel_layout=stereo:sample_rate=48000"));
         assert!(joined.contains("[0:a:0]aresample=48000"));
         assert!(joined.contains("[0:a:1]aresample=48000"));
-        assert!(joined.contains("amix=inputs=2:duration=longest:dropout_transition=0:normalize=1"));
+        assert!(joined.contains(
+            "amix=inputs=2:duration=longest:dropout_transition=0:normalize=1,asetpts=N/SR/TB[a0]"
+        ));
         assert!(joined.contains("concat=n=2:v=1:a=1"));
         assert!(joined.contains("-c:v h264_mf"));
         assert!(joined.contains("-c:a libopus"));

@@ -2,8 +2,8 @@
 
 ## Goal
 
-Keep mixed microphone/output audio alive through each clip's declared duration so FFmpeg can
-advance the concat filter to the next group member.
+Give every mixed microphone/output audio frame a monotonic timestamp so FFmpeg can advance the
+concat filter to the next group member.
 
 ## Reproduction
 
@@ -14,8 +14,9 @@ advance the concat filter to the next group member.
 
 ## TDD implementation
 
-- [ ] Add a failing argument contract requiring the multi-track `amix` output to be padded and
-      trimmed to the member's known movie duration before its timestamps are reset.
-- [ ] Bound the existing mixed-audio branch with FFmpeg's native `apad` and `atrim` filters.
+- [ ] Add a failing argument contract requiring the multi-track `amix` output to rebuild timestamps
+      from audio sample count with `asetpts=N/SR/TB`.
+- [ ] Replace the mixed branch's `PTS-STARTPTS` reset with the sample-count expression; keep
+      `duration=longest` so the longer microphone/output tail is preserved.
 - [ ] Rerun the exact two-file reproduction and the full five-file compilation.
 - [ ] Run workspace tests and strict Clippy, update `handoff.md`, commit, and relaunch Clipline.

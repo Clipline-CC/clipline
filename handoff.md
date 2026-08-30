@@ -4,6 +4,23 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-29): Group mixed-audio concat boundary
+
+Plan: `docs/superpowers/plans/2026-08-29-group-compilation-amix-boundary.md`.
+
+Real Output and Microphone tracks can end about 180 ms apart. At the shorter stream's EOF,
+`amix=duration=longest` could emit a tail frame with `pts=NOPTS`; the existing
+`asetpts=PTS-STARTPTS` preserved that invalid value and FFmpeg intermittently returned
+`-1094995529` at the group concat boundary. Both source files decoded cleanly and the old
+single-stream graph succeeded. The mixed branch now rebuilds monotonic timestamps directly from
+audio sample count with `asetpts=N/SR/TB`, preserving the longer track without extra staging.
+
+The original real graph reproduced the failure. `ashowinfo` pinned the first bad frame, while the
+one-line timestamp fix passed the same unpadded graph 12/12 times. A separate corrected
+96.5-second compilation produced one H.264 video plus one stereo Opus mix.
+
+Verification: `cargo test --workspace` green and warning-denied workspace Clippy clean.
+
 ## Checkpoint (2026-08-29): Group upload audio and cloud state
 
 Plan: `docs/superpowers/plans/2026-08-29-group-upload-audio-state.md`.
