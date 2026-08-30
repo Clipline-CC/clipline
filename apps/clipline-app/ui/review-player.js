@@ -49,11 +49,24 @@ function syncUploadClipButton() {
 
 function syncReviewLocalActions() {
   const cloudOnly = isCloudOnlyReviewClip();
-  for (const id of ["rename-clip", "open-folder", "copy-clip", "delete-clip"]) {
+  for (const id of ["favorite-clip", "rename-clip", "open-folder", "copy-clip", "delete-clip"]) {
     const el = $(id);
     if (el) el.hidden = cloudOnly;
   }
+  syncFavoriteButton();
   if (cloudOnly) setClipTitleEditing(false);
+}
+
+function syncFavoriteButton() {
+  const el = $("favorite-clip");
+  if (!el) return;
+  const favorite = !!(currentClip && currentClip.favorite);
+  el.classList.toggle("favorite-on", favorite);
+  el.setAttribute("aria-pressed", String(favorite));
+  el.title = favorite ? "Remove from favorites" : "Add to favorites";
+  el.innerHTML = favorite
+    ? '<svg viewBox="0 0 24 24"><path d="M12 2.6l3 5.9 6.5 1-4.8 4.5 1.1 6.5L12 17.3 6.2 20.6l1.1-6.5L2.5 9.6l6.5-1z"/></svg>'
+    : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2.6l3 5.9 6.5 1-4.8 4.5 1.1 6.5L12 17.3 6.2 20.6l1.1-6.5L2.5 9.6l6.5-1z"/></svg>';
 }
 
 function setClipRenameControlsDisabled(disabled) {
@@ -1923,6 +1936,28 @@ async function deleteClip(path = currentClip && currentClip.path) {
     await invoke("delete_clip", { path });
     await applyDeletion([path]);
     setNotice("clip deleted", { transient: true });
+    $("error").textContent = "";
+  } catch (e) {
+    $("error").textContent = e;
+  }
+}
+
+async function toggleClipFavorite(clip) {
+  if (!clip || !clip.path) return;
+  if (isCloudOnlyReviewClip(clip)) return;
+  try {
+    const result = await invoke("set_clip_favorite", {
+      path: clip.path,
+      favorite: !clip.favorite,
+    });
+    const updated = { ...clip, favorite: !!result.favorite };
+    replaceClipInCache(clip.path, updated);
+    if (currentClip && currentClip.path === clip.path) currentClip = updated;
+    syncFavoriteButton();
+    renderClips();
+    setNotice(result.favorite ? "added to favorites" : "removed from favorites", {
+      transient: true,
+    });
     $("error").textContent = "";
   } catch (e) {
     $("error").textContent = e;

@@ -1024,13 +1024,13 @@ fn normalize_mixed_pcm(mixed: &mut [f32], active_counts: &[u32]) -> Result<(), T
             "audio mix produced an empty frame".into(),
         ));
     }
-    for (frame, &active) in mixed.chunks_exact_mut(2).zip(active_counts) {
+    for (frame, &active) in mixed.as_chunks_mut::<2>().0.iter_mut().zip(active_counts) {
         if active > 1 {
             for sample in frame.iter_mut() {
                 *sample /= active as f32;
             }
         }
-        for sample in frame {
+        for sample in frame.iter_mut() {
             *sample = sample.clamp(-1.0, 1.0);
         }
     }

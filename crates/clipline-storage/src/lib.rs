@@ -1,8 +1,12 @@
 //! Filesystem storage management for saved clips.
 
+mod empty_sessions;
 mod sessions;
 
-pub use sessions::{session_label, SessionTracker};
+pub use empty_sessions::{
+    remove_emptied_session_dir, remove_emptied_session_dir_after_clip, sweep_emptied_session_dirs,
+};
+pub use sessions::{is_session_dir_name, session_label, SessionTracker};
 
 use std::fs;
 use std::io::{self, ErrorKind, Write};
@@ -47,10 +51,15 @@ pub fn replay_cache_owner_identity(process_instance_id: &str) -> Option<(u32, u6
     Some((pid.parse().ok()?, creation_time.parse().ok()?))
 }
 
-/// Serializes quota collectors so overlapping recorder generations (and any
-/// concurrent app-side GC) cannot inventory the same over-quota library and
-/// over-delete while another collector's deletions are in flight.
-static QUOTA_GC_LOCK: Mutex<()> = Mutex::new(());
+/// Serializes emptied-session cleanup with session attribution writes.
+/// ponytail: process-wide lock; split per session only if contention is measured.
+static SESSION_MUTATION_LOCK: Mutex<()> = Mutex::new(());
+
+pub(crate) fn lock_session_mutations() -> std::sync::MutexGuard<'static, ()> {
+    SESSION_MUTATION_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StorageStatus {
@@ -70,7 +79,14 @@ impl StorageStatus {
 pub struct GcReport {
     pub deleted_clips: usize,
     pub freed_bytes: u64,
+    pub cleanup_errors: Vec<String>,
     pub status: StorageStatus,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ClipGcPolicy {
+    pub protected: bool,
+    pub priority: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,7 +117,7 @@ pub fn clip_ownership_marker_path(path: &Path) -> io::Result<PathBuf> {
             "clip ownership markers require an MP4 path",
         ));
     }
-    Ok(clip.with_extension("clipline.json"))
+    Ok(clip_sidecar_path(&clip, CLIP_OWNERSHIP_MARKER_SUFFIX))
 }
 
 /// Atomically create a valid empty Clipline metadata document for a new clip.
@@ -134,6 +150,50 @@ pub fn ensure_clip_owned(path: &Path) -> io::Result<bool> {
         }
         Err(error) => Err(error),
     }
+}
+
+/// Create a session folder and its ownership marker while emptied-session
+/// cleanup is excluded. The marker is the first visible proof of an in-progress
+/// replay save.
+pub fn ensure_session_clip_owned(path: &Path) -> io::Result<bool> {
+    let marker = clip_ownership_marker_path(path)?;
+    let parent = marker
+        .parent()
+        .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "clip path has no parent"))?;
+    let _guard = lock_session_mutations();
+    fs::create_dir_all(parent)?;
+    ensure_clip_owned(path)
+}
+
+/// Reserve the `.mp4.recording` file while emptied-session cleanup is excluded.
+/// Once this returns, the recording file itself keeps the folder alive.
+pub fn reserve_session_recording_file(path: &Path) -> io::Result<fs::File> {
+    clip_ownership_marker_path(path)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "recording path has no parent"))?;
+    let _guard = lock_session_mutations();
+    fs::create_dir_all(parent)?;
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+}
+
+/// Write Clipline's session attribution file under the same lock used by
+/// emptied-session cleanup. Returns `false` when an existing file was kept.
+pub fn write_session_metadata(
+    session_dir: &Path,
+    bytes: &[u8],
+    replace_existing: bool,
+) -> io::Result<bool> {
+    let _guard = lock_session_mutations();
+    let path = session_dir.join(SESSION_META_FILE);
+    if !replace_existing && path.exists() {
+        return Ok(false);
+    }
+    fs::write(path, bytes)?;
+    Ok(true)
 }
 
 pub fn remove_clip_ownership_marker(path: &Path) -> io::Result<()> {
@@ -256,9 +316,12 @@ pub fn delete_all_managed_media(dir: &Path) -> io::Result<()> {
                 }
             }
         }
-        if let Err(error) = delete_inventoried_clip(&clip, dir, &|_| false) {
+        if let Err(error) = delete_inventoried_clip(&clip, dir) {
             first_error.get_or_insert(error);
         }
+    }
+    if let Err(error) = sweep_emptied_session_dirs(dir) {
+        first_error.get_or_insert(error);
     }
     first_error.map_or(Ok(()), Err)
 }
@@ -268,69 +331,109 @@ pub fn enforce_quota(
     quota_bytes: Option<u64>,
     protect: Option<&Path>,
 ) -> io::Result<GcReport> {
-    enforce_quota_with_protection(dir, quota_bytes, protect, |_| false)
+    enforce_quota_with_policy(dir, quota_bytes, protect, |_| ClipGcPolicy::default())
 }
 
-/// Enforces the clip quota while allowing the caller to protect additional
-/// managed files that are temporarily immutable, such as active upload
-/// sources. Protected bytes still count toward the quota; collection skips
-/// them and continues with the next-oldest deletable clip.
-pub fn enforce_quota_with_protection(
+/// Enforces the clip quota while letting the caller order deletion by clip
+/// policy and protect additional managed files that are temporarily immutable
+/// (active upload sources, favorites). Protected bytes still count toward the
+/// quota; collection skips them and continues with the next deletable clip.
+///
+/// `policy` is evaluated once per clip. Lower priorities are deleted first,
+/// and within the same priority the oldest clip goes first. Storage stays
+/// neutral about what protection and priority mean.
+pub fn enforce_quota_with_policy(
     dir: &Path,
     quota_bytes: Option<u64>,
     protect: Option<&Path>,
-    additionally_protected: impl Fn(&Path) -> bool,
+    policy: impl Fn(&Path) -> ClipGcPolicy,
 ) -> io::Result<GcReport> {
-    let _guard = QUOTA_GC_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    enforce_quota_with_policy_and_cleanup(
+        dir,
+        quota_bytes,
+        protect,
+        policy,
+        remove_emptied_session_dir_after_clip,
+    )
+}
 
+fn enforce_quota_with_policy_and_cleanup(
+    dir: &Path,
+    quota_bytes: Option<u64>,
+    protect: Option<&Path>,
+    policy: impl Fn(&Path) -> ClipGcPolicy,
+    cleanup: impl Fn(&Path, &Path) -> io::Result<bool>,
+) -> io::Result<GcReport> {
     let Some(quota) = quota_bytes else {
         return Ok(GcReport {
             deleted_clips: 0,
             freed_bytes: 0,
+            cleanup_errors: Vec::new(),
             status: storage_status(dir, quota_bytes)?,
         });
     };
 
-    let mut clips = inventory(dir, protect)?;
+    let clips = inventory(dir, protect)?;
     let mut total_bytes = clips.iter().map(ClipFile::total_bytes).sum::<u64>();
     let mut deleted_clips = 0usize;
     let mut freed_bytes = 0u64;
+    let mut cleanup_errors = Vec::new();
 
-    let undeletable_bytes = clips
-        .iter()
-        .filter(|clip| !clip.can_delete(protect, &additionally_protected))
-        .map(ClipFile::total_bytes)
-        .sum::<u64>();
-    if undeletable_bytes > quota {
+    if total_bytes <= quota {
         return Ok(GcReport {
             deleted_clips,
             freed_bytes,
+            cleanup_errors,
             status: status_from_clips(&clips, quota_bytes),
         });
     }
 
-    clips.sort_by(|a, b| {
-        a.modified
-            .cmp(&b.modified)
+    // Decorate once because app policy reads clip sidecars.
+    let mut clips = clips
+        .into_iter()
+        .map(|clip| (policy(&clip.path), clip))
+        .collect::<Vec<_>>();
+
+    let undeletable_bytes = clips
+        .iter()
+        .filter(|(policy, clip)| !clip.can_delete(protect, policy.protected))
+        .map(|(_, clip)| clip.total_bytes())
+        .sum::<u64>();
+    if undeletable_bytes > quota {
+        let clips = clips.into_iter().map(|(_, clip)| clip).collect::<Vec<_>>();
+        return Ok(GcReport {
+            deleted_clips,
+            freed_bytes,
+            cleanup_errors,
+            status: status_from_clips(&clips, quota_bytes),
+        });
+    }
+
+    clips.sort_by(|(policy_a, a), (policy_b, b)| {
+        policy_a
+            .priority
+            .cmp(&policy_b.priority)
+            .then_with(|| a.modified.cmp(&b.modified))
             .then_with(|| a.path.file_name().cmp(&b.path.file_name()))
     });
 
-    for clip in clips {
+    for (policy, clip) in clips {
         if total_bytes <= quota {
             break;
         }
-        if !clip.can_delete(protect, &additionally_protected) {
+        if !clip.can_delete(protect, policy.protected) {
             continue;
         }
 
         let clip_bytes = clip.total_bytes();
-        match delete_inventoried_clip(&clip, dir, &additionally_protected)? {
-            DeletedClip::Removed => {
+        match delete_inventoried_clip_with(&clip, dir, &cleanup)? {
+            DeletedClip::Removed { cleanup_error } => {
                 total_bytes = total_bytes.saturating_sub(clip_bytes);
                 freed_bytes += clip_bytes;
                 deleted_clips += 1;
+                if let Some(error) = cleanup_error {
+                    cleanup_errors.push(error);
+                }
             }
             // The file is already gone from this tree (rename/delete race or a
             // prior collector). Drop its bytes from the running total so we do
@@ -345,6 +448,7 @@ pub fn enforce_quota_with_protection(
     Ok(GcReport {
         deleted_clips,
         freed_bytes,
+        cleanup_errors,
         status: status_from_clips(&inventory(dir, protect)?, quota_bytes),
     })
 }
@@ -368,14 +472,10 @@ impl ClipFile {
         self.mp4_bytes + self.sidecar_bytes
     }
 
-    fn can_delete(
-        &self,
-        protect: Option<&Path>,
-        additionally_protected: &impl Fn(&Path) -> bool,
-    ) -> bool {
+    fn can_delete(&self, protect: Option<&Path>, additionally_protected: bool) -> bool {
         !self.recording
             && !protect.is_some_and(|protected| same_path(&self.path, protected))
-            && !additionally_protected(&self.path)
+            && !additionally_protected
     }
 }
 
@@ -467,9 +567,13 @@ fn is_managed_clip(path: &Path) -> bool {
     }
     // Conservative legacy signals. Poster files are deliberately excluded:
     // merely previewing an unrelated MP4 can create one.
-    path.with_extension("markers.json").is_file()
-        || path.with_extension("osu-enrichment.json").is_file()
+    clip_sidecar_path(path, MARKERS_SUFFIX).is_file()
+        || clip_sidecar_path(path, OSU_ENRICHMENT_SUFFIX).is_file()
         || is_legacy_generated_clip(path)
+}
+
+pub fn is_clip_owned(path: &Path) -> bool {
+    is_managed_clip(path)
 }
 
 fn is_legacy_generated_clip(path: &Path) -> bool {
@@ -542,22 +646,42 @@ fn recovery_destination_available(path: &Path, current_marker: &Path) -> bool {
             .is_ok_and(|marker| marker == current_marker || !marker.exists())
 }
 
+pub(crate) const SESSION_META_FILE: &str = "clipline-session.json";
+pub const MARKERS_SUFFIX: &str = ".markers.json";
+pub const CLIP_OWNERSHIP_MARKER_SUFFIX: &str = ".clipline.json";
+pub const FAVORITE_MARKER_SUFFIX: &str = ".clipline-favorite";
+pub const OSU_ENRICHMENT_SUFFIX: &str = ".osu-enrichment.json";
+pub const POSTER_SUFFIX: &str = ".poster.jpg";
 
-const SESSION_META_FILE: &str = "clipline-session.json";
+/// Sidecar suffixes paired with a clip stem (`clip.mp4` → `clip.markers.json`).
+/// Leftover-folder cleanup uses this same table; anything else is unrecognized.
+pub const CLIP_SIDECAR_SUFFIXES: [&str; 5] = [
+    MARKERS_SUFFIX,
+    CLIP_OWNERSHIP_MARKER_SUFFIX,
+    FAVORITE_MARKER_SUFFIX,
+    OSU_ENRICHMENT_SUFFIX,
+    POSTER_SUFFIX,
+];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum DeletedClip {
-    Removed,
+    Removed {
+        cleanup_error: Option<String>,
+    },
     /// Inventoried MP4 vanished before we could delete it.
     AlreadyGone,
     /// Still present but protected (upload lease / active mutation).
     Skipped,
 }
 
-fn delete_inventoried_clip(
+fn delete_inventoried_clip(clip: &ClipFile, media_root: &Path) -> io::Result<DeletedClip> {
+    delete_inventoried_clip_with(clip, media_root, remove_emptied_session_dir_after_clip)
+}
+
+fn delete_inventoried_clip_with(
     clip: &ClipFile,
     media_root: &Path,
-    additionally_protected: &impl Fn(&Path) -> bool,
+    cleanup: impl Fn(&Path, &Path) -> io::Result<bool>,
 ) -> io::Result<DeletedClip> {
     // Never delete through a directory symlink/junction that escaped the
     // configured media root (or any path that no longer resolves under it).
@@ -573,32 +697,22 @@ fn delete_inventoried_clip(
             // to the renamed clip, and the other task owns their cleanup.
             return Ok(DeletedClip::AlreadyGone);
         }
-        Err(error) => {
-            // A lease can begin after the pre-delete protection check. If it
-            // now owns the file, keep collecting other clips instead of
-            // surfacing the kernel's sharing-violation text to the user.
-            if additionally_protected(&clip.path) {
-                return Ok(DeletedClip::Skipped);
-            }
-            return Err(error);
-        }
+        Err(error) => return Err(error),
     }
 
-    // The MP4 is gone; sidecar/session cleanup is best-effort so a transient
-    // sidecar error cannot hide the deletion from LibraryChanged callers or
-    // abort collection of remaining over-quota clips.
+    // The MP4 is gone; clip-attached sidecars are best-effort so a transient
+    // sidecar error cannot abort collection of remaining over-quota clips.
     for sidecar in &clip.sidecars {
         let _ = remove_file_if_exists(sidecar);
     }
-    // Session folders disappear with their last clip; remove_dir refuses
-    // non-empty directories, so a leftover sidecar/export keeps it alive.
-    if let Some(parent) = clip.path.parent() {
-        if parent != media_root && !session_dir_has_managed_clips(parent).unwrap_or(true) {
-            let _ = remove_file_if_exists(&parent.join(SESSION_META_FILE));
-            let _ = fs::remove_dir(parent);
-        }
-    }
-    Ok(DeletedClip::Removed)
+    // The primary deletion succeeded. Session cleanup is diagnostic only: it
+    // must not turn a removed clip into a failed deletion or abort quota GC.
+    let cleanup_error = clip.path.parent().and_then(|parent| {
+        cleanup(parent, media_root)
+            .err()
+            .map(|error| error.to_string())
+    });
+    Ok(DeletedClip::Removed { cleanup_error })
 }
 
 fn is_within_media_root(path: &Path, media_root: &Path) -> bool {
@@ -619,7 +733,7 @@ fn is_within_media_root(path: &Path, media_root: &Path) -> bool {
     }
 }
 
-fn is_link_or_reparse_point(metadata: &fs::Metadata) -> bool {
+pub(crate) fn is_link_or_reparse_point(metadata: &fs::Metadata) -> bool {
     if metadata.file_type().is_symlink() {
         return true;
     }
@@ -635,30 +749,8 @@ fn is_link_or_reparse_point(metadata: &fs::Metadata) -> bool {
     }
 }
 
-fn session_dir_has_managed_clips(dir: &Path) -> io::Result<bool> {
-    for entry in fs::read_dir(dir)? {
-        let path = entry?.path();
-        if (is_mp4(&path) || is_recording_mp4(&path)) && is_managed_clip(&path) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-fn sidecar_path(path: &Path) -> PathBuf {
-    path.with_extension("markers.json")
-}
-
-fn clip_metadata_path(path: &Path) -> PathBuf {
-    path.with_extension("clipline.json")
-}
-
-fn poster_path(path: &Path) -> PathBuf {
-    path.with_extension("poster.jpg")
-}
-
-fn osu_pending_path(path: &Path) -> PathBuf {
-    path.with_extension("osu-enrichment.json")
+pub fn clip_sidecar_path(clip: &Path, suffix: &str) -> PathBuf {
+    clip.with_extension(suffix.trim_start_matches('.'))
 }
 
 /// The sidecar files present beside a clip (markers, clip metadata, pending osu!
@@ -667,12 +759,8 @@ fn osu_pending_path(path: &Path) -> PathBuf {
 fn clip_sidecars(clip: &Path) -> io::Result<(Vec<PathBuf>, u64)> {
     let mut sidecars = Vec::new();
     let mut bytes = 0u64;
-    for candidate in [
-        sidecar_path(clip),
-        clip_metadata_path(clip),
-        osu_pending_path(clip),
-        poster_path(clip),
-    ] {
+    for suffix in &CLIP_SIDECAR_SUFFIXES {
+        let candidate = clip_sidecar_path(clip, suffix);
         let len = optional_file_len(&candidate)?;
         if len > 0 || candidate.exists() {
             bytes += len;
@@ -691,7 +779,7 @@ fn optional_file_len(path: &Path) -> io::Result<u64> {
     }
 }
 
-fn remove_file_if_exists(path: &Path) -> io::Result<()> {
+pub(crate) fn remove_file_if_exists(path: &Path) -> io::Result<()> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
@@ -728,10 +816,51 @@ fn visit_media_dirs(dir: &Path, mut f: impl FnMut(&Path) -> io::Result<()>) -> i
 mod tests {
     use super::*;
     use clipline_test_utils::TestDir;
+    use std::sync::mpsc;
     use std::time::Duration;
 
     fn tick_mtime() {
         std::thread::sleep(Duration::from_millis(20));
+    }
+
+    #[test]
+    fn replay_reservation_waits_for_cleanup_lock_before_creating_the_folder() {
+        let dir = TestDir::new("clipline-storage", "session-reservation-lock");
+        let replay = dir.path().join("2026-08-30 01-00/clip_1.mp4");
+        let guard = lock_session_mutations();
+        let worker_path = replay.clone();
+        let (tx, rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            tx.send(ensure_session_clip_owned(&worker_path)).unwrap();
+        });
+
+        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+        assert!(!replay.parent().unwrap().exists());
+        drop(guard);
+        assert!(rx.recv_timeout(Duration::from_secs(2)).unwrap().unwrap());
+        worker.join().unwrap();
+        assert!(clip_ownership_marker_path(&replay).unwrap().is_file());
+    }
+
+    #[test]
+    fn full_session_reservation_waits_for_cleanup_lock_before_creating_the_folder() {
+        let dir = TestDir::new("clipline-storage", "recording-reservation-lock");
+        let recording = dir.path().join("2026-08-30 01-01/session_1.mp4.recording");
+        let guard = lock_session_mutations();
+        let worker_path = recording.clone();
+        let (tx, rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            tx.send(reserve_session_recording_file(&worker_path))
+                .unwrap();
+        });
+
+        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+        assert!(!recording.parent().unwrap().exists());
+        drop(guard);
+        let file = rx.recv_timeout(Duration::from_secs(2)).unwrap().unwrap();
+        drop(file);
+        worker.join().unwrap();
+        assert!(recording.is_file());
     }
 
     fn mark_owned(path: &Path) {
@@ -921,8 +1050,9 @@ mod tests {
         tick_mtime();
         let newest = write_owned(&dir, "newest.mp4", 10);
 
-        let report = enforce_quota_with_protection(dir.path(), Some(20), None, |path| {
-            same_path(path, &uploading)
+        let report = enforce_quota_with_policy(dir.path(), Some(20), None, |path| ClipGcPolicy {
+            protected: same_path(path, &uploading),
+            priority: 0,
         })
         .unwrap();
 
@@ -934,6 +1064,154 @@ mod tests {
         );
         assert!(newest.exists());
         assert_eq!(report.status.total_bytes, 20);
+    }
+
+    fn kind_priority(name: &str) -> u8 {
+        // Sessions drain first, then replays, then trims (the app maps the
+        // clip kind onto this order; here the file name stands in for it).
+        if name.starts_with("session-") {
+            0
+        } else if name.starts_with("replay-") {
+            1
+        } else {
+            2
+        }
+    }
+
+    #[test]
+    fn enforce_quota_with_policy_deletes_by_priority_before_age() {
+        let dir = TestDir::new("clipline-storage", "policy-priority");
+        // Oldest clip is a trim (lowest deletion priority): age must lose to
+        // kind priority when the quota frees only part of the library.
+        let trim = write_owned(&dir, "trim-old.mp4", 10);
+        tick_mtime();
+        let replay = write_owned(&dir, "replay-mid.mp4", 10);
+        tick_mtime();
+        let session = write_owned(&dir, "session-new.mp4", 10);
+
+        let report = enforce_quota_with_policy(dir.path(), Some(10), None, |path| ClipGcPolicy {
+            protected: false,
+            priority: kind_priority(path.file_name().and_then(|n| n.to_str()).unwrap_or("")),
+        })
+        .unwrap();
+
+        assert_eq!(report.deleted_clips, 2);
+        assert!(
+            !session.exists(),
+            "sessions must drain before replays/trims"
+        );
+        assert!(!replay.exists(), "replays must drain before trims");
+        assert!(
+            trim.exists(),
+            "the oldest clip can survive when its kind is low priority"
+        );
+        assert_eq!(report.status.total_bytes, 10);
+    }
+
+    #[test]
+    fn enforce_quota_with_policy_deletes_oldest_within_a_priority() {
+        let dir = TestDir::new("clipline-storage", "policy-within-kind");
+        let oldest = write_owned(&dir, "replay-oldest.mp4", 10);
+        tick_mtime();
+        let older = write_owned(&dir, "replay-old.mp4", 10);
+        tick_mtime();
+        let newer = write_owned(&dir, "replay-new.mp4", 10);
+
+        let report = enforce_quota_with_policy(dir.path(), Some(10), None, |path| ClipGcPolicy {
+            protected: false,
+            priority: kind_priority(path.file_name().and_then(|n| n.to_str()).unwrap_or("")),
+        })
+        .unwrap();
+
+        assert_eq!(report.deleted_clips, 2);
+        assert!(!oldest.exists());
+        assert!(!older.exists());
+        assert!(newer.exists());
+    }
+
+    #[test]
+    fn enforce_quota_with_policy_skips_protected_high_priority_clips() {
+        let dir = TestDir::new("clipline-storage", "policy-protected");
+        let favorite = write_owned(&dir, "session-favorite.mp4", 10);
+        tick_mtime();
+        let replay = write_owned(&dir, "replay.mp4", 10);
+        tick_mtime();
+        let trim = write_owned(&dir, "trim.mp4", 10);
+
+        let report = enforce_quota_with_policy(dir.path(), Some(10), None, |path| ClipGcPolicy {
+            protected: same_path(path, &favorite),
+            priority: kind_priority(path.file_name().and_then(|n| n.to_str()).unwrap_or("")),
+        })
+        .unwrap();
+
+        assert_eq!(report.deleted_clips, 2);
+        assert!(
+            favorite.exists(),
+            "protected clips must survive even at high priority"
+        );
+        assert!(!replay.exists());
+        assert!(!trim.exists());
+        assert_eq!(report.status.total_bytes, 10);
+    }
+
+    #[test]
+    fn enforce_quota_under_budget_skips_policy_callbacks() {
+        let dir = TestDir::new("clipline-storage", "policy-under-budget");
+        write_owned(&dir, "clip.mp4", 10);
+        let protection_checks = std::cell::Cell::new(0usize);
+        let priority_checks = std::cell::Cell::new(0usize);
+
+        let report = enforce_quota_with_policy(dir.path(), Some(100), None, |_| {
+            protection_checks.set(protection_checks.get() + 1);
+            priority_checks.set(priority_checks.get() + 1);
+            ClipGcPolicy::default()
+        })
+        .unwrap();
+
+        assert_eq!(report.deleted_clips, 0);
+        assert_eq!(protection_checks.get(), 0);
+        assert_eq!(priority_checks.get(), 0);
+    }
+
+    #[test]
+    fn enforce_quota_evaluates_policy_once_per_clip() {
+        let dir = TestDir::new("clipline-storage", "policy-once");
+        write_owned(&dir, "old.mp4", 10);
+        tick_mtime();
+        write_owned(&dir, "new.mp4", 10);
+        let checks = std::cell::Cell::new(0usize);
+
+        let report = enforce_quota_with_policy(dir.path(), Some(10), None, |_| {
+            checks.set(checks.get() + 1);
+            ClipGcPolicy::default()
+        })
+        .unwrap();
+
+        assert_eq!(report.deleted_clips, 1);
+        assert_eq!(checks.get(), 2, "policy must be computed once per clip");
+    }
+
+    #[test]
+    fn enforce_quota_reports_cleanup_error_after_counting_deleted_clip() {
+        let dir = TestDir::new("clipline-storage", "quota-cleanup-error");
+        let old = write_owned(&dir, "2026-08-30 01-00/old.mp4", 40);
+        tick_mtime();
+        let keep = write_owned(&dir, "keep.mp4", 10);
+
+        let report = enforce_quota_with_policy_and_cleanup(
+            dir.path(),
+            Some(20),
+            None,
+            |_| ClipGcPolicy::default(),
+            |_, _| Err(io::Error::other("simulated cleanup failure")),
+        )
+        .unwrap();
+
+        assert_eq!(report.deleted_clips, 1);
+        assert_eq!(report.freed_bytes, 40);
+        assert_eq!(report.cleanup_errors.len(), 1);
+        assert!(!old.exists());
+        assert!(keep.exists());
     }
 
     #[test]
@@ -1208,11 +1486,39 @@ mod tests {
         // must be left alone so the renamer can finish moving them.
         std::fs::rename(&old, dir.path().join("renamed.mp4")).unwrap();
 
-        let outcome = delete_inventoried_clip(&clip, dir.path(), &|_| false).unwrap();
+        let outcome = delete_inventoried_clip(&clip, dir.path()).unwrap();
 
         assert_eq!(outcome, DeletedClip::AlreadyGone);
         assert!(old_meta.exists());
         assert!(old_markers.exists());
+    }
+
+    #[test]
+    fn deleted_clip_reports_session_cleanup_error_without_becoming_a_failure() {
+        let dir = TestDir::new("clipline-storage", "gc-cleanup-error");
+        let clip_path = write_owned(&dir, "2026-08-30 01-00/old.mp4", 40);
+        let marker = clip_ownership_marker_path(&clip_path).unwrap();
+        let clip = ClipFile {
+            path: clip_path.clone(),
+            sidecars: vec![marker],
+            mp4_bytes: 40,
+            sidecar_bytes: 2,
+            modified: UNIX_EPOCH,
+            recording: false,
+        };
+
+        let outcome = delete_inventoried_clip_with(&clip, dir.path(), |_, _| {
+            Err(io::Error::other("simulated cleanup failure"))
+        })
+        .unwrap();
+
+        let DeletedClip::Removed { cleanup_error } = outcome else {
+            panic!("the MP4 deletion must remain successful");
+        };
+        assert!(!clip_path.exists());
+        assert!(cleanup_error
+            .as_deref()
+            .is_some_and(|error| error.contains("simulated cleanup failure")));
     }
 
     #[test]
@@ -1237,18 +1543,40 @@ mod tests {
     }
 
     #[test]
+    fn enforce_quota_removes_orphaned_sidecars_with_emptied_folder() {
+        let dir = TestDir::new("clipline-storage", "session-orphan-sidecar-gc");
+        let old = write_owned(&dir, "2026-06-11 09-00/old.mp4", 30);
+        let orphan = dir.write("2026-06-11 09-00/gone.poster.jpg", 7);
+        let session_meta = dir.write("2026-06-11 09-00/clipline-session.json", 12);
+        tick_mtime();
+        let keep = write_owned(&dir, "keep.mp4", 10);
+
+        let report = enforce_quota(dir.path(), Some(20), None).unwrap();
+
+        assert_eq!(report.deleted_clips, 1);
+        assert!(!old.exists());
+        assert!(!orphan.exists());
+        assert!(!session_meta.exists());
+        assert!(
+            !old.parent().unwrap().exists(),
+            "orphaned leftover metadata must not keep the emptied session folder"
+        );
+        assert!(keep.exists());
+    }
+
+    #[test]
     fn delete_all_managed_media_removes_owned_clips_recordings_and_sidecars_only() {
         let dir = TestDir::new("clipline-storage", "delete-all-managed");
         let saved = write_owned(&dir, "saved.mp4", 10);
         let saved_markers = dir.write("saved.markers.json", 2);
         let saved_osu = dir.write("saved.osu-enrichment.json", 3);
         let saved_poster = dir.write("saved.poster.jpg", 4);
-        let recording = dir.write("2026-08-16/active.mp4.recording", 20);
+        let recording = dir.write("2026-08-16 12-00/active.mp4.recording", 20);
         mark_owned(&recording);
-        let recording_markers = dir.write("2026-08-16/active.markers.json", 2);
-        let recording_osu = dir.write("2026-08-16/active.osu-enrichment.json", 3);
-        let recording_poster = dir.write("2026-08-16/active.poster.jpg", 4);
-        let session = dir.write("2026-08-16/clipline-session.json", 5);
+        let recording_markers = dir.write("2026-08-16 12-00/active.markers.json", 2);
+        let recording_osu = dir.write("2026-08-16 12-00/active.osu-enrichment.json", 3);
+        let recording_poster = dir.write("2026-08-16 12-00/active.poster.jpg", 4);
+        let session = dir.write("2026-08-16 12-00/clipline-session.json", 5);
         let legacy = dir.write("clip_1786900000.mp4", 7);
         let legacy_recording = dir.write("session_1786900001_1.mp4.recording", 8);
         let foreign = dir.write("foreign.mp4", 30);
@@ -1376,7 +1704,7 @@ mod tests {
             recording: false,
         };
 
-        let outcome = delete_inventoried_clip(&clip, root.path(), &|_| false).unwrap();
+        let outcome = delete_inventoried_clip(&clip, root.path()).unwrap();
 
         assert_eq!(outcome, DeletedClip::Skipped);
         assert!(external.exists());

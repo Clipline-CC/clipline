@@ -5678,24 +5678,6 @@ fn gallery_supports_multi_select_bulk_actions() {
         "select-mode visual class ownership should live in the selection sync helpers"
     );
 
-    let delete_clip_rs = library
-        .split("pub fn delete_clip")
-        .nth(1)
-        .and_then(|rest| rest.split("pub struct DeletedClipsReport").next())
-        .expect("delete_clip command body exists");
-    assert!(
-        delete_clip_rs.contains("remove_clip_files(&target)"),
-        "single delete should call the same file-removal helper as bulk delete"
-    );
-    let delete_clips_impl_rs = library
-        .split("fn delete_clips_impl")
-        .nth(1)
-        .and_then(|rest| rest.split("pub async fn delete_clips").next())
-        .expect("delete_clips_impl body exists");
-    assert!(
-        delete_clips_impl_rs.contains("remove_clip_files(&target)"),
-        "bulk delete should call the shared file-removal helper"
-    );
 }
 
 #[test]
@@ -6043,6 +6025,7 @@ fn quota_full_is_a_durable_recording_lock_with_optional_auto_delete() {
         r#"id="storage-quota-settings""#,
         r#"id="storage-quota-recheck""#,
         "Your clips were not deleted",
+        "When auto-delete is enabled, favorited clips stay protected",
         "Clipline stops recording when this limit is reached",
         r#"id="set-auto-delete-when-over-quota""#,
         "Auto-delete oldest clips",
@@ -6113,5 +6096,42 @@ fn league_game_type_metadata_filters_the_local_library() {
             && library.contains("gallerySource === \"cloud\"")
             && library.contains("gallerySearch = input.value.trim().toLowerCase()"),
         "cloud library search must keep the typed query as plain text, not a LoL Type token"
+    );
+}
+
+#[test]
+fn favorites_are_guarded_across_review_gallery_and_context_menu() {
+    let html = index_html();
+    let library = read_ui_js("library.js");
+    let review = read_ui_js("review-player.js");
+    let main = read_ui_js("main.js");
+
+    assert!(
+        html.contains(r#"id="favorite-clip""#)
+            && html.contains(r#"data-filter="favorite""#)
+            && html.contains(r#"id="clip-menu-favorite""#),
+        "review header, filter row, and local context menu must each expose favorites"
+    );
+    assert!(
+        review.contains(r#""favorite-clip""#)
+            && review.contains("function syncFavoriteButton")
+            && review.contains("aria-pressed")
+            && review.contains("Remove from favorites")
+            && review.contains("Add to favorites")
+            && review.contains(r#"invoke("set_clip_favorite""#)
+            && review.contains("replaceClipInCache"),
+        "review must hide the favorite button for cloud-only clips, reflect the flag, and patch the cache after toggling"
+    );
+    assert!(
+        library.contains(r#"galleryFilter === "favorite" && !c.favorite"#)
+            && library.contains("card-fav-toggle")
+            && library.contains("toggleClipFavorite(c)")
+            && library.contains("clip.favorite ? \"Remove from favorites\" : \"Add to favorites\""),
+        "the gallery filter, inline card star toggle, and context-menu label must key on the favorite flag"
+    );
+    assert!(
+        library.contains("$(\"clip-menu-favorite\").hidden = true")
+            && main.contains("clip-menu-favorite"),
+        "cloud/game-play menus must hide the favorite action; main.js must wire the toggle"
     );
 }

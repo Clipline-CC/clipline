@@ -13,7 +13,6 @@ use crate::util::unix_now_i64;
 
 const PENDING_SCHEMA_VERSION: u32 = 1;
 const SESSION_META_FILE: &str = "clipline-session.json";
-const PENDING_EXTENSION: &str = "osu-enrichment.json";
 const UTC_SKEW_TOLERANCE_S: f64 = 15.0;
 const PASSED_RESULTS_SCREEN_PADDING_S: f64 = 1.0;
 const TITLE_EVENT_FALLBACK_LOOKBACK_S: i64 = 15 * 60;
@@ -171,7 +170,7 @@ pub struct OsuMappedPlays {
 }
 
 pub fn pending_path(path: &Path) -> PathBuf {
-    path.with_extension(PENDING_EXTENSION)
+    clipline_storage::clip_sidecar_path(path, clipline_storage::OSU_ENRICHMENT_SUFFIX)
 }
 
 struct OwnedSidecarTemp {

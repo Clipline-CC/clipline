@@ -134,6 +134,7 @@ impl UploadSourceLease {
         // Serialize identity discovery and registration with all app-side
         // mutation checks. If a mutation checked first, it wins; otherwise it
         // cannot observe an unregistered lease after this open succeeds.
+        let _mutation_guard = crate::gc::lock_clip_mutations();
         let mut sources = ACTIVE_UPLOAD_SOURCES
             .get_or_init(|| Mutex::new(HashMap::new()))
             .lock()
