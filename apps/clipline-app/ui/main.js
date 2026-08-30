@@ -411,6 +411,11 @@ $("clip-menu-delete").addEventListener("click", () => {
   hideClipContextMenu();
   if (clip) deleteClip(clip.path);
 });
+$("clip-menu-favorite").addEventListener("click", () => {
+  const clip = clipContextTarget;
+  hideClipContextMenu();
+  if (clip) toggleClipFavorite(clip);
+});
 window.addEventListener("resize", () => {
   renderRegionEditor();
   updateStageFrame();
@@ -509,6 +514,9 @@ $("export-clip").addEventListener("click", exportTrim);
 $("add-to-group").addEventListener("click", openGroupPicker);
 $("deck-status-action").addEventListener("click", runDeckStatusAction);
 $("delete-clip").addEventListener("click", () => activeGroup() ? deleteOpenGroup() : deleteClip());
+$("favorite-clip").addEventListener("click", () => {
+  if (currentClip) toggleClipFavorite(currentClip);
+});
 $("open-folder").addEventListener("click", openFolder);
 $("copy-clip").addEventListener("click", (event) => activeGroup()
   ? copyOpenGroup(event)

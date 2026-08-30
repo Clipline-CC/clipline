@@ -1669,9 +1669,7 @@ fn decode_sample_bytes(
             .as_chunks::<2>()
             .0
             .iter()
-            .map(|sample| {
-                i16::from_le_bytes(*sample) as f32 / 32_768.0
-            })
+            .map(|sample| i16::from_le_bytes(*sample) as f32 / 32_768.0)
             .collect(),
         SampleFormat::Pcm24 => bytes
             .as_chunks::<3>()
@@ -1687,9 +1685,7 @@ fn decode_sample_bytes(
             .as_chunks::<4>()
             .0
             .iter()
-            .map(|sample| {
-                i32::from_le_bytes(*sample) as f32 / 2_147_483_648.0
-            })
+            .map(|sample| i32::from_le_bytes(*sample) as f32 / 2_147_483_648.0)
             .collect(),
     })
 }

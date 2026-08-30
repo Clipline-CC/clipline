@@ -1030,7 +1030,7 @@ fn normalize_mixed_pcm(mixed: &mut [f32], active_counts: &[u32]) -> Result<(), T
                 *sample /= active as f32;
             }
         }
-        for sample in frame {
+        for sample in frame.iter_mut() {
             *sample = sample.clamp(-1.0, 1.0);
         }
     }

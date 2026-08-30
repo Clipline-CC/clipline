@@ -1755,8 +1755,22 @@ function clipCard(c) {
   del.innerHTML =
     '<svg viewBox="0 0 24 24"><path d="M9 3v1H4v2h16V4h-5V3H9zM6 8v11a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V8H6zm3 2h2v9H9v-9zm4 0h2v9h-2v-9z"/></svg>';
 
-  thumb.append(play, kindChip, del);
+  // Favorite star sits left of the trash so it can be toggled without opening
+  // the clip; filled when favorited, outline otherwise.
+  const fav = document.createElement("button");
+  fav.type = "button";
+  fav.className = "card-fav-toggle" + (c.favorite ? " on" : "");
+  fav.title = c.favorite ? "Remove from favorites" : "Add to favorites";
+  fav.setAttribute("aria-pressed", String(!!c.favorite));
+  fav.innerHTML = c.favorite
+    ? '<svg viewBox="0 0 24 24"><path d="M12 2.6l3 5.9 6.5 1-4.8 4.5 1.1 6.5L12 17.3 6.2 20.6l1.1-6.5L2.5 9.6l6.5-1z"/></svg>'
+    : '<svg class="off" viewBox="0 0 24 24"><path d="M12 2.6l3 5.9 6.5 1-4.8 4.5 1.1 6.5L12 17.3 6.2 20.6l1.1-6.5L2.5 9.6l6.5-1z"/></svg>';
+  fav.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    toggleClipFavorite(c);
+  });
 
+  thumb.append(play, kindChip, fav, del);
   if (Number.isFinite(duration)) {
     const dur = document.createElement("span");
     dur.className = "card-dur";
@@ -2228,6 +2242,7 @@ function filterGalleryClips(clips, { groupName = "" } = {}) {
     const kind = clipKind(c);
     if ((galleryFilter === "replay" || galleryFilter === "session" || galleryFilter === "trim")
       && kind !== galleryFilter) continue;
+    if (galleryFilter === "favorite" && !c.favorite) continue;
     if (galleryFilter === "marked" && !clipMarkers(c).length) continue;
     if (galleryGameType !== "all") {
       const category = c.game && c.game.id === "league_of_legends"
@@ -2601,6 +2616,9 @@ function showClipContextMenu(ev, clip) {
   upload.disabled = busy || (uploaded ? !record.remote_clip_id : !cloudConnected());
   $("clip-menu-rename").hidden = false;
   $("clip-menu-rename-file").hidden = false;
+  const favorite = $("clip-menu-favorite");
+  favorite.hidden = false;
+  favorite.textContent = clip.favorite ? "Remove from favorites" : "Add to favorites";
   $("clip-menu-delete").hidden = false;
   const menu = $("clip-context-menu");
   menu.hidden = false;
@@ -2654,6 +2672,7 @@ function showCloudClipContextMenu(ev, entry) {
   $("clip-menu-upload").hidden = true;
   $("clip-menu-rename").hidden = true;
   $("clip-menu-rename-file").hidden = true;
+  $("clip-menu-favorite").hidden = true;
   $("clip-menu-delete").hidden = true;
   const menu = $("clip-context-menu");
   menu.hidden = false;
@@ -2681,6 +2700,7 @@ function showGamePlayContextMenu(ev, play) {
   $("clip-menu-upload").hidden = true;
   $("clip-menu-rename").hidden = true;
   $("clip-menu-rename-file").hidden = true;
+  $("clip-menu-favorite").hidden = true;
   $("clip-menu-delete").hidden = true;
   const menu = $("clip-context-menu");
   menu.hidden = false;

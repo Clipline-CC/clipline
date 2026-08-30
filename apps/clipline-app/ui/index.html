@@ -117,6 +117,7 @@
               <button class="g-chip" data-filter="session" type="button"><span class="g-dot" style="background:var(--session)"></span>Sessions</button>
               <button class="g-chip" data-filter="trim" type="button"><span class="g-dot" style="background:var(--ok)"></span>Trims</button>
               <button class="g-chip" data-filter="group" type="button">Groups</button>
+              <button class="g-chip" data-filter="favorite" type="button"><span class="g-dot" style="background:var(--favorite)"></span>Favorites</button>
               <span class="g-sep"></span>
               <button class="g-chip" data-filter="marked" type="button">Has markers</button>
             </div>
@@ -166,6 +167,9 @@
             <span id="pmeta"></span>
           </div>
           <div class="review-actions">
+            <button id="favorite-clip" class="icon-button" title="Add to favorites" aria-pressed="false">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2.6l3 5.9 6.5 1-4.8 4.5 1.1 6.5L12 17.3 6.2 20.6l1.1-6.5L2.5 9.6l6.5-1z"/></svg>
+            </button>
             <button id="upload-clip" class="icon-button" title="Upload to Clipline Cloud" disabled hidden>
               <svg viewBox="0 0 24 24"><path d="M12 3 6.5 8.5 8 10l3-3v10h2V7l3 3 1.5-1.5L12 3zM5 19h14v2H5v-2z"/></svg>
             </button>
@@ -1193,6 +1197,7 @@
       <strong id="storage-quota-title">Storage quota full</strong>
       <span id="storage-quota-message">Clipline stopped recording because there is not enough room under your saved-media quota. Your clips were not deleted.</span>
       <span id="storage-quota-usage" class="hint"></span>
+      <span class="hint">Increase the quota or delete clips to make room. When auto-delete is enabled, favorited clips stay protected until you unfavorite them.</span>
       <span class="hint">Recording and replay saves stay disabled until you increase the quota or make enough space.</span>
     </div>
     <div class="confirm-actions storage-quota-actions">
@@ -1413,6 +1418,7 @@
     <button id="clip-menu-upload" type="button">Upload</button>
     <button id="clip-menu-rename" type="button">Rename</button>
     <button id="clip-menu-rename-file" type="button">Rename file</button>
+    <button id="clip-menu-favorite" type="button">Add to favorites</button>
     <button id="clip-menu-copy" type="button">Copy to clipboard</button>
     <button id="clip-menu-copy-shareable" type="button">Copy shareable clip</button>
     <button id="clip-menu-remove-group" type="button">Remove from group</button>

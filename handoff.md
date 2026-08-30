@@ -241,6 +241,154 @@ portrait+silent inputs, encoded the exact 1080p60 H.264/Opus filter path, and de
 Rust 1.98's new `chunks_exact_to_as_chunks` warnings were cleared mechanically in commit `38f465b`
 so the required warning-denied gate remains usable.
 
+## Checkpoint (2026-08-30): PR #188 final-review fixes
+
+Plan: `docs/superpowers/plans/2026-08-30-pr-188-final-review-fixes.md`.
+
+The relocated upload payload writer and its 24-hour reaper now share the
+`clipline-upload-` prefix, and the prune regression uses the actual `%TEMP%\Clipline\upload-payloads`
+filename shape. Replay saves write session attribution immediately after the locked ownership
+reservation and before MP4 creation, closing the post-save crash window without reopening the
+empty-folder race. The quota dialog now says unfavoriting matters only when auto-delete is enabled.
+
+Concurrency regressions now independently prove replay and full-session reservation wait on the
+session cleanup lock. The favorite-vs-GC race test pauses inside the production GC wrapper after
+the protection check, so removing either production lock makes the test fail. Delete coverage
+remains behavioral; the brittle source-string assertion was intentionally not restored.
+
+Verification: `cargo test --workspace` and
+`cargo clippy --workspace --all-targets -- -D warnings` both pass.
+
+## Checkpoint (2026-08-30): PR #188 merge blockers
+
+Plan: `docs/superpowers/plans/2026-08-30-pr-188-merge-blockers.md`.
+
+Replay saves now create the session folder and ownership marker under storage's session lock;
+full-session recording creates its `.mp4.recording` file under the same lock. Empty-session
+cleanup therefore cannot remove either destination between directory creation and the first
+cleanup-blocking file. Recorder startup performs its sweep after abandoned-recording recovery,
+so metadata-only husks produced by deleting zero-byte recordings disappear in the same run.
+Blind sweeps keep evidence-free empty session-shaped folders; cleanup invoked after deleting a
+known managed clip may still remove an already-empty session.
+
+Remuxed upload payloads are staged under `%TEMP%\Clipline\upload-payloads`, not beside the source
+clip, and every upload prunes abandoned payloads from that shared location. A crashed upload can
+no longer keep a session folder alive after delete-local-after-upload; the exact legacy in-session
+payload name is also recognized as disposable so existing crash debris is repaired.
+
+Favorites now use a dedicated zero-byte `.clipline-favorite` sidecar. The ownership metadata file
+again has one meaning—its existence proves Clipline ownership—so storage no longer parses the
+app's JSON schema or depends on `serde_json`, and imported favorites remain unmanaged without an
+`owned: false` override. Storage exports the canonical sidecar derivation used by library delete,
+rename, poster, and osu! paths; the sidecar table remains a fixed-size array.
+
+Clip mutation synchronization is app-owned and covers GC, favorite/title/file rename, explicit
+delete, post-upload delete, and upload-lease acquisition. GC receives one `ClipGcPolicy` per clip,
+so favorite protection and kind priority are computed once. A session-folder cleanup error after
+the MP4 is gone is diagnostic rather than a failed deletion: GC still reports the deleted clip and
+freed bytes, and library deletion logs the path without leaving a ghost card.
+
+Verification: `cargo test --workspace` passes, including device tests on the development machine.
+Fresh-cache Clippy passes for `clipline-storage` and `clipline-app`; workspace Clippy also passes
+with warnings denied.
+
+## Checkpoint (2026-08-28): PR #188 second-review hardening
+
+Plan: `docs/superpowers/plans/2026-08-28-pr-188-second-review-fixes.md`.
+
+Empty-session cleanup now retries Clipline-owned crash debris instead of preserving it forever:
+orphan ownership markers expire after a one-hour recorder safety window, and the exact metadata,
+poster, osu! atomic-write, and osu! rename temp/backup shapes are disposable. Arbitrary files,
+media temps, recent ownership markers, recordings, and videos remain protected. If folder removal
+fails and restoring `clipline-session.json` also fails, that write error now propagates through
+sweeps, quota GC, explicit deletion, post-upload deletion, and recorder-startup diagnostics.
+
+File rename clears an imported favorite's `owned: false` only after reading the moved metadata,
+so title and file editing are both explicit adoption boundaries as documented. Favorite writes
+run in a blocking task instead of waiting on quota GC's clip lock from Tauri's IPC thread. When
+favorites alone exceed the quota, GC deliberately avoids futile deletion of other clips; the
+quota dialog now identifies favorites as protected and tells the user to unfavorite or raise the
+quota. Comments at both recorder paths pin the ownership-marker-before-session-metadata ordering.
+
+Verification: `cargo test --workspace` passes, including device tests on the development machine.
+Fresh-cache Clippy passes for `clipline-storage` and `clipline-app`, and workspace Clippy passes
+with warnings denied.
+
+## Checkpoint (2026-08-28): PR #188 review hardening
+
+Plan: `docs/superpowers/plans/2026-08-28-pr-188-review-fixes.md`.
+
+Favorites on imported, otherwise unowned MP4s now write `owned: false` into favorite-only
+metadata. Storage parses that explicit override, so starring and unstarring an imported file
+cannot silently opt it into destructive quota GC; existing metadata without the field remains
+owned for compatibility, while title/file rename still deliberately adopts the clip.
+
+Quota GC and favorite/title/file-rename metadata mutations share one process-wide clip lock.
+A favorite command therefore either commits before GC's protection check or, if GC won, reports
+that the clip disappeared instead of succeeding and recreating an orphan sidecar. Empty-session
+cleanup and session attribution writes likewise share one process-wide session lock, and replay
+plus full-session paths reserve their ownership marker before writing attribution, closing the
+read/unlink stale-restore race without bringing back staging files.
+
+Cleanup suffix matching now uses checked UTF-8 slices; recorder startup sweeps the current media
+root before the process-global abandoned-recording guard; and quota enforcement returns directly
+from its initial inventory when already under budget, avoiding favorite/kind reads and sorting.
+
+## Checkpoint (2026-08-27): Favorites + kind-ordered auto-delete
+
+Plan: `docs/superpowers/plans/2026-08-27-favorites-and-gc-priority.md`.
+
+**Favorites.** Any local clip can be marked as a favorite from the Review header (star button,
+hidden for cloud-only clips), the inline star toggle on each library card (left of the delete
+button; outline when off, filled when on), or a card's context menu (`Add to favorites` /
+`Remove from favorites`); the **Favorites** chip in the Library filter row isolates them. The
+flag lives in the per-clip metadata sidecar (`favorite: bool`,
+serde-defaulted and skipped when false, so non-favorite sidecars stay byte-identical), is
+serialized into `ClipInfo` for cards/Review, and is set through the new
+`set_clip_favorite(path, favorite)` command (returns `{path, favorite}`; the UI patches the
+cache in place like rename). Favorites survive renames because the sidecar is read-modify-written
+(or moved) by both rename paths.
+
+**Auto-delete priority.** `clipline-storage::enforce_quota_with_policy` now takes a caller-
+supplied `priority: Fn(&Path) -> u8` sort key (storage stays neutral; plain `enforce_quota`
+delegates with constant priority, and the unused `enforce_quota_with_protection` wrapper is
+gone). The app's single shared policy
+(`gc::enforce_quota_with_clip_policy`) protects active uploads **and favorites**, and orders
+deletion **sessions → replays → trims**, oldest within each kind. The priority closure is
+evaluated once per clip up front (decorate-then-sort) so sidecar reads don't run inside the
+sort. All three quota-GC call sites
+use it: recorder `make_room_for_quota`, the replay-save path (`emit_saved_clip`), and the manual
+`recheck_storage_quota`.
+
+Sharp edges:
+
+- GC and favorite/rename metadata writes share one clip-mutation lock, so a successful favorite
+  cannot race with deletion or lose a concurrent title update.
+- Kind classification falls back to filename inference (`session_`, `_trim_`) for clips whose
+  sidecar predates kind tagging, so legacy libraries still drain in the right order.
+- The favorite sidecar serializes `title`/`kind` as explicit nulls for clips that never had
+  them; harmless, and the round-trip test pins the `favorite` key only appears when true.
+
+Not built: favorites on cloud-only clips (local flag only), a dedicated favorites tab beyond the
+filter chip, and per-kind quota GC previews in Settings.
+
+## Checkpoint (2026-08-27): Delete emptied session folders
+
+Deleting a clip already removed its MP4 and sidecars, but the session folder stayed behind with
+`clipline-session.json` (and any orphaned leftover metadata). Real libraries can accumulate
+hundreds of those empty folders.
+
+User delete, bulk delete, delete-local-after-upload, quota GC, and recorder startup share
+`clipline-storage::remove_emptied_session_dir`: when a recorder-named session folder no longer
+holds any real media (videos, recordings, in-progress `*.clipline.json` markers, screenshots,
+temps, or unrecognized files), leftover clip sidecars and `clipline-session.json` are deleted and
+the folder is removed. If a concurrent save already landed new files, `remove_dir` fails and those
+files stay. The session metadata is never staged: it is held in memory across `remove_dir` and
+written back only if the removal failed and the file is still absent, so a fresh sidecar from a
+concurrent save is never clobbered and no `.clipline-removing-*` debris is created. Library
+listing does not sweep — it is a read path. The media root, Screenshots, and other non-session
+trees are left alone.
+
 ## Checkpoint (2026-08-17): Stable 1.0.2
 
 Plan: `docs/superpowers/plans/2026-08-17-stable-1.0.2.md`.
