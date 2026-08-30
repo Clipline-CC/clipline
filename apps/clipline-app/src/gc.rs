@@ -29,6 +29,14 @@ pub(crate) fn clip_gc_priority(path: &Path) -> u8 {
     }
 }
 
+fn clip_gc_policy(path: &Path) -> clipline_storage::ClipGcPolicy {
+    clipline_storage::ClipGcPolicy {
+        protected: crate::cloud_upload::is_active_upload_source(path)
+            || library::is_favorite_clip(path),
+        priority: clip_gc_priority(path),
+    }
+}
+
 /// Active upload sources and favorites are never deleted, and kinds drain in
 /// priority order (sessions → replays → trims).
 pub(crate) fn enforce_quota_with_clip_policy(
@@ -36,14 +44,17 @@ pub(crate) fn enforce_quota_with_clip_policy(
     quota_bytes: Option<u64>,
     protect: Option<&Path>,
 ) -> io::Result<clipline_storage::GcReport> {
+    enforce_quota_with_clip_policy_using(dir, quota_bytes, protect, clip_gc_policy)
+}
+
+fn enforce_quota_with_clip_policy_using(
+    dir: &Path,
+    quota_bytes: Option<u64>,
+    protect: Option<&Path>,
+    policy: impl Fn(&Path) -> clipline_storage::ClipGcPolicy,
+) -> io::Result<clipline_storage::GcReport> {
     let _guard = lock_clip_mutations();
-    let report = clipline_storage::enforce_quota_with_policy(dir, quota_bytes, protect, |path| {
-        clipline_storage::ClipGcPolicy {
-            protected: crate::cloud_upload::is_active_upload_source(path)
-                || library::is_favorite_clip(path),
-            priority: clip_gc_priority(path),
-        }
-    })?;
+    let report = clipline_storage::enforce_quota_with_policy(dir, quota_bytes, protect, policy)?;
     for error in &report.cleanup_errors {
         tracing::warn!(event = "storage_session_cleanup_failed", error);
     }
@@ -160,14 +171,14 @@ mod tests {
         let (continue_tx, continue_rx) = mpsc::channel();
         let gc_root = dir.path().to_path_buf();
         let gc = std::thread::spawn(move || {
-            let _guard = lock_clip_mutations();
-            clipline_storage::enforce_quota_with_policy(&gc_root, Some(0), None, |path| {
-                checked_tx.send(()).unwrap();
-                continue_rx.recv().unwrap();
-                clipline_storage::ClipGcPolicy {
+            enforce_quota_with_clip_policy_using(&gc_root, Some(0), None, |path| {
+                let policy = clipline_storage::ClipGcPolicy {
                     protected: library::is_favorite_clip(path),
                     priority: 0,
-                }
+                };
+                checked_tx.send(()).unwrap();
+                continue_rx.recv().unwrap();
+                policy
             })
             .unwrap()
         });
@@ -180,15 +191,17 @@ mod tests {
                 .send(library::set_clip_favorite_impl(&favorite_clip, true))
                 .unwrap();
         });
-        let early_result = favorite_rx.recv_timeout(Duration::from_millis(100)).ok();
+        assert!(
+            favorite_rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_err(),
+            "favorite mutation must wait while production GC owns the clip lock"
+        );
         continue_tx.send(()).unwrap();
         gc.join().unwrap();
-        let favorite_result = early_result
-            .unwrap_or_else(|| favorite_rx.recv_timeout(Duration::from_secs(2)).unwrap());
+        let favorite_result = favorite_rx.recv_timeout(Duration::from_secs(2)).unwrap();
 
-        assert!(
-            favorite_result.is_err() || clip.exists(),
-            "a successful favorite command must leave the clip present"
-        );
+        assert!(favorite_result.is_err());
+        assert!(!clip.exists());
     }
 }

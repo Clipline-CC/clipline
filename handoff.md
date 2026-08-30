@@ -4,6 +4,24 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-30): PR #188 final-review fixes
+
+Plan: `docs/superpowers/plans/2026-08-30-pr-188-final-review-fixes.md`.
+
+The relocated upload payload writer and its 24-hour reaper now share the
+`clipline-upload-` prefix, and the prune regression uses the actual `%TEMP%\Clipline\upload-payloads`
+filename shape. Replay saves write session attribution immediately after the locked ownership
+reservation and before MP4 creation, closing the post-save crash window without reopening the
+empty-folder race. The quota dialog now says unfavoriting matters only when auto-delete is enabled.
+
+Concurrency regressions now independently prove replay and full-session reservation wait on the
+session cleanup lock. The favorite-vs-GC race test pauses inside the production GC wrapper after
+the protection check, so removing either production lock makes the test fail. Delete coverage
+remains behavioral; the brittle source-string assertion was intentionally not restored.
+
+Verification: `cargo test --workspace` and
+`cargo clippy --workspace --all-targets -- -D warnings` both pass.
+
 ## Checkpoint (2026-08-30): PR #188 merge blockers
 
 Plan: `docs/superpowers/plans/2026-08-30-pr-188-merge-blockers.md`.

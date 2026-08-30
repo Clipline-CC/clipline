@@ -43,6 +43,7 @@ const REMOTE_NOT_FOUND_SYNC_MARKER: &str = "remote clip not found during status 
 const MAX_AVATAR_BYTES: usize = 2 * 1024 * 1024;
 const CLOUD_CACHE_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const UPLOAD_PAYLOAD_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+const UPLOAD_PAYLOAD_PREFIX: &str = "clipline-upload-";
 const CLOUD_THUMBNAIL_MAX_BYTES: u64 = 10 * 1024 * 1024;
 const CLOUD_MEDIA_FALLBACK_MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const CLOUD_MEDIA_HARD_MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
@@ -1945,7 +1946,7 @@ fn reserve_upload_payload_path(source: &Path) -> Result<PathBuf, String> {
     for _ in 0..128 {
         let suffix = CLOUD_CACHE_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
         let path = directory.join(format!(
-            "clipline-upload-{}-{suffix}.mp4.tmp",
+            "{UPLOAD_PAYLOAD_PREFIX}{}-{suffix}.mp4.tmp",
             std::process::id()
         ));
         match std::fs::OpenOptions::new()
@@ -1974,7 +1975,7 @@ fn prune_abandoned_upload_payloads(directory: &Path) {
         let is_upload_temp = path
             .file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| name.contains(".clipline-upload-") && name.ends_with(".tmp"));
+            .is_some_and(|name| name.starts_with(UPLOAD_PAYLOAD_PREFIX) && name.ends_with(".tmp"));
         let abandoned = entry
             .metadata()
             .and_then(|metadata| metadata.modified())
@@ -2627,8 +2628,8 @@ mod tests {
     #[test]
     fn abandoned_upload_payload_prune_is_scoped_and_age_gated() {
         let dir = TestDir::new("clipline-cloud", "upload-payload-prune");
-        let abandoned = dir.path().join("clip.mp4.clipline-upload-1-1.tmp");
-        let active = dir.path().join("clip.mp4.clipline-upload-1-2.tmp");
+        let abandoned = dir.path().join("clipline-upload-1-1.mp4.tmp");
+        let active = dir.path().join("clipline-upload-1-2.mp4.tmp");
         let unrelated = dir.path().join("editor.tmp");
         for path in [&abandoned, &active, &unrelated] {
             std::fs::write(path, b"temp").unwrap();

@@ -1279,15 +1279,14 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                     }
                     let session_dir = clips_dir.join(session.current());
                     let path = unique_media_path(&session_dir, "clip");
-                    match save(&rec, &path, opts.replay_window_s) {
+                    match save(
+                        &rec,
+                        &path,
+                        opts.replay_window_s,
+                        opts.active_game.as_ref(),
+                        league_queue.as_ref(),
+                    ) {
                         Ok((end, seconds)) => {
-                            // save() creates the ownership marker first;
-                            // empty-session cleanup relies on that ordering.
-                            write_session_game_meta(
-                                &session_dir,
-                                opts.active_game.as_ref(),
-                                league_queue.as_ref(),
-                            );
                             // Markers and match summary ride along as a
                             // sidecar (ddoc §5) when either is available.
                             let markers = write_marker_sidecar(
@@ -2778,9 +2777,14 @@ fn save(
     rec: &Recorder<impl CaptureEngine, impl Encoder>,
     path: &Path,
     window_s: f64,
+    active_game: Option<&ActiveGame>,
+    league_queue: Option<&LeagueQueue>,
 ) -> Result<(f64, f64), String> {
     let marker_created = ensure_session_clip_owned(path)
         .map_err(|e| format!("mark Clipline-owned clip {path:?}: {e}"))?;
+    if let Some(session_dir) = path.parent() {
+        write_session_game_meta(session_dir, active_game, league_queue);
+    }
     let saved_from = rec
         .save_window_bounds(window_s, None)
         .map(|(start, _)| start);
@@ -4137,8 +4141,8 @@ mod tests {
 
         let first_path = dir.path().join("clip_first.mp4");
         let second_path = dir.path().join("clip_second.mp4");
-        let (first_end, first_seconds) = save(&rec, &first_path, 2.0).unwrap();
-        let (second_end, second_seconds) = save(&rec, &second_path, 2.0).unwrap();
+        let (first_end, first_seconds) = save(&rec, &first_path, 2.0, None, None).unwrap();
+        let (second_end, second_seconds) = save(&rec, &second_path, 2.0, None, None).unwrap();
 
         assert!((first_end - 4.0).abs() < 1e-6);
         assert!((second_end - 4.0).abs() < 1e-6);
@@ -4155,7 +4159,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_replay_save_removes_only_a_new_ownership_marker() {
+    fn failed_replay_save_reserves_attribution_and_removes_only_a_new_ownership_marker() {
         let dir = TestDir::new("clipline-service", "failed-save-marker-cleanup");
         let mut rec = Recorder::new(
             MockCapture::new(1, 30),
@@ -4163,16 +4167,23 @@ mod tests {
             usize::MAX,
         );
         rec.run_to_end().unwrap();
+        let game = ActiveGame {
+            identity: crate::game_identity::GameIdentity::custom("test-game"),
+            name: "Test game".into(),
+            exe_path: None,
+            process_id: None,
+        };
 
         let newly_marked = dir.path().join("new.mp4");
         std::fs::create_dir(&newly_marked).unwrap();
-        assert!(save(&rec, &newly_marked, 1.0).is_err());
+        assert!(save(&rec, &newly_marked, 1.0, Some(&game), None).is_err());
         assert!(!newly_marked.with_extension("clipline.json").exists());
+        assert!(dir.path().join(SESSION_META_FILE).is_file());
 
         let already_marked = dir.path().join("existing.mp4");
         std::fs::create_dir(&already_marked).unwrap();
         ensure_clip_owned(&already_marked).unwrap();
-        assert!(save(&rec, &already_marked, 1.0).is_err());
+        assert!(save(&rec, &already_marked, 1.0, None, None).is_err());
         assert_eq!(
             std::fs::read(already_marked.with_extension("clipline.json")).unwrap(),
             b"{}"

@@ -6025,7 +6025,7 @@ fn quota_full_is_a_durable_recording_lock_with_optional_auto_delete() {
         r#"id="storage-quota-settings""#,
         r#"id="storage-quota-recheck""#,
         "Your clips were not deleted",
-        "Favorited clips are protected from auto-delete",
+        "When auto-delete is enabled, favorited clips stay protected",
         "Clipline stops recording when this limit is reached",
         r#"id="set-auto-delete-when-over-quota""#,
         "Auto-delete oldest clips",

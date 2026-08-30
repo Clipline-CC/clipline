@@ -824,7 +824,7 @@ mod tests {
     }
 
     #[test]
-    fn session_reservations_wait_for_cleanup_lock_before_creating_the_folder() {
+    fn replay_reservation_waits_for_cleanup_lock_before_creating_the_folder() {
         let dir = TestDir::new("clipline-storage", "session-reservation-lock");
         let replay = dir.path().join("2026-08-30 01-00/clip_1.mp4");
         let guard = lock_session_mutations();
@@ -840,10 +840,26 @@ mod tests {
         assert!(rx.recv_timeout(Duration::from_secs(2)).unwrap().unwrap());
         worker.join().unwrap();
         assert!(clip_ownership_marker_path(&replay).unwrap().is_file());
+    }
 
+    #[test]
+    fn full_session_reservation_waits_for_cleanup_lock_before_creating_the_folder() {
+        let dir = TestDir::new("clipline-storage", "recording-reservation-lock");
         let recording = dir.path().join("2026-08-30 01-01/session_1.mp4.recording");
-        let file = reserve_session_recording_file(&recording).unwrap();
+        let guard = lock_session_mutations();
+        let worker_path = recording.clone();
+        let (tx, rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            tx.send(reserve_session_recording_file(&worker_path))
+                .unwrap();
+        });
+
+        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+        assert!(!recording.parent().unwrap().exists());
+        drop(guard);
+        let file = rx.recv_timeout(Duration::from_secs(2)).unwrap().unwrap();
         drop(file);
+        worker.join().unwrap();
         assert!(recording.is_file());
     }
 
