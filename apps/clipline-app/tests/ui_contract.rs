@@ -5714,7 +5714,6 @@ fn groups_are_created_from_trim_and_managed_in_the_library() {
         "function submitGroupPicker",
         "function libraryItemMeta",
         "function topLevelLocalClips",
-        "function renderGroupCards",
         "function openGroupView",
         "function openGroupMember",
         "function renderGroupClipRail",
@@ -5783,8 +5782,26 @@ fn groups_are_created_from_trim_and_managed_in_the_library() {
         assert!(css.contains(required), "groups styling must include `{required}`");
     }
     assert!(
-        js.contains("filter((clip) => !clip.group)"),
-        "group members must stay in clipsCache but be hidden from top-level clip cards"
+        js.contains("filter((clip) => !clip.group && !clip.source_group)"),
+        "group members and generated compilations must stay in clipsCache without separate top-level cards"
+    );
+    let filter_chips = html
+        .split("<div class=\"gallery-filter-chips\">")
+        .nth(1)
+        .and_then(|rest| rest.split("</div>").next())
+        .expect("gallery filter chips");
+    let separator = filter_chips.find("class=\"g-sep\"").expect("filter separator");
+    let groups_filter = filter_chips.find("data-filter=\"group\"").expect("Groups filter");
+    let markers_filter = filter_chips.find("data-filter=\"marked\"").expect("Has markers filter");
+    assert!(
+        separator < groups_filter && groups_filter < markers_filter,
+        "Groups must sit beside Has markers on the right side of the filter divider"
+    );
+    assert!(
+        !js.contains("function renderGroupCards")
+            && js.contains("const items = [...filtered, ...libraryGroups]")
+            && js.contains("root.appendChild(c.members ? groupCard(c) : clipCard(c))"),
+        "group cards must use the ordinary Library grouping and rendering pipeline"
     );
     for required in [
         "group.size_mb = group.members.reduce",

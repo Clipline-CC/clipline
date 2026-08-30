@@ -267,8 +267,9 @@ Riot's Vanguard FAQ confirms in-game/LCU APIs "should continue to function" and 
   live in each clip's existing `.clipline.json` sidecar, so the first member creates the group and
   deleting the last member removes it without a second database. Group members stay out of the
   top-level Library: one group card represents them with an asymmetric mosaic of up to four real
-  clip posters. Group cards remain visible whenever any member matches the active kind, marker,
-  game, or text filter. Group names use the same Unicode lowercase key in native and frontend code.
+  clip posters. Group cards participate in the normal Library sort, grouping, and pagination flow,
+  and remain visible whenever any member matches the active kind, marker, game, or text filter.
+  Group names use the same Unicode lowercase key in native and frontend code.
   Local clip and group cards share a primary metadata order of duration, size, then
   relative modified time. Opening a group reuses the normal review player as a sequential playlist and repurposes
   the Match events rail for member posters/titles; rows are mouse-draggable with keyboard Up/Down
@@ -286,8 +287,9 @@ Riot's Vanguard FAQ confirms in-game/LCU APIs "should continue to function" and 
   the authoritative compilation; Delete confirms once before removing the group and its members.
   Right-clicking a rail member opens app-owned Remove from group and Delete actions; either action
   continues an active group review with a surviving neighbor. Export normalizes members to 1080p60 H.264/Opus and concatenates them into a
-  normal editable local `compilation` clip; Upload creates that same compilation and hands it to
-  the existing Clipline Cloud title/description/visibility dialog. Each member's enabled embedded
+  group-owned local compilation artifact that stays out of the top-level Library; Upload creates
+  that same artifact and hands it to the existing Clipline Cloud title/description/visibility
+  dialog. Each member's enabled embedded
   audio streams are normalized and mixed before concatenation, so split Output + Microphone clips
   keep both sources. Video and audio are padded/trimmed to the same per-member endpoint, and mixed
   audio timestamps are rebuilt from sample count, so unequal
