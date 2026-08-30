@@ -4,6 +4,29 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-30): Groups second review follow-up
+
+Plan: `docs/superpowers/plans/2026-08-30-groups-second-review.md`.
+
+The second report was pinned to pre-follow-up commit `21b0966b`; its fresh-member reorder and stale
+compilation P2s, atomicity/timeout/command-length clusters, and endpoint concern were already fixed
+at `6341ac8c`. The remaining external-drop finding was valid: with native drop interception disabled,
+the app now cancels document-level `dragover` and `drop` defaults so Explorer files cannot navigate
+the WebView away from Clipline while group row handlers still receive internal drags.
+
+Rust and JavaScript now share Unicode lowercase group-name keys, so names such as `Éclair`/`éclair`
+cannot split native membership behind one UI card. Reorder refuses corrupt or unreadable member
+sidecars instead of replacing them with defaults. A failed compilation duration probe falls back to
+summed member duration, avoiding an orphan after publish. Non-group titled exports retain legacy
+kind/sidecar behavior.
+
+Group card visibility is derived from member predicates under kind, marked, game, and text filters.
+Group picker submission and per-group compilation creation are single-flight, and the playback rail
+policy now reads `activeGroupName` rather than rebuilding/sorting all groups on each sync tick.
+
+Verification: Node syntax checks clean, all 125 UI contracts and 638 app tests green,
+`cargo test --workspace` green, and warning-denied workspace Clippy clean.
+
 ## Checkpoint (2026-08-30): Groups PR review blockers
 
 Plan: `docs/superpowers/plans/2026-08-30-groups-pr-review.md`.

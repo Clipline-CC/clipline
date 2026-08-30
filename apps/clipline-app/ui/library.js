@@ -83,13 +83,17 @@ function libraryItemMeta(durationS, sizeMb, modifiedUnix) {
   return parts;
 }
 
+function groupNameKey(name) {
+  return String(name || "").trim().toLowerCase();
+}
+
 function localGroups() {
   const groups = new Map();
   for (const clip of clipsCache) {
     const membership = clip && clip.group;
     const name = String(membership && membership.name || "").trim();
     if (!name) continue;
-    const key = name.toLocaleLowerCase();
+    const key = groupNameKey(name);
     if (!groups.has(key)) groups.set(key, { name, members: [], modified_unix: 0 });
     const group = groups.get(key);
     group.members.push(clip);
@@ -115,8 +119,8 @@ function localGroups() {
 }
 
 function groupForName(name) {
-  const key = String(name || "").trim().toLocaleLowerCase();
-  return localGroups().find((group) => group.name.toLocaleLowerCase() === key) || null;
+  const key = groupNameKey(name);
+  return localGroups().find((group) => groupNameKey(group.name) === key) || null;
 }
 
 function activeGroup() {
@@ -134,7 +138,7 @@ function groupCompilationClip(group = activeGroup()) {
   const fingerprint = groupFingerprint(group);
   const candidates = clipsCache
     .filter((clip) => clipKind(clip) === "compilation"
-      && clip.source_group === group.name
+      && groupNameKey(clip.source_group) === groupNameKey(group.name)
       && clip.source_group_fingerprint === fingerprint)
     .sort((left, right) => (Number(right.modified_unix) || 0) - (Number(left.modified_unix) || 0));
   return candidates[0] || null;
@@ -157,15 +161,8 @@ function groupReviewMeta(group, currentDuration = NaN) {
 }
 
 function visibleLocalGroups() {
-  if (!['all', 'group'].includes(galleryFilter) || galleryGameType !== "all") return [];
-  if (!gallerySearch) return localGroups();
-  return localGroups().filter((group) => {
-    const haystack = [
-      group.name,
-      ...group.members.flatMap((clip) => [clipDisplayTitle(clip), clip.name]),
-    ].join(" ").toLocaleLowerCase();
-    return haystack.includes(gallerySearch);
-  });
+  return localGroups().filter((group) =>
+    filterGalleryClips(group.members, { groupName: group.name }).items.length);
 }
 
 function groupPosterMosaic(group) {
@@ -276,6 +273,7 @@ function closeGroupPicker() {
 }
 
 async function submitGroupPicker() {
+  if ($("group-picker-confirm").disabled) return;
   const creating = $("group-picker-select").value === "";
   const name = (creating ? $("group-picker-name").value : $("group-picker-select").value).trim();
   if (!name) {
@@ -443,23 +441,34 @@ function dropGroupClip(sourcePath, targetPath) {
 
 async function createOpenGroupCompilation() {
   if (!activeGroupName) return null;
-  setDeckStatus("exporting compilation…");
-  await afterNextPaint();
+  const name = activeGroupName;
+  const key = groupNameKey(name);
+  if (groupCompilationInflight.has(key)) return groupCompilationInflight.get(key);
+  const pending = (async () => {
+    setDeckStatus("exporting compilation…");
+    await afterNextPaint();
+    try {
+      const exportedClip = await invoke("export_group", { name });
+      invalidateLocalClipsRefresh();
+      clipsCache = [
+        exportedClip,
+        ...clipsCache.filter((clip) => !PlayerCore.sameClipPath(clip.path, exportedClip.path)),
+      ];
+      renderClips();
+      await refreshStorage();
+      setDeckStatus("group compilation ready", { transient: true });
+      return exportedClip;
+    } catch (error) {
+      setDeckStatus("");
+      $("error").textContent = String(error);
+      return null;
+    }
+  })();
+  groupCompilationInflight.set(key, pending);
   try {
-    const exportedClip = await invoke("export_group", { name: activeGroupName });
-    invalidateLocalClipsRefresh();
-    clipsCache = [
-      exportedClip,
-      ...clipsCache.filter((clip) => !PlayerCore.sameClipPath(clip.path, exportedClip.path)),
-    ];
-    renderClips();
-    await refreshStorage();
-    setDeckStatus("group compilation ready", { transient: true });
-    return exportedClip;
-  } catch (error) {
-    setDeckStatus("");
-    $("error").textContent = String(error);
-    return null;
+    return await pending;
+  } finally {
+    if (groupCompilationInflight.get(key) === pending) groupCompilationInflight.delete(key);
   }
 }
 
@@ -486,7 +495,8 @@ async function deleteOpenGroup() {
     `This deletes all ${count} clip${count === 1 ? "" : "s"} in the group.`,
   ))) return;
   try {
-    const generated = clipsCache.filter((clip) => String(clip.source_group || "") === group.name);
+    const generated = clipsCache.filter((clip) =>
+      groupNameKey(clip.source_group) === groupNameKey(group.name));
     const paths = [...group.members, ...generated].map((clip) => clip.path);
     const report = await invoke("delete_clips", { paths });
     await applyDeletion(report.deleted);
@@ -873,19 +883,19 @@ var selectedGamePlayEnd = null;
 var gamePlayRows = [];
 
 function eventRailPolicy(clip) {
-  if (activeGroup()) return { enabled: true, group: true, title: "group clips" };
+  if (activeGroupName) return { enabled: true, group: true, title: "group clips" };
   const presentation = pluginPresentationForClip(clip);
   return presentation && presentation.event_rail ? presentation.event_rail : null;
 }
 
 function playRailPolicy(clip) {
-  if (activeGroup()) return { enabled: false };
+  if (activeGroupName) return { enabled: false };
   const presentation = pluginPresentationForClip(clip);
   return presentation && presentation.play_rail ? presentation.play_rail : null;
 }
 
 function metadataPanelPolicy(clip) {
-  if (activeGroup()) return { enabled: false };
+  if (activeGroupName) return { enabled: false };
   const presentation = pluginPresentationForClip(clip);
   return presentation && presentation.metadata_panel ? presentation.metadata_panel : null;
 }
@@ -2210,11 +2220,11 @@ function onGallerySearchKeydown(ev) {
   }
 }
 
-function filterGalleryClips(clips) {
+function filterGalleryClips(clips, { groupName = "" } = {}) {
   const items = [];
   let maxModifiedUnix = 0;
   for (const c of clips) {
-    if (galleryFilter === "group") continue;
+    if (galleryFilter === "group" && !groupName) continue;
     const kind = clipKind(c);
     if ((galleryFilter === "replay" || galleryFilter === "session" || galleryFilter === "trim")
       && kind !== galleryFilter) continue;
@@ -2228,7 +2238,7 @@ function filterGalleryClips(clips) {
     if (gallerySearch) {
       const champ = c.markers && c.markers.player_summary ? c.markers.player_summary.champion_name : "";
       const queue = c.game && c.game.queue ? c.game.queue.label : "";
-      const hay = `${clipDisplayTitle(c)} ${c.name} ${champ} ${c.session || ""} ${c.game ? c.game.name : ""} ${queue}`.toLowerCase();
+      const hay = `${groupName} ${clipDisplayTitle(c)} ${c.name} ${champ} ${c.session || ""} ${c.game ? c.game.name : ""} ${queue}`.toLowerCase();
       if (!hay.includes(gallerySearch)) continue;
     }
     items.push(c);

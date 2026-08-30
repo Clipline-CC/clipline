@@ -197,6 +197,7 @@ var uploadDialogClip = null;
 var activeGroupName = "";
 var groupDragSourcePath = "";
 var groupReorderPending = false;
+var groupCompilationInflight = new Map();
 var selectedAudioTrackIds = new Set();
 var uploadSelectedAudioTrackIds = new Set();
 var currentReviewAudioKey = null;

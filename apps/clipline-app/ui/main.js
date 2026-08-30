@@ -192,6 +192,11 @@ $("group-picker-name").addEventListener("keydown", (event) => {
 $("group-picker-dialog").addEventListener("click", (event) => {
   if (event.target === $("group-picker-dialog")) closeGroupPicker();
 });
+function preventExternalFileDrop(event) {
+  event.preventDefault();
+}
+document.addEventListener("dragover", preventExternalFileDrop);
+document.addEventListener("drop", preventExternalFileDrop);
 $("poster-runtime-install").addEventListener("click", () => {
   void installFfmpegForPosters().catch(() => {});
 });

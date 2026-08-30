@@ -267,12 +267,15 @@ Riot's Vanguard FAQ confirms in-game/LCU APIs "should continue to function" and 
   live in each clip's existing `.clipline.json` sidecar, so the first member creates the group and
   deleting the last member removes it without a second database. Group members stay out of the
   top-level Library: one group card represents them with an asymmetric mosaic of up to four real
-  clip posters. Local clip and group cards share a primary metadata order of duration, size, then
+  clip posters. Group cards remain visible whenever any member matches the active kind, marker,
+  game, or text filter. Group names use the same Unicode lowercase key in native and frontend code.
+  Local clip and group cards share a primary metadata order of duration, size, then
   relative modified time. Opening a group reuses the normal review player as a sequential playlist and repurposes
   the Match events rail for member posters/titles; rows are mouse-draggable with keyboard Up/Down
   fallbacks, and one ordered-path backend command validates and commits the complete reorder with
   rollback on a sidecar failure. Playback advances to the next member at end. Clipline disables Tauri's unused
-  native file-drop interception so WebView drag events reach those rows. The next member is
+  native file-drop interception so WebView drag events reach those rows; document-level drag/drop
+  cancellation keeps external Explorer files from navigating the WebView. The next member is
   preloaded into a muted layered video that covers the main player's source swap until its first
   frame decodes, avoiding a blank visual boundary. Group mode reuses the standard review-header
   actions instead of a second toolbar: Explorer reveals the current member; Copy and Upload build

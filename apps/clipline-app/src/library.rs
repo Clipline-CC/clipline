@@ -2059,7 +2059,7 @@ fn export_clip_file(
             std::fs::write(target.with_extension("markers.json"), json)
                 .map_err(|e| e.to_string())?;
         }
-        if title.is_some() || group.is_some() {
+        if group.is_some() {
             write_clip_metadata(
                 &target,
                 &ClipMetadata {

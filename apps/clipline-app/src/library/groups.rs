@@ -50,10 +50,15 @@ fn normalized_group_name(input: &str) -> Result<String, String> {
     Ok(name.to_string())
 }
 
+fn group_name_key(name: &str) -> String {
+    name.to_lowercase()
+}
+
 fn canonical_group(existing: &[ClipGroup], requested: &str) -> (String, u32) {
+    let requested_key = group_name_key(requested);
     let matching: Vec<&ClipGroup> = existing
         .iter()
-        .filter(|group| group.name.eq_ignore_ascii_case(requested))
+        .filter(|group| group_name_key(&group.name) == requested_key)
         .collect();
     let name = matching
         .first()
@@ -69,12 +74,13 @@ fn canonical_group(existing: &[ClipGroup], requested: &str) -> (String, u32) {
 }
 
 fn group_members(root: &Path, name: &str) -> Result<Vec<GroupMember>, String> {
+    let name_key = group_name_key(name);
     let mut members: Vec<GroupMember> = list_clips_from_dir(root.to_path_buf())?
         .clips
         .into_iter()
         .filter_map(|clip| {
             let group = clip.group?;
-            if !group.name.eq_ignore_ascii_case(name) {
+            if group_name_key(&group.name) != name_key {
                 return None;
             }
             Some(GroupMember {
@@ -159,7 +165,11 @@ fn reordered_members(
 fn persist_group_order(members: &[GroupMember]) -> Result<(), String> {
     let mut updates = Vec::new();
     for member in members {
-        let previous = read_clip_metadata(&member.path).unwrap_or_default();
+        let metadata_path = clip_metadata_path(&member.path);
+        let json = std::fs::read_to_string(&metadata_path)
+            .map_err(|error| format!("read group clip metadata {metadata_path:?}: {error}"))?;
+        let previous: ClipMetadata = serde_json::from_str(&json)
+            .map_err(|error| format!("parse group clip metadata {metadata_path:?}: {error}"))?;
         if previous.group.as_ref() == Some(&member.group) {
             continue;
         }
@@ -280,9 +290,7 @@ fn export_group_file(
     }
 
     let title = format!("{name} compilation");
-    let duration_s = clipline_mp4::movie_duration_s_file(&target)
-        .map_err(|error| format!("inspect compilation duration: {error}"))?
-        .unwrap_or_else(|| inputs.iter().map(|input| input.duration_s).sum());
+    let duration_s = compilation_duration_s(&target, &inputs);
     let markers = ClipMarkers {
         recording_start_s: 0.0,
         duration_s,
@@ -339,6 +347,14 @@ fn export_group_file(
         source_group: Some(name.to_string()),
         source_group_fingerprint: Some(fingerprint),
     })
+}
+
+fn compilation_duration_s(target: &Path, inputs: &[CompilationInput]) -> f64 {
+    clipline_mp4::movie_duration_s_file(target)
+        .ok()
+        .flatten()
+        .filter(|duration| duration.is_finite() && *duration > 0.0)
+        .unwrap_or_else(|| inputs.iter().map(|input| input.duration_s).sum())
 }
 
 fn validate_compilation_size(members: &[GroupMember]) -> Result<(), String> {
@@ -620,6 +636,16 @@ mod tests {
             ("Highlights".into(), 5)
         );
         assert_eq!(canonical_group(&groups, "Fresh"), ("Fresh".into(), 0));
+        assert_eq!(
+            canonical_group(
+                &[ClipGroup {
+                    name: "Éclair".into(),
+                    order: 2,
+                }],
+                "éCLAIR",
+            ),
+            ("Éclair".into(), 3)
+        );
     }
 
     #[test]
@@ -731,6 +757,30 @@ mod tests {
                 .and_then(|metadata| metadata.group)
                 .map(|group| group.order),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn reorder_refuses_to_overwrite_corrupt_member_metadata() {
+        let dir = clipline_test_utils::TestDir::new("clipline-groups", "reorder-corrupt");
+        let clip = dir.path().join("clip.mp4");
+        std::fs::write(&clip, b"clip").unwrap();
+        std::fs::write(clip_metadata_path(&clip), b"{").unwrap();
+        let members = vec![GroupMember::test(clip.to_str().unwrap(), 1)];
+
+        assert!(persist_group_order(&members).is_err());
+        assert_eq!(std::fs::read(clip_metadata_path(&clip)).unwrap(), b"{");
+    }
+
+    #[test]
+    fn compilation_duration_falls_back_when_published_file_cannot_be_inspected() {
+        let inputs = vec![
+            CompilationInput::test("a.mp4", 1, 1.25),
+            CompilationInput::test("b.mp4", 1, 2.5),
+        ];
+        assert_eq!(
+            compilation_duration_s(Path::new("missing.mp4"), &inputs),
+            3.75
         );
     }
 

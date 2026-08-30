@@ -5746,10 +5746,14 @@ fn groups_are_created_from_trim_and_managed_in_the_library() {
         "function deleteOpenGroup",
         "function groupCompilationClip",
         "function groupFingerprint",
-        "clip.source_group === group.name",
+        "function groupNameKey",
+        "groupNameKey(clip.source_group) === groupNameKey(group.name)",
         "clip.source_group_fingerprint === fingerprint",
         "await invoke(\"reorder_group\"",
         "await invoke(\"remove_from_group\"",
+        "filterGalleryClips(group.members, { groupName: group.name })",
+        r#"if ($("group-picker-confirm").disabled) return;"#,
+        "if (groupCompilationInflight.has(key)) return groupCompilationInflight.get(key);",
         "const compilation = groupCompilationClip(group)",
         "const record = compilation ? clipCloudRecord(compilation) : null",
         "openUploadDialog(exportedClip)",
@@ -5868,9 +5872,25 @@ fn groups_are_created_from_trim_and_managed_in_the_library() {
         "gallery rendering must not own review-player rail rendering"
     );
     assert!(
-        js_function_body(&js, "eventRailPolicy").contains("activeGroup()")
-            && js_function_body(&js, "playRailPolicy").contains("activeGroup()")
-            && js_function_body(&js, "metadataPanelPolicy").contains("activeGroup()"),
+        js.contains("document.addEventListener(\"dragover\", preventExternalFileDrop)")
+            && js.contains("document.addEventListener(\"drop\", preventExternalFileDrop)")
+            && js_function_body(&js, "preventExternalFileDrop").contains("event.preventDefault();"),
+        "external file drags must never navigate the WebView away from Clipline"
+    );
+    let export_clip_file = library
+        .split("fn export_clip_file")
+        .nth(1)
+        .and_then(|rest| rest.split("fn export_markers_for_range").next())
+        .expect("export_clip_file body");
+    assert!(
+        export_clip_file.contains("if group.is_some() {")
+            && !export_clip_file.contains("if title.is_some() || group.is_some()"),
+        "non-group titled exports must retain legacy kind/sidecar behavior"
+    );
+    assert!(
+        js_function_body(&js, "eventRailPolicy").contains("activeGroupName")
+            && js_function_body(&js, "playRailPolicy").contains("activeGroupName")
+            && js_function_body(&js, "metadataPanelPolicy").contains("activeGroupName"),
         "group chrome belongs in the existing review policy layer"
     );
     let compilation_runner = groups
