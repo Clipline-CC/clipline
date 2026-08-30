@@ -4111,9 +4111,10 @@ button.primary.settings-save-glow {
 }
 .game-event-rail .group-clip-row.drag-before::before { top: -7px; }
 .game-event-rail .group-clip-row.drag-after::after { bottom: -7px; }
-}
 .game-event-rail ol button.group-clip-open {
-  grid-template-columns: 52px minmax(0, 1fr);
+  display: flex;
+  align-items: center;
+  gap: 10px;
   min-height: 54px;
   padding: 5px;
   cursor: grab;
@@ -4122,6 +4123,7 @@ button.primary.settings-save-glow {
 .group-clip-poster {
   position: relative;
   display: block;
+  flex: 0 0 52px;
   width: 52px;
   height: 38px;
   overflow: hidden;
@@ -4129,7 +4131,7 @@ button.primary.settings-save-glow {
   background: radial-gradient(120% 120% at 30% 20%, var(--g1), var(--g2) 70%);
 }
 .group-clip-poster .card-thumb-img { object-fit: cover; }
-.group-clip-body { display: grid; gap: 2px; min-width: 0; }
+.group-clip-body { display: grid; flex: 1 1 auto; gap: 2px; min-width: 0; overflow: hidden; }
 .group-clip-body strong,
 .group-clip-body span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .group-clip-body span { font-family: var(--font-mono); font-size: 10.5px; }

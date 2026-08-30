@@ -4,6 +4,23 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-29): Library metadata order and group rail layout
+
+Plan: `docs/superpowers/plans/2026-08-29-library-metadata-and-group-rail.md`.
+
+Local clip and group cards now share one metadata formatter with duration first, size second, and
+relative modified time third; optional queue/marker context follows those primary fields. Group
+aggregation now sums member size as well as duration and latest modification, replacing the old
+`2 clips · 0:33` line with the same `0:33 · 31.4 MB · just now` shape used by normal clips.
+
+The group rail text overlap came from a generic event-button grid competing with the group-specific
+grid, plus a stray unmatched closing brace at that CSS boundary. Group rows now use an explicit
+flex layout: the poster owns a fixed 52px basis, the body owns the remaining width with
+`min-width: 0` and `overflow: hidden`, and title/meta ellipsize only inside that body.
+
+Verification: Node syntax check clean, all 125 UI contracts green, `cargo test --workspace`
+green, and warning-denied workspace Clippy clean.
+
 ## Checkpoint (2026-08-29): Group context actions and header controls
 
 Plan: `docs/superpowers/plans/2026-08-29-groups-context-actions.md`.

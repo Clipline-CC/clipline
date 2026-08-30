@@ -1746,9 +1746,8 @@ fn review_player_owns_all_controls() {
             && player_core_js().contains("const markerRailConfig =")
             && main_js().contains("detail.className = \"game-meta\"")
             && main_js().contains("if (cardPreview.summary && !cardTitleUsesSummary)")
-            && main_js().contains("const infoParts = []")
             && main_js().contains(
-                "if (Number.isFinite(c.duration_s)) infoParts.push(fmtDur(c.duration_s))"
+                "const infoParts = libraryItemMeta(duration, c.size_mb, c.modified_unix)"
             )
             && main_js().contains("if (!cardPreview.summary && digest) infoParts.push(digest)")
             && !main_js().contains("LEAGUE_OF_LEGENDS_ID")
@@ -5729,6 +5728,7 @@ fn groups_are_created_from_trim_and_managed_in_the_library() {
     for required in [
         "function openGroupPicker",
         "function submitGroupPicker",
+        "function libraryItemMeta",
         "function topLevelLocalClips",
         "function renderGroupCards",
         "function openGroupView",
@@ -5788,6 +5788,24 @@ fn groups_are_created_from_trim_and_managed_in_the_library() {
         js.contains("filter((clip) => !clip.group)"),
         "group members must stay in clipsCache but be hidden from top-level clip cards"
     );
+    for required in [
+        "group.size_mb = group.members.reduce",
+        "libraryItemMeta(group.duration_s, group.size_mb, group.modified_unix)",
+        "libraryItemMeta(duration, c.size_mb, c.modified_unix)",
+    ] {
+        assert!(
+            js.contains(required),
+            "Library metadata must use duration · size · modified through `{required}`"
+        );
+    }
+    let group_open = css_rule_body(&css, ".game-event-rail ol button.group-clip-open");
+    let group_poster = css_rule_body(&css, ".group-clip-poster");
+    let group_body = css_rule_body(&css, ".group-clip-body");
+    assert_eq!(css_decl_value(group_open, "display"), Some("flex"));
+    assert_eq!(css_decl_value(group_open, "gap"), Some("10px"));
+    assert_eq!(css_decl_value(group_poster, "flex"), Some("0 0 52px"));
+    assert_eq!(css_decl_value(group_body, "min-width"), Some("0"));
+    assert_eq!(css_decl_value(group_body, "overflow"), Some("hidden"));
     assert_eq!(
         config
             .pointer("/app/windows/0/dragDropEnabled")

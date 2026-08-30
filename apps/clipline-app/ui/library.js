@@ -73,6 +73,16 @@ function clipDisplayTitle(clip) {
   return title || PresentationCore.clipNameStem(clip && clip.name);
 }
 
+function libraryItemMeta(durationS, sizeMb, modifiedUnix) {
+  const parts = [];
+  if (Number.isFinite(durationS)) parts.push(fmtDur(durationS));
+  if (Number.isFinite(Number(sizeMb))) parts.push(fmtMegabytes(Number(sizeMb)));
+  if (Number.isFinite(Number(modifiedUnix))) {
+    parts.push(fmtAgo(Date.now() / 1000, Number(modifiedUnix)));
+  }
+  return parts;
+}
+
 function localGroups() {
   const groups = new Map();
   for (const clip of clipsCache) {
@@ -96,6 +106,10 @@ function localGroups() {
       const duration = Number(clip.duration_s ?? clip.markers?.duration_s);
       return sum + (Number.isFinite(duration) ? duration : 0);
     }, 0);
+    group.size_mb = group.members.reduce(
+      (sum, clip) => sum + (Number(clip.size_mb) || 0),
+      0,
+    );
   }
   return [...groups.values()].sort((left, right) => right.modified_unix - left.modified_unix);
 }
@@ -181,8 +195,7 @@ function groupCard(group) {
   title.appendChild(text);
   const info = document.createElement("div");
   info.className = "card-sub";
-  info.textContent = `${group.members.length} clip${group.members.length === 1 ? "" : "s"}`
-    + (group.duration_s > 0 ? ` · ${fmtDur(group.duration_s)}` : "");
+  info.textContent = libraryItemMeta(group.duration_s, group.size_mb, group.modified_unix).join(" · ");
   meta.append(title, info);
   card.append(art, meta);
   const open = () => {
@@ -1738,11 +1751,8 @@ function clipCard(c) {
   const info = document.createElement("div");
   info.className = "card-sub";
   const digest = markerDigest(markers, presentation);
-  const infoParts = [];
+  const infoParts = libraryItemMeta(duration, c.size_mb, c.modified_unix);
   if (c.game && c.game.queue && c.game.queue.label) infoParts.push(c.game.queue.label);
-  if (Number.isFinite(c.duration_s)) infoParts.push(fmtDur(c.duration_s));
-  infoParts.push(fmtMegabytes(c.size_mb));
-  infoParts.push(fmtAgo(Date.now() / 1000, c.modified_unix));
   if (!cardPreview.summary && digest) infoParts.push(digest);
   info.textContent = infoParts.join(" · ");
 
