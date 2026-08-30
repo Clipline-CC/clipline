@@ -288,8 +288,9 @@ Riot's Vanguard FAQ confirms in-game/LCU APIs "should continue to function" and 
   keep both sources. Video and audio are padded/trimmed to the same per-member endpoint, and mixed
   audio timestamps are rebuilt from sample count, so unequal
   Output/Microphone tails cannot feed untimestamped frames into a concat boundary. The group header
-  reuses a compilation only when its persisted normalized ordered-member fingerprint matches the
-  live group, including after restart. It resolves that compilation through normal local cloud records, so a successful
+  reuses a compilation only when its persisted, Unicode-lowercased normalized ordered-member
+  fingerprint matches the live group, including after restart. It resolves that compilation through
+  normal local cloud records, so a successful
   public/unlisted upload changes Upload into Copy cloud link just as it does for an ordinary clip.
   V1 compiles at most 64 members and rejects the actual UTF-16 FFmpeg invocation before it can
   exceed Windows' process command-line limit. It does not include group rename or moving an

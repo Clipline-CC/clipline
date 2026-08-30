@@ -106,7 +106,7 @@ fn sort_group_members(members: &mut [GroupMember]) {
 
 fn windows_clip_path_key(path: &Path) -> String {
     let text = path.display().to_string().replace('/', r"\");
-    let lower = text.to_ascii_lowercase();
+    let lower = text.to_lowercase();
     let normalized = if let Some(path) = lower.strip_prefix(r"\\?\unc\") {
         format!(r"\\{path}")
     } else if let Some(path) = lower.strip_prefix(r"\\?\") {
@@ -699,18 +699,18 @@ mod tests {
     #[test]
     fn group_fingerprint_is_path_spelling_independent_and_order_sensitive() {
         let plain = vec![
-            GroupMember::test(r"D:\Clips\A.mp4", 0),
+            GroupMember::test(r"D:\Clips\ÉCLAIR.mp4", 0),
             GroupMember::test(r"D:\Clips\b.mp4", 1),
         ];
         let verbatim = vec![
-            GroupMember::test(r"\\?\d:\clips\a.mp4", 0),
+            GroupMember::test(r"\\?\d:\clips\éclair.mp4", 0),
             GroupMember::test(r"\\?\D:\Clips\B.mp4", 1),
         ];
         let reversed = vec![plain[1].clone(), plain[0].clone()];
 
         assert_eq!(
             group_fingerprint(&plain),
-            "windows:d:\\clips\\a.mp4\0windows:d:\\clips\\b.mp4"
+            "windows:d:\\clips\\éclair.mp4\0windows:d:\\clips\\b.mp4"
         );
         assert_eq!(group_fingerprint(&plain), group_fingerprint(&verbatim));
         assert_ne!(group_fingerprint(&plain), group_fingerprint(&reversed));

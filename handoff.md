@@ -4,6 +4,18 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-30): Unicode compilation fingerprint parity
+
+Plan: `docs/superpowers/plans/2026-08-30-group-fingerprint-unicode.md`.
+
+The frontend Windows path key uses Unicode `toLowerCase`, but Rust used `to_ascii_lowercase`, so an
+uppercase accented character in any member path made every compilation cache lookup miss. Rust now
+uses `to_lowercase`; the fingerprint contract includes `D:\Clips\ÉCLAIR.mp4` versus verbatim
+`\\?\d:\clips\éclair.mp4` and pins the shared `windows:d:\clips\éclair.mp4` bytes.
+
+Verification: focused regression green, `cargo test --workspace` green, and warning-denied workspace
+Clippy clean.
+
 ## Checkpoint (2026-08-30): Groups second review follow-up
 
 Plan: `docs/superpowers/plans/2026-08-30-groups-second-review.md`.
