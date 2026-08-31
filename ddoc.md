@@ -289,10 +289,11 @@ Riot's Vanguard FAQ confirms in-game/LCU APIs "should continue to function" and 
   the authoritative compilation; Delete confirms once before removing the group and its members.
   Right-clicking a rail member opens app-owned Remove from group and Delete actions; either action
   continues an active group review with a surviving neighbor. Export normalizes members to 1080p60 H.264/Opus and concatenates them into a
-  group-owned local compilation artifact; the exact current artifact stays inside the group, while
-  stale, duplicate, legacy, or orphaned outputs remain accessible as ordinary Compilation cards.
-  Upload creates that same current artifact and hands it to the existing Clipline Cloud
-  title/description/visibility dialog. Each member's enabled embedded
+  group-owned local compilation artifact that never renders as a separate Library card. Reorder or
+  membership removal invalidates every generated artifact before changing group metadata; an active
+  upload or deletion failure blocks that mutation instead of stranding media. Upload creates the
+  current artifact and hands it to the existing Clipline Cloud title/description/visibility dialog.
+  Each member's enabled embedded
   audio streams are normalized and mixed before concatenation, so split Output + Microphone clips
   keep both sources. Video and audio are padded/trimmed to the same per-member endpoint, and mixed
   audio timestamps are rebuilt from sample count, so unequal

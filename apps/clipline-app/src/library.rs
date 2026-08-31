@@ -807,6 +807,10 @@ pub(crate) fn clip_sidecar_paths(
 
 fn remove_clip_files(target: &Path, media_root: &Path) -> Result<(), String> {
     let _guard = crate::gc::lock_clip_mutations();
+    remove_clip_files_unlocked(target, media_root)
+}
+
+fn remove_clip_files_unlocked(target: &Path, media_root: &Path) -> Result<(), String> {
     if let Some(error) = crate::cloud_upload::active_upload_source_error(target) {
         return Err(error);
     }

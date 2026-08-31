@@ -5782,10 +5782,8 @@ fn groups_are_created_from_trim_and_managed_in_the_library() {
         assert!(css.contains(required), "groups styling must include `{required}`");
     }
     assert!(
-        js.contains("function groupCompilationClip(group = activeGroup(), clips = clipsCache)")
-            && js.contains("localGroups(clips).map((group) => groupCompilationClip(group, clips))")
-            && js.contains("filter((clip) => !clip.group && !ownedCompilations.has(clip))"),
-        "only the current compilation owned by a live group should be hidden; stale and orphaned outputs must stay accessible"
+        js.contains("filter((clip) => !clip.group && !clip.source_group)"),
+        "group members and every generated compilation must stay inside their group instead of rendering separate cards"
     );
     let filter_chips = html
         .split("<div class=\"gallery-filter-chips\">")
@@ -5868,6 +5866,7 @@ fn groups_are_created_from_trim_and_managed_in_the_library() {
         "pub async fn export_group",
         "pub async fn reorder_group",
         "pub async fn remove_from_group",
+        "remove_group_compilations_unlocked(root, name)?",
     ] {
         assert!(groups.contains(required), "group commands must include `{required}`");
     }

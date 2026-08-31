@@ -137,10 +137,10 @@ function groupFingerprint(group) {
     : "";
 }
 
-function groupCompilationClip(group = activeGroup(), clips = clipsCache) {
+function groupCompilationClip(group = activeGroup()) {
   if (!group) return null;
   const fingerprint = groupFingerprint(group);
-  const candidates = clips
+  const candidates = clipsCache
     .filter((clip) => clipKind(clip) === "compilation"
       && groupNameKey(clip.source_group) === groupNameKey(group.name)
       && clip.source_group_fingerprint === fingerprint)
@@ -149,10 +149,7 @@ function groupCompilationClip(group = activeGroup(), clips = clipsCache) {
 }
 
 function topLevelLocalClips(clips = clipsCache) {
-  const ownedCompilations = new Set(
-    localGroups(clips).map((group) => groupCompilationClip(group, clips)).filter(Boolean),
-  );
-  return clips.filter((clip) => !clip.group && !ownedCompilations.has(clip));
+  return clips.filter((clip) => !clip.group && !clip.source_group);
 }
 
 function groupReviewMeta(group, currentDuration = NaN) {

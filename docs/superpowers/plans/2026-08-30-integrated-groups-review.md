@@ -3,6 +3,9 @@
 **Goal:** Keep generated group media recoverable and make integrated group cards obey every existing
 Library grouping and sort control.
 
+The compilation-visibility step was superseded by
+`2026-08-30-group-owned-compilations.md`: generated output is internal and group mutations delete it.
+
 - [ ] Add failing UI contracts for exposing stale/orphaned compilations, deriving deterministic
       group game/session metadata, and counting member markers for Most markers sorting.
 - [ ] Hide only the exact current compilation selected by a live group's fingerprint; render stale,
