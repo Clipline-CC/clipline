@@ -21,10 +21,10 @@ Greptile follow-up found that hiding every `source_group` output could strand st
 after a reorder or last-member removal, and that synthetic group cards lacked fields consumed by
 game, session, and Most markers controls. Exposing stale outputs as ordinary Compilation cards fixed
 recoverability but violated the product's single Group concept. The final ownership model keeps all
-generated compilations inside their group and invalidates them before reorder or membership removal;
-active uploads and filesystem failures block the group mutation. Homogeneous groups use their shared
-game/session bucket, mixed groups use explicit Multiple games/sessions buckets, and marker sorting
-sums member markers.
+generated compilations inside their group and invalidates them before reorder, ungroup, or ordinary
+single/bulk member deletion; active uploads and filesystem failures block the mutation. Homogeneous
+groups use their shared game/session bucket, mixed groups use explicit Multiple games/sessions
+buckets, and marker sorting sums member markers.
 
 Follow-up verification: Node syntax checks, focused Groups UI contract, `cargo test --workspace`,
 and warning-denied workspace Clippy all green; independent adversarial traces confirmed the

@@ -5859,6 +5859,7 @@ fn groups_are_created_from_trim_and_managed_in_the_library() {
         "pub struct ClipGroup",
         "group: Option<ClipGroup>",
         "source_group_fingerprint: Option<String>",
+        "delete_clip_with_group_compilations_unlocked",
     ] {
         assert!(library.contains(required), "group backend must include `{required}`");
     }

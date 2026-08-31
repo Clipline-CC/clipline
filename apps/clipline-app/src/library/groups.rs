@@ -354,7 +354,7 @@ fn group_compilation_paths_unrecovered(root: &Path, name: &str) -> Result<Vec<Pa
         .collect())
 }
 
-fn remove_group_compilations_unlocked(root: &Path, name: &str) -> Result<(), String> {
+pub(super) fn remove_group_compilations_unlocked(root: &Path, name: &str) -> Result<(), String> {
     for path in group_compilation_paths_unrecovered(root, name)? {
         remove_clip_files_unlocked(&path, root)
             .map_err(|error| format!("remove group compilation {path:?}: {error}"))?;
