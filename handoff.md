@@ -4,6 +4,32 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-30): Groups integrated into the Library
+
+Plan: `docs/superpowers/plans/2026-08-30-integrated-groups-library.md`.
+
+The Groups filter now sits beside Has markers. Group cards no longer render under a dedicated
+Groups divider; they use the same sort, date/game/session grouping, pagination, and heading flow as
+ordinary Library cards. A generated `source_group` compilation remains cached for group Copy and
+Upload, but no longer appears as a second top-level Compilation card.
+
+Verification: Node syntax checks, focused Groups UI contract, `cargo test --workspace`, and
+warning-denied workspace Clippy all green. One unrelated capture cadence test failed its first
+timing-sensitive workspace run, passed alone, then passed in the full rerun.
+
+Greptile follow-up found that hiding every `source_group` output could strand stale compilations
+after a reorder or last-member removal, and that synthetic group cards lacked fields consumed by
+game, session, and Most markers controls. Exposing stale outputs as ordinary Compilation cards fixed
+recoverability but violated the product's single Group concept. The final ownership model keeps all
+generated compilations inside their group and invalidates them before reorder, ungroup, or ordinary
+single/bulk member deletion; active uploads and filesystem failures block the mutation. Homogeneous
+groups use their shared game/session bucket, mixed groups use explicit Multiple games/sessions
+buckets, and marker sorting sums member markers.
+
+Follow-up verification: Node syntax checks, focused Groups UI contract, `cargo test --workspace`,
+and warning-denied workspace Clippy all green; independent adversarial traces confirmed the
+compilation ownership and grouping edge cases.
+
 ## Checkpoint (2026-08-30): Durable group reorder recovery
 
 Plan: `docs/superpowers/plans/2026-08-30-group-order-journal.md`.

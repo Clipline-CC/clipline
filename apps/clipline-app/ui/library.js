@@ -87,9 +87,9 @@ function groupNameKey(name) {
   return String(name || "").trim().toLowerCase();
 }
 
-function localGroups() {
+function localGroups(clips = clipsCache) {
   const groups = new Map();
-  for (const clip of clipsCache) {
+  for (const clip of clips) {
     const membership = clip && clip.group;
     const name = String(membership && membership.name || "").trim();
     if (!name) continue;
@@ -114,6 +114,10 @@ function localGroups() {
       (sum, clip) => sum + (Number(clip.size_mb) || 0),
       0,
     );
+    const gameNames = new Set(group.members.map((clip) => clip.game && clip.game.name || ""));
+    group.game = gameNames.size === 1 ? group.members[0].game || null : { name: "Multiple games" };
+    const sessions = new Set(group.members.map((clip) => clip.session || ""));
+    group.session = sessions.size === 1 ? group.members[0].session || null : "Multiple sessions";
   }
   return [...groups.values()].sort((left, right) => right.modified_unix - left.modified_unix);
 }
@@ -145,7 +149,7 @@ function groupCompilationClip(group = activeGroup()) {
 }
 
 function topLevelLocalClips(clips = clipsCache) {
-  return clips.filter((clip) => !clip.group);
+  return clips.filter((clip) => !clip.group && !clip.source_group);
 }
 
 function groupReviewMeta(group, currentDuration = NaN) {
@@ -222,20 +226,6 @@ function groupCard(group) {
     open();
   });
   return card;
-}
-
-function renderGroupCards(root, groups) {
-  if (!groups.length) return;
-  const head = document.createElement("div");
-  head.className = "gallery-group-head group-section-head";
-  const label = document.createElement("span");
-  label.textContent = "Groups";
-  const count = document.createElement("span");
-  count.className = "gcount";
-  count.textContent = groups.length;
-  head.append(label, count);
-  root.appendChild(head);
-  for (const group of groups) root.appendChild(groupCard(group));
 }
 
 function syncGroupPickerMode() {
@@ -2267,7 +2257,9 @@ function filterGalleryClips(clips, { groupName = "" } = {}) {
 
 function sortGalleryClips(clips) {
   const out = clips.slice();
-  const markerCount = (c) => clipMarkers(c).length;
+  const markerCount = (c) => c.members
+    ? c.members.reduce((sum, member) => sum + clipMarkers(member).length, 0)
+    : clipMarkers(c).length;
   if (gallerySort === "old") out.sort((a, b) => a.modified_unix - b.modified_unix);
   else if (gallerySort === "big") out.sort((a, b) => b.size_mb - a.size_mb);
   else if (gallerySort === "marks") out.sort((a, b) => markerCount(b) - markerCount(a));
@@ -2448,7 +2440,8 @@ function renderClips() {
   const filteredResult = filterGalleryClips(topLevelClips);
   const filtered = filteredResult.items;
   const libraryGroups = visibleLocalGroups();
-  const sorted = sortGalleryClips(filtered);
+  const items = [...filtered, ...libraryGroups];
+  const sorted = sortGalleryClips(items);
   const groups = galleryGroups(sorted);
   const firstGroup = groups[0];
   const lastGroup = groups[groups.length - 1];
@@ -2456,14 +2449,14 @@ function renderClips() {
   const lastItems = lastGroup && lastGroup.clips || [];
   const identity = groupedGalleryIdentity(
     `local|${galleryFilter}|${galleryGameType}|${gallerySort}|${galleryGroup}|${gallerySearch}|${libraryGroups.map((group) => `${group.name}:${group.members.map((clip) => clip.group.order).join(",")}`).join("|")}`,
-    filtered.length,
+    items.length,
     firstItems[0],
     lastItems[lastItems.length - 1],
     filteredResult.maxModifiedUnix,
   );
   galleryPageState = GalleryWindowCore.updateState(galleryPageState, {
     identity,
-    total: filtered.length,
+    total: items.length,
   });
   const page = GalleryWindowCore.windowGroups(groups, galleryPageState);
   syncGalleryPagination(page);
@@ -2486,10 +2479,6 @@ function renderClips() {
     root.appendChild(empty);
     return;
   }
-  if (galleryPageState.page === 0) renderGroupCards(root, libraryGroups);
-  if (galleryFilter === "group") {
-    return;
-  }
   for (const group of page.groups) {
     if (group.label !== null) {
       const head = document.createElement("div");
@@ -2502,7 +2491,7 @@ function renderClips() {
       head.append(label, count);
       root.appendChild(head);
     }
-    for (const c of group.items) root.appendChild(clipCard(c));
+    for (const c of group.items) root.appendChild(c.members ? groupCard(c) : clipCard(c));
   }
 }
 

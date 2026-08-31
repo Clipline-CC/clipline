@@ -5714,7 +5714,6 @@ fn groups_are_created_from_trim_and_managed_in_the_library() {
         "function submitGroupPicker",
         "function libraryItemMeta",
         "function topLevelLocalClips",
-        "function renderGroupCards",
         "function openGroupView",
         "function openGroupMember",
         "function renderGroupClipRail",
@@ -5783,8 +5782,36 @@ fn groups_are_created_from_trim_and_managed_in_the_library() {
         assert!(css.contains(required), "groups styling must include `{required}`");
     }
     assert!(
-        js.contains("filter((clip) => !clip.group)"),
-        "group members must stay in clipsCache but be hidden from top-level clip cards"
+        js.contains("filter((clip) => !clip.group && !clip.source_group)"),
+        "group members and every generated compilation must stay inside their group instead of rendering separate cards"
+    );
+    let filter_chips = html
+        .split("<div class=\"gallery-filter-chips\">")
+        .nth(1)
+        .and_then(|rest| rest.split("</div>").next())
+        .expect("gallery filter chips");
+    let separator = filter_chips.find("class=\"g-sep\"").expect("filter separator");
+    let groups_filter = filter_chips.find("data-filter=\"group\"").expect("Groups filter");
+    let markers_filter = filter_chips.find("data-filter=\"marked\"").expect("Has markers filter");
+    assert!(
+        separator < groups_filter && groups_filter < markers_filter,
+        "Groups must sit beside Has markers on the right side of the filter divider"
+    );
+    assert!(
+        !js.contains("function renderGroupCards")
+            && js.contains("const items = [...filtered, ...libraryGroups]")
+            && js.contains("root.appendChild(c.members ? groupCard(c) : clipCard(c))"),
+        "group cards must use the ordinary Library grouping and rendering pipeline"
+    );
+    assert!(
+        js.contains("function localGroups(clips = clipsCache)")
+            && js.contains("gameNames.size === 1 ? group.members[0].game || null : { name: \"Multiple games\" }")
+            && js.contains("sessions.size === 1 ? group.members[0].session || null : \"Multiple sessions\""),
+        "groups need truthful homogeneous or mixed game and session classifications"
+    );
+    assert!(
+        js.contains("c.members.reduce((sum, member) => sum + clipMarkers(member).length, 0)"),
+        "Most markers sorting must count markers across a group's members"
     );
     for required in [
         "group.size_mb = group.members.reduce",
@@ -5832,6 +5859,7 @@ fn groups_are_created_from_trim_and_managed_in_the_library() {
         "pub struct ClipGroup",
         "group: Option<ClipGroup>",
         "source_group_fingerprint: Option<String>",
+        "delete_clip_with_group_compilations_unlocked",
     ] {
         assert!(library.contains(required), "group backend must include `{required}`");
     }
@@ -5839,6 +5867,7 @@ fn groups_are_created_from_trim_and_managed_in_the_library() {
         "pub async fn export_group",
         "pub async fn reorder_group",
         "pub async fn remove_from_group",
+        "remove_group_compilations_unlocked(root, name)?",
     ] {
         assert!(groups.contains(required), "group commands must include `{required}`");
     }
@@ -5852,6 +5881,16 @@ fn groups_are_created_from_trim_and_managed_in_the_library() {
     assert!(
         !js_function_body(&js, "renderClips").contains("renderGroupClipRail"),
         "gallery rendering must not own review-player rail rendering"
+    );
+    let grouped_delete = library
+        .split("fn delete_clip_with_group_compilations_unlocked")
+        .nth(1)
+        .and_then(|rest| rest.split("fn delete_clip_file").next())
+        .expect("group-aware clip deletion helper");
+    assert!(
+        grouped_delete.find("active_upload_source_error(target)")
+            < grouped_delete.find("remove_group_compilations_unlocked"),
+        "a blocked member upload must fail before its group compilation is invalidated"
     );
     assert!(
         js.contains("document.addEventListener(\"dragover\", preventExternalFileDrop)")
