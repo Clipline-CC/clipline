@@ -836,6 +836,9 @@ fn delete_clip_with_group_compilations_unlocked(
     target: &Path,
     media_root: &Path,
 ) -> Result<(), String> {
+    if let Some(error) = crate::cloud_upload::active_upload_source_error(target) {
+        return Err(error);
+    }
     if let Some(group) = read_clip_metadata(target).and_then(|metadata| metadata.group) {
         groups::remove_group_compilations_unlocked(media_root, &group.name)?;
     }

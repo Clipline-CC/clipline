@@ -5882,6 +5882,16 @@ fn groups_are_created_from_trim_and_managed_in_the_library() {
         !js_function_body(&js, "renderClips").contains("renderGroupClipRail"),
         "gallery rendering must not own review-player rail rendering"
     );
+    let grouped_delete = library
+        .split("fn delete_clip_with_group_compilations_unlocked")
+        .nth(1)
+        .and_then(|rest| rest.split("fn delete_clip_file").next())
+        .expect("group-aware clip deletion helper");
+    assert!(
+        grouped_delete.find("active_upload_source_error(target)")
+            < grouped_delete.find("remove_group_compilations_unlocked"),
+        "a blocked member upload must fail before its group compilation is invalidated"
+    );
     assert!(
         js.contains("document.addEventListener(\"dragover\", preventExternalFileDrop)")
             && js.contains("document.addEventListener(\"drop\", preventExternalFileDrop)")
