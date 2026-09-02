@@ -5,6 +5,46 @@
 //! active session to its own folder and reverts when the match ends. Folder
 //! creation is the caller's job, lazily at save time.
 
+/// True for recorder-generated session folder names:
+/// `2026-06-12 14-05` or `2026-06-12 14-52 league`.
+///
+/// Other media-root children (Screenshots, user folders) must not be treated
+/// as emptied sessions.
+pub fn is_session_dir_name(name: &str) -> bool {
+    let stamp = match name.strip_suffix(" league") {
+        Some(stamp) => stamp,
+        None => name,
+    };
+    let Some((date, time)) = stamp.split_once(' ') else {
+        return false;
+    };
+    let mut date_parts = date.split('-');
+    let (Some(year), Some(month), Some(day), None) = (
+        date_parts.next(),
+        date_parts.next(),
+        date_parts.next(),
+        date_parts.next(),
+    ) else {
+        return false;
+    };
+    let mut time_parts = time.split('-');
+    let (Some(hour), Some(minute), None) =
+        (time_parts.next(), time_parts.next(), time_parts.next())
+    else {
+        return false;
+    };
+    year.len() == 4
+        && month.len() == 2
+        && day.len() == 2
+        && hour.len() == 2
+        && minute.len() == 2
+        && year.bytes().all(|byte| byte.is_ascii_digit())
+        && month.bytes().all(|byte| byte.is_ascii_digit())
+        && day.bytes().all(|byte| byte.is_ascii_digit())
+        && hour.bytes().all(|byte| byte.is_ascii_digit())
+        && minute.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 /// `2026-06-12 14-05` / `2026-06-12 14-52 league` — Windows-safe, sortable.
 pub fn session_label(
     year: i32,
@@ -61,6 +101,11 @@ mod tests {
             session_label(2026, 6, 12, 14, 52, true),
             "2026-06-12 14-52 league"
         );
+        assert!(is_session_dir_name("2026-06-12 14-05"));
+        assert!(is_session_dir_name("2026-06-12 14-52 league"));
+        assert!(!is_session_dir_name("Screenshots"));
+        assert!(!is_session_dir_name("2026-06-12"));
+        assert!(!is_session_dir_name("ranked-match"));
     }
 
     #[test]

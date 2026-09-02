@@ -231,6 +231,22 @@ $("gallery-select-toggle").addEventListener("click", () => {
 $("bulk-select-all").addEventListener("click", selectAllVisible);
 $("bulk-clear").addEventListener("click", clearSelection);
 $("bulk-delete").addEventListener("click", bulkDeleteSelected);
+$("group-picker-select").addEventListener("change", syncGroupPickerMode);
+$("group-picker-confirm").addEventListener("click", submitGroupPicker);
+$("group-picker-cancel").addEventListener("click", closeGroupPicker);
+$("group-picker-name").addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  submitGroupPicker();
+});
+$("group-picker-dialog").addEventListener("click", (event) => {
+  if (event.target === $("group-picker-dialog")) closeGroupPicker();
+});
+function preventExternalFileDrop(event) {
+  event.preventDefault();
+}
+document.addEventListener("dragover", preventExternalFileDrop);
+document.addEventListener("drop", preventExternalFileDrop);
 $("poster-runtime-install").addEventListener("click", () => {
   void installFfmpegForPosters().catch(() => {});
 });
@@ -416,6 +432,11 @@ $("clip-menu-copy-shareable").addEventListener("click", () => {
   hideClipContextMenu();
   if (clip) copyClipToClipboard(null, clip, false);
 });
+$("clip-menu-remove-group").addEventListener("click", () => {
+  const clip = clipContextTarget;
+  hideClipContextMenu();
+  if (clip) removeClipFromGroup(clip);
+});
 $("clip-menu-upload").addEventListener("click", () => {
   const clip = clipContextTarget;
   const record = clipContextRecord();
@@ -439,6 +460,11 @@ $("clip-menu-delete").addEventListener("click", () => {
   const clip = clipContextTarget;
   hideClipContextMenu();
   if (clip) deleteClip(clip.path);
+});
+$("clip-menu-favorite").addEventListener("click", () => {
+  const clip = clipContextTarget;
+  hideClipContextMenu();
+  if (clip) toggleClipFavorite(clip);
 });
 window.addEventListener("resize", () => {
   renderRegionEditor();
@@ -494,14 +520,19 @@ video.addEventListener("timeupdate", () => {
   syncGamePlayRail(current);
   syncReviewAudioSidecars();
 });
+video.addEventListener("ended", advanceGroupPlayback);
 video.addEventListener("seeking", () => syncReviewAudioSidecars({ forceSeek: true }));
 video.addEventListener("ratechange", () => syncReviewAudioSidecars());
 video.addEventListener("volumechange", syncVolume);
+video.addEventListener("loadeddata", finishGroupPlaybackBridge);
 video.addEventListener("loadedmetadata", () => {
   $("stage-note").textContent = `${video.videoWidth}x${video.videoHeight} · ${fmtDur(video.duration)}`;
   updateStageFrame();
   if (currentClip) {
-    $("pmeta").textContent = `${fmtDur(video.duration)} · ${fmtMegabytes(currentClip.size_mb)} · ${PlayerCore.clipFileLabel(currentClip)}`;
+    const group = activeGroup();
+    $("pmeta").textContent = group
+      ? groupReviewMeta(group, video.duration)
+      : `${fmtDur(video.duration)} · ${fmtMegabytes(currentClip.size_mb)} · ${PlayerCore.clipFileLabel(currentClip)}`;
     setTrim(0, video.duration);
     // Duration is now exact: rebuild the whole-clip navigator and re-render.
     renderOverviewMarkers();
@@ -530,10 +561,16 @@ $("volume-slider").addEventListener("input", () => {
 });
 
 $("export-clip").addEventListener("click", exportTrim);
+$("add-to-group").addEventListener("click", openGroupPicker);
 $("deck-status-action").addEventListener("click", runDeckStatusAction);
-$("delete-clip").addEventListener("click", () => deleteClip());
+$("delete-clip").addEventListener("click", () => activeGroup() ? deleteOpenGroup() : deleteClip());
+$("favorite-clip").addEventListener("click", () => {
+  if (currentClip) toggleClipFavorite(currentClip);
+});
 $("open-folder").addEventListener("click", openFolder);
-$("copy-clip").addEventListener("click", (event) => copyClipToClipboard(event));
+$("copy-clip").addEventListener("click", (event) => activeGroup()
+  ? copyOpenGroup(event)
+  : copyClipToClipboard(event));
 $("rename-clip").addEventListener("click", () => beginClipRename());
 $("clip-title-edit").addEventListener("submit", saveClipRename);
 $("rename-cancel").addEventListener("click", cancelClipRename);
@@ -554,6 +591,15 @@ $("rename-file-input").addEventListener("keydown", (ev) => {
   }
 });
 $("upload-clip").addEventListener("click", () => {
+  const group = activeGroup();
+  if (group) {
+    const compilation = groupCompilationClip(group);
+    const record = compilation ? clipCloudRecord(compilation) : null;
+    if (cloudShareUrl(record)) copyCloudUrl(record);
+    else if (cloudRecordUploaded(record)) openCloudClipUrl(record);
+    else uploadOpenGroup();
+    return;
+  }
   if (!currentClip) return;
   if (isCloudOnlyReviewClip(currentClip)) {
     const entry = {

@@ -43,6 +43,7 @@ const REMOTE_NOT_FOUND_SYNC_MARKER: &str = "remote clip not found during status 
 const MAX_AVATAR_BYTES: usize = 2 * 1024 * 1024;
 const CLOUD_CACHE_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const UPLOAD_PAYLOAD_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+const UPLOAD_PAYLOAD_PREFIX: &str = "clipline-upload-";
 const CLOUD_THUMBNAIL_MAX_BYTES: u64 = 10 * 1024 * 1024;
 const CLOUD_MEDIA_FALLBACK_MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const CLOUD_MEDIA_HARD_MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
@@ -1409,6 +1410,7 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
     request: UploadClipCommandRequest,
 ) -> Result<CloudUploadResult, String> {
     let target = validate_clip_path(&storage, &request.path)?;
+    let media_root = storage.media_dir();
     let settings = state.settings();
     let cloud = settings.cloud.clone();
 
@@ -1635,7 +1637,7 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
                 local_deleted: false,
             });
         }
-        let cleanup_result = delete_uploaded_local_files(&target);
+        let cleanup_result = delete_uploaded_local_files(&target, &media_root);
         let local_deleted = cleanup_result.is_ok() || matches!(target.try_exists(), Ok(false));
         if let Err(error) = cleanup_result {
             record.error = Some(format!(
@@ -1932,21 +1934,21 @@ async fn upload_payload_for_audio_selection_from_path(
 }
 
 fn reserve_upload_payload_path(source: &Path) -> Result<PathBuf, String> {
-    let file_name = source
-        .file_name()
-        .ok_or_else(|| "clip path must include a file name".to_string())?;
-    let parent = source
-        .parent()
-        .ok_or_else(|| "clip path must include a parent directory".to_string())?;
-    prune_abandoned_upload_payloads(parent);
+    if source.file_name().is_none() {
+        return Err("clip path must include a file name".into());
+    }
+    let directory = std::env::temp_dir()
+        .join("Clipline")
+        .join("upload-payloads");
+    std::fs::create_dir_all(&directory)
+        .map_err(|error| format!("create upload payload directory {directory:?}: {error}"))?;
+    prune_abandoned_upload_payloads(&directory);
     for _ in 0..128 {
         let suffix = CLOUD_CACHE_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let mut name = file_name.to_os_string();
-        name.push(format!(
-            ".clipline-upload-{}-{suffix}.tmp",
+        let path = directory.join(format!(
+            "{UPLOAD_PAYLOAD_PREFIX}{}-{suffix}.mp4.tmp",
             std::process::id()
         ));
-        let path = source.with_file_name(name);
         match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -1973,7 +1975,7 @@ fn prune_abandoned_upload_payloads(directory: &Path) {
         let is_upload_temp = path
             .file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| name.contains(".clipline-upload-") && name.ends_with(".tmp"));
+            .is_some_and(|name| name.starts_with(UPLOAD_PAYLOAD_PREFIX) && name.ends_with(".tmp"));
         let abandoned = entry
             .metadata()
             .and_then(|metadata| metadata.modified())
@@ -2290,7 +2292,10 @@ fn mark_remote_not_found_once(record: &mut CloudUploadRecord) {
     record.updated_at_unix = unix_now();
 }
 
-fn delete_uploaded_local_files(target: &Path) -> std::io::Result<()> {
+fn delete_uploaded_local_files(target: &Path, media_root: &Path) -> std::io::Result<()> {
+    crate::library::groups::recover_group_order_transaction(media_root)
+        .map_err(std::io::Error::other)?;
+    let _guard = crate::gc::lock_clip_mutations();
     std::fs::remove_file(target).map_err(|error| {
         std::io::Error::new(
             error.kind(),
@@ -2307,6 +2312,13 @@ fn delete_uploaded_local_files(target: &Path) -> std::io::Result<()> {
                     format!("delete uploaded clip sidecar {sidecar:?}: {error}"),
                 ));
             }
+        }
+    }
+    if let Some(parent) = target.parent() {
+        if let Err(error) =
+            clipline_storage::remove_emptied_session_dir_after_clip(parent, media_root)
+        {
+            first_error.get_or_insert(error);
         }
     }
     match first_error {
@@ -2532,6 +2544,14 @@ mod tests {
 
         assert_eq!(upload_title(None, &clip), "Ranked win vs Lux");
         assert_eq!(source_type(&clip), "session");
+
+        std::fs::write(
+            clip.with_extension("clipline.json"),
+            r#"{"title":"Highlights compilation","kind":"compilation"}"#,
+        )
+        .unwrap();
+        assert_eq!(upload_title(None, &clip), "Highlights compilation");
+        assert_eq!(source_type(&clip), "compilation");
     }
 
     #[test]
@@ -2602,6 +2622,11 @@ mod tests {
         let payload_bytes = std::fs::read(&payload_path).unwrap();
 
         assert_ne!(payload_path, source);
+        assert_ne!(
+            payload_path.parent(),
+            source.parent(),
+            "upload payloads must not keep a source session folder alive"
+        );
         assert!(payload_bytes.windows(6).any(|window| window == b"V00000"));
         assert!(!payload_bytes.windows(6).any(|window| window == b"A00000"));
         assert!(payload_bytes.windows(6).any(|window| window == b"B00000"));
@@ -2613,8 +2638,8 @@ mod tests {
     #[test]
     fn abandoned_upload_payload_prune_is_scoped_and_age_gated() {
         let dir = TestDir::new("clipline-cloud", "upload-payload-prune");
-        let abandoned = dir.path().join("clip.mp4.clipline-upload-1-1.tmp");
-        let active = dir.path().join("clip.mp4.clipline-upload-1-2.tmp");
+        let abandoned = dir.path().join("clipline-upload-1-1.mp4.tmp");
+        let active = dir.path().join("clipline-upload-1-2.mp4.tmp");
         let unrelated = dir.path().join("editor.tmp");
         for path in [&abandoned, &active, &unrelated] {
             std::fs::write(path, b"temp").unwrap();
@@ -3443,7 +3468,7 @@ mod tests {
         std::fs::write(&pending_osu, b"{}").unwrap();
         std::fs::write(&poster, b"jpg").unwrap();
 
-        delete_uploaded_local_files(&clip).unwrap();
+        delete_uploaded_local_files(&clip, &dir).unwrap();
 
         assert!(!clip.exists());
         assert!(!markers.exists());
@@ -3454,6 +3479,27 @@ mod tests {
     }
 
     #[test]
+    fn delete_uploaded_local_files_removes_emptied_session_folder() {
+        let dir = TestDir::new("clipline-cloud", "delete-empty-session");
+        let media = dir.path().join("media");
+        let session = media.join("2026-06-12 19-15");
+        let clip = session.join("clip.mp4");
+        std::fs::create_dir_all(&session).unwrap();
+        std::fs::write(&clip, b"mp4").unwrap();
+        std::fs::write(clip.with_extension("clipline.json"), b"{}").unwrap();
+        std::fs::write(session.join("clipline-session.json"), b"{}").unwrap();
+
+        delete_uploaded_local_files(&clip, &media).unwrap();
+
+        assert!(!clip.exists());
+        assert!(
+            !session.exists(),
+            "emptied session folder should be removed after delete-local-on-upload"
+        );
+        assert!(media.exists());
+    }
+
+    #[test]
     fn local_cleanup_preserves_sidecars_when_primary_deletion_fails() {
         let dir = TestDir::new("clipline-cloud", "delete-primary-first");
         let clip = dir.path().join("clip.mp4");
@@ -3461,7 +3507,8 @@ mod tests {
         std::fs::create_dir(&clip).unwrap();
         std::fs::write(&markers, b"{}").unwrap();
 
-        delete_uploaded_local_files(&clip).expect_err("a directory is not a removable MP4 file");
+        delete_uploaded_local_files(&clip, dir.path())
+            .expect_err("a directory is not a removable MP4 file");
 
         assert!(clip.exists());
         assert!(markers.exists());
@@ -3475,7 +3522,8 @@ mod tests {
         std::fs::write(&clip, b"mp4").unwrap();
         std::fs::create_dir(&markers).unwrap();
 
-        let error = delete_uploaded_local_files(&clip).expect_err("sidecar directory must fail");
+        let error = delete_uploaded_local_files(&clip, dir.path())
+            .expect_err("sidecar directory must fail");
 
         assert!(!clip.exists(), "primary deletion happens before sidecars");
         assert!(markers.exists());

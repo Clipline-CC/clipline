@@ -4,6 +4,394 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-08-30): Durable group reorder recovery
+
+Plan: `docs/superpowers/plans/2026-08-30-group-order-journal.md`.
+
+Best-effort reverse writes could still leave mixed order if the initial write and rollback both
+failed. Reorder now atomically publishes `.clipline-group-order.json` with every prior sidecar value
+before changing any member. Immediate rollback and every production Library scan replay that journal
+idempotently; a blocked recovery keeps the journal and fails the scan, so playback/export never
+consume partial order. The app-wide clip-mutation lock prevents scans, reorder commits, rename,
+ungroup, deletion, upload cleanup, favorites, and GC racing the journal.
+Journal publication and every replaced sidecar are flushed before journal deletion, so power loss
+cannot persist deletion ahead of the order writes. Successful commit atomically renames the journal
+to a write-through `.committed` marker before best-effort cleanup; restart treats that marker as
+committed order, while an unrenamed journal always means rollback.
+
+The regression test creates a partial order plus a deliberately blocked sidecar restore, proves the
+Library scan fails without deleting the journal, removes the obstruction, then verifies the next
+recovery restores order and removes the journal.
+
+Verification: 11 focused Groups tests green, all 125 UI contracts and 639 app tests green,
+`cargo test --workspace` green, and warning-denied workspace Clippy clean.
+
+## Checkpoint (2026-08-30): Unicode compilation fingerprint parity
+
+Plan: `docs/superpowers/plans/2026-08-30-group-fingerprint-unicode.md`.
+
+The frontend Windows path key uses Unicode `toLowerCase`, but Rust used `to_ascii_lowercase`, so an
+uppercase accented character in any member path made every compilation cache lookup miss. Rust now
+uses `to_lowercase`; the fingerprint contract includes `D:\Clips\ÉCLAIR.mp4` versus verbatim
+`\\?\d:\clips\éclair.mp4` and pins the shared `windows:d:\clips\éclair.mp4` bytes.
+
+Verification: focused regression green, `cargo test --workspace` green, and warning-denied workspace
+Clippy clean.
+
+## Checkpoint (2026-08-30): Groups second review follow-up
+
+Plan: `docs/superpowers/plans/2026-08-30-groups-second-review.md`.
+
+The second report was pinned to pre-follow-up commit `21b0966b`; its fresh-member reorder and stale
+compilation P2s, atomicity/timeout/command-length clusters, and endpoint concern were already fixed
+at `6341ac8c`. The remaining external-drop finding was valid: with native drop interception disabled,
+the app now cancels document-level `dragover` and `drop` defaults so Explorer files cannot navigate
+the WebView away from Clipline while group row handlers still receive internal drags.
+
+Rust and JavaScript now share Unicode lowercase group-name keys, so names such as `Éclair`/`éclair`
+cannot split native membership behind one UI card. Reorder refuses corrupt or unreadable member
+sidecars instead of replacing them with defaults. A failed compilation duration probe falls back to
+summed member duration, avoiding an orphan after publish. Non-group titled exports retain legacy
+kind/sidecar behavior.
+
+Group card visibility is derived from member predicates under kind, marked, game, and text filters.
+Group picker submission and per-group compilation creation are single-flight, and the playback rail
+policy now reads `activeGroupName` rather than rebuilding/sorting all groups on each sync tick.
+
+Verification: Node syntax checks clean, all 125 UI contracts and 638 app tests green,
+`cargo test --workspace` green, and warning-denied workspace Clippy clean.
+
+## Checkpoint (2026-08-30): Groups PR review blockers
+
+Plan: `docs/superpowers/plans/2026-08-30-groups-pr-review.md`.
+
+Freshly exported members can reach the UI as `\\?\D:\...` while Library scans return `D:\...`.
+The old exact backend comparison made first-use drag and Alt+Arrow reorders fail. Reordering is now
+one `reorder_group(name, ordered_paths)` call: every path is validated once, Windows device prefixes
+and case are normalized, the group is scanned once, and changed sidecars roll back if a later write
+fails. This deletes the neighbor-move protocol and its N scans/N×member writes.
+
+Compilation reuse no longer depends on process-local maps, invalidation sets, or a format-version
+literal. Each compilation persists `source_group_fingerprint`, built from normalized ordered member
+paths; the UI compares it directly with the current group. Reorder, membership changes, restart,
+compilation deletion, and same-name group recreation therefore reject stale media without mutable
+cache state. Deleting a group also deletes its generated compilations.
+
+The member context menu now offers **Remove from group**, clearing only group metadata and keeping
+review on a surviving neighbor. Group rail visibility runs through the existing event/play/metadata
+policy functions, while the gallery renderer no longer reaches into review chrome.
+
+Group compilation and normal share export now use one encoder fallback runner, one overall deadline,
+bounded diagnostics, and the existing lifecycle cancellation generation. Every member video and
+audio stream is padded/trimmed to the same endpoint before concat. The real five-member smoke
+produced 96.533 s video and 96.530 s stereo Opus audio, a 3.3 ms endpoint delta. The group cap is
+backed by an actual UTF-16 command-length check before `CreateProcessW`, so unusually long paths
+fail clearly instead of overrunning Windows' command-line ceiling.
+
+Verification: Node syntax checks clean, all 125 UI contracts and 636 app tests green,
+`cargo test --workspace` green, and warning-denied workspace Clippy clean. The one unrelated memory
+cache timing test failed once in an earlier run, then passed twice in isolation and in both complete
+reruns.
+
+## Checkpoint (2026-08-29): Group mixed-audio concat boundary
+
+Plan: `docs/superpowers/plans/2026-08-29-group-compilation-amix-boundary.md`.
+
+Real Output and Microphone tracks can end about 180 ms apart. At the shorter stream's EOF,
+`amix=duration=longest` could emit a tail frame with `pts=NOPTS`; the existing
+`asetpts=PTS-STARTPTS` preserved that invalid value and FFmpeg intermittently returned
+`-1094995529` at the group concat boundary. Both source files decoded cleanly and the old
+single-stream graph succeeded. The mixed branch now rebuilds monotonic timestamps directly from
+audio sample count with `asetpts=N/SR/TB`, preserving the longer track without extra staging.
+
+The original real graph reproduced the failure. `ashowinfo` pinned the first bad frame, while the
+one-line timestamp fix passed the same unpadded graph 12/12 times. A separate corrected
+96.5-second compilation produced one H.264 video plus one stereo Opus mix.
+
+Verification: `cargo test --workspace` green and warning-denied workspace Clippy clean.
+
+## Checkpoint (2026-08-29): Group upload audio and cloud state
+
+Plan: `docs/superpowers/plans/2026-08-29-group-upload-audio-state.md`.
+
+The missing microphone was upstream of Cloud. Real repro members each contain `0:output` and
+`1:microphone`, but compilation discovery reduced `audio=2` to a boolean and FFmpeg hardcoded
+`a:0`. `CompilationInput` now retains the audio count; every stream is normalized to 48 kHz stereo,
+multi-stream members use `amix` with longest duration/zero dropout/normalization, and the resulting
+single Opus stream feeds the existing cross-clip concat. Zero-audio members still receive silence.
+
+The group upload icon also bypassed normal record state. Group mode now resolves the matching local
+`source_group` compilation clip, looks up its ordinary persisted cloud record, and uses the same
+queued/uploading/uploaded/shareable rendering and click behavior as normal clips. Public/unlisted
+uploads become Copy group cloud link; private uploads open the cloud page. Existing compilations
+are reused for Copy/Upload only when their persisted ordered-member fingerprint matches. Legacy
+stream-0-only outputs lack that fingerprint and are deliberately not reused.
+
+A real discrimination smoke used silent stream 0 plus an 880 Hz stream 1; the compilation measured
+`max_volume: -21.2 dB` and contained one stereo Opus stream, proving the formerly omitted second
+stream reaches output.
+
+Verification: Node syntax checks clean, all 125 UI contracts green, `cargo test --workspace`
+green, and warning-denied workspace Clippy clean.
+
+## Checkpoint (2026-08-29): Library metadata order and group rail layout
+
+Plan: `docs/superpowers/plans/2026-08-29-library-metadata-and-group-rail.md`.
+
+Local clip and group cards now share one metadata formatter with duration first, size second, and
+relative modified time third; optional queue/marker context follows those primary fields. Group
+aggregation now sums member size as well as duration and latest modification, replacing the old
+`2 clips · 0:33` line with the same `0:33 · 31.4 MB · just now` shape used by normal clips.
+
+The group rail text overlap came from a generic event-button grid competing with the group-specific
+grid, plus a stray unmatched closing brace at that CSS boundary. Group rows now use an explicit
+flex layout: the poster owns a fixed 52px basis, the body owns the remaining width with
+`min-width: 0` and `overflow: hidden`, and title/meta ellipsize only inside that body.
+
+Verification: Node syntax check clean, all 125 UI contracts green, `cargo test --workspace`
+green, and warning-denied workspace Clippy clean.
+
+## Checkpoint (2026-08-29): Group context actions and header controls
+
+Plan: `docs/superpowers/plans/2026-08-29-groups-context-actions.md`.
+
+Group member rows now right-click into the existing app-owned context menu with only Delete shown.
+The normal `clipContextTarget`/`clip-menu-delete`/`deleteClip` flow stays authoritative. Deleting
+the active member selects the next surviving member (or the previous one at the end); the group
+review closes only when no member survives.
+
+The bottom Export compilation / Upload compilation row is deleted. Group mode keeps the standard
+review-header Explorer, Copy, Upload, and Delete icons: Explorer reveals the current member, Copy
+creates the authoritative compilation then uses `copyClipToClipboard`, Upload creates it then opens
+the existing upload dialog, and Delete confirms once before bulk-deleting all group members.
+Rename remains hidden because group rename is still out of scope.
+
+Drag feedback now scales/fades the source, opens an animated eight-pixel insertion gap above or
+below the hovered target, and draws a glowing accent insertion line. Persistence still uses the
+same native HTML drag pipeline and path-validated backend order command.
+
+Verification: Node syntax checks clean, all 125 UI contracts green, `cargo test --workspace`
+green, and warning-denied workspace Clippy clean.
+
+## Checkpoint (2026-08-29): Group drag interception and playback bridge
+
+Plan: `docs/superpowers/plans/2026-08-29-groups-drag-and-playback.md`.
+
+The non-working group drag was a Tauri/WebView ownership conflict, not the reorder command. Tauri's
+native Windows file-drop handler defaults on and consumed the gesture before HTML `dragstart`, so
+`groupDragSourcePath` remained empty and the backend was unreachable. The main-window config now
+sets `dragDropEnabled: false`; Clipline has no native `DragDropEvent` consumer to lose. The entire
+clip row remains the HTML drag target. Visible arrows and the drag glyph are removed; focused rows
+retain Alt+Up/Down as the no-extra-chrome keyboard equivalent.
+
+Group playback now primes the next member in one reusable muted video layered over the main stage.
+At the boundary, that prepared video (or its poster while still buffering) covers the ordinary
+main-player source replacement, then hides as soon as the main video emits `loadeddata`. This
+removes the black/blank visual gap without introducing a second player state machine; audio and
+selected sidecars remain authoritative on the existing main player, so this is visual gaplessness,
+not sample-continuous audio mixing.
+
+Verification: Node syntax checks clean, focused Groups contract green, `cargo test --workspace`
+green, and warning-denied workspace Clippy clean. Live mouse drag/transition acceptance remains the
+user handoff because Computer Use's native pipe is unavailable.
+
+## Checkpoint (2026-08-29): Groups use the review player
+
+Plan: `docs/superpowers/plans/2026-08-29-groups-player-view.md`.
+
+The first Groups pass is refined around one top-level Library owner. Grouped trim files remain in
+`clipsCache` and on disk but no longer render individual cards; search and group playback still see
+them. The post-export deck action now says **Open group**. A group card combines up to four normal
+lazy-loaded clip posters into a full-bleed/cutout mosaic with a fourth-photo polaroid treatment and
+an overflow count instead of using a placeholder glyph.
+
+The standalone group dialog is deleted. Opening a group puts its first member in the existing
+review player, shows the group name and aggregate/member position in the header, and reuses the
+Match events rail for ordered clip rows. Clicking a row loads that member, reaching `ended`
+advances to the next member, and HTML drag/drop reorders through the existing path-validated move
+command. Alt+Up/Down on the focused row is the keyboard-accessible equivalent. Per-member
+rename/delete/share/trim chrome is hidden in group mode; compilation Export and Upload now live in
+the review deck and still use the authoritative FFmpeg/cloud paths from the first pass.
+
+Verification: Node syntax checks clean, all 125 UI contracts green, `cargo test --workspace`
+green, and warning-denied workspace Clippy clean. The rebuilt app started against the real local
+Library with one two-member group; startup/mosaic rendering produced no frontend warning or error
+diagnostics. Computer Use's native pipe was unavailable, so click/drag visual acceptance remains
+the user handoff.
+
+## Checkpoint (2026-08-29): Ordered clip groups and compilation export
+
+Plan: `docs/superpowers/plans/2026-08-29-groups.md` (plan commit `1f0ffe2`).
+
+The review trim row now has a secondary **Add to group** action. It can create a named group or
+append to an existing one while exporting the selected range. Membership is intentionally not a
+new database: the existing per-clip `.clipline.json` document carries optional `{ name, order }`
+group metadata. The first member creates the Library group card, normal clip rename/delete keeps
+working through the existing sidecar ownership path, and the group disappears with its last clip.
+
+Clicking a group card opens its ordered member view. Up/Down controls call one path-validated
+backend command that rewrites authoritative order values. **Export compilation** runs a bounded
+FFmpeg job over those authoritative members, letterboxes mixed dimensions to 1920×1080, converts
+to 60 fps H.264/Opus, supplies silence for members without audio, and publishes an ordinary owned
+`compilation` clip in the media root. **Upload compilation** creates the same local result and then
+reuses the existing Cloud upload dialog and durable upload path. Cloud itself needs no group API.
+V1 caps a compilation at 64 members to stay below the Windows process command-line ceiling; group
+rename and moving old Library clips between groups remain deferred.
+
+Verification: `cargo test --workspace` green; warning-denied workspace Clippy clean; all 125 UI
+contracts green; Node syntax checks clean. A real managed-FFmpeg smoke joined landscape+audio and
+portrait+silent inputs, encoded the exact 1080p60 H.264/Opus filter path, and decoded the output.
+Rust 1.98's new `chunks_exact_to_as_chunks` warnings were cleared mechanically in commit `38f465b`
+so the required warning-denied gate remains usable.
+
+## Checkpoint (2026-08-30): PR #188 final-review fixes
+
+Plan: `docs/superpowers/plans/2026-08-30-pr-188-final-review-fixes.md`.
+
+The relocated upload payload writer and its 24-hour reaper now share the
+`clipline-upload-` prefix, and the prune regression uses the actual `%TEMP%\Clipline\upload-payloads`
+filename shape. Replay saves write session attribution immediately after the locked ownership
+reservation and before MP4 creation, closing the post-save crash window without reopening the
+empty-folder race. The quota dialog now says unfavoriting matters only when auto-delete is enabled.
+
+Concurrency regressions now independently prove replay and full-session reservation wait on the
+session cleanup lock. The favorite-vs-GC race test pauses inside the production GC wrapper after
+the protection check, so removing either production lock makes the test fail. Delete coverage
+remains behavioral; the brittle source-string assertion was intentionally not restored.
+
+Verification: `cargo test --workspace` and
+`cargo clippy --workspace --all-targets -- -D warnings` both pass.
+
+## Checkpoint (2026-08-30): PR #188 merge blockers
+
+Plan: `docs/superpowers/plans/2026-08-30-pr-188-merge-blockers.md`.
+
+Replay saves now create the session folder and ownership marker under storage's session lock;
+full-session recording creates its `.mp4.recording` file under the same lock. Empty-session
+cleanup therefore cannot remove either destination between directory creation and the first
+cleanup-blocking file. Recorder startup performs its sweep after abandoned-recording recovery,
+so metadata-only husks produced by deleting zero-byte recordings disappear in the same run.
+Blind sweeps keep evidence-free empty session-shaped folders; cleanup invoked after deleting a
+known managed clip may still remove an already-empty session.
+
+Remuxed upload payloads are staged under `%TEMP%\Clipline\upload-payloads`, not beside the source
+clip, and every upload prunes abandoned payloads from that shared location. A crashed upload can
+no longer keep a session folder alive after delete-local-after-upload; the exact legacy in-session
+payload name is also recognized as disposable so existing crash debris is repaired.
+
+Favorites now use a dedicated zero-byte `.clipline-favorite` sidecar. The ownership metadata file
+again has one meaning—its existence proves Clipline ownership—so storage no longer parses the
+app's JSON schema or depends on `serde_json`, and imported favorites remain unmanaged without an
+`owned: false` override. Storage exports the canonical sidecar derivation used by library delete,
+rename, poster, and osu! paths; the sidecar table remains a fixed-size array.
+
+Clip mutation synchronization is app-owned and covers GC, favorite/title/file rename, explicit
+delete, post-upload delete, and upload-lease acquisition. GC receives one `ClipGcPolicy` per clip,
+so favorite protection and kind priority are computed once. A session-folder cleanup error after
+the MP4 is gone is diagnostic rather than a failed deletion: GC still reports the deleted clip and
+freed bytes, and library deletion logs the path without leaving a ghost card.
+
+Verification: `cargo test --workspace` passes, including device tests on the development machine.
+Fresh-cache Clippy passes for `clipline-storage` and `clipline-app`; workspace Clippy also passes
+with warnings denied.
+
+## Checkpoint (2026-08-28): PR #188 second-review hardening
+
+Plan: `docs/superpowers/plans/2026-08-28-pr-188-second-review-fixes.md`.
+
+Empty-session cleanup now retries Clipline-owned crash debris instead of preserving it forever:
+orphan ownership markers expire after a one-hour recorder safety window, and the exact metadata,
+poster, osu! atomic-write, and osu! rename temp/backup shapes are disposable. Arbitrary files,
+media temps, recent ownership markers, recordings, and videos remain protected. If folder removal
+fails and restoring `clipline-session.json` also fails, that write error now propagates through
+sweeps, quota GC, explicit deletion, post-upload deletion, and recorder-startup diagnostics.
+
+File rename clears an imported favorite's `owned: false` only after reading the moved metadata,
+so title and file editing are both explicit adoption boundaries as documented. Favorite writes
+run in a blocking task instead of waiting on quota GC's clip lock from Tauri's IPC thread. When
+favorites alone exceed the quota, GC deliberately avoids futile deletion of other clips; the
+quota dialog now identifies favorites as protected and tells the user to unfavorite or raise the
+quota. Comments at both recorder paths pin the ownership-marker-before-session-metadata ordering.
+
+Verification: `cargo test --workspace` passes, including device tests on the development machine.
+Fresh-cache Clippy passes for `clipline-storage` and `clipline-app`, and workspace Clippy passes
+with warnings denied.
+
+## Checkpoint (2026-08-28): PR #188 review hardening
+
+Plan: `docs/superpowers/plans/2026-08-28-pr-188-review-fixes.md`.
+
+Favorites on imported, otherwise unowned MP4s now write `owned: false` into favorite-only
+metadata. Storage parses that explicit override, so starring and unstarring an imported file
+cannot silently opt it into destructive quota GC; existing metadata without the field remains
+owned for compatibility, while title/file rename still deliberately adopts the clip.
+
+Quota GC and favorite/title/file-rename metadata mutations share one process-wide clip lock.
+A favorite command therefore either commits before GC's protection check or, if GC won, reports
+that the clip disappeared instead of succeeding and recreating an orphan sidecar. Empty-session
+cleanup and session attribution writes likewise share one process-wide session lock, and replay
+plus full-session paths reserve their ownership marker before writing attribution, closing the
+read/unlink stale-restore race without bringing back staging files.
+
+Cleanup suffix matching now uses checked UTF-8 slices; recorder startup sweeps the current media
+root before the process-global abandoned-recording guard; and quota enforcement returns directly
+from its initial inventory when already under budget, avoiding favorite/kind reads and sorting.
+
+## Checkpoint (2026-08-27): Favorites + kind-ordered auto-delete
+
+Plan: `docs/superpowers/plans/2026-08-27-favorites-and-gc-priority.md`.
+
+**Favorites.** Any local clip can be marked as a favorite from the Review header (star button,
+hidden for cloud-only clips), the inline star toggle on each library card (left of the delete
+button; outline when off, filled when on), or a card's context menu (`Add to favorites` /
+`Remove from favorites`); the **Favorites** chip in the Library filter row isolates them. The
+flag lives in the per-clip metadata sidecar (`favorite: bool`,
+serde-defaulted and skipped when false, so non-favorite sidecars stay byte-identical), is
+serialized into `ClipInfo` for cards/Review, and is set through the new
+`set_clip_favorite(path, favorite)` command (returns `{path, favorite}`; the UI patches the
+cache in place like rename). Favorites survive renames because the sidecar is read-modify-written
+(or moved) by both rename paths.
+
+**Auto-delete priority.** `clipline-storage::enforce_quota_with_policy` now takes a caller-
+supplied `priority: Fn(&Path) -> u8` sort key (storage stays neutral; plain `enforce_quota`
+delegates with constant priority, and the unused `enforce_quota_with_protection` wrapper is
+gone). The app's single shared policy
+(`gc::enforce_quota_with_clip_policy`) protects active uploads **and favorites**, and orders
+deletion **sessions → replays → trims**, oldest within each kind. The priority closure is
+evaluated once per clip up front (decorate-then-sort) so sidecar reads don't run inside the
+sort. All three quota-GC call sites
+use it: recorder `make_room_for_quota`, the replay-save path (`emit_saved_clip`), and the manual
+`recheck_storage_quota`.
+
+Sharp edges:
+
+- GC and favorite/rename metadata writes share one clip-mutation lock, so a successful favorite
+  cannot race with deletion or lose a concurrent title update.
+- Kind classification falls back to filename inference (`session_`, `_trim_`) for clips whose
+  sidecar predates kind tagging, so legacy libraries still drain in the right order.
+- The favorite sidecar serializes `title`/`kind` as explicit nulls for clips that never had
+  them; harmless, and the round-trip test pins the `favorite` key only appears when true.
+
+Not built: favorites on cloud-only clips (local flag only), a dedicated favorites tab beyond the
+filter chip, and per-kind quota GC previews in Settings.
+
+## Checkpoint (2026-08-27): Delete emptied session folders
+
+Deleting a clip already removed its MP4 and sidecars, but the session folder stayed behind with
+`clipline-session.json` (and any orphaned leftover metadata). Real libraries can accumulate
+hundreds of those empty folders.
+
+User delete, bulk delete, delete-local-after-upload, quota GC, and recorder startup share
+`clipline-storage::remove_emptied_session_dir`: when a recorder-named session folder no longer
+holds any real media (videos, recordings, in-progress `*.clipline.json` markers, screenshots,
+temps, or unrecognized files), leftover clip sidecars and `clipline-session.json` are deleted and
+the folder is removed. If a concurrent save already landed new files, `remove_dir` fails and those
+files stay. The session metadata is never staged: it is held in memory across `remove_dir` and
+written back only if the removal failed and the file is still absent, so a fresh sidecar from a
+concurrent save is never clobbered and no `.clipline-removing-*` debris is created. Library
+listing does not sweep — it is a read path. The media root, Screenshots, and other non-session
+trees are left alone.
+
 ## Checkpoint (2026-08-18): Auto-detect newly launched Steam games
 
 Plan: `docs/superpowers/plans/2026-08-17-auto-detect-steam-launches.md`.
@@ -4708,6 +5096,37 @@ Settings > General now offers Pink (deep rose). It persists as the `pink` `UiThe
 the existing instant preview, save/discard transaction, shared logo tint, and complete alternate
 palette contract. Burgundy surfaces and rose controls keep recording red, success teal, and
 warm-gold Session markers visually distinct without adding theme-specific component logic.
+
+## Checkpoint (2026-08-17): Windows Nightly runner benchmark
+
+Branch `benchmark-clipline-windows-nightly-runner` measured the exact signed Windows release
+workload on one commit across caching/tooling variants; full evidence and run links are in
+`docs/ci-windows-nightly-benchmark.md`. Production Nightly changed only in commit `420b85f`
+(present on the branch) plus the follow-up extraction commit: install the official Tauri CLI 2.11.2
+binary pinned by URL, exact
+7,414,116-byte size, SHA-256, and reported version (measured 1–3s versus 10m04s source compile),
+and make the Nightly rust-cache restore-only (`save-if: false`) because immutable sibling tags can
+never restore one another's caches and the 1.568 GB save cost 2m35–3m18s. That pair reduces the
+43m22s baseline to roughly 31 minutes. Every signing/updater/provenance/transactional/public-byte
+verification is unchanged, and actions stay pinned to full SHAs.
+
+Measured negatives that must not be re-tried blindly: dependencies-only and sccache did not beat
+no-cache (complete warm sccache 26m56s at 88.7% hits, 1.468 GB across 1,582 cache objects; a
+second warm dispatch reproduced the exact hit/miss counts but failed its post-build
+`sccache --stop-server` bookkeeping); the two installers need two compilations because fixed
+WebView2 runtime selection is compiled into the binary (executables differ); splitting tests from
+Clippy duplicated 117s of compiler work for 146s of critical path. One paired NSIS zlib sample
+saved ~4m50s of `makensis` time for +92 MB per download, and byte-identical packages are
+impossible because the generated `uninstall.exe` embeds the compressor — LZMA stays unless the
+size tradeoff is accepted. The full-target warm median (17m43s) is a same-ref-only GitHub result.
+
+Namespace, Depot, and Blacksmith remain unmeasured because no account runner label is configured;
+the workflow skips them correctly and the ranking is pending those variables. The production
+verification now lives in `scripts/install-pinned-tauri-cli.ps1` (extracted from the benchmark
+harness so the Nightly workflow no longer depends on benchmark machinery; the harness delegates to
+it and still records the provenance JSON). The branch was merged to develop after review; do not
+production-enable sccache/zlib/build reuse/parallel checks without the follow-up evidence the
+report describes.
 
 ## What's next (rough value order; each gets its own plan)
 

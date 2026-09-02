@@ -747,6 +747,8 @@ fn nightly_tags_publish_both_verified_updater_variants_transactionally() {
         "cancel-in-progress: false",
         "cargo test --workspace",
         "cargo clippy --workspace --all-targets -- -D warnings",
+        "save-if: false",
+        "scripts\\install-pinned-tauri-cli.ps1",
         "scripts\\stage-webview2-runtime.ps1",
         "scripts\\stage-ffmpeg-resource.ps1",
         "cargo tauri build --config tauri.standalone.conf.json",
@@ -762,6 +764,15 @@ fn nightly_tags_publish_both_verified_updater_variants_transactionally() {
             "Nightly workflow is missing contract: {contract}"
         );
     }
+
+    assert!(
+        !workflow.contains("cargo install tauri-cli"),
+        "Nightly must use the verified pinned Tauri CLI binary instead of compiling it"
+    );
+    assert!(
+        !workflow.contains("benchmark-windows-nightly"),
+        "Nightly must own its tooling; benchmark harness scripts are benchmark-only"
+    );
 
     let regular_build = workflow
         .find("cargo tauri build\n")
@@ -790,6 +801,78 @@ fn nightly_tags_publish_both_verified_updater_variants_transactionally() {
     }
 }
 
+#[test]
+fn windows_nightly_benchmark_keeps_release_work_identical_and_reviewable() {
+    let root = workspace_root();
+    let dispatcher =
+        fs::read_to_string(root.join(".github/workflows/windows-nightly-benchmark.yml"))
+            .expect("read Windows Nightly benchmark dispatcher");
+    let workload =
+        fs::read_to_string(root.join(".github/workflows/_windows-nightly-benchmark-job.yml"))
+            .expect("read reusable Windows Nightly benchmark workload");
+    let harness = fs::read_to_string(root.join("scripts/benchmark-windows-nightly.ps1"))
+        .expect("read Windows Nightly benchmark harness");
+
+    for contract in [
+        "CI_BENCH_GITHUB_WINDOWS_RUNNER",
+        "CI_BENCH_NAMESPACE_WINDOWS_RUNNER",
+        "CI_BENCH_DEPOT_WINDOWS_RUNNER",
+        "CI_BENCH_BLACKSMITH_WINDOWS_RUNNER",
+        "windows-latest",
+        "cache_strategy",
+        "cache_epoch",
+        "expected_cache",
+        "repetition",
+        "benchmark_parallel_checks",
+        "$_.conclusion -ne 'skipped'",
+    ] {
+        assert!(
+            dispatcher.contains(contract),
+            "benchmark dispatcher is missing contract: {contract}"
+        );
+    }
+
+    for contract in [
+        "ref: ${{ inputs.commit }}",
+        "cargo test --workspace",
+        "cargo clippy --workspace --all-targets -- -D warnings",
+        "cargo install tauri-cli --version 2.11.2 --locked",
+        "cargo tauri build",
+        "cargo tauri build --config tauri.standalone.conf.json",
+        "scripts\\verify-webview2-runtime.ps1",
+        "scripts\\stage-webview2-runtime.ps1",
+        "scripts\\stage-ffmpeg-resource.ps1",
+        "scripts\\verify-ffmpeg-resource.ps1",
+        "scripts\\prepare-nightly-assets.ps1",
+        "TAURI_SIGNING_PRIVATE_KEY",
+        "Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4",
+        "mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba",
+        "compression = 'zlib'",
+        "payloads_identical",
+        "compression-level: 0",
+    ] {
+        assert!(
+            workload.contains(contract),
+            "benchmark workload is missing release contract: {contract}"
+        );
+    }
+
+    assert!(harness.contains("Win32_Processor"));
+    assert!(harness.contains("Get-PhysicalDisk"));
+    assert!(harness.contains("makensis"));
+    assert!(harness.contains("TotalProcessorTime"));
+    assert!(harness.contains("$env:GITHUB_STEP_SUMMARY"));
+    assert!(harness.contains("install-pinned-tauri-cli.ps1"));
+
+    let installer = fs::read_to_string(root.join("scripts/install-pinned-tauri-cli.ps1"))
+        .expect("read pinned Tauri CLI installer");
+    for pin in [
+        "7414116",
+        "b6844470bcbf1da6e5dbf01990ae317d4d7969171628bb8badbdbff2e3d06d23",
+    ] {
+        assert!(installer.contains(pin), "Tauri CLI installer must pin {pin}");
+    }
+}
 
 #[test]
 fn nightly_release_notes_fallback_clears_native_exit_code() {

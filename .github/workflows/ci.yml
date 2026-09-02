@@ -29,6 +29,12 @@ jobs:
           components: clippy
 
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          # Drops the job-id component so the key this saves on main is the same
+          # one nightly.yml computes. Without it, main only ever holds
+          # v0-rust-test-* while release tags look for v0-rust-build-*, and the
+          # tags miss despite the dependency set being byte-identical.
+          shared-key: clipline-shared
 
       # Real-demuxer validation for the MP4 tests (they self-skip without it).
       # Cap apt at 5 minutes: GitHub Ubuntu mirrors can hang on `apt-get update`

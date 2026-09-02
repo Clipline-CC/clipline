@@ -113,7 +113,7 @@ selection while the packaged Windows icon remains the fixed product mark.
 - **Encode Pipeline:** encoder abstraction probing hardware at startup by deterministic priority (H.264 first for compatibility, then backend merit NVENC → AMF → QuickSync → software; HEVC/AV1 remain explicit local-efficiency options). SDR desktop/game captures are normalized from WGC full-range RGB Rec.709 into limited-range NV12 Rec.709 and advertised in encoder/container metadata so players do not guess the wrong range. The LGPL-clean software tier is SVT-AV1 (with Microsoft's software H.264 MFT as the last resort); no GPL x264. CQP/VBR for quality-efficient local recording; CBR for replay-buffer predictability.
 - **Replay Buffer Manager:** segment-based circular buffer of *encoded* video+audio in RAM, with disk-spill option. Keyframe-aligned segments so saved clips start cleanly.
 - **Event Ingestion Service:** optional plugin-backed per-game event sources normalizing into a common event schema; synchronizes game-clock event times to recording timestamps.
-- **Storage Manager:** Hybrid MP4 (fragmented internally for crash safety; finalized as standard MP4 on stop) with a disk-quota safety lock. By default saved clips are deleted only by an explicit user action; Settings can optionally auto-delete the oldest clips to make room.
+- **Storage Manager:** Hybrid MP4 (fragmented internally for crash safety; finalized as standard MP4 on stop) with a disk-quota safety lock. By default saved clips are deleted only by an explicit user action; Settings can optionally auto-delete the oldest clips to make room. Auto-delete drains clip kinds in order — sessions first, then replays, then trims (oldest within each kind) — and never deletes favorited clips.
 - **Clip Editor:** keyframe-aligned stream-copy trim (lossless, instant) with optional boundary re-encode for frame accuracy; GIF/WebM export.
 - **UI Layer:** Tauri + WebView2; timeline renders event markers; runs in the system tray.
 
@@ -258,12 +258,48 @@ Riot's Vanguard FAQ confirms in-game/LCU APIs "should continue to function" and 
 ### 10. Storage Management
 - **Container: Hybrid MP4** (OBS 30.2+ approach). During recording the file is a fragmented MP4 (resilient against BSOD/power-loss/disk-full because each `moof`/`mdat` fragment is independently decodable); on stop, a fast "soft remux" writes a full `moov` and overwrites the leading placeholder so the file appears as a standard, seekable MP4 — combining MKV-grade crash safety with MP4 compatibility. This defeats the classic MP4 moov-atom "total loss" failure. MKV is offered as an alternative for power users (record-MKV-then-remux is the long-standing safe workflow).
 - **Rate control:** CQP/CRF ~18–22 default for recording quality; CBR for replay-buffer predictability.
-- **Disk management:** configurable media folder, configurable quota, and per-game folders (gpu-screen-recorder demonstrates the save-script pattern). By default Clipline never deletes a non-empty saved or unfinished recording automatically. Before a replay save or full-session write would exceed the quota, recording stops and remains blocked until the user raises the quota, explicitly makes enough space, or enables auto-delete of oldest clips in Settings (which frees space before locking). Default to the system drive and warn about external-drive corruption risks (Outplayed documents that non-C: drives can cause corrupted/disconnected recordings). In-progress full sessions use a `.mp4.recording` suffix, count toward storage usage, and are recovered on the next launch; only zero-byte placeholders may be cleaned automatically.
+- **Disk management:** configurable media folder, configurable quota, and per-game folders (gpu-screen-recorder demonstrates the save-script pattern). By default Clipline never deletes a non-empty saved or unfinished recording automatically. Before a replay save or full-session write would exceed the quota, recording stops and remains blocked until the user raises the quota, explicitly makes enough space, or enables auto-delete of oldest clips in Settings (which frees space before locking). Auto-delete removes the oldest clips within each kind but drains kinds in order — sessions before replays before trims — and skips favorited clips entirely; a Library clip is favorited from Review's star button, a card's inline star toggle, or the context menu, and the Favorites chip isolates them. A dedicated favorite marker on an imported, otherwise unowned MP4 does not enroll that file in quota management; title/file editing remains the explicit adoption boundary. Default to the system drive and warn about external-drive corruption risks (Outplayed documents that non-C: drives can cause corrupted/disconnected recordings). In-progress full sessions use a `.mp4.recording` suffix, count toward storage usage, and are recovered on the next launch; only zero-byte placeholders may be cleaned automatically.
 - **Audio:** WASAPI loopback for system audio; **per-application loopback** via `ActivateAudioInterfaceAsync` with `VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK` and `AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK` (documented for build 20348+/Win 11; works in practice on updated Win10 2004+ — see Caveats) to capture only the game process tree; separate mic track via WASAPI capture; **multi-track output** (game / mic / system) for editing.
 
 ### 11. Clip Editor
 - **Lossless trim:** keyframe-aligned stream copy (instant, no quality loss) for cuts on GOP boundaries; **re-encode only the boundary GOPs** for frame-accurate trims.
 - Timeline with event markers; in/out points; merge multiple replay clips into a montage (joining files, ShadowPlay-montage style).
+- **Groups:** the trim action has a secondary **Add to group** path. Group membership and order
+  live in each clip's existing `.clipline.json` sidecar, so the first member creates the group and
+  deleting the last member removes it without a second database. Group members stay out of the
+  top-level Library: one group card represents them with an asymmetric mosaic of up to four real
+  clip posters. Group cards remain visible whenever any member matches the active kind, marker,
+  game, or text filter. Group names use the same Unicode lowercase key in native and frontend code.
+  Local clip and group cards share a primary metadata order of duration, size, then
+  relative modified time. Opening a group reuses the normal review player as a sequential playlist and repurposes
+  the Match events rail for member posters/titles; rows are mouse-draggable with keyboard Up/Down
+  fallbacks, and one ordered-path backend command validates and commits the complete reorder with
+  a durable pre-order journal under the app-wide clip-mutation lock; the journal and each sidecar
+  replacement use write-through phase transitions before the journal becomes a committed marker.
+  If rollback is blocked, every Library scan retries recovery and
+  refuses to expose mixed order until restoration completes. Playback advances to the next member
+  at end. Clipline disables Tauri's unused
+  native file-drop interception so WebView drag events reach those rows; document-level drag/drop
+  cancellation keeps external Explorer files from navigating the WebView. The next member is
+  preloaded into a muted layered video that covers the main player's source swap until its first
+  frame decodes, avoiding a blank visual boundary. Group mode reuses the standard review-header
+  actions instead of a second toolbar: Explorer reveals the current member; Copy and Upload build
+  the authoritative compilation; Delete confirms once before removing the group and its members.
+  Right-clicking a rail member opens app-owned Remove from group and Delete actions; either action
+  continues an active group review with a surviving neighbor. Export normalizes members to 1080p60 H.264/Opus and concatenates them into a
+  normal editable local `compilation` clip; Upload creates that same compilation and hands it to
+  the existing Clipline Cloud title/description/visibility dialog. Each member's enabled embedded
+  audio streams are normalized and mixed before concatenation, so split Output + Microphone clips
+  keep both sources. Video and audio are padded/trimmed to the same per-member endpoint, and mixed
+  audio timestamps are rebuilt from sample count, so unequal
+  Output/Microphone tails cannot feed untimestamped frames into a concat boundary. The group header
+  reuses a compilation only when its persisted, Unicode-lowercased normalized ordered-member
+  fingerprint matches the live group, including after restart. It resolves that compilation through
+  normal local cloud records, so a successful
+  public/unlisted upload changes Upload into Copy cloud link just as it does for an ordinary clip.
+  V1 compiles at most 64 members and rejects the actual UTF-16 FFmpeg invocation before it can
+  exceed Windows' process command-line limit. It does not include group rename or moving an
+  already-existing library clip between groups.
 - **Export:** MP4 (H.264 for compatibility, AV1/HEVC for size), plus **GIF/WebM** for sharing.
 - A successful trim export adds the result to the local library immediately and exposes an **Open clip** action beside the success status, avoiding a back-to-library search. The review stage supports standard fullscreen playback through its transport control or `F`; `Esc` returns from fullscreen before the existing close-clip shortcut applies.
 - **Preview decodes natively** (FFmpeg + D3D11VA hardware decode), presenting frames to the UI as shared textures — WebView2's `<video>` cannot be assumed to play AV1/HEVC (§4), and frame-accurate scrubbing of high-bitrate streams needs our own decode loop regardless.

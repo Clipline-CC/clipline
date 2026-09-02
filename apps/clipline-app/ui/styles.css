@@ -13,6 +13,7 @@
   --marker: #e8c56a;
   --session: #b98aff;
   --rec: #ff4b4b;
+  --favorite: #ff5c8a;
   --warn: #f0883e;
   --ok: #56c8bd;
   --titlebar-h: 32px;
@@ -3590,6 +3591,76 @@ button.primary.settings-save-glow {
 .card-kind.replay { background: var(--accent); color: #14100c; }
 .card-kind.session { background: var(--session); color: #14100c; }
 .card-kind.trim { background: var(--ok); color: #14100c; }
+.card-kind.compilation { background: var(--session); color: #14100c; }
+.card-kind.group { background: var(--accent); color: var(--accent-text); }
+
+.group-card-art {
+  isolation: isolate;
+  background: radial-gradient(circle at 35% 30%, rgba(var(--accent-rgb), .28), var(--well) 72%);
+}
+.group-poster-mosaic,
+.group-poster-cell { position: absolute; inset: 0; overflow: hidden; }
+.group-poster-mosaic { z-index: 0; }
+.group-poster-cell {
+  background: radial-gradient(120% 120% at 30% 20%, var(--g1), var(--g2) 70%);
+}
+.group-poster-cell .card-thumb-img { object-fit: cover; }
+.group-poster-mosaic[data-count="2"] .group-poster-cell-1,
+.group-poster-mosaic[data-count="3"] .group-poster-cell-1,
+.group-poster-mosaic[data-count="4"] .group-poster-cell-1 {
+  right: 34%;
+}
+.group-poster-mosaic[data-count="2"] .group-poster-cell-2 {
+  left: 52%;
+  box-shadow: -10px 0 24px rgba(var(--scrim-c-rgb), .65);
+  clip-path: polygon(17% 0, 100% 0, 100% 100%, 0 100%);
+}
+.group-poster-mosaic[data-count="3"] .group-poster-cell-2,
+.group-poster-mosaic[data-count="4"] .group-poster-cell-2 {
+  left: 58%;
+  bottom: 49%;
+  border-left: 2px solid rgba(255,255,255,.28);
+  border-bottom: 2px solid rgba(255,255,255,.28);
+  box-shadow: -8px 8px 20px rgba(var(--scrim-c-rgb), .55);
+}
+.group-poster-mosaic[data-count="3"] .group-poster-cell-3,
+.group-poster-mosaic[data-count="4"] .group-poster-cell-3 {
+  left: 58%;
+  top: 51%;
+  border-left: 2px solid rgba(255,255,255,.28);
+  box-shadow: -8px -8px 20px rgba(var(--scrim-c-rgb), .45);
+}
+.group-poster-mosaic[data-count="4"] .group-poster-cell-4 {
+  left: 16%;
+  right: 51%;
+  top: 54%;
+  bottom: 8%;
+  z-index: 2;
+  border: 2px solid rgba(255,255,255,.72);
+  border-radius: 5px;
+  box-shadow: 0 8px 20px rgba(var(--scrim-c-rgb), .72);
+  transform: rotate(-3deg);
+}
+.group-poster-mosaic::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  background: linear-gradient(118deg, transparent 38%, rgba(255,255,255,.14) 49%, transparent 60%);
+  pointer-events: none;
+}
+.group-poster-overflow {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 4;
+  padding: 3px 7px;
+  border: 1px solid rgba(255,255,255,.35);
+  border-radius: 999px;
+  background: rgba(var(--scrim-c-rgb), .78);
+  color: #fff;
+  font: 700 11px var(--font-mono);
+}
 
 .card-dur {
   position: absolute; bottom: 8px; right: 8px; z-index: 2;
@@ -3607,8 +3678,27 @@ button.primary.settings-save-glow {
 .card-del:hover { background: rgba(229,72,77,.85); color: #fff; }
 .card-del:active { transform: none; }
 .card-del svg { display: block; width: 15px; height: 15px; fill: currentColor; }
+
+/* Favorite star toggle on local cards; the hover delete sits right of it. */
+.card-fav-toggle {
+  position: absolute; top: 8px; right: 40px; z-index: 3;
+  width: 28px; height: 28px; min-width: 0; padding: 0;
+  display: grid; place-items: center; border: 0; border-radius: 6px;
+  background: rgba(var(--scrim-c-rgb),.7); color: var(--muted);
+  opacity: 0; pointer-events: none; transition: opacity 0.12s ease;
+}
+.card:hover .card-fav-toggle, .card:focus-within .card-fav-toggle {
+  opacity: 1; pointer-events: auto;
+}
+.card-fav-toggle:hover { background: rgba(var(--scrim-c-rgb),.9); color: var(--text); }
+.card-fav-toggle.on { color: var(--favorite); opacity: 1; pointer-events: auto; }
+.card-fav-toggle.on:hover { color: var(--favorite); }
+.card-fav-toggle svg { display: block; width: 15px; height: 15px; fill: currentColor; }
+.card-fav-toggle svg.off { fill: none; stroke: currentColor; stroke-width: 1.8; }
 .gallery-grid.select-mode .card-del,
-.card.selected .card-del {
+.gallery-grid.select-mode .card-fav-toggle,
+.card.selected .card-del,
+.card.selected .card-fav-toggle {
   opacity: 0;
   pointer-events: none;
 }
@@ -3766,6 +3856,8 @@ button.primary.settings-save-glow {
 }
 .review-actions .icon-button.uploaded { color: var(--ok); }
 .review-actions .icon-button.busy { color: var(--accent); }
+.review-actions .icon-button.favorite-on { color: var(--favorite); }
+.review-actions .icon-button.favorite-on:hover { color: var(--favorite); }
 
 .clip-button {
   display: inline-flex;
@@ -3782,6 +3874,7 @@ button.primary.settings-save-glow {
 #update-dialog,
 #elevation-dialog,
 #upload-dialog,
+#group-picker-dialog,
 #storage-quota-dialog,
 #rename-file-dialog {
   width: 380px;
@@ -3797,6 +3890,7 @@ button.primary.settings-save-glow {
 #update-dialog::backdrop,
 #elevation-dialog::backdrop,
 #upload-dialog::backdrop,
+#group-picker-dialog::backdrop,
 #storage-quota-dialog::backdrop,
 #rename-file-dialog::backdrop { background: rgba(var(--scrim-b-rgb), 0.62); }
 
@@ -3855,12 +3949,15 @@ button.primary.settings-save-glow {
   font-size: 11.5px;
 }
 .upload-body textarea { resize: none; }
+.group-picker-new { display: grid; gap: 8px; }
+.group-picker-new[hidden] { display: none; }
 .upload-audio-section[hidden] { display: none; }
 .upload-audio-section > span {
   display: block;
   color: var(--muted);
   font-size: 11.5px;
 }
+#group-picker-status:empty,
 #upload-dialog-status:empty,
 #rename-file-status:empty { display: none; }
 
@@ -3997,6 +4094,69 @@ button.primary.settings-save-glow {
 .game-event-rail li {
   min-width: 0;
 }
+.game-event-rail .group-clip-row {
+  position: relative;
+  display: block;
+  padding: 4px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  cursor: grab;
+  user-select: none;
+  transition:
+    opacity 160ms ease,
+    transform 180ms cubic-bezier(.2, .8, .2, 1),
+    box-shadow 180ms ease,
+    background 180ms ease;
+}
+.game-event-rail .group-clip-row.dragging {
+  opacity: .28;
+  transform: scale(.965);
+}
+.game-event-rail .group-clip-row.drag-before {
+  transform: translateY(8px);
+  background: rgba(var(--accent-rgb), .07);
+}
+.game-event-rail .group-clip-row.drag-after {
+  transform: translateY(-8px);
+  background: rgba(var(--accent-rgb), .07);
+}
+.game-event-rail .group-clip-row.drag-before::before,
+.game-event-rail .group-clip-row.drag-after::after {
+  content: "";
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow: 0 0 10px rgba(var(--accent-rgb), .7);
+}
+.game-event-rail .group-clip-row.drag-before::before { top: -7px; }
+.game-event-rail .group-clip-row.drag-after::after { bottom: -7px; }
+.game-event-rail ol button.group-clip-open {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 54px;
+  padding: 5px;
+  cursor: grab;
+}
+.game-event-rail .group-clip-row.dragging button.group-clip-open { cursor: grabbing; }
+.group-clip-poster {
+  position: relative;
+  display: block;
+  flex: 0 0 52px;
+  width: 52px;
+  height: 38px;
+  overflow: hidden;
+  border-radius: 5px;
+  background: radial-gradient(120% 120% at 30% 20%, var(--g1), var(--g2) 70%);
+}
+.group-clip-poster .card-thumb-img { object-fit: cover; }
+.group-clip-body { display: grid; flex: 1 1 auto; gap: 2px; min-width: 0; overflow: hidden; }
+.group-clip-body strong,
+.group-clip-body span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.group-clip-body span { font-family: var(--font-mono); font-size: 10.5px; }
 .game-event-rail ol button {
   display: grid;
   grid-template-columns: 44px minmax(0, 1fr);
@@ -4396,6 +4556,16 @@ button.primary.settings-save-glow {
   height: 100%;
   object-fit: contain;
 }
+#group-preload-video {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  pointer-events: none;
+}
+#group-preload-video[hidden] { display: none; }
 #fullscreen-toggle .i-fullscreen-exit { display: none; }
 #fullscreen-toggle.active .i-fullscreen-enter { display: none; }
 #fullscreen-toggle.active .i-fullscreen-exit { display: block; }
@@ -4844,9 +5014,16 @@ button.primary.settings-save-glow {
 .deck.simple-timeline:not(.simple-trim-active) .trim-readout {
   display: none !important;
 }
-.deck.simple-timeline:not(.simple-trim-active) .export-row {
+.deck.simple-timeline:not(.simple-trim-active) #clip-export-row {
   display: none !important;
 }
+#clip-export-row[hidden] { display: none; }
+.review-viewer.group-review #dim-in,
+.review-viewer.group-review #dim-out,
+.review-viewer.group-review #handle-in,
+.review-viewer.group-review #handle-out,
+.review-viewer.group-review #trim-band,
+.review-viewer.group-review #overview-trim { display: none !important; }
 .deck.legacy-timeline .nav-row {
   display: flex;
 }
