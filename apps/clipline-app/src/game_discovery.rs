@@ -335,12 +335,16 @@ fn sort_bucket(candidate: &DetectedGameCandidate) -> u8 {
 fn is_path_within(path: &str, parent: &Path) -> bool {
     let path = normalize_path_string(path);
     let parent = normalize_path_string(&parent.to_string_lossy());
+    is_path_within_normalized(&path, &parent)
+}
+
+fn is_path_within_normalized(path: &str, parent: &str) -> bool {
     if path.is_empty() || parent.is_empty() {
         return false;
     }
     path == parent
         || path
-            .strip_prefix(&parent)
+            .strip_prefix(parent)
             .is_some_and(|rest| rest.starts_with('\\'))
 }
 
@@ -475,14 +479,17 @@ fn tokenize_vdf(input: &str) -> Result<Vec<VdfToken>, String> {
                             let Some((_, escaped)) = chars.next() else {
                                 return Err("unterminated string".into());
                             };
-                            value.push(match escaped {
-                                '\\' => '\\',
-                                '"' => '"',
-                                'n' => '\n',
-                                'r' => '\r',
-                                't' => '\t',
-                                other => other,
-                            });
+                            match escaped {
+                                '\\' => value.push('\\'),
+                                '"' => value.push('"'),
+                                'n' => value.push('\n'),
+                                'r' => value.push('\r'),
+                                't' => value.push('\t'),
+                                other => {
+                                    value.push('\\');
+                                    value.push(other);
+                                }
+                            }
                         }
                         other => value.push(other),
                     }
@@ -577,10 +584,19 @@ fn library_paths_from_vdf(entries: &[VdfEntry]) -> Vec<PathBuf> {
 
 fn steam_app_from_manifest(entries: &[VdfEntry]) -> Option<SteamAppManifest> {
     let app_state = find_object(entries, "AppState")?;
+    let install_dir_name = find_pair(app_state, "installdir")?.trim();
+    if install_dir_name.is_empty()
+        || install_dir_name == "."
+        || install_dir_name == ".."
+        || install_dir_name.contains('/')
+        || install_dir_name.contains('\\')
+    {
+        return None;
+    }
     Some(SteamAppManifest {
         app_id: find_pair(app_state, "appid")?.parse().ok()?,
         name: find_pair(app_state, "name")?.to_owned(),
-        install_dir_name: find_pair(app_state, "installdir")?.to_owned(),
+        install_dir_name: install_dir_name.to_owned(),
     })
 }
 
@@ -627,6 +643,24 @@ pub(crate) struct SteamLaunchApp {
     pub(crate) app_id: u32,
     pub(crate) name: String,
     pub(crate) install_dir: PathBuf,
+    pub(crate) normalized_install_dir: String,
+}
+
+impl SteamLaunchApp {
+    pub(crate) fn new(
+        app_id: u32,
+        name: impl Into<String>,
+        install_dir: impl Into<PathBuf>,
+    ) -> Self {
+        let install_dir = install_dir.into();
+        let normalized_install_dir = normalize_path_string(&install_dir.to_string_lossy());
+        Self {
+            app_id,
+            name: name.into(),
+            install_dir,
+            normalized_install_dir,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -654,13 +688,14 @@ impl SteamLaunchCatalog {
                 let steamapps_dir = library.join("steamapps");
                 add_unique_path(&mut common_roots, steamapps_dir.join("common"));
                 for manifest in read_steam_manifests(&steamapps_dir) {
-                    apps.push(SteamLaunchApp {
-                        app_id: manifest.app_id,
-                        name: manifest.name,
-                        install_dir: steamapps_dir
-                            .join("common")
-                            .join(&manifest.install_dir_name),
-                    });
+                    let install_dir = steamapps_dir
+                        .join("common")
+                        .join(&manifest.install_dir_name);
+                    apps.push(SteamLaunchApp::new(
+                        manifest.app_id,
+                        manifest.name,
+                        install_dir,
+                    ));
                 }
             }
         }
@@ -673,15 +708,18 @@ impl SteamLaunchCatalog {
 
     /// First catalog app whose install directory contains `exe_path`.
     pub(crate) fn find_by_exe_path(&self, exe_path: &str) -> Option<&SteamLaunchApp> {
+        let normalized = normalize_path_string(exe_path);
         self.apps
             .iter()
-            .find(|app| is_path_within(exe_path, &app.install_dir))
+            .find(|app| is_path_within_normalized(&normalized, &app.normalized_install_dir))
     }
 
     pub(crate) fn is_steam_rooted(&self, exe_path: &str) -> bool {
-        self.common_roots
-            .iter()
-            .any(|root| is_path_within(exe_path, root))
+        let normalized = normalize_path_string(exe_path);
+        self.common_roots.iter().any(|root| {
+            let parent = normalize_path_string(&root.to_string_lossy());
+            is_path_within_normalized(&normalized, &parent)
+        })
     }
 }
 
@@ -959,6 +997,20 @@ mod tests {
         assert_eq!(manifest.app_id, 646570);
         assert_eq!(manifest.name, "Slay the Spire");
         assert_eq!(manifest.install_dir_name, "SlayTheSpire");
+    }
+
+    #[test]
+    fn rejects_manifest_install_directories_that_escape_or_claim_common_root() {
+        for install_dir in ["", ".", "..", r"Parent\Child", "Parent/Child"] {
+            let input = format!(
+                r#""AppState" {{ "appid" "1" "name" "Bad" "installdir" "{install_dir}" }}"#
+            );
+            let parsed = parse_vdf(&input).expect("manifest parses");
+            assert!(
+                steam_app_from_manifest(&parsed).is_none(),
+                "invalid installdir {install_dir:?} must be rejected"
+            );
+        }
     }
 
     #[test]

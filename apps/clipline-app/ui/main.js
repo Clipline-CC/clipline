@@ -104,22 +104,43 @@ listen("ffmpeg-install", (event) => {
 });
 
 var discoveredSteamToastKeys = new Set();
+var discoveredSteamOffer = null;
+
+function clearDiscoveredSteamOffer() {
+  const offer = discoveredSteamOffer;
+  discoveredSteamOffer = null;
+  if (!offer) return;
+  if ($("deck-status").textContent === offer.status) setDeckStatus("");
+  else setDeckStatusAction("", null);
+}
 
 // First `discovered_steam` event for a game in this UI session: show the
 // recording toast plus a one-shot Always add action. Rule building stays on
 // the backend command; the frontend never reconstructs it from exe_name.
 function maybeOfferDiscoveredSteamAlwaysAdd(event) {
-  if (!event?.active || !event.discovered_steam) return;
-  const key = `${event.process_id ?? 0}:${event.exe_name ?? ""}`;
-  if (discoveredSteamToastKeys.has(key)) return;
+  if (!event?.active || !event.discovered_steam) {
+    clearDiscoveredSteamOffer();
+    return;
+  }
+  const key = String(event.exe_name || event.name || "").toLowerCase();
+  if (!key || discoveredSteamToastKeys.has(key)) return;
   discoveredSteamToastKeys.add(key);
   const name = event.name || event.exe_name || "Steam game";
-  setDeckStatus(`Recording ${name}`);
+  const status = "Recording " + name;
+  discoveredSteamOffer = { key, status };
+  setDeckStatus(status);
   setDeckStatusAction("Always add", async () => {
+    discoveredSteamOffer = null;
     try {
-      const added = await invoke("add_discovered_steam_game");
+      const added = await invoke("add_discovered_steam_game", {
+        target: {
+          processId: event.process_id,
+          exeName: event.exe_name,
+        },
+      });
+      await refreshCustomGamesFromBackend();
       setNotice(
-        added ? `Added ${name} to Custom games` : `${name} is already a custom game`,
+        added ? "Added " + name + " to Custom games" : name + " is already a custom game",
         { transient: true }
       );
     } catch (error) {
@@ -136,6 +157,9 @@ listen("encoders-changed", (event) => {
 });
 
 listen("game-detection", (e) => {
+  if (!e.payload?.active || !e.payload?.discovered_steam) {
+    clearDiscoveredSteamOffer();
+  }
   activeDetectedGame = e.payload || null;
   if (activeDetectedGame?.active) {
     if (captureForegroundWork()) loadGamePlugins();

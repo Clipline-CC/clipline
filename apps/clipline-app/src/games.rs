@@ -110,14 +110,29 @@ pub(crate) fn detect_active_game_from_windows_with_steam(
                     .custom_games
                     .iter()
                     .filter(|game| !game.enabled)
-                    .any(|game| {
-                        best_window_for_game(game, std::slice::from_ref(window)).is_some()
-                    })
+                    .any(|game| disabled_custom_rule_matches_path(game, window))
             })
             .collect();
         return detect_steam_game_from_windows(steam_windows, steam);
     }
     None
+}
+
+fn disabled_custom_rule_matches_path(
+    game: &CustomGameSettings,
+    window: &CapturableWindow,
+) -> bool {
+    let Some(configured) = game
+        .process_path
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+    else {
+        return false;
+    };
+    window
+        .exe_path
+        .as_deref()
+        .is_some_and(|actual| path_key(configured) == path_key(actual))
 }
 
 /// Upper bound on Steam manifest rescans while a Steam-rooted window misses
@@ -188,23 +203,24 @@ fn detect_steam_game_from_windows(
             window
                 .exe_path
                 .as_deref()
-                .is_some_and(|path| path.to_ascii_lowercase().contains(r"steamapps\common"))
+                .is_some_and(|path| {
+                    let lower = path.to_ascii_lowercase();
+                    lower.contains(r"steamapps\common") || lower.contains("steamapps/common")
+                })
         })
         .collect();
     if candidates.is_empty() {
         return None;
     }
-    // A window any registered plugin would match stays plugin-owned even
-    // while that plugin is disabled, so this path can never revive it.
     for plugin in game_plugins::all() {
-        let matched_handle = plugin.match_window(&candidates).map(|window| window.handle);
-        if let Some(handle) = matched_handle {
-            candidates.retain(|window| window.handle != handle);
+        while let Some(window) = plugin.match_window(&candidates) {
+            let handle = window.handle;
+            candidates.retain(|w| w.handle != handle);
         }
     }
     candidates.retain(|window| !crate::game_discovery::is_noise_window(window));
 
-    if find_best_steam_match(steam.catalog_mut(), &candidates).is_none() {
+    if has_unmatched_steam_candidate(steam.catalog_mut(), &candidates) {
         maybe_refresh_steam_catalog(steam, &candidates);
     }
     let (app, window) = find_best_steam_match(steam.catalog_mut(), &candidates)?;
@@ -237,6 +253,17 @@ fn detect_steam_game_from_windows(
 /// permanently unmatched Steam-rooted window cannot force a rescan every
 /// 30 s forever. A Steam library added after the first scan stays unnoticed
 /// until restart; rescan on a timer if that ever matters.
+fn has_unmatched_steam_candidate(
+    catalog: &crate::game_discovery::SteamLaunchCatalog,
+    candidates: &[CapturableWindow],
+) -> bool {
+    candidates.iter().any(|window| {
+        window.exe_path.as_deref().is_some_and(|path| {
+            catalog.is_steam_rooted(path) && catalog.find_by_exe_path(path).is_none()
+        })
+    })
+}
+
 fn maybe_refresh_steam_catalog(
     steam: &mut SteamDetectorState,
     candidates: &[CapturableWindow],
@@ -247,13 +274,7 @@ fn maybe_refresh_steam_catalog(
     let wait = steam.refresh_wait;
     let due = {
         let catalog = steam.catalog_mut();
-        catalog.loaded_at.elapsed() >= wait
-            && candidates.iter().any(|window| {
-                window
-                    .exe_path
-                    .as_deref()
-                    .is_some_and(|path| catalog.is_steam_rooted(path))
-            })
+        catalog.loaded_at.elapsed() >= wait && has_unmatched_steam_candidate(catalog, candidates)
     };
     if !due {
         return;
@@ -278,20 +299,31 @@ fn next_refresh_wait(current: Duration, changed: bool) -> Duration {
         (current * 2).min(STEAM_CATALOG_REFRESH_MAX_BACKOFF)
     }
 }
-
 fn find_best_steam_match<'a>(
     catalog: &'a crate::game_discovery::SteamLaunchCatalog,
     candidates: &'a [CapturableWindow],
 ) -> Option<(&'a crate::game_discovery::SteamLaunchApp, &'a CapturableWindow)> {
-    candidates
+    // Window order defines candidate priority across different games.
+    // The first Steam app matched in window order wins.
+    let best_app = candidates.iter().find_map(|window| {
+        let path = window.exe_path.as_deref()?;
+        catalog.find_by_exe_path(path)
+    })?;
+
+    // Several windows can share one Steam app (game + splash/launcher);
+    // the longest title among windows for this app is the actual gameplay window.
+    let best_window = candidates
         .iter()
-        .filter_map(|window| {
-            let path = window.exe_path.as_deref()?;
-            catalog.find_by_exe_path(path).map(|app| (app, window))
+        .filter(|window| {
+            window
+                .exe_path
+                .as_deref()
+                .and_then(|path| catalog.find_by_exe_path(path))
+                .is_some_and(|app| app.app_id == best_app.app_id)
         })
-        // Several windows can share one Steam exe (game + splash); the
-        // longest title is the actual gameplay window.
-        .max_by_key(|(_, window)| window.title.len())
+        .max_by_key(|window| window.title.len())?;
+
+    Some((best_app, best_window))
 }
 
 pub fn built_in_game_still_configured(settings: &GameSettings, identity: &GameIdentity) -> bool {
@@ -883,11 +915,11 @@ mod tests {
 
     fn steam_catalog() -> crate::game_discovery::SteamLaunchCatalog {
         crate::game_discovery::SteamLaunchCatalog {
-            apps: vec![crate::game_discovery::SteamLaunchApp {
-                app_id: 427520,
-                name: "Friendslop".into(),
-                install_dir: std::path::PathBuf::from(r"C:\Steam\steamapps\common\Friendslop"),
-            }],
+            apps: vec![crate::game_discovery::SteamLaunchApp::new(
+                427520,
+                "Friendslop",
+                r"C:\Steam\steamapps\common\Friendslop",
+            )],
             common_roots: vec![std::path::PathBuf::from(r"C:\Steam\steamapps\common")],
             loaded_at: std::time::Instant::now(),
         }
@@ -964,13 +996,11 @@ mod tests {
             custom_games: Vec::new(),
         };
         let catalog = crate::game_discovery::SteamLaunchCatalog {
-            apps: vec![crate::game_discovery::SteamLaunchApp {
-                app_id: 1,
-                name: "League of Legends".into(),
-                install_dir: std::path::PathBuf::from(
-                    r"C:\Steam\steamapps\common\League of Legends",
-                ),
-            }],
+            apps: vec![crate::game_discovery::SteamLaunchApp::new(
+                1,
+                "League of Legends",
+                r"C:\Steam\steamapps\common\League of Legends",
+            )],
             common_roots: vec![std::path::PathBuf::from(r"C:\Steam\steamapps\common")],
             loaded_at: std::time::Instant::now(),
         };
@@ -987,6 +1017,45 @@ mod tests {
             &mut steam,
         )
         .is_none());
+    }
+
+    #[test]
+    fn disabled_plugin_filters_every_matching_window() {
+        let settings = GameSettings {
+            plugins: settings_with_league(false, GameRecordingMode::FullSession).plugins,
+            ..GameSettings::default()
+        };
+        let catalog = crate::game_discovery::SteamLaunchCatalog {
+            apps: vec![crate::game_discovery::SteamLaunchApp::new(
+                1,
+                "League of Legends",
+                r"C:\Steam\steamapps\common\League of Legends",
+            )],
+            common_roots: vec![std::path::PathBuf::from(r"C:\Steam\steamapps\common")],
+            loaded_at: std::time::Instant::now(),
+        };
+        let mut steam = super::SteamDetectorState::fixed(catalog);
+
+        let detected = super::detect_active_game_from_windows_with_steam(
+            &settings,
+            vec![
+                window(
+                    7,
+                    "League of Legends",
+                    "League of Legends.exe",
+                    Some(r"C:\Steam\steamapps\common\League of Legends\League of Legends.exe"),
+                ),
+                window(
+                    8,
+                    "League of Legends (TM) Client",
+                    "League of Legends.exe",
+                    Some(r"C:\Steam\steamapps\common\League of Legends\League of Legends.exe"),
+                ),
+            ],
+            &mut steam,
+        );
+
+        assert!(detected.is_none());
     }
 
     #[test]
@@ -1102,6 +1171,22 @@ mod tests {
             "a disabled custom rule must keep owning its Steam-path window"
         );
 
+        let fuzzy_exe_only = GameSettings {
+            custom_games: vec![CustomGameSettings {
+                id: "custom-fuzzy-off".into(),
+                enabled: false,
+                exe_name: "Friendslop.exe".into(),
+                process_path: None,
+                window_title: String::new(),
+                ..game()
+            }],
+            ..GameSettings::default()
+        };
+        assert!(
+            detect_with_catalog(&fuzzy_exe_only, windows.clone()).is_some(),
+            "an exe-only disabled rule must not block an unrelated Steam game"
+        );
+
         let unrelated = GameSettings {
             custom_games: vec![CustomGameSettings {
                 id: "custom-other-off".into(),
@@ -1134,6 +1219,27 @@ mod tests {
             next_refresh_wait(wait, true),
             STEAM_CATALOG_REFRESH_INTERVAL
         );
+    }
+
+    #[test]
+    fn a_catalog_hit_does_not_hide_another_rooted_candidate_miss() {
+        let catalog = steam_catalog();
+        let candidates = vec![
+            window(
+                1,
+                "Friendslop",
+                "Friendslop.exe",
+                Some(r"C:\Steam\steamapps\common\Friendslop\Friendslop.exe"),
+            ),
+            window(
+                2,
+                "New Game",
+                "NewGame.exe",
+                Some(r"C:\Steam\steamapps\common\NewGame\NewGame.exe"),
+            ),
+        ];
+
+        assert!(has_unmatched_steam_candidate(&catalog, &candidates));
     }
 
     #[test]
@@ -1194,5 +1300,49 @@ mod tests {
         .expect("shared Steam exe should still pick a window");
 
         assert_eq!(detected.hwnd, 2);
+    }
+
+    #[test]
+    fn window_order_wins_across_different_steam_games() {
+        let catalog = crate::game_discovery::SteamLaunchCatalog {
+            apps: vec![
+                crate::game_discovery::SteamLaunchApp::new(
+                    1,
+                    "First",
+                    r"C:\Steam\steamapps\common\First",
+                ),
+                crate::game_discovery::SteamLaunchApp::new(
+                    2,
+                    "Second",
+                    r"C:\Steam\steamapps\common\Second",
+                ),
+            ],
+            common_roots: vec![std::path::PathBuf::from(r"C:\Steam\steamapps\common")],
+            loaded_at: std::time::Instant::now(),
+        };
+        let mut steam = super::SteamDetectorState::fixed(catalog);
+
+        let detected = super::detect_active_game_from_windows_with_steam(
+            &GameSettings::default(),
+            vec![
+                window(
+                    1,
+                    "First",
+                    "First.exe",
+                    Some(r"C:\Steam\steamapps\common\First\First.exe"),
+                ),
+                window(
+                    2,
+                    "Second - A Much Longer Window Title",
+                    "Second.exe",
+                    Some(r"C:\Steam\steamapps\common\Second\Second.exe"),
+                ),
+            ],
+            &mut steam,
+        )
+        .expect("a Steam window should match");
+
+        assert_eq!(detected.identity.id(), "steam-1");
+        assert_eq!(detected.hwnd, 1);
     }
 }

@@ -298,6 +298,33 @@ function fillSettings(s) {
   resetSettingsBaselineFromForm();
 }
 
+async function refreshCustomGamesFromBackend() {
+  const settings = await invoke("get_settings");
+  const games = (settings?.games?.custom_games || []).map(normalizeCustomGame);
+  customGames = games;
+  const savedGames = games.map((game) => ({ ...game }));
+  if (currentSettings) {
+    currentSettings = {
+      ...currentSettings,
+      games: { ...currentSettings.games, custom_games: savedGames.map((game) => ({ ...game })) },
+    };
+  }
+  if (settingsDraft) {
+    settingsDraft = {
+      ...settingsDraft,
+      games: { ...settingsDraft.games, custom_games: savedGames.map((game) => ({ ...game })) },
+    };
+  }
+  if (settingsIndicatorBaseline) {
+    settingsIndicatorBaseline = {
+      ...settingsIndicatorBaseline,
+      games: { ...settingsIndicatorBaseline.games, custom_games: savedGames.map((game) => ({ ...game })) },
+    };
+  }
+  renderCustomGames();
+  syncSettingsDirtyState();
+}
+
 function readSettings() {
   const replay = Number($("set-replay").value);
   const capture = selectedCaptureSettings();

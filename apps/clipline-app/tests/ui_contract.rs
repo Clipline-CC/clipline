@@ -4717,12 +4717,26 @@ fn steam_launch_detection_wires_settings_checkbox_and_always_add() {
         "invoke(\"add_discovered_steam_game\"",
         "setDeckStatusAction(\"Always add\"",
         "discoveredSteamToastKeys",
+        "processId: event.process_id",
+        "exeName: event.exe_name",
+        "target: {",
+        "refreshCustomGamesFromBackend()",
+        "clearDiscoveredSteamOffer()",
     ] {
         assert!(
             main.contains(required),
             "game detection UI is missing required wiring {required}"
         );
     }
+
+    assert!(
+        settings.contains("refreshCustomGamesFromBackend"),
+        "settings.js must expose refreshCustomGamesFromBackend"
+    );
+    assert!(
+        settings.contains("settingsIndicatorBaseline"),
+        "settings.js must update baseline when refreshing custom games"
+    );
 }
 
 #[test]

@@ -2245,11 +2245,34 @@ fn gate_queue_for_exe(exe_path: Option<&str>) -> Option<LeagueQueue> {
 
 fn same_game_window(current: Option<&DetectedGame>, next: Option<&DetectedGame>) -> bool {    match (current, next) {
         (Some(current), Some(next)) => {
-            current.identity == next.identity && current.hwnd == next.hwnd
+            current.hwnd == next.hwnd
+                && (current.identity == next.identity
+                    || same_discovered_steam_custom_capture(current, next))
         }
         (None, None) => true,
         _ => false,
     }
+}
+
+fn same_discovered_steam_custom_capture(current: &DetectedGame, next: &DetectedGame) -> bool {
+    let discovered_custom_pair = matches!(
+        (&current.identity, &next.identity),
+        (
+            crate::game_identity::GameIdentity::DiscoveredSteam { .. },
+            crate::game_identity::GameIdentity::Custom(_)
+        ) | (
+            crate::game_identity::GameIdentity::Custom(_),
+            crate::game_identity::GameIdentity::DiscoveredSteam { .. }
+        )
+    );
+    discovered_custom_pair
+        && current.process_id == next.process_id
+        && current.exe_name.eq_ignore_ascii_case(&next.exe_name)
+        && current
+            .exe_path
+            .as_deref()
+            .zip(next.exe_path.as_deref())
+            .is_some_and(|(left, right)| crate::games::path_key(left) == crate::games::path_key(right))
 }
 
 fn game_recording_mode_changed(
@@ -2260,6 +2283,18 @@ fn game_recording_mode_changed(
         (Some(current), Some(next)) => current.recording_mode != next.recording_mode,
         _ => false,
     }
+}
+
+fn discovered_steam_target_matches(
+    active: &DetectedGame,
+    process_id: u32,
+    exe_name: &str,
+) -> bool {
+    matches!(
+        active.identity,
+        crate::game_identity::GameIdentity::DiscoveredSteam { .. }
+    ) && active.process_id == process_id
+        && active.exe_name.eq_ignore_ascii_case(exe_name)
 }
 
 fn active_game_still_configured(settings: &AppSettings, active: Option<&DetectedGame>) -> bool {
@@ -3109,51 +3144,59 @@ fn list_game_plugins() -> Vec<GamePluginInfo> {
 /// The rule is rebuilt on the backend from the live `DetectedGame` — the
 /// frontend never sends an executable path — and goes through the normal
 /// save transaction so dedupe and runtime side effects match manual adds.
-#[tauri::command(async)]
-fn add_discovered_steam_game<R: Runtime>(
-    app: AppHandle<R>,
-    state: tauri::State<RuntimeState>,
-    first_run_state: tauri::State<FirstRunState>,
-    tray_items: tauri::State<TrayItems<R>>,
-    storage_settings: tauri::State<crate::library::StorageSettings>,
-    media_folder_authorization: tauri::State<NativeMediaFolderAuthorization>,
-) -> Result<bool, String> {
-    let new_game = {
-        let inner = state.0.lock().map_err(|_| "runtime state lock poisoned")?;
-        let game = inner
-            .active_game
-            .as_ref()
-            .ok_or("no game is currently detected")?;
-        let crate::game_identity::GameIdentity::DiscoveredSteam { app_id, .. } = &game.identity
-        else {
-            return Err("the detected game is not a discovered Steam launch".into());
-        };
-        let exe_path = game
-            .exe_path
-            .clone()
-            .filter(|path| !path.trim().is_empty())
-            .ok_or("the detected Steam window has no executable path")?;
-        CustomGameSettings {
-            id: format!("custom-steam-{app_id}"),
-            legacy_ids: Vec::new(),
-            name: game.name.clone(),
-            enabled: true,
-            exe_name: game.exe_name.clone(),
-            process_path: Some(exe_path.clone()),
-            window_title: game.window_title.clone(),
-            recording_mode: game.recording_mode,
-            icon: crate::game_icon::extract_exe_icon_data_url(&exe_path),
-        }
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DiscoveredSteamTarget {
+    process_id: u32,
+    exe_name: String,
+}
+fn custom_game_from_discovered_steam(game: &DetectedGame) -> Result<CustomGameSettings, String> {
+    let crate::game_identity::GameIdentity::DiscoveredSteam { app_id, .. } = &game.identity else {
+        return Err("the detected game is not a discovered Steam launch".into());
     };
+    let exe_path = game
+        .exe_path
+        .clone()
+        .filter(|path| !path.trim().is_empty())
+        .ok_or("the detected Steam window has no executable path")?;
+    Ok(CustomGameSettings {
+        id: format!("custom-steam-{app_id}"),
+        legacy_ids: vec![format!("steam-{app_id}")],
+        name: game.name.clone(),
+        enabled: true,
+        exe_name: game.exe_name.clone(),
+        process_path: Some(exe_path),
+        window_title: game.window_title.clone(),
+        recording_mode: game.recording_mode,
+        icon: None,
+    })
+}
 
-    let mut settings = state.settings();
-    let path_key = crate::games::path_key(new_game.process_path.as_deref().unwrap_or_default());
-    if settings.games.custom_games.iter().any(|game| {
-        game.process_path
+#[derive(Debug, Clone, PartialEq)]
+struct InsertDiscoveredSteamResult {
+    added: bool,
+    game: CustomGameSettings,
+}
+
+fn insert_discovered_steam_custom_game(
+    settings: &mut AppSettings,
+    mut game: CustomGameSettings,
+) -> InsertDiscoveredSteamResult {
+    let path_key = crate::games::path_key(game.process_path.as_deref().unwrap_or_default());
+    let is_duplicate = settings.games.custom_games.iter().any(|existing| {
+        existing
+            .process_path
             .as_deref()
-            .is_some_and(|existing| crate::games::path_key(existing) == path_key)
-    }) {
-        return Ok(false);
+            .is_some_and(|path| crate::games::path_key(path) == path_key)
+            || (existing.process_path.is_none()
+                && !existing.exe_name.trim().is_empty()
+                && existing.exe_name.eq_ignore_ascii_case(&game.exe_name))
+    });
+    if is_duplicate {
+        return InsertDiscoveredSteamResult {
+            added: false,
+            game,
+        };
     }
 
     let occupied: std::collections::HashSet<String> = settings
@@ -3162,14 +3205,52 @@ fn add_discovered_steam_game<R: Runtime>(
         .iter()
         .map(|existing| existing.id.clone())
         .collect();
-    let mut game = new_game;
     let base = game.id.clone();
     let mut suffix = 2;
     while occupied.contains(&game.id) {
         game.id = format!("{base}-{suffix}");
         suffix += 1;
     }
-    settings.games.custom_games.push(game);
+    settings.games.custom_games.push(game.clone());
+    InsertDiscoveredSteamResult {
+        added: true,
+        game,
+    }
+}
+
+
+#[tauri::command(async)]
+fn add_discovered_steam_game<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<RuntimeState>,
+    first_run_state: tauri::State<FirstRunState>,
+    tray_items: tauri::State<TrayItems<R>>,
+    storage_settings: tauri::State<crate::library::StorageSettings>,
+    media_folder_authorization: tauri::State<NativeMediaFolderAuthorization>,
+    target: DiscoveredSteamTarget,
+) -> Result<bool, String> {
+    let new_game = {
+        let inner = state.0.lock().map_err(|_| "runtime state lock poisoned")?;
+        let game = inner
+            .active_game
+            .as_ref()
+            .ok_or("no game is currently detected")?;
+        if !discovered_steam_target_matches(game, target.process_id, &target.exe_name) {
+            return Err("the discovered Steam game is no longer active".into());
+        }
+        custom_game_from_discovered_steam(game)?
+    };
+
+    let mut settings = state.settings();
+    let result = insert_discovered_steam_custom_game(&mut settings, new_game);
+    if !result.added {
+        return Ok(false);
+    }
+    if let Some(last) = settings.games.custom_games.last_mut() {
+        if let Some(exe_path) = &last.process_path {
+            last.icon = crate::game_icon::extract_exe_icon_data_url(exe_path);
+        }
+    }
     save_settings(
         app,
         state,
@@ -6142,6 +6223,80 @@ mod tests {
             &settings,
             Some(&discovered_steam_game(42))
         ));
+    }
+
+    #[test]
+    fn discovered_steam_to_custom_transition_keeps_the_same_capture() {
+        let current = discovered_steam_game(42);
+        let mut next = current.clone();
+        next.identity = crate::game_identity::GameIdentity::custom("custom-steam-427520");
+
+        assert!(same_game_window(Some(&current), Some(&next)));
+        assert!(!same_game_window(
+            Some(&current),
+            Some(&detected_game("custom-other", "Friendslop", 42))
+        ));
+    }
+
+    #[test]
+    fn discovered_to_custom_re_detection_does_not_restart_and_updates_the_ui() {
+        let mut settings = AppSettings::default();
+        settings.games.custom_games.push(CustomGameSettings {
+            id: "custom-steam-427520".into(),
+            name: "Friendslop".into(),
+            exe_name: "Friendslop.exe".into(),
+            process_path: Some(r"C:\Steam\steamapps\common\Friendslop\Friendslop.exe".into()),
+            window_title: "Friendslop".into(),
+            enabled: true,
+            legacy_ids: Vec::new(),
+            recording_mode: GameRecordingMode::ReplaysOnly,
+            icon: None,
+        });
+        let state = RuntimeState::new(settings, None);
+        let mut inner = state.0.lock().unwrap();
+        inner.recording_desired = true;
+        let discovered = discovered_steam_game(42);
+        RuntimeState::plan_detection_transition(&mut inner, Some(discovered.clone()), None)
+            .unwrap();
+        let mut custom = discovered;
+        custom.identity = crate::game_identity::GameIdentity::custom("custom-steam-427520");
+
+        let (prepared, emit, _) =
+            RuntimeState::plan_detection_transition(&mut inner, Some(custom), None).unwrap();
+        assert!(prepared.is_none());
+        assert!(emit);
+    }
+
+    #[test]
+    fn always_add_target_requires_the_same_live_steam_process() {
+        let active = discovered_steam_game(42);
+
+        assert!(discovered_steam_target_matches(&active, 42, "Friendslop.exe"));
+        assert!(!discovered_steam_target_matches(&active, 43, "Friendslop.exe"));
+        assert!(!discovered_steam_target_matches(&active, 42, "Other.exe"));
+        assert!(!discovered_steam_target_matches(
+            &detected_game("custom", "Friendslop", 42),
+            42,
+            "Friendslop.exe",
+        ));
+    }
+
+    #[test]
+    fn always_add_builds_a_linked_rule_and_dedupes_by_path() {
+        let active = discovered_steam_game(42);
+        let game = custom_game_from_discovered_steam(&active).expect("Steam rule");
+        assert_eq!(game.id, "custom-steam-427520");
+        assert_eq!(game.legacy_ids, ["steam-427520"]);
+        assert!(game.icon.is_none(), "icon extraction happens after the runtime lock");
+
+        let mut settings = AppSettings::default();
+        let first = insert_discovered_steam_custom_game(&mut settings, game.clone());
+        assert!(first.added);
+        assert_eq!(first.game, game);
+
+        let duplicate = insert_discovered_steam_custom_game(&mut settings, game);
+        assert!(!duplicate.added);
+        assert_eq!(settings.games.custom_games.len(), 1);
     }
 
     #[test]
