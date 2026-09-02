@@ -4704,6 +4704,77 @@ fn games_ui_wires_detection_commands() {
 }
 
 #[test]
+fn steam_launch_detection_wires_settings_checkbox_and_always_add() {
+    let html = index_html();
+    for required in [
+        "id=\"set-games-auto-detect-steam\"",
+        "data-settings-key=\"games.auto_detect_steam_launches\"",
+    ] {
+        assert!(
+            html.contains(required),
+            "games settings are missing required control {required}"
+        );
+    }
+
+    let settings = read_ui_js("settings.js");
+    assert!(
+        settings.contains("auto_detect_steam_launches: true"),
+        "default game settings must opt into Steam launch detection"
+    );
+    assert!(settings.contains("auto_detect_steam_launches: $(\"set-games-auto-detect-steam\").checked"));
+
+    let main = main_js();
+    for required in [
+        "\"set-games-auto-detect-steam\"",
+        "discovered_steam",
+        "invoke(\"add_discovered_steam_game\"",
+        "setDeckStatusAction(\"Always add\"",
+        "discoveredSteamToastKeys",
+        "processId: event.process_id",
+        "exeName: event.exe_name",
+        "target: {",
+        "refreshCustomGamesFromBackend()",
+        "clearDiscoveredSteamOffer()",
+    ] {
+        assert!(
+            main.contains(required),
+            "game detection UI is missing required wiring {required}"
+        );
+    }
+
+    assert!(
+        settings.contains("refreshCustomGamesFromBackend"),
+        "settings.js must expose refreshCustomGamesFromBackend"
+    );
+    assert!(
+        settings.contains("settingsIndicatorBaseline"),
+        "settings.js must update baseline when refreshing custom games"
+    );
+}
+
+#[test]
+fn settings_html_never_repeats_an_element_id() {
+    let html = index_html();
+    let mut ids: Vec<&str> = Vec::new();
+    let mut rest = html.as_str();
+    while let Some(start) = rest.find("id=\"") {
+        rest = &rest[start + 4..];
+        let end = rest.find('"').expect("unterminated id attribute");
+        ids.push(&rest[..end]);
+        rest = &rest[end..];
+    }
+    assert!(!ids.is_empty(), "id scan must find elements");
+    let mut sorted = ids.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(
+        ids.len(),
+        sorted.len(),
+        "duplicate element ids in index.html"
+    );
+}
+
+#[test]
 fn deck_status_success_toasts_auto_clear() {
     let js = main_js();
 

@@ -103,6 +103,52 @@ listen("ffmpeg-install", (event) => {
   applyFfmpegInstallSnapshot(event.payload);
 });
 
+var discoveredSteamToastKeys = new Set();
+var discoveredSteamOffer = null;
+
+function clearDiscoveredSteamOffer() {
+  const offer = discoveredSteamOffer;
+  discoveredSteamOffer = null;
+  if (!offer) return;
+  if ($("deck-status").textContent === offer.status) setDeckStatus("");
+  else setDeckStatusAction("", null);
+}
+
+// First `discovered_steam` event for a game in this UI session: show the
+// recording toast plus a one-shot Always add action. Rule building stays on
+// the backend command; the frontend never reconstructs it from exe_name.
+function maybeOfferDiscoveredSteamAlwaysAdd(event) {
+  if (!event?.active || !event.discovered_steam) {
+    clearDiscoveredSteamOffer();
+    return;
+  }
+  const key = String(event.exe_name || event.name || "").toLowerCase();
+  if (!key || discoveredSteamToastKeys.has(key)) return;
+  discoveredSteamToastKeys.add(key);
+  const name = event.name || event.exe_name || "Steam game";
+  const status = "Recording " + name;
+  discoveredSteamOffer = { key, status };
+  setDeckStatus(status);
+  setDeckStatusAction("Always add", async () => {
+    discoveredSteamOffer = null;
+    try {
+      const added = await invoke("add_discovered_steam_game", {
+        target: {
+          processId: event.process_id,
+          exeName: event.exe_name,
+        },
+      });
+      await refreshCustomGamesFromBackend();
+      setNotice(
+        added ? "Added " + name + " to Custom games" : name + " is already a custom game",
+        { transient: true }
+      );
+    } catch (error) {
+      $("error").textContent = String(error);
+    }
+  });
+}
+
 listen("encoders-changed", (event) => {
   videoEncoders = Array.isArray(event.payload) ? event.payload : [];
   videoEncodersLoaded = true;
@@ -111,6 +157,9 @@ listen("encoders-changed", (event) => {
 });
 
 listen("game-detection", (e) => {
+  if (!e.payload?.active || !e.payload?.discovered_steam) {
+    clearDiscoveredSteamOffer();
+  }
   activeDetectedGame = e.payload || null;
   if (activeDetectedGame?.active) {
     if (captureForegroundWork()) loadGamePlugins();
@@ -119,6 +168,7 @@ listen("game-detection", (e) => {
   updateCaptureStatus();
   updateGameDetectionStatus();
   maybeWarnElevatedGame(activeDetectedGame);
+  maybeOfferDiscoveredSteamAlwaysAdd(activeDetectedGame);
 });
 
 listen("cloud-upload-progress", (e) => {
@@ -286,7 +336,7 @@ $("cloud-host-url").addEventListener("input", syncCloudHttpWarning);
 $("cloud-host-url").addEventListener("change", syncCloudHttpWarning);
 $("cloud-connect").addEventListener("click", connectCloud);
 $("cloud-disconnect").addEventListener("click", disconnectCloud);
-for (const id of ["set-games-auto-detect", "set-games-pause-when-empty"]) {
+for (const id of ["set-games-auto-detect", "set-games-auto-detect-steam", "set-games-pause-when-empty"]) {
   $(id).addEventListener("change", updateGameDetectionStatus);
 }
 for (const id of [

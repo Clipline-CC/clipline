@@ -153,6 +153,8 @@ pub struct GameSettings {
     pub auto_detect: bool,
     #[serde(default = "default_disabled")]
     pub pause_when_no_game: bool,
+    #[serde(default = "default_enabled")]
+    pub auto_detect_steam_launches: bool,
     #[serde(default)]
     pub plugins: BTreeMap<String, GamePluginSettings>,
     #[serde(default)]
@@ -165,6 +167,8 @@ struct GameSettingsWire {
     auto_detect: bool,
     #[serde(default = "default_disabled")]
     pause_when_no_game: bool,
+    #[serde(default = "default_enabled")]
+    auto_detect_steam_launches: bool,
     #[serde(default)]
     plugins: BTreeMap<String, GamePluginSettings>,
     #[serde(default, rename = "recording_mode")]
@@ -178,6 +182,7 @@ impl Default for GameSettings {
         Self {
             auto_detect: true,
             pause_when_no_game: false,
+            auto_detect_steam_launches: true,
             plugins: BTreeMap::new(),
             custom_games: Vec::new(),
         }
@@ -198,6 +203,7 @@ impl<'de> Deserialize<'de> for GameSettings {
         Ok(Self {
             auto_detect: wire.auto_detect,
             pause_when_no_game: wire.pause_when_no_game,
+            auto_detect_steam_launches: wire.auto_detect_steam_launches,
             plugins: wire.plugins,
             custom_games: wire.custom_games,
         })

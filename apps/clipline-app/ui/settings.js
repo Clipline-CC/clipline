@@ -233,6 +233,7 @@ function fillSettings(s) {
   renderCaptureTargetSelect();
   $("set-games-auto-detect").checked = !!games.auto_detect;
   $("set-games-pause-when-empty").checked = !!games.pause_when_no_game;
+  $("set-games-auto-detect-steam").checked = !!games.auto_detect_steam_launches;
   $("set-output-enabled").checked = !!audio.output_enabled;
   $("set-audio-split-output").checked = audio.split_output_by_process === true;
   $("set-output-volume").value = String(Number.isFinite(audio.output_volume) ? audio.output_volume : 1);
@@ -297,6 +298,33 @@ function fillSettings(s) {
   resetSettingsBaselineFromForm();
 }
 
+async function refreshCustomGamesFromBackend() {
+  const settings = await invoke("get_settings");
+  const games = (settings?.games?.custom_games || []).map(normalizeCustomGame);
+  customGames = games;
+  const savedGames = games.map((game) => ({ ...game }));
+  if (currentSettings) {
+    currentSettings = {
+      ...currentSettings,
+      games: { ...currentSettings.games, custom_games: savedGames.map((game) => ({ ...game })) },
+    };
+  }
+  if (settingsDraft) {
+    settingsDraft = {
+      ...settingsDraft,
+      games: { ...settingsDraft.games, custom_games: savedGames.map((game) => ({ ...game })) },
+    };
+  }
+  if (settingsIndicatorBaseline) {
+    settingsIndicatorBaseline = {
+      ...settingsIndicatorBaseline,
+      games: { ...settingsIndicatorBaseline.games, custom_games: savedGames.map((game) => ({ ...game })) },
+    };
+  }
+  renderCustomGames();
+  syncSettingsDirtyState();
+}
+
 function readSettings() {
   const replay = Number($("set-replay").value);
   const capture = selectedCaptureSettings();
@@ -315,6 +343,7 @@ function readSettings() {
     games: {
       auto_detect: $("set-games-auto-detect").checked,
       pause_when_no_game: $("set-games-pause-when-empty").checked,
+      auto_detect_steam_launches: $("set-games-auto-detect-steam").checked,
       plugins: readGamePluginSettings(),
       custom_games: customGames.map((game) => ({ ...game })),
     },
@@ -468,6 +497,7 @@ function defaultGameSettings() {
   return {
     auto_detect: true,
     pause_when_no_game: false,
+    auto_detect_steam_launches: true,
     plugins: {},
     custom_games: [],
   };
