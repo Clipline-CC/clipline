@@ -19,9 +19,17 @@ const APP_UI_JS: &[&str] = &[
     "support-core.js",
     "app-core.js",
     "settings.js",
+    "settings-capture.js",
+    "settings-ffmpeg-games.js",
+    "settings-game-plugins.js",
     "library.js",
+    "library-cards.js",
+    "library-gallery.js",
+    "library-rails.js",
     "cloud.js",
     "review-player.js",
+    "review-clips.js",
+    "review-timeline.js",
     "support.js",
     "first-run.js",
     "main.js",
@@ -35,7 +43,7 @@ fn read_ui_js(name: &str) -> String {
 #[test]
 fn legacy_buffer_setting_mirrors_the_replay_window() {
     let html = index_html();
-    let settings = read_ui_js("settings.js");
+    let settings = settings_js();
 
     assert!(
         html.contains("<input id=\"set-buffer\" type=\"hidden\" value=\"60\" />"),
@@ -60,7 +68,7 @@ fn legacy_buffer_setting_mirrors_the_replay_window() {
 #[test]
 fn purple_theme_is_selectable_and_covers_the_theme_palette() {
     let html = index_html();
-    let settings = read_ui_js("settings.js");
+    let settings = settings_js();
     let css = styles_css();
     let classic = css_rule_body(&css, ":root[data-theme=\"classic\"]");
     let purple = css_rule_body(&css, ":root[data-theme=\"purple\"]");
@@ -378,19 +386,65 @@ fn js_function_body<'a>(source: &'a str, name: &str) -> &'a str {
     panic!("unterminated JavaScript function body for {name}");
 }
 
+fn settings_js() -> String {
+    ["settings.js", "settings-capture.js", "settings-ffmpeg-games.js", "settings-game-plugins.js"]
+        .iter()
+        .map(|name| read_ui_js(name))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn library_js() -> String {
+    ["library.js", "library-cards.js", "library-gallery.js", "library-rails.js"]
+        .iter()
+        .map(|name| read_ui_js(name))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn review_js() -> String {
+    ["review-player.js", "review-clips.js", "review-timeline.js"]
+        .iter()
+        .map(|name| read_ui_js(name))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn read_src_tree(roots: &[&str]) -> String {
+    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut out = String::new();
+    for root in roots {
+        let path = base.join(root);
+        if path.is_file() {
+            out.push_str(&fs::read_to_string(&path).unwrap_or_else(|err| panic!("read src/{root}: {err}")));
+            out.push('\n');
+            continue;
+        }
+        let mut entries: Vec<_> = fs::read_dir(&path)
+            .unwrap_or_else(|err| panic!("read src/{root}: {err}"))
+            .map(|entry| entry.expect("dir entry").path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
+            .collect();
+        entries.sort();
+        for path in entries {
+            out.push_str(&fs::read_to_string(&path).unwrap_or_else(|err| panic!("read {}: {err}", path.display())));
+            out.push('\n');
+        }
+    }
+    out
+}
+
 fn app_rs() -> String {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app.rs");
-    fs::read_to_string(path).expect("read src/app.rs")
+    read_src_tree(&["app.rs", "app"])
+}
+
+fn service_rs() -> String {
+    read_src_tree(&["service.rs", "service"])
 }
 
 fn main_rs() -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs");
     fs::read_to_string(path).expect("read src/main.rs")
-}
-
-fn service_rs() -> String {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/service.rs");
-    fs::read_to_string(path).expect("read src/service.rs")
 }
 
 fn tauri_config() -> String {
@@ -462,8 +516,8 @@ fn renderer_capabilities_match_observed_window_operations() {
 #[test]
 fn cloud_pages_and_marker_art_cross_narrow_renderer_boundaries() {
     let cloud = read_ui_js("cloud.js");
-    let review = read_ui_js("review-player.js");
-    let library = read_ui_js("library.js");
+    let review = review_js();
+    let library = library_js();
 
     assert!(
         cloud.contains("await invoke(\"open_cloud_clip\", { remoteClipId: entry.remote_clip_id })")
@@ -953,8 +1007,7 @@ fn quality_of_life_features_are_wired_through_the_app_shell() {
 }
 
 fn library_rs() -> String {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/library.rs");
-    fs::read_to_string(path).expect("read src/library.rs")
+    read_src_tree(&["library.rs", "library"])
 }
 
 fn library_groups_rs() -> String {
@@ -963,8 +1016,7 @@ fn library_groups_rs() -> String {
 }
 
 fn cloud_rs() -> String {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/cloud.rs");
-    fs::read_to_string(path).expect("read src/cloud.rs")
+    read_src_tree(&["cloud.rs", "cloud", "cloud_upload.rs", "cloud_upload"])
 }
 
 fn tag_attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
@@ -1034,7 +1086,7 @@ fn audio_sidecar_command_is_the_only_review_audio_generation_contract() {
 fn legacy_audio_preview_code_is_absent() {
     let library = library_rs();
     let app = app_rs();
-    let review = read_ui_js("review-player.js");
+    let review = review_js();
     for legacy in [
         "pub struct AudioPreviewRequest",
         "pub protected_preview_path: Option<String>",
@@ -1053,13 +1105,17 @@ fn legacy_audio_preview_code_is_absent() {
     }
     assert!(!app.contains("crate::library::preview_clip_audio_tracks"));
     assert!(!review.contains("invoke(\"preview_clip_audio_tracks\""));
-    assert!(!library.contains("amix=inputs="));
+    let sidecars = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/library/audio_sidecars.rs"),
+    )
+    .expect("read src/library/audio_sidecars.rs");
+    assert!(!sidecars.contains("amix=inputs="));
     assert!(library.contains("remux_with_mixed_audio_track"));
 }
 
 #[test]
 fn league_game_type_recording_gate_controls_are_persisted_and_wired() {
-    let settings = read_ui_js("settings.js");
+    let settings = settings_js();
     let general_tab = js_function_body(&settings, "renderGamePluginSettingsGeneralTab");
     let settings_module = fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src/settings/league.rs"),
@@ -1665,7 +1721,7 @@ fn review_player_owns_all_controls() {
             && !main_js().contains("is_timeline_marker"),
         "supported games must expose persisted League match detail controls in the settings dialog"
     );
-    let settings = read_ui_js("settings.js");
+    let settings = settings_js();
     let render_games = js_function_body(&settings, "renderGamePlugins");    assert!(
         render_games.contains("empty.textContent = \"no supported games available\"")
             && !render_games.contains("not installed")
@@ -1935,7 +1991,7 @@ fn renderer_filesystem_authority_is_exact_and_backend_owned() {
     let app = app_rs();
     let cloud = cloud_rs();
     let library = library_rs();
-    let settings_js = read_ui_js("settings.js");
+    let settings_js = settings_js();
     let config_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json");
     let config: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(config_path).unwrap()).unwrap();
@@ -1962,8 +2018,8 @@ fn renderer_filesystem_authority_is_exact_and_backend_owned() {
 #[test]
 fn local_library_refresh_rejects_stale_snapshots_and_reports_event_errors() {
     let app_core = read_ui_js("app-core.js");
-    let library = read_ui_js("library.js");
-    let review = read_ui_js("review-player.js");
+    let library = library_js();
+    let review = review_js();
     let main = read_ui_js("main.js");
     let refresh_clips = js_function_body(&library, "refreshClips");
 
@@ -2030,7 +2086,7 @@ fn local_library_refresh_rejects_stale_snapshots_and_reports_event_errors() {
 
 #[test]
 fn cloud_upload_completion_preserves_equivalent_paths_and_reports_local_deletion() {
-    let library = read_ui_js("library.js");
+    let library = library_js();
     let cloud = read_ui_js("cloud.js");
     let native_library = library_rs();
     let app = app_rs();
@@ -2058,7 +2114,7 @@ fn cloud_upload_completion_preserves_equivalent_paths_and_reports_local_deletion
         !refresh_clips.contains("clip.path === currentPath"),
         "active clip reconciliation must not use raw path-string equality"
     );
-    let review = read_ui_js("review-player.js");
+    let review = review_js();
     let apply_deletion = js_function_body(&review, "applyDeletion");
     assert!(
         apply_deletion.contains("GalleryWindowCore.clipPathKey")
@@ -2114,7 +2170,7 @@ fn cloud_upload_completion_preserves_equivalent_paths_and_reports_local_deletion
 
 #[test]
 fn local_library_cards_show_cloud_upload_activity() {
-    let library = read_ui_js("library.js");
+    let library = library_js();
     let css = styles_css();
     let card = js_function_body(&library, "clipCard");
 
@@ -2502,7 +2558,7 @@ fn library_refresh_canonicalizes_the_media_root_once_before_scoping_clips() {
         .find("pub async fn list_clips<R: Runtime>")
         .expect("list_clips command");
     let list_end = library[list_start..]
-        .find("\nfn list_clips_from_dir")
+        .find("\npub(crate) fn list_clips_from_dir")
         .map(|offset| list_start + offset)
         .expect("list_clips helper follows command");
     let list = &library[list_start..list_end];
@@ -2920,7 +2976,7 @@ fn rail_shows_connected_cloud_identity() {
 fn opening_multitrack_clip_starts_direct_and_prepares_default_sidecars() {
     let app_core = read_ui_js("app-core.js");
     let reset_selection = js_function_body(&app_core, "resetSelectedAudioTracks");
-    let review = read_ui_js("review-player.js");
+    let review = review_js();
     let open_clip = js_function_body(&review, "openClip");
 
     assert!(reset_selection.contains("defaultAudioTrackIds(clip)"));
@@ -2943,7 +2999,7 @@ fn opening_multitrack_clip_starts_direct_and_prepares_default_sidecars() {
 
 #[test]
 fn review_header_meta_shows_file_name_not_folder_path() {
-    let review = read_ui_js("review-player.js");
+    let review = review_js();
     let main = read_ui_js("main.js");
 
     let mut pmeta_assignments: Vec<String> = Vec::new();
@@ -2993,7 +3049,7 @@ fn review_audio_pruning_preserves_fallback_and_muted_selection() {
 
 #[test]
 fn review_player_applies_logical_seek_only_for_current_metadata() {
-    let review = read_ui_js("review-player.js");
+    let review = review_js();
     let assign = js_function_body(&review, "assignReviewVideoSource");
     let clear_error_handler = js_function_body(&review, "clearReviewSourceErrorHandler");
     let release = js_function_body(&review, "releaseReviewVideoSource");
@@ -3055,7 +3111,7 @@ fn audio_sidecar_preparation_consumes_validated_hits_once() {
 
 #[test]
 fn explicit_audio_preview_uses_one_pure_coalescing_queue() {
-    let review = read_ui_js("review-player.js");
+    let review = review_js();
     assert!(review.contains("var audioPreviewQueue = PlayerCore.emptyAudioPreviewQueue();"));
     assert!(review.contains("PlayerCore.queueAudioPreviewRequest("));
     assert!(review.contains("PlayerCore.finishAudioPreviewRequest("));
@@ -3074,7 +3130,7 @@ fn explicit_audio_preview_uses_one_pure_coalescing_queue() {
 #[test]
 fn audio_sidecar_transport_prepares_and_releases_hidden_media() {
     let app_core = read_ui_js("app-core.js");
-    let review = read_ui_js("review-player.js");
+    let review = review_js();
     for state in [
         "var reviewAudioMode = \"direct\";",
         "var reviewAudioMuted = false;",
@@ -3109,7 +3165,7 @@ fn audio_sidecar_transport_prepares_and_releases_hidden_media() {
 
 #[test]
 fn audio_sidecar_transport_follows_only_the_video_clock() {
-    let review = read_ui_js("review-player.js");
+    let review = review_js();
     let main = read_ui_js("main.js");
     let sync = js_function_body(&review, "syncReviewAudioSidecarSet");
     assert!(sync.contains("PlayerCore.audioSidecarSyncDecision("));
@@ -3148,7 +3204,7 @@ fn audio_sidecar_transport_follows_only_the_video_clock() {
 
 #[test]
 fn audio_sidecar_transport_owns_logical_mute_volume_and_lifecycle() {
-    let review = read_ui_js("review-player.js");
+    let review = review_js();
     let main = read_ui_js("main.js");
     let output = js_function_body(&review, "applyReviewAudioOutput");
     assert!(output.contains("PlayerCore.reviewAudioOutputDecision("));
@@ -3181,7 +3237,7 @@ fn audio_sidecar_transport_owns_logical_mute_volume_and_lifecycle() {
 
 #[test]
 fn preview_failure_keeps_source_and_reverts_controls_to_audible_selection() {
-    let review = read_ui_js("review-player.js");
+    let review = review_js();
     let restore = js_function_body(&review, "restoreAudibleAudioSelection");
     assert!(restore.contains("selectedAudioTrackIds = new Set(currentReviewAudioTrackIds);"));
     assert!(restore.contains("renderAudioTrackPanel();"));
@@ -3191,7 +3247,7 @@ fn preview_failure_keeps_source_and_reverts_controls_to_audible_selection() {
 
 #[test]
 fn valid_sidecar_activation_reads_latest_player_state_without_swapping_video() {
-    let review = read_ui_js("review-player.js");
+    let review = review_js();
     let run = js_function_body(&review, "runAudioPreviewRequest");
     let await_preview = run
         .find("await invoke(\"prepare_clip_audio_sidecars\"")
@@ -3224,7 +3280,7 @@ fn valid_sidecar_activation_reads_latest_player_state_without_swapping_video() {
 
 #[test]
 fn audio_sidecar_activation_is_generation_gated_and_disposes_stale_sets() {
-    let review = read_ui_js("review-player.js");
+    let review = review_js();
     let run = js_function_body(&review, "runAudioPreviewRequest");
     assert!(run.contains("previewRequestStillCurrent(request)"));
     assert!(run.contains("PlayerCore.finishAudioPreviewRequest("));
@@ -3246,7 +3302,7 @@ fn audio_sidecar_activation_is_generation_gated_and_disposes_stale_sets() {
 
 #[test]
 fn direct_and_muted_audio_selections_clear_sidecars_without_changing_video_source() {
-    let review = read_ui_js("review-player.js");
+    let review = review_js();
     let request = js_function_body(&review, "requestSelectedAudioPreview");
     assert!(request.contains("if (selected.length === 0)"));
     assert!(request.contains("clearReviewAudioSidecars(\"muted\");"));
@@ -3258,7 +3314,7 @@ fn direct_and_muted_audio_selections_clear_sidecars_without_changing_video_sourc
 
 #[test]
 fn returning_to_fallback_invalidates_an_inflight_audio_preview() {
-    let review = read_ui_js("review-player.js");
+    let review = review_js();
     let request = js_function_body(&review, "requestSelectedAudioPreview");
     let needs_preview = request
         .find("if (!PlayerCore.reviewSelectionNeedsPreview(tracks, selected)) {")
@@ -3275,7 +3331,7 @@ fn returning_to_fallback_invalidates_an_inflight_audio_preview() {
 
 #[test]
 fn timeline_and_media_events_render_the_logical_playhead() {
-    let review = read_ui_js("review-player.js");
+    let review = review_js();
     let main = read_ui_js("main.js");
     assert!(js_function_body(&review, "paintTimeline").contains("reviewPlayheadTime()"));
     assert!(js_function_body(&review, "paintOverview").contains("reviewPlayheadTime()"));
@@ -3285,7 +3341,7 @@ fn timeline_and_media_events_render_the_logical_playhead() {
 
 #[test]
 fn opening_a_clip_clears_only_the_previous_clips_seek_state() {
-    let review = read_ui_js("review-player.js");
+    let review = review_js();
     let open_clip = js_function_body(&review, "openClip");
     assert!(open_clip.contains("reviewSeekState = PlayerCore.createLogicalSeekState();"));
     assert!(open_clip.contains("assignReviewVideoSource(clip.path, { resumeTime: 0 })"));
@@ -3293,7 +3349,7 @@ fn opening_a_clip_clears_only_the_previous_clips_seek_state() {
 
 #[test]
 fn every_review_video_source_mutation_uses_generation_helpers() {
-    let review = read_ui_js("review-player.js");
+    let review = review_js();
     assert_eq!(
         review.matches("video.src = convertFileSrc(path);").count(),
         1
@@ -3413,11 +3469,11 @@ fn tray_left_click_opens_the_app_instead_of_the_menu() {
 #[test]
 fn lifecycle_guards_refreshes_posters_and_cloud_media_completions() {
     let app_core = read_ui_js("app-core.js");
-    let library = read_ui_js("library.js");
+    let library = library_js();
     let cloud = read_ui_js("cloud.js");
     let main = read_ui_js("main.js");
-    let settings = read_ui_js("settings.js");
-    let review = read_ui_js("review-player.js");
+    let settings = settings_js();
+    let review = review_js();
 
     assert!(
         app_core.contains("WindowLifecycleCore.requestRefresh(windowLifecycleState)")
@@ -4049,10 +4105,10 @@ fn shell_shows_live_memory_usage() {
         "memory polling must pause while hidden and refresh when visible again"
     );
     let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let app = fs::read_to_string(source_root.join("app.rs")).expect("read app.rs");
+    let webview = fs::read_to_string(source_root.join("app/webview.rs")).expect("read app/webview.rs");
     assert!(
-        app.contains("async fn memory_status(")
-            && app.contains("State<'_, crate::memory::MemorySampler>"),
+        webview.contains("async fn memory_status(")
+            && webview.contains("State<'_, crate::memory::MemorySampler>"),
         "memory_status must use the managed asynchronous sampler"
     );
     let memory = fs::read_to_string(source_root.join("memory.rs")).expect("read memory.rs");
@@ -4104,7 +4160,7 @@ fn gallery_header_shows_library_storage_usage() {
 #[test]
 fn gallery_renders_one_bounded_page_for_local_and_cloud_sources() {
     let html = index_html();
-    let library = read_ui_js("library.js");
+    let library = library_js();
     let app_core = read_ui_js("app-core.js");
     let css = styles_css();
 
@@ -4171,7 +4227,7 @@ fn gallery_renders_one_bounded_page_for_local_and_cloud_sources() {
 
 #[test]
 fn gallery_releases_off_page_images_and_bounds_poster_state() {
-    let library = read_ui_js("library.js");
+    let library = library_js();
     let cloud = read_ui_js("cloud.js");
 
     let release = js_function_body(&library, "releaseGalleryRoot");
@@ -4395,8 +4451,8 @@ fn signed_out_users_do_not_see_cloud_action_chrome() {
     let html = index_html();
     let css = styles_css();
     let cloud = read_ui_js("cloud.js");
-    let library = read_ui_js("library.js");
-    let review = read_ui_js("review-player.js");
+    let library = library_js();
+    let review = review_js();
     let main = read_ui_js("main.js");
 
     let tabs_start = html
@@ -4749,8 +4805,10 @@ fn deck_status_success_toasts_auto_clear() {
 
 #[test]
 fn ffmpeg_capability_cache_is_replaceable_after_managed_install() {
-    let service = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/service.rs"))
-        .expect("read service.rs");
+    let service = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/service/encoders.rs"),
+    )
+    .expect("read service/encoders.rs");
     let install =
         fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ffmpeg_install.rs"))
             .expect("read ffmpeg_install.rs");
@@ -4818,9 +4876,9 @@ fn ffmpeg_install_commands_are_native_and_queryable() {
 fn ffmpeg_install_is_reachable_from_settings_and_blocked_library_actions() {
     let html = index_html();
     let main = main_js();
-    let settings = read_ui_js("settings.js");
-    let library = read_ui_js("library.js");
-    let review = read_ui_js("review-player.js");
+    let settings = settings_js();
+    let library = library_js();
+    let review = review_js();
 
     for required in [
         "id=\"ffmpeg-runtime-status\"",
@@ -5099,7 +5157,7 @@ fn ui_is_split_into_markup_styles_and_logic() {
     );
 
     let presentation = read_ui_js("presentation-core.js");
-    let library = read_ui_js("library.js");
+    let library = library_js();
     let cloud = read_ui_js("cloud.js");
     let player = player_core_js();
     assert!(presentation.contains("const clipNameStem ="));
@@ -5131,7 +5189,7 @@ fn first_run_setup_covers_approved_defaults_and_save_flow() {
     let html = index_html();
     let css = styles_css();
     let wizard = read_ui_js("first-run.js");
-    let settings = read_ui_js("settings.js");
+    let settings = settings_js();
     let main = read_ui_js("main.js");
     let app = app_rs();
 
@@ -5875,7 +5933,11 @@ fn groups_are_created_from_trim_and_managed_in_the_library() {
             && js_function_body(&js, "metadataPanelPolicy").contains("activeGroupName"),
         "group chrome belongs in the existing review policy layer"
     );
-    let compilation_runner = groups
+    let compilation = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/library/compilation.rs"),
+    )
+    .expect("read src/library/compilation.rs");
+    let compilation_runner = compilation
         .split("fn run_compilation_ffmpeg")
         .nth(1)
         .and_then(|rest| rest.split("fn ffmpeg_compilation_args").next())
@@ -5907,7 +5969,7 @@ fn groups_are_created_from_trim_and_managed_in_the_library() {
 
 #[test]
 fn returning_to_no_preview_selection_clears_stale_audio_status() {
-    let review = read_ui_js("review-player.js");
+    let review = review_js();
     let request = js_function_body(&review, "requestSelectedAudioPreview");
     // The no-preview branch sits between the reviewSelectionNeedsPreview guard and the
     // selectionKey == currentReviewAudioKey early-exit that follows it.
@@ -6241,7 +6303,7 @@ fn quota_full_is_a_durable_recording_lock_with_optional_auto_delete() {
     let main = main_js();
     let main_file = read_ui_js("main.js");
     let app_core = read_ui_js("app-core.js");
-    let settings = read_ui_js("settings.js");
+    let settings = settings_js();
 
     for required in [
         r#"id="storage-quota-dialog""#,
@@ -6287,7 +6349,7 @@ fn league_game_type_metadata_filters_the_local_library() {
     let html = index_html();
     let main = read_ui_js("main.js");
     let app_core = read_ui_js("app-core.js");
-    let library = read_ui_js("library.js");
+    let library = library_js();
     let search = read_ui_js("gallery-search-core.js");
 
     assert!(
@@ -6327,8 +6389,8 @@ fn league_game_type_metadata_filters_the_local_library() {
 #[test]
 fn favorites_are_guarded_across_review_gallery_and_context_menu() {
     let html = index_html();
-    let library = read_ui_js("library.js");
-    let review = read_ui_js("review-player.js");
+    let library = library_js();
+    let review = review_js();
     let main = read_ui_js("main.js");
 
     assert!(

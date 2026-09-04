@@ -10,6 +10,28 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
+/// Concatenated production sources for a split module: facade file + sibling dir.
+fn read_source_tree(root: &Path, facade: &str, dir: &str) -> String {
+    let base = root.join("apps/clipline-app/src");
+    let mut out = String::new();
+    out.push_str(&fs::read_to_string(base.join(facade)).unwrap_or_else(|err| panic!("read {facade}: {err}")));
+    out.push('\n');
+    let dir_path = base.join(dir);
+    if dir_path.is_dir() {
+        let mut entries: Vec<_> = fs::read_dir(&dir_path)
+            .unwrap_or_else(|err| panic!("read {dir}: {err}"))
+            .map(|entry| entry.expect("dir entry").path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
+            .collect();
+        entries.sort();
+        for path in entries {
+            out.push_str(&fs::read_to_string(&path).unwrap_or_else(|err| panic!("read {}: {err}", path.display())));
+            out.push('\n');
+        }
+    }
+    out
+}
+
 fn unix_day_for_iso_date(value: &str) -> i64 {
     let mut parts = value.split('-');
     let mut year: i64 = parts
@@ -124,18 +146,29 @@ fn unsafe_application_platform_helpers_live_under_the_windows_module() {
 #[test]
 fn capture_diagnostics_and_snapshot_names_match_production_behavior() {
     let root = workspace_root();
-    let wasapi_path = root.join("crates/clipline-capture/src/windows/wasapi.rs");
-    let ffmpeg_path = root.join("crates/clipline-capture/src/ffmpeg_encoder.rs");
-    let wasapi = fs::read_to_string(&wasapi_path).expect("read WASAPI source");
-    let ffmpeg = fs::read_to_string(&ffmpeg_path).expect("read FFmpeg encoder source");
-    let wasapi_production = wasapi
-        .rsplit_once("#[cfg(test)]\nmod tests")
-        .expect("WASAPI unit-test boundary")
-        .0;
-    let ffmpeg_production = ffmpeg
-        .split_once("#[cfg(test)]\nmod tests")
-        .expect("FFmpeg unit-test boundary")
-        .0;
+    // Split modules: concatenate facade + child dir, then strip `mod tests` bodies per file.
+    fn production_tree(root: &Path, facade: &str, dir: &str) -> String {
+        let mut out = String::new();
+        for path in std::iter::once(root.join(facade)).chain({
+            let mut entries: Vec<_> = fs::read_dir(root.join(dir))
+                .unwrap_or_else(|err| panic!("read {dir}: {err}"))
+                .map(|entry| entry.expect("dir entry").path())
+                .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
+                .collect();
+            entries.sort();
+            entries.into_iter()
+        }) {
+            let source = fs::read_to_string(&path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+            // Cut everything from the first `mod tests {` in each file (test bodies only trail).
+            let production = source.split_once("mod tests {").map(|(head, _)| head).unwrap_or(&source);
+            out.push_str(production);
+            out.push('\n');
+        }
+        out
+    }
+    let capture = root.join("crates/clipline-capture/src");
+    let wasapi_production = production_tree(&capture, "windows/wasapi.rs", "windows/wasapi");
+    let ffmpeg_production = production_tree(&capture, "ffmpeg_encoder.rs", "ffmpeg_encoder");
 
     let snapshot = wasapi_production
         .split_once("struct ProcessSnapshotEntry")
@@ -159,12 +192,12 @@ fn capture_diagnostics_and_snapshot_names_match_production_behavior() {
         "production FFmpeg reader diagnostics must not print ad hoc"
     );
 
-    let app =
-        fs::read_to_string(root.join("apps/clipline-app/src/app.rs")).expect("read app source");
-    let install = app
+    let setup =
+        fs::read_to_string(root.join("apps/clipline-app/src/app/setup.rs")).expect("read app setup");
+    let install = setup
         .find("install_diagnostic_handler(|event|")
         .expect("capture diagnostic handler installation");
-    let builder = app.find("tauri::Builder").expect("Tauri builder");
+    let builder = setup.find("tauri::Builder").expect("Tauri builder");
     assert!(
         install < builder,
         "capture diagnostics must be routed before capture services can start"
@@ -609,37 +642,51 @@ fn divergence_prone_paths_keep_single_production_owners() {
         "game discovery must expose real dead-code drift to the compiler"
     );
 
-    let app =
-        fs::read_to_string(root.join("apps/clipline-app/src/app.rs")).expect("read app source");
+    let commands = fs::read_to_string(root.join("apps/clipline-app/src/app/commands.rs"))
+        .expect("read folder-picker owner");
     assert_eq!(
-        app.matches("rfd::FileDialog::new()").count(),
+        commands.matches("rfd::FileDialog::new()").count(),
         1,
         "folder pickers must share one dialog construction path"
     );
+    let app = read_source_tree(&root, "app.rs", "app");
     assert!(app.matches("choose_folder_dialog(").count() >= 3);
 
-    let service = fs::read_to_string(root.join("apps/clipline-app/src/service.rs"))
-        .expect("read service source");
+    let service = read_source_tree(&root, "service.rs", "service");
     assert!(!service.contains("to_string().contains(\"timed out\")"));
     let ffmpeg = fs::read_to_string(root.join("crates/clipline-capture/src/ffmpeg_encoder.rs"))
         .expect("read FFmpeg source");
     assert!(!ffmpeg.contains("let _ = codec"));
-
     let walker = fs::read_to_string(root.join("crates/clipline-mp4/src/walker.rs"))
         .expect("read MP4 walker");
-    let trim = fs::read_to_string(root.join("crates/clipline-mp4/src/trim.rs"))
-        .expect("read MP4 trim source");
+    let mp4 = root.join("crates/clipline-mp4/src");
+    let trim_files: Vec<_> = {
+        let mut entries: Vec<_> = fs::read_dir(mp4.join("trim"))
+            .expect("read trim dir")
+            .map(|entry| entry.expect("dir entry").path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
+            .collect();
+        entries.sort();
+        entries
+    };
+    let mut trim = String::new();
+    for path in &trim_files {
+        let source = fs::read_to_string(path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+        let production = source.split_once("mod tests {").map(|(head, _)| head).unwrap_or(&source);
+        trim.push_str(production);
+        trim.push('\n');
+    }
     assert!(walker.contains("decode_box_header("));
     assert!(trim.matches("decode_box_header(").count() >= 2);
     assert!(!walker.contains("size32 == 1"));
     assert!(!trim.contains("size32 == 1"));
-
-    let writer = fs::read_to_string(root.join("crates/clipline-mp4/src/writer.rs"))
-        .expect("read MP4 writer");
-    let writer_production = writer
-        .split_once("#[cfg(test)]\nmod tests")
-        .expect("writer unit-test boundary")
-        .0;
+    let mut writer_production = String::new();
+    for facade in ["writer/mod.rs", "writer/track_state.rs"] {
+        let source = fs::read_to_string(mp4.join(facade)).unwrap_or_else(|err| panic!("read {facade}: {err}"));
+        let production = source.split_once("mod tests {").map(|(head, _)| head).unwrap_or(&source);
+        writer_production.push_str(production);
+        writer_production.push('\n');
+    }
     assert_eq!(
         writer_production
             .matches("state.record_sample(sample)?;")
