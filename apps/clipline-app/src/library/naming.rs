@@ -1,6 +1,6 @@
 use std::path::Path;
 
-pub(super) fn inferred_clip_kind_for_path(path: &Path) -> &'static str {
+pub(crate) fn inferred_clip_kind_for_path(path: &Path) -> &'static str {
     let name = path
         .file_name()
         .and_then(|value| value.to_str())
@@ -15,7 +15,7 @@ pub(super) fn inferred_clip_kind_for_path(path: &Path) -> &'static str {
     }
 }
 
-pub(super) fn normalized_clip_title(input: &str) -> Result<String, String> {
+pub(crate) fn normalized_clip_title(input: &str) -> Result<String, String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return Err("clip name cannot be empty".into());
@@ -26,7 +26,7 @@ pub(super) fn normalized_clip_title(input: &str) -> Result<String, String> {
     Ok(trimmed.to_string())
 }
 
-pub(super) fn normalized_clip_file_name(input: &str) -> Result<String, String> {
+pub(crate) fn normalized_clip_file_name(input: &str) -> Result<String, String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return Err("clip name cannot be empty".into());
@@ -62,7 +62,7 @@ pub(super) fn normalized_clip_file_name(input: &str) -> Result<String, String> {
     Ok(format!("{stem}.mp4"))
 }
 
-pub(super) fn is_reserved_windows_file_name(stem: &str) -> bool {
+pub(crate) fn is_reserved_windows_file_name(stem: &str) -> bool {
     let base = stem
         .split('.')
         .next()
@@ -73,4 +73,63 @@ pub(super) fn is_reserved_windows_file_name(stem: &str) -> bool {
             && (base.starts_with("COM") || base.starts_with("LPT"))
             && base.as_bytes()[3].is_ascii_digit()
             && base.as_bytes()[3] != b'0')
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn normalized_clip_file_name_adds_mp4_and_preserves_valid_text() {
+        assert_eq!(
+            normalized_clip_file_name("Ranked win").unwrap(),
+            "Ranked win.mp4"
+        );
+        assert_eq!(
+            normalized_clip_file_name("Ranked win.Mp4").unwrap(),
+            "Ranked win.mp4"
+        );
+        assert_eq!(
+            normalized_clip_file_name("solo.queue.vod").unwrap(),
+            "solo.queue.vod.mp4"
+        );
+    }
+    #[test]
+    fn normalized_clip_file_name_rejects_paths_reserved_names_and_invalid_chars() {
+        for name in [
+            "",
+            "..",
+            "folder/clip",
+            r"folder\clip",
+            "bad:name",
+            "clip?",
+            "clip.",
+            "CON",
+            "LPT1.mp4",
+        ] {
+            assert!(
+                normalized_clip_file_name(name).is_err(),
+                "{name:?} should be rejected"
+            );
+        }
+    }
+    #[test]
+    fn inferred_clip_kind_only_matches_generated_filename_patterns() {
+        assert_eq!(
+            inferred_clip_kind_for_path(Path::new("trimming-practice.mp4")),
+            "replay"
+        );
+        assert_eq!(
+            inferred_clip_kind_for_path(Path::new("obsession.mp4")),
+            "replay"
+        );
+        assert_eq!(
+            inferred_clip_kind_for_path(Path::new("clip_1_trim_001000_002000.mp4")),
+            "trim"
+        );
+        assert_eq!(
+            inferred_clip_kind_for_path(Path::new("session_1781377615.mp4")),
+            "session"
+        );
+    }
 }

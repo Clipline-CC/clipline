@@ -4,21 +4,33 @@
 //! WebView must re-query status after recreate. Downloaded bytes are never
 //! executed before allowlist hash verification.
 
-use std::fs::{self, File};
-use std::io::{self, Read, Write};
+#[path = "ffmpeg_install/controller.rs"]
+mod controller;
+#[path = "ffmpeg_install/download.rs"]
+mod download;
+#[path = "ffmpeg_install/status.rs"]
+mod status;
+#[path = "ffmpeg_install/verify.rs"]
+mod verify;
+
+pub use controller::FfmpegInstallController;
+pub use download::{has_sufficient_free_space, managed_root, staging_root};
+pub use status::{build_install_snapshot, committed_manifest, runtime_status_for_dirs};
+pub use verify::{
+    assert_archive_size, install_managed_runtime_from_archive, verify_archive_sha256,
+};
+use download::download_ffmpeg_archive;
+use status::status_snapshot_async;
+
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
 
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use tauri::{Emitter, Manager};
-use zip::ZipArchive;
 
 use crate::ffmpeg_runtime::{
-    free_space_required_bytes, parse_ffmpeg_runtime_manifest, verify_managed_ffmpeg_runtime,
-    FfmpegAllowedFile, FfmpegDiscoveryKind, FfmpegRuntimeManifest, FfmpegRuntimeStatus,
-    ManagedRuntimeInfo, ManagedRuntimeVerifyError,
+    free_space_required_bytes, FfmpegDiscoveryKind, FfmpegRuntimeStatus, ManagedRuntimeInfo,
 };
 
 pub const FFMPEG_RUNTIME_MANIFEST_JSON: &str = include_str!("../ffmpeg-runtime.json");
@@ -74,147 +86,6 @@ impl From<&ManagedRuntimeInfo> for ManagedRuntimeInfoDto {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DownloadAbortReason {
-    Overflow,
-    Cancelled,
-}
-
-#[derive(Debug, Default)]
-struct InstallInner {
-    state: FfmpegInstallState,
-    job_active: bool,
-}
-
-/// Process-global install controller: queryable across UI destroy/recreate.
-pub struct FfmpegInstallController {
-    inner: Mutex<InstallInner>,
-    cancel: AtomicBool,
-}
-
-impl Default for FfmpegInstallController {
-    fn default() -> Self {
-        Self {
-            inner: Mutex::new(InstallInner::default()),
-            cancel: AtomicBool::new(false),
-        }
-    }
-}
-
-impl FfmpegInstallController {
-    pub fn snapshot_state(&self) -> FfmpegInstallState {
-        self.inner
-            .lock()
-            .map(|guard| guard.state.clone())
-            .unwrap_or(FfmpegInstallState::Failed {
-                message: "ffmpeg install state lock poisoned".into(),
-            })
-    }
-
-    pub fn set_state(&self, state: FfmpegInstallState) {
-        if let Ok(mut guard) = self.inner.lock() {
-            guard.state = state;
-        }
-    }
-
-    pub fn request_cancel(&self) -> FfmpegInstallState {
-        let guard = match self.inner.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if guard.job_active && !matches!(guard.state, FfmpegInstallState::Publishing) {
-            self.cancel.store(true, Ordering::Release);
-        }
-        guard.state.clone()
-    }
-
-    #[allow(dead_code)]
-    pub fn clear_cancel(&self) {
-        self.cancel.store(false, Ordering::Release);
-    }
-
-    pub fn is_cancelled(&self) -> bool {
-        self.cancel.load(Ordering::Acquire)
-    }
-
-    /// Atomically cross the last cancellable boundary. Once this succeeds,
-    /// cancellation is ignored until the publish operation completes.
-    pub fn begin_publishing(&self) -> Result<bool, String> {
-        let mut guard = self
-            .inner
-            .lock()
-            .map_err(|_| "ffmpeg install state lock poisoned".to_string())?;
-        if !guard.job_active || self.cancel.load(Ordering::Acquire) {
-            return Ok(false);
-        }
-        guard.state = FfmpegInstallState::Publishing;
-        Ok(true)
-    }
-
-    /// Returns true when this caller should start the job; false when coalesced.
-    pub fn try_begin_job(&self) -> Result<bool, String> {
-        let mut guard = self
-            .inner
-            .lock()
-            .map_err(|_| "ffmpeg install state lock poisoned".to_string())?;
-        if guard.job_active {
-            return Ok(false);
-        }
-        match &guard.state {
-            FfmpegInstallState::Checking
-            | FfmpegInstallState::Downloading { .. }
-            | FfmpegInstallState::Verifying
-            | FfmpegInstallState::Publishing => return Ok(false),
-            FfmpegInstallState::Ready
-            | FfmpegInstallState::Idle
-            | FfmpegInstallState::Failed { .. }
-            | FfmpegInstallState::Cancelled => {}
-        }
-        guard.job_active = true;
-        guard.state = FfmpegInstallState::Checking;
-        self.cancel.store(false, Ordering::Release);
-        Ok(true)
-    }
-
-    pub fn end_job(&self, state: FfmpegInstallState) {
-        if let Ok(mut guard) = self.inner.lock() {
-            guard.job_active = false;
-            guard.state = state;
-        }
-    }
-}
-
-pub fn committed_manifest() -> Result<(FfmpegRuntimeManifest, String), ManagedRuntimeVerifyError> {
-    let manifest = parse_ffmpeg_runtime_manifest(FFMPEG_RUNTIME_MANIFEST_JSON)?;
-    let hash = {
-        let digest = Sha256::digest(FFMPEG_RUNTIME_MANIFEST_JSON.as_bytes());
-        digest.iter().map(|byte| format!("{byte:02x}")).collect()
-    };
-    Ok((manifest, hash))
-}
-
-pub fn staging_root(local_app_data: &Path) -> PathBuf {
-    local_app_data.join("Clipline").join("ffmpeg-staging")
-}
-
-pub fn managed_root(local_app_data: &Path) -> PathBuf {
-    local_app_data.join("Clipline").join("ffmpeg")
-}
-
-pub fn download_partial_path(staging: &Path, archive_name: &str) -> PathBuf {
-    staging
-        .join("download")
-        .join(format!("{archive_name}.partial"))
-}
-
-pub fn download_final_path(staging: &Path, archive_name: &str) -> PathBuf {
-    staging.join("download").join(archive_name)
-}
-
-pub fn staging_tree_path(staging: &Path) -> PathBuf {
-    staging.join("tree")
-}
-
 /// Remove abandoned staging artifacts (crash recovery / cancel cleanup).
 pub fn sweep_abandoned_staging(staging: &Path) -> io::Result<Vec<PathBuf>> {
     let mut removed = Vec::new();
@@ -232,303 +103,6 @@ pub fn sweep_abandoned_staging(staging: &Path) -> io::Result<Vec<PathBuf>> {
         removed.push(path);
     }
     Ok(removed)
-}
-
-pub fn download_should_abort(
-    written: u64,
-    archive_size: u64,
-    cancelled: bool,
-) -> Option<DownloadAbortReason> {
-    if cancelled {
-        return Some(DownloadAbortReason::Cancelled);
-    }
-    if written > archive_size {
-        return Some(DownloadAbortReason::Overflow);
-    }
-    None
-}
-
-pub fn has_sufficient_free_space(free_bytes: u64, required_bytes: u64) -> bool {
-    free_bytes >= required_bytes
-}
-
-fn hex_sha256_reader(mut reader: impl io::Read) -> io::Result<String> {
-    let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 64 * 1024];
-    loop {
-        let read = reader.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect())
-}
-
-fn hex_sha256_file(path: &Path) -> io::Result<String> {
-    hex_sha256_reader(File::open(path)?)
-}
-
-fn validate_allowlist_entry(file: &FfmpegAllowedFile) -> Result<(), String> {
-    if file.staged_name.trim().is_empty()
-        || file.staged_name
-            != Path::new(&file.staged_name)
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-        || file.archive_path.contains("..")
-        || Path::new(&file.archive_path).is_absolute()
-    {
-        return Err(format!(
-            "unsafe FFmpeg allowlist entry: {} -> {}",
-            file.archive_path, file.staged_name
-        ));
-    }
-    Ok(())
-}
-
-fn copy_with_cancel(
-    reader: &mut impl Read,
-    writer: &mut impl Write,
-    cancelled: &dyn Fn() -> bool,
-) -> Result<(u64, String), String> {
-    let mut copied = 0_u64;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        if cancelled() {
-            return Err("ffmpeg install cancelled".into());
-        }
-        let read = reader
-            .read(&mut buffer)
-            .map_err(|e| format!("read archive entry: {e}"))?;
-        if read == 0 {
-            let hash = hasher
-                .finalize()
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect();
-            return Ok((copied, hash));
-        }
-        writer
-            .write_all(&buffer[..read])
-            .map_err(|e| format!("write staged file: {e}"))?;
-        hasher.update(&buffer[..read]);
-        copied = copied.saturating_add(read as u64);
-    }
-}
-
-/// Extract only allowlisted entries from a verified archive into `tree_dir`.
-pub fn extract_allowlisted_ffmpeg_archive(
-    archive_path: &Path,
-    tree_dir: &Path,
-    manifest: &FfmpegRuntimeManifest,
-    cancelled: &dyn Fn() -> bool,
-) -> Result<Vec<(String, u64, String)>, String> {
-    if cancelled() {
-        return Err("ffmpeg install cancelled".into());
-    }
-    if tree_dir.exists() {
-        fs::remove_dir_all(tree_dir).map_err(|e| format!("clear staging tree: {e}"))?;
-    }
-    fs::create_dir_all(tree_dir).map_err(|e| format!("create staging tree: {e}"))?;
-
-    let file = File::open(archive_path).map_err(|e| format!("open archive: {e}"))?;
-    let mut zip = ZipArchive::new(file).map_err(|e| format!("open zip: {e}"))?;
-    let mut verified = Vec::with_capacity(manifest.allowed_files.len());
-
-    for allowed in &manifest.allowed_files {
-        if cancelled() {
-            return Err("ffmpeg install cancelled".into());
-        }
-        validate_allowlist_entry(allowed)?;
-        let entry_name = format!(
-            "{}/{}",
-            manifest.archive_root.trim_end_matches('/'),
-            allowed.archive_path.replace('\\', "/")
-        );
-        let mut entry = zip
-            .by_name(&entry_name)
-            .map_err(|_| format!("missing archive entry {entry_name}"))?;
-        if entry.size() != allowed.size {
-            return Err(format!(
-                "archive entry {entry_name} size mismatch: expected {}, got {}",
-                allowed.size,
-                entry.size()
-            ));
-        }
-        let output = tree_dir.join(&allowed.staged_name);
-        let (copied, hash) = {
-            let mut out = File::create(&output)
-                .map_err(|e| format!("create staged {}: {e}", allowed.staged_name))?;
-            copy_with_cancel(&mut entry, &mut out, cancelled)
-                .map_err(|e| format!("extract {}: {e}", allowed.staged_name))?
-        };
-        if cancelled() {
-            return Err("ffmpeg install cancelled".into());
-        }
-        if copied != allowed.size {
-            return Err(format!(
-                "staged {} size mismatch: expected {}, got {copied}",
-                allowed.staged_name, allowed.size
-            ));
-        }
-        if hash != allowed.sha256.to_ascii_lowercase() {
-            return Err(format!(
-                "staged {} SHA-256 mismatch: expected {}, got {hash}",
-                allowed.staged_name, allowed.sha256
-            ));
-        }
-        verified.push((allowed.staged_name.clone(), allowed.size, hash));
-    }
-    Ok(verified)
-}
-
-pub fn write_managed_provenance(
-    tree_dir: &Path,
-    manifest: &FfmpegRuntimeManifest,
-    manifest_sha256: &str,
-    files: &[(String, u64, String)],
-) -> Result<(), String> {
-    let provenance = serde_json::json!({
-        "schema_version": 1,
-        "provider": manifest.provider,
-        "release_tag": manifest.release_tag,
-        "published_at": manifest.published_at,
-        "archive_name": manifest.archive_name,
-        "archive_url": manifest.archive_url,
-        "archive_sha256": manifest.archive_sha256,
-        "manifest_sha256": manifest_sha256,
-        "ffmpeg_version": manifest.version_line,
-        "source_offer_url": manifest.source_offer_url,
-        "ffmpeg_source_url": manifest.ffmpeg_source_url,
-        "files": files.iter().map(|(name, size, sha)| serde_json::json!({
-            "name": name,
-            "size": size,
-            "sha256": sha,
-        })).collect::<Vec<_>>(),
-    });
-    fs::write(
-        tree_dir.join("PROVENANCE.json"),
-        serde_json::to_string_pretty(&provenance).map_err(|e| e.to_string())? + "\n",
-    )
-    .map_err(|e| format!("write PROVENANCE.json: {e}"))
-}
-
-/// Atomically replace `dest` with `tree_dir` (backup+rename).
-pub fn publish_managed_runtime_atomic(tree_dir: &Path, dest: &Path) -> Result<(), String> {
-    if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("create managed parent: {e}"))?;
-    }
-    let backup = dest.with_file_name(format!(
-        ".ffmpeg-previous-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0)
-    ));
-    if dest.exists() {
-        fs::rename(dest, &backup).map_err(|e| format!("backup existing managed runtime: {e}"))?;
-    }
-    match fs::rename(tree_dir, dest) {
-        Ok(()) => {
-            let _ = fs::remove_dir_all(&backup);
-            Ok(())
-        }
-        Err(error) => {
-            if backup.exists() && !dest.exists() {
-                let _ = fs::rename(&backup, dest);
-            }
-            Err(format!("publish managed runtime: {error}"))
-        }
-    }
-}
-
-pub fn verify_archive_sha256(archive_path: &Path, expected: &str) -> Result<String, String> {
-    let actual = hex_sha256_file(archive_path).map_err(|e| format!("hash archive: {e}"))?;
-    let expected = expected.to_ascii_lowercase();
-    if actual != expected {
-        return Err(format!(
-            "FFmpeg archive SHA-256 mismatch: expected {expected}, got {actual}"
-        ));
-    }
-    Ok(actual)
-}
-
-pub fn assert_archive_size(archive_path: &Path, expected_size: u64) -> Result<(), String> {
-    let actual = fs::metadata(archive_path)
-        .map_err(|e| format!("archive metadata: {e}"))?
-        .len();
-    if actual != expected_size {
-        return Err(format!(
-            "FFmpeg archive size mismatch: expected {expected_size}, got {actual}"
-        ));
-    }
-    Ok(())
-}
-
-/// Install from a local archive that already passed size/hash checks.
-pub fn install_managed_runtime_from_archive(
-    archive_path: &Path,
-    local_app_data: &Path,
-    manifest: &FfmpegRuntimeManifest,
-    manifest_sha256: &str,
-    cancelled: &dyn Fn() -> bool,
-    before_publish: impl FnOnce() -> Result<(), String>,
-) -> Result<ManagedRuntimeInfo, String> {
-    if cancelled() {
-        return Err("ffmpeg install cancelled".into());
-    }
-    assert_archive_size(archive_path, manifest.archive_size)?;
-    verify_archive_sha256(archive_path, &manifest.archive_sha256)?;
-
-    let staging = staging_root(local_app_data);
-    let tree = staging_tree_path(&staging);
-    let files = extract_allowlisted_ffmpeg_archive(archive_path, &tree, manifest, cancelled)?;
-    write_managed_provenance(&tree, manifest, manifest_sha256, &files)?;
-    let mut info = verify_managed_ffmpeg_runtime(&tree, manifest, manifest_sha256)
-        .map_err(|e| e.to_string())?;
-    if cancelled() {
-        return Err("ffmpeg install cancelled".into());
-    }
-    let dest = managed_root(local_app_data);
-    before_publish()?;
-    publish_managed_runtime_atomic(&tree, &dest)?;
-    info.dir = dest.clone();
-    info.ffmpeg_exe = dest.join("ffmpeg.exe");
-    Ok(info)
-}
-
-pub fn runtime_status_for_dirs(
-    managed_dir: Option<&Path>,
-    locate_path: Option<&Path>,
-) -> Result<FfmpegRuntimeStatus, String> {
-    let (manifest, manifest_sha256) = committed_manifest().map_err(|e| e.to_string())?;
-    Ok(crate::ffmpeg_runtime::ffmpeg_runtime_status(
-        managed_dir,
-        &manifest,
-        &manifest_sha256,
-        locate_path,
-    ))
-}
-
-pub fn build_install_snapshot(
-    state: FfmpegInstallState,
-    status: &FfmpegRuntimeStatus,
-) -> FfmpegInstallSnapshot {
-    FfmpegInstallSnapshot {
-        state,
-        discovery: status.kind,
-        managed: status.managed.as_ref().map(ManagedRuntimeInfoDto::from),
-        locate_path: status
-            .locate_path
-            .as_ref()
-            .map(|path| path.display().to_string()),
-    }
 }
 
 fn install_progress_snapshot(state: FfmpegInstallState) -> FfmpegInstallSnapshot {
@@ -549,36 +123,6 @@ fn emit_install_progress(
     let _ = app.emit(FFMPEG_INSTALL_EVENT, install_progress_snapshot(state));
 }
 
-/// Write download bytes with hard cap / cancel checks. Caller supplies chunks.
-pub fn write_download_chunk(
-    file: &mut File,
-    written: &mut u64,
-    chunk: &[u8],
-    archive_size: u64,
-    cancelled: bool,
-) -> Result<(), String> {
-    if let Some(reason) = download_should_abort(*written, archive_size, cancelled) {
-        return Err(match reason {
-            DownloadAbortReason::Cancelled => "ffmpeg download cancelled".into(),
-            DownloadAbortReason::Overflow => "ffmpeg download exceeded archive_size".into(),
-        });
-    }
-    let next = written.saturating_add(chunk.len() as u64);
-    if next > archive_size {
-        return Err("ffmpeg download exceeded archive_size".into());
-    }
-    file.write_all(chunk)
-        .map_err(|e| format!("write ffmpeg download chunk: {e}"))?;
-    *written = next;
-    if let Some(reason) = download_should_abort(*written, archive_size, cancelled) {
-        return Err(match reason {
-            DownloadAbortReason::Cancelled => "ffmpeg download cancelled".into(),
-            DownloadAbortReason::Overflow => "ffmpeg download exceeded archive_size".into(),
-        });
-    }
-    Ok(())
-}
-
 fn local_app_data_dir() -> Result<PathBuf, String> {
     std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
@@ -587,36 +131,6 @@ fn local_app_data_dir() -> Result<PathBuf, String> {
 
 fn current_locate_path() -> Option<PathBuf> {
     clipline_capture::ffmpeg::locate()
-}
-
-fn status_snapshot_for_state(state: FfmpegInstallState) -> Result<FfmpegInstallSnapshot, String> {
-    let local = local_app_data_dir().ok();
-    let managed = local.as_ref().map(|path| managed_root(path));
-    let (manifest, manifest_sha256) = committed_manifest().map_err(|e| e.to_string())?;
-    if let Some(info) = managed
-        .as_deref()
-        .and_then(|dir| verify_managed_ffmpeg_runtime(dir, &manifest, &manifest_sha256).ok())
-    {
-        let status = FfmpegRuntimeStatus {
-            kind: FfmpegDiscoveryKind::ManagedVerified,
-            locate_path: Some(info.ffmpeg_exe.clone()),
-            managed: Some(info),
-        };
-        return Ok(build_install_snapshot(state, &status));
-    }
-    let status = crate::ffmpeg_runtime::ffmpeg_runtime_status(
-        None,
-        &manifest,
-        &manifest_sha256,
-        current_locate_path().as_deref(),
-    );
-    Ok(build_install_snapshot(state, &status))
-}
-
-async fn status_snapshot_async(state: FfmpegInstallState) -> Result<FfmpegInstallSnapshot, String> {
-    tauri::async_runtime::spawn_blocking(move || status_snapshot_for_state(state))
-        .await
-        .map_err(|e| format!("ffmpeg status worker join: {e}"))?
 }
 
 #[tauri::command]
@@ -768,104 +282,15 @@ pub async fn ensure_ffmpeg_runtime(
     }
 }
 
-fn download_ffmpeg_archive(
-    app: &tauri::AppHandle,
-    controller: &FfmpegInstallController,
-    staging: &Path,
-    manifest: &FfmpegRuntimeManifest,
-) -> Result<PathBuf, String> {
-    let partial = download_partial_path(staging, &manifest.archive_name);
-    let final_path = download_final_path(staging, &manifest.archive_name);
-    if let Some(parent) = partial.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("create download dir: {e}"))?;
-    }
-    if partial.exists() {
-        let _ = fs::remove_file(&partial);
-    }
-
-    // Blocking reqwest client with redirects for GitHub release assets.
-    let client = reqwest::blocking::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .timeout(std::time::Duration::from_secs(30 * 60))
-        .redirect(reqwest::redirect::Policy::limited(10))
-        .build()
-        .map_err(|e| format!("build ffmpeg download client: {e}"))?;
-    let mut response = client
-        .get(&manifest.archive_url)
-        .send()
-        .map_err(|e| format!("download ffmpeg archive: {e}"))?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "download ffmpeg archive failed with status {}",
-            response.status()
-        ));
-    }
-    if response
-        .content_length()
-        .is_some_and(|length| length > manifest.archive_size)
-    {
-        return Err("ffmpeg download Content-Length exceeds archive_size".into());
-    }
-
-    let mut file = File::create(&partial).map_err(|e| format!("create partial download: {e}"))?;
-    let mut written = 0u64;
-    let mut buffer = [0u8; 64 * 1024];
-    loop {
-        if controller.is_cancelled() {
-            drop(file);
-            let _ = fs::remove_file(&partial);
-            return Err("ffmpeg download cancelled".into());
-        }
-        let read = io::Read::read(&mut response, &mut buffer)
-            .map_err(|e| format!("read ffmpeg download: {e}"))?;
-        if read == 0 {
-            break;
-        }
-        write_download_chunk(
-            &mut file,
-            &mut written,
-            &buffer[..read],
-            manifest.archive_size,
-            controller.is_cancelled(),
-        )?;
-        controller.set_state(FfmpegInstallState::Downloading {
-            bytes: written,
-            total: manifest.archive_size,
-        });
-        if written == manifest.archive_size || written.is_multiple_of(512 * 1024) {
-            let _ = app.emit(
-                FFMPEG_INSTALL_EVENT,
-                FfmpegInstallSnapshot {
-                    state: controller.snapshot_state(),
-                    discovery: FfmpegDiscoveryKind::Missing,
-                    managed: None,
-                    locate_path: None,
-                },
-            );
-        }
-    }
-    if written != manifest.archive_size {
-        let _ = fs::remove_file(&partial);
-        return Err(format!(
-            "ffmpeg download size mismatch: expected {}, got {written}",
-            manifest.archive_size
-        ));
-    }
-    drop(file);
-    verify_archive_sha256(&partial, &manifest.archive_sha256)?;
-    if final_path.exists() {
-        let _ = fs::remove_file(&final_path);
-    }
-    fs::rename(&partial, &final_path).map_err(|e| format!("publish downloaded archive: {e}"))?;
-    Ok(final_path)
-}
-
 #[cfg(test)]
 mod tests {
+    use super::download::{DownloadAbortReason, download_should_abort, write_download_chunk};
+    use super::verify::{copy_with_cancel, hex_sha256_file};
     use super::*;
     use crate::ffmpeg_runtime::{FfmpegAllowedFile, FfmpegRuntimeManifest};
+    use sha2::{Digest, Sha256};
+    use std::fs::File;
     use std::io::Write;
-
     fn tiny_manifest(files: Vec<FfmpegAllowedFile>, archive_size: u64) -> FfmpegRuntimeManifest {
         FfmpegRuntimeManifest {
             schema_version: 1,
