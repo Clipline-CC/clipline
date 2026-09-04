@@ -31,11 +31,7 @@ pub mod types;
 pub(crate) mod validation;
 
 pub use cloud::{normalize_cloud_visibility, CloudSettings, CloudUploadRecord};
-#[allow(unused_imports)]
-pub use games::{
-    GamePluginReviewSettings, GamePluginSettings, GameRecordingMode, GameSettings,
-    MatchEventSettings, TimelineMarkerSettings,
-};
+pub use games::{GamePluginReviewSettings, GamePluginSettings, GameRecordingMode, GameSettings};
 pub use hotkey::{is_global_shortcut_hotkey, normalize_hotkey, parse_hotkey};
 pub use league::LeagueModeSettings;
 pub use osu::OsuApiSettings;
@@ -43,11 +39,12 @@ pub use persistence::{
     audio_preview_cache_dir, icon_cache_dir, normalize_media_dir, normalize_replay_cache_dir,
     quota_bytes_from_gb, replay_cache_quota_bytes_from_gb, settings_path, share_export_cache_dir,
 };
-#[allow(unused_imports)]
 pub use types::{
     AdvancedRecordingSettings, AudioSettings, CaptureMode, CaptureRegionSettings,
-    CustomGameSettings, ReplayStorageMode, ReplayStorageSettings, VideoQuality,
+    CustomGameSettings, ReplayStorageSettings, VideoQuality,
 };
+#[cfg(test)]
+pub use types::ReplayStorageMode;
 
 const DEFAULT_REPLAY_CACHE_QUOTA_GB: f64 = 2.0;
 

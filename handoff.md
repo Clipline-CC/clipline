@@ -4,6 +4,37 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-09-04): 1k-decomposition landed (PR #193, CI green both OSes)
+
+Plan: `docs/superpowers/plans/2026-09-03-1k-decomposition.md`. Branch
+`cleanup/1k-decomposition`, 6 conventional commits: plan, mp4 (trim/writer/box-header),
+capture (pipeline/encoders/devices), storage (inventory/quota/recovery), app
+(service/support/cloud/library splits, 361 dead imports removed), ui+tests (JS splits,
+guardrail updates).
+
+Review fixes folded in: P1 dead-prelude cleanup (file-level allows stripped, `--fix`
+over-prunes repaired with test-scoped imports); P3 `support.rs` split part 2
+(`app/support/bundle.rs` 501 lines owns report prep/upload/staging/bundle-build,
+`support.rs` keeps state/redaction/snapshots at 708); walker/trim `decode_box_header`
+guardrails restored against new `trim/` paths (production-code only, `mod tests`
+stripped like the writer asserts).
+
+Deferred as follow-ups, not rebuttals: P2 `service.rs` (857 lines, under 1k as-is), P4
+facade preludes, P5 `test_support` dedup, P6 JS rail/group motion, P7 fragments. Bug-review
+low adjudicated as non-finding: the dropped settings re-exports (`MatchEventSettings`,
+`TimelineMarkerSettings`, `ReplayStorageMode` facade paths) have zero users tree-wide —
+HEAD kept them alive with its own `#[allow(unused_imports)]`, so restoring would
+reintroduce the P1 debt just removed.
+
+Sharp edge learned: re-exporting `#[tauri::command]` fns via `pub use` does not carry the
+generated `__cmd__` items — `setup.rs` addresses `support::bundle::prepare_bug_report`
+directly.
+
+Verification: `cargo test --workspace` 1491 passed / 0 failed, warning-denied workspace
+Clippy clean after fresh `cargo clean -p` of the four touched crates. Awaiting user
+in-app smoke test (record, trim, settings save, bug-report submit/cancel, library views)
+on the running `cargo run -p clipline-app` build before merge to develop.
+
 ## Checkpoint (2026-08-30): Durable group reorder recovery
 
 Plan: `docs/superpowers/plans/2026-08-30-group-order-journal.md`.
