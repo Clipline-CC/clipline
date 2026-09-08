@@ -13,6 +13,11 @@ the existing Windows 10 AMD machine, registered mocks and audio endpoint.
   existing H.264/audio/replay pipeline against exclusive mocks. Verify freshness,
   colors, visible border, transitions and overlaps. This is output-scoped capture,
   never an automatic window fallback or proof of game-only isolation.
+- [ ] Address the reproduced fixed-region mode-change failure separately: the
+  exclusive mock switches this display from 1280x720 to 720x480, invalidating the
+  saved 1280x720 crop. Add failing neutral tests, then make invalid crop geometry
+  return a non-timeout error rather than endless old-frame reuse. Keep partial
+  region boundaries fixed; full-monitor capture is an explicit control/choice.
 - [ ] Preserve evidence, document the feasible options and remaining constraints,
   obtain review, run workspace tests (CI=1, no WGC/device tests) and warning-denied
   Clippy for code changes, rebuild/open Clipline, push PR #200 and verify CI.
