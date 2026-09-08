@@ -69,3 +69,8 @@ game frames, tear-free output or synchronized audio. Mock results do not establi
 real game, anti-cheat, HDR or device-loss compatibility.
 
 Results: [Windows 10 mock validation](research/2026-09-08-mock-game-validation.md).
+
+Standalone window-only recording and replay (separate from the app):
+[native PrintWindow experiment](research/2026-09-08-print-window-recording.md).
+It records the mocks in windowed/borderless modes, but does not yet satisfy the
+app's automatic-capture gate or exclusive/full lifecycle acceptance.

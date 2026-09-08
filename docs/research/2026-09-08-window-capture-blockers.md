@@ -114,6 +114,12 @@ were formatted. Clipline was rebuilt and reopened after the checks.
 
 ## Remaining integration work
 
+Update: the [native recording experiment](2026-09-08-print-window-recording.md)
+now exercises process isolation, frame delivery, GPU upload, audio and replay,
+including a successful 60-second 720p60 borderless mock run. It also exposes an
+A/V lead and preserves exclusive/transition failures. The list below describes
+what remained at this earlier screenshot-only checkpoint.
+
 PrintWindow is a promising experimental path for ordinary windowed/borderless
 capture. It still needs native process isolation, bounded frame delivery, CPU to
 GPU transfer and timestamp handling, resize/minimize/device-loss recovery, border

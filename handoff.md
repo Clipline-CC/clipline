@@ -4,7 +4,33 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
-## Checkpoint (2026-09-08): PrintWindow captures flip windowed/borderless in isolation
+## Checkpoint (2026-09-08): native PrintWindow records 720p60 with audio and replay
+
+`cargo run -p clipline-capture --example print_window_record -- --help` exposes a
+standalone experiment, never a production backend. It isolates synchronous capture
+in a supervised child, checks target/protection/geometry, crops client BGRA, uploads
+on the shared D3D device and uses existing AMD H.264 MFT/WASAPI/Recorder code. A
+two-second deadline kills/reaps the worker immediately; a kill-on-close job protects
+abrupt parent exits. The replay ring has byte/time limits. Failures preserve valid
+partial sessions and diagnostics; fixed-resolution resize/minimize currently stop.
+
+Windowed and borderless blt/flip mocks produced decodable video, stereo Opus and
+trailing replays with overlap excluded and no yellow border observed. Strongest
+run: 60 seconds, 1280x720, 60 FPS, 3,600 frames / 3,599 counter advances, no repeats;
+mean PrintWindow 11.36 ms, recorder private memory ~96 MB after warm-up. This does
+not establish tear-free capture, real-game support or long-session performance.
+
+Outstanding: exclusive fails (flip invalid pixels, blt frozen); visual pulse leads
+audio by ~78..85 ms versus ~34 ms in an earlier explicit DXGI control. No timing
+offset was applied. Separate FFmpeg/AMF encoding ignores the requested GOP interval
+in a direct control and trips the ten-second pipeline guard; native MFT succeeds.
+No production capture/encoder changes were made for this prototype. Automatic
+game-only app capture remains blocked. See
+`docs/research/2026-09-08-print-window-recording.md` for commands, exact measurements,
+negative controls and media hashes. Evidence is under
+`C:\Users\Dain\Desktop\CliplineNativePrintTest-20260908-111424`.
+
+## Earlier checkpoint (2026-09-08): PrintWindow captures flip windowed/borderless in isolation
 
 The DWM failure matches redirection-surface limitations, not a reproduced stale
 texture cache. A live DWM thumbnail still reads as only its helper's background
