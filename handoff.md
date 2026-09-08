@@ -4,7 +4,20 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
-## Checkpoint (2026-09-08): local API audit confirms remaining source limitation
+## Checkpoint (2026-09-08): unchanged-resolution fullscreen control
+
+User clarified the objective remains fixing experimental window capture for
+fullscreen. Tested the unchanged flip fixture borderless -> native exclusive ->
+borderless at constant 1280x720, with concurrent PresentMon and 300 geometry rows.
+PrintWindow passes both borderless phases (51 valid reads / 50 advances each)
+but freezes in exclusive (51 valid reads, all counter 5552). Direct DWM reads 88
+unchanged frames in exclusive. Both exclusive stages are entirely Legacy Flip.
+This rules out display resolution changes as the sole explanation, without
+identifying a capture code defect or proving every possible route impossible.
+See `docs/research/2026-09-08-fullscreen-surface-continuity.md`. The copied fixture
+setting was restored, helpers exited, and production recording is unchanged.
+
+## Earlier checkpoint (2026-09-08): local API audit confirms remaining source limitation
 
 Read-only WinRT metadata checks on build 19045 confirm that `IsBorderRequired`
 and `GraphicsCaptureAccess` are absent. AppRecordingManager is present, but its

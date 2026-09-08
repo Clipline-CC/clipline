@@ -23,6 +23,11 @@ now confirms static direct-DWM pixels under Legacy Flip. A thumbnail-host plus
 PrintWindow combination works in the windowed control but returns stale
 pre-transition game content under the same measured native-exclusive mode.
 
+A [constant-resolution control](research/2026-09-08-fullscreen-surface-continuity.md)
+also reproduces the failure at 1280x720: PrintWindow has fresh game pixels before
+and after native exclusive but freezes during it. Display resizing is not the
+sole explanation for the unavailable fullscreen frames.
+
 The [subsequent API audit](research/2026-09-08-capture-api-audit.md) verifies local
 border-control API absence and explains why public Game DVR APIs do not supply
 an isolated third-party game source. No passing native-exclusive replacement has
