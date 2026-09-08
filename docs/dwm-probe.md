@@ -8,6 +8,10 @@ The [native mock-game matrix](research/2026-09-08-mock-game-validation.md) now
 reproduces a presentation distinction: blt windowed/borderless captures correctly,
 while flip presentation and DXGI exclusive modes return stale surfaces. Build the
 [mock executables](mock-games.md) to reproduce without a real-game installation.
+The [blocker investigation](research/2026-09-08-window-capture-blockers.md) identifies
+an alternative full-content PrintWindow path that captures the flip mock in
+windowed/borderless modes. Exclusive fullscreen still fails. It remains a separate
+diagnostic, with no change to production recording.
 
 This standalone probe tests border-free window capture using an undocumented DWM surface
 export. It does not change Clipline, inject into the target, run WGC, or fall back to display
@@ -20,6 +24,12 @@ From an extracted probe ZIP, open PowerShell in that directory:
 .\dwm_probe.exe --list
 .\dwm_probe.exe --hwnd 123456 --seconds 30 --fps 60 --out league-test
 ```
+
+For an intentionally animated target, add `--require-motion`. This returns a
+nonzero exit after saving evidence if every readable sample is identical. The
+controlled target runner now uses it. Without that flag static-image sampling is
+still allowed. A passing motion check does not establish sustained freshness or
+frame synchronization.
 
 Check `$LASTEXITCODE` immediately after each native command. Both preflight commands
 must exit zero before starting capture. `-1073741515` / `0xC0000135` means a required

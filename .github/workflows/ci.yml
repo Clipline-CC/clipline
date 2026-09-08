@@ -52,6 +52,11 @@ jobs:
         shell: powershell
         run: .\scripts\tests\test-dwm-probe-runner.ps1
 
+      - name: Test PrintWindow diagnostic runner
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: .\scripts\tests\test-print-window-runner.ps1
+
       - name: Test
         run: cargo test --workspace
 

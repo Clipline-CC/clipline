@@ -4,7 +4,29 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
-## Checkpoint (2026-09-08): native mock games isolate DWM presentation failures
+## Checkpoint (2026-09-08): PrintWindow captures flip windowed/borderless in isolation
+
+The DWM failure matches redirection-surface limitations, not a reproduced stale
+texture cache. A live DWM thumbnail still reads as only its helper's background
+through the shared-surface export. `PrintWindow(PW_RENDERFULLCONTENT)` does return
+fresh flip windowed/borderless content, including when Clipline covers the source.
+Exclusive fullscreen remains frozen/blank for both mock presentation types. A
+one-minute overlapped run had 1,292 reads / 1,291 changing native mock counters,
+no errors, ~11 ms average API latency, and similar initial/final private bytes.
+The PowerShell harness achieved ~21.5 samples/s; this is not native recorder
+throughput or a synchronization guarantee.
+
+`scripts/test-print-window.ps1` provides a separate process with an external timeout,
+identity/affinity checks, evidence, and optional mock color/counter validation.
+Worker exit-code preservation, invalid/blank pixels and >2s progress gaps were
+reviewed and fixed. The DWM probe/controlled runner now support `--require-motion`
+to reject all-identical animated-target runs after preserving evidence. Production
+capture remains unchanged. Native bounded frame delivery/timestamps, sustained
+border observation, recovery, real games and end-to-end PrintWindow recording
+remain required before integration. See
+`docs/research/2026-09-08-window-capture-blockers.md` for exact scope and commands.
+
+## Earlier checkpoint (2026-09-08): native mock games isolate DWM presentation failures
 
 `scripts/build-mock-games.ps1` builds hardware D3D11 blt/flip executable fixtures
 with generated stereo audio; see `docs/mock-games.md`. Both register and are

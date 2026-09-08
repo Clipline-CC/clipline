@@ -362,9 +362,8 @@ pub fn run(options: super::Options) -> ProbeResult<()> {
     let summary = format!("elapsed_s={elapsed:.3}\nsuccessful_reads={reads}\nchanged_samples={changes}\nerrors={errors}\nreads_per_second={:.2}\nmean_read_ms={:.3}\nmax_read_ms={max_ms:.3}\nChanges are sampled pixel differences, NOT unique game FPS or proof of tear-free capture.\n", reads as f64 / elapsed, total_ms / reads.max(1) as f64);
     fs::write(output.join("summary.txt"), &summary)?;
     print!("{summary}");
-    if reads == 0 {
-        return Err("no readable DWM frames; see samples.csv".into());
-    }
+    // Evidence is already persisted, including for a failed motion-required run.
+    super::capture_verdict(reads, changes, options.require_motion)?;
     if changes == 0 {
         eprintln!("No pixel changes detected: animate the target before judging freshness.");
     }

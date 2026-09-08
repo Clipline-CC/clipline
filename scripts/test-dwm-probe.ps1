@@ -78,7 +78,7 @@ try {
     }
     if (-not $ready) { throw 'Controlled target did not appear after probe preflight passed; inspect target.stderr.txt.' }
     $captureDirectory = Join-Path $OutputDirectory 'capture'
-    $result = Invoke-Probe ('--window "Clipline DWM Probe Target" --seconds 22 --fps 60 --out "' + $captureDirectory + '"') 'capture' 40
+    $result = Invoke-Probe ('--window "Clipline DWM Probe Target" --seconds 22 --fps 60 --require-motion --out "' + $captureDirectory + '"') 'capture' 40
     Write-Output $result
     Write-Output "Evidence: $OutputDirectory"
 } finally {

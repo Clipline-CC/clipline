@@ -11,6 +11,7 @@ const HELP: &str = "DWM window capture experiment (Windows x64; no WGC fallback)
   dwm_probe --window \"unique title\" [--seconds 10] [--fps 30] [--out NEW_DIRECTORY]
   dwm_probe --hwnd 123456 [--seconds 10] [--fps 30] [--out NEW_DIRECTORY]
 Limits: 1-600 seconds, 1-120 sampling FPS. Keep the selected window animating.
+Add --require-motion to fail if all readable samples are identical.
 Saves first/middle/last BMP images, samples.csv, and summary.txt locally.
 Sampling/pixel changes do not establish game FPS or synchronization correctness.";
 
@@ -38,6 +39,7 @@ pub struct Options {
     pub seconds: u64,
     pub fps: u32,
     pub output: Option<PathBuf>,
+    pub require_motion: bool,
 }
 
 impl Options {
@@ -48,12 +50,17 @@ impl Options {
             seconds: 10,
             fps: 30,
             output: None,
+            require_motion: false,
         };
         let mut args = args.into_iter();
         let mut seen = std::collections::HashSet::new();
         while let Some(flag) = args.next() {
             if !seen.insert(flag.clone()) {
                 return Err(format!("duplicate option: {flag}"));
+            }
+            if flag == "--require-motion" {
+                result.require_motion = true;
+                continue;
             }
             let value = args
                 .next()
@@ -84,6 +91,17 @@ impl Options {
             return Err("seconds must be 1-600 and FPS must be 1-120".into());
         }
         Ok(result)
+    }
+}
+
+/// An animated-target acceptance check, not a claim about synchronized game FPS.
+pub fn capture_verdict(reads: u64, changes: u64, require_motion: bool) -> Result<(), &'static str> {
+    if reads == 0 {
+        Err("no readable DWM frames; see samples.csv")
+    } else if require_motion && changes == 0 {
+        Err("motion required but all captured samples were identical; inspect the saved BMPs")
+    } else {
+        Ok(())
     }
 }
 
@@ -124,6 +142,21 @@ pub fn bmp_bytes(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn motion_required_runs_reject_readable_but_static_surfaces() {
+        assert!(super::capture_verdict(300, 0, true).is_err());
+        assert!(super::capture_verdict(300, 1, true).is_ok());
+        assert!(super::capture_verdict(300, 0, false).is_ok());
+        assert!(super::capture_verdict(0, 0, false).is_err());
+        let options =
+            super::Options::parse(["--hwnd", "42", "--require-motion"].map(str::to_owned)).unwrap();
+        assert!(options.require_motion);
+        assert!(super::Options::parse(
+            ["--hwnd", "42", "--require-motion", "--require-motion"].map(str::to_owned),
+        )
+        .is_err());
+    }
+
     #[test]
     fn rejects_unbounded_or_ambiguous_capture_requests() {
         for args in [
