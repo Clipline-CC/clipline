@@ -145,3 +145,21 @@ Keep full desktop PNGs and window lists local: they include unrelated desktop/UI
 content. Review any selected fixture-only snapshots before sharing. Continue with
 the AMD driver, actual renderer verification, and separate game-mode acceptance;
 the prior Windows 11 / RX 6700 XT results do not fill these Windows 10 gaps.
+
+## Delivery checkpoint
+
+The repaired `dwm-probe-x64-fixed.zip` contains six files (probe, runtime, runner,
+target, README, provenance); no desktop-title logs or screenshots. SHA-256:
+`A679A76CB55DDAD0D497A6F5A4D749BA50E410E17C7A928F65B7F25D34689F63`.
+Both loader commands passed again after extracting this ZIP to a new directory.
+Package staging also passed with a trailing directory separator while keeping
+its preflight logs outside the package.
+
+Plan and implementation were committed locally as `f3be040` and `0510d73` on
+`dwm-win10-validation`. Publishing to `improve-windows-10-support` is blocked:
+Git has no available credentials, and the connected GitHub app returns HTTP 403
+`Resource not accessible by integration` for both tree creation and PR comments.
+PR #200 has **not** been updated and remains at `e6dd13a2`; no new CI result is
+claimed. Local patch files and a Git bundle are saved beside the evidence for
+transfer to an authenticated development host. Once Git write access is available,
+push these commits to the existing PR branch and watch Windows/Linux CI.

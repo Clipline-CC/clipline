@@ -13,7 +13,7 @@ commands without rebuilding the executable or installing a global runtime. The D
 copy now includes that DLL and a corrected launcher; the original launcher is backed up.
 New package/runner scripts check native exits before starting the fixture, preserve timeout
 logs, validate runtime identity, and keep desktop-title logs outside the distributable.
-PowerShell 5.1 regression tests pass and run in Windows CI.
+PowerShell 5.1 regression tests pass and are configured for Windows CI.
 
 The installed GPU driver is still **Microsoft Basic Display Adapter 10.0.19041.3636**.
 DWM and WebGL both use **Microsoft Basic Render Driver**. A 22-second controlled run
@@ -30,6 +30,9 @@ in uninstall records or standard directories. Local workspace tests and Clippy c
 compile because MSVC `link.exe` is absent. Full results, hashes, evidence paths, and next
 steps: `docs/research/2026-09-08-dwm-probe-win10-validation.md`. Next establish the AMD driver,
 verify the actual renderer, then test installed/logged-in games in separate rendering modes.
+Publication is also blocked: Git lacks credentials and the GitHub app rejects both commits
+and PR comments with HTTP 403. Changes remain on local `dwm-win10-validation`; PR #200 still
+has head `e6dd13a2`. Patches, a Git bundle, and the repaired ZIP are saved with the evidence.
 
 ## Checkpoint (2026-09-06): Nightly 1.0.4 published
 
