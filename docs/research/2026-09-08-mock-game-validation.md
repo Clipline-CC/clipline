@@ -61,9 +61,13 @@ gaps of at least 10 ms at the -45 dB threshold. A 1.6-2.1 second tone sample has
 channel RMS -17.025/-17.025 dBFS and zero-crossing rates 0.018371/0.036663, consistent
 with 440 Hz left / 880 Hz right. SHA-256:
 `99FF9DF168B474A7E9D0D1D3640466BF65FFB2119FF91C2CE69D1241A65F14B6`.
-The replay was saved using the app's Save button; synthetic F6 attempts while the
-mock was foreground did not produce a confirmed save. Global F6 with this native
-fixture therefore needs follow-up (the earlier audio fixture's F6 test passed).
+That replay was saved using the app's Save button. A separate F6 repeat, after
+confirming the buffer was ready and the mock was the foreground HWND, also saved
+successfully: `clip_1788857364.mp4`, 19,107,106 bytes, 30 seconds / 1,800 decoded
+frames with stereo Opus. SHA-256:
+`0B6035CF7FB4D05B6A729713DFECAD7D28E8159A490A12E1DEABE549BDB4CCED`.
+Earlier synthetic F6 attempts had inconclusive capture state and should not be
+treated as a reproduced hotkey defect.
 This control records the display, including UI exposed around the save action;
 it is not proof of game-only capture, automatic start or tight A/V synchronization.
 

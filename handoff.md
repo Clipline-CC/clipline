@@ -19,8 +19,9 @@ A separate 30-second display-control replay of the flip mock decodes all 1,800
 frames with correct stereo tones and silent intervals. Fixed the mock's short
 waveOut buffers after they reproduced underruns; no recorder audio code changed.
 The app remains open, paused, with both mock paths registered and automatic game
-switching off. Native-mock global F6 and automatic full-session acceptance remain
-open; the display control used the Save button.
+switching off. Both the Save button and global F6 with the native mock foreground
+save valid 30-second display replays. Automatic full-session acceptance remains
+blocked by the window-source restriction.
 
 ## Earlier checkpoint (2026-09-08): AMD display recording works; DWM WebGL fails
 
