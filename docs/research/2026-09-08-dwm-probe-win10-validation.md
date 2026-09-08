@@ -146,7 +146,13 @@ content. Review any selected fixture-only snapshots before sharing. Continue wit
 the AMD driver, actual renderer verification, and separate game-mode acceptance;
 the prior Windows 11 / RX 6700 XT results do not fill these Windows 10 gaps.
 
-## Delivery checkpoint
+## Delivery checkpoint (historical; blockers subsequently resolved)
+
+The Git push subsequently succeeded at `e2c8ca2` and both Windows/Ubuntu CI passed.
+Microsoft Build Tools and the AMD driver are now installed; the app builds and runs.
+See [AMD follow-up](2026-09-08-win10-amd-recording.md) for the successful display
+recording and failed accelerated DWM WebGL tests. The following text records the
+earlier transfer state, not the current machine/PR status.
 
 The repaired `dwm-probe-x64-fixed.zip` contains six files (probe, runtime, runner,
 target, README, provenance); no desktop-title logs or screenshots. SHA-256:

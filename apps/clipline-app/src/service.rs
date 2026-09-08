@@ -287,10 +287,9 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
     let mut marker_log = MarkerLog::new();
     let mut player_summary = PlayerSummaryState::default();
     let mut league_queue: Option<LeagueQueue> = None;
-    // Build the capture engine — DXGI Desktop Duplication when the user opted
-    // in for a display/region source, else WGC — and pull the first frame,
-    // which fixes the capture size. A DXGI failure (multi-GPU, rotated display,
-    // secure desktop on the first frame, …) silently falls back to WGC.
+    // Build the selected capture engine and pull the first frame, which fixes
+    // the capture size. Explicit Desktop Duplication rejects window sources
+    // and returns failures without switching to WGC.
     let (cap, first) = open_screen_capture(
         &device,
         clock,

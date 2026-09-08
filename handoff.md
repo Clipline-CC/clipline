@@ -4,7 +4,36 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
-## Checkpoint (2026-09-08): Windows 10 DWM probe runtime repair and software baseline
+## Checkpoint (2026-09-08): AMD display recording works; DWM accelerated windows fail
+
+Official AMD driver `32.0.31041.1004` and Microsoft C++ Build Tools are installed on
+the Windows 10 Home 19045 / Radeon 780M machine. Clipline builds and launches.
+Desktop Duplication + AMD AMF H.264 saved and played a 30-second replay and decoded
+a 126.5-second session without errors; live sampled views have no yellow border.
+Runtime diagnostics confirm the actual DXGI backend. Default output audio has no
+usable endpoint (`0x80070490`), so audio acceptance remains open.
+
+The DWM GDI fixture works on AMD, including overlap exclusion/resize/restore and a
+five-minute run without sustained memory growth. **AMD-accelerated WebGL fails:**
+white windowed / gray browser-fullscreen surfaces with zero pixel changes while
+the actual AMD scene animates. Do not integrate the probe into production. Games
+and exclusive fullscreen remain untested; game installation/login prerequisites
+are still missing. Display recording is not isolated game recording.
+
+Explicit Desktop Duplication now stops on initialization/first-frame failure and
+rejects window sources instead of silently using WGC. Auto/WGC defaults and settings
+serialization are unchanged. Four neutral regression tests, workspace tests and
+fresh-app-cache warning-denied workspace Clippy pass locally; independent review
+found no remaining WGC route for explicit DXGI. Clipline is open for testing.
+The earlier runtime packaging commits were pushed to PR #200 (`e2c8ca2`) and both
+Windows/Ubuntu CI passed; the publication/linker/driver blockers below are historical.
+
+Evidence and exact limits: `docs/research/2026-09-08-win10-amd-recording.md`.
+Local artifacts: `C:\Users\Dain\Desktop\CliplineWin10E2E-20260908-031609`.
+Private desktop captures/support ZIPs remain local. Verified LGPL FFmpeg is staged;
+the debug launch uses its verified local path through `CLIPLINE_FFMPEG`.
+
+## Earlier checkpoint (2026-09-08): DWM runtime repair and software baseline
 
 Continued PR #200 from `e6dd13a2` on physical Windows 10 Home 19045 / Ryzen 9 7940HS.
 The original probe's `--help` and `--list` both failed before capture with `0xC0000135`.

@@ -91,7 +91,7 @@ function syncCaptureBackendSummary() {
   if (!summary) return;
   if ($("set-backend").value === "desktop_duplication") {
     summary.textContent =
-      "Removes the Windows 10 capture border for displays and regions. Display/region only (not single windows); the mouse cursor may be missing on some systems. Falls back to Windows Graphics Capture if unavailable.";
+      "Captures a display or region without the Windows 10 border, including overlapping windows. Recording stops if unavailable. Turn off automatic game switching to use this mode; single-window capture is unsupported. The mouse cursor may be missing on some systems.";
   } else {
     summary.textContent =
       "Windows Graphics Capture works everywhere, including single windows. On Windows 10 it may show a yellow capture border.";

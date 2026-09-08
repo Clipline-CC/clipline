@@ -21,6 +21,8 @@ fn main() {
 mod app;
 #[cfg(windows)]
 mod bounded_http;
+#[cfg(any(windows, test))]
+mod capture_policy;
 #[cfg(windows)]
 mod cloud;
 #[cfg(windows)]

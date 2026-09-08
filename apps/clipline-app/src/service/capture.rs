@@ -259,11 +259,9 @@ pub(super) fn spawn_marker_source(opts: &ServiceOptions, recording_t0: Instant) 
 pub(super) const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Build the capture engine and pull its first frame (which fixes the capture
-/// size). DXGI Desktop Duplication is attempted only when the user explicitly
-/// selected it for a display/region source; any DXGI failure at construction
-/// or on the first frame is logged as a diagnostic and silently falls back to
-/// WGC, so recording always starts (the user chose silent fallback over a
-/// warning).
+/// size). Explicit Desktop Duplication requires a display/region source and
+/// returns construction or first-frame failures without starting WGC. Auto and
+/// explicit WGC retain their existing capture behavior.
 pub(super) fn open_screen_capture(
     device: &ID3D11Device,
     clock: RelativeClock,
@@ -271,29 +269,20 @@ pub(super) fn open_screen_capture(
     backend: CaptureBackend,
     events: &Sender<Event>,
 ) -> Result<(LiveBackend, Frame), String> {
-    if backend == CaptureBackend::DesktopDuplication
-        && matches!(
-            source,
-            CaptureSource::PrimaryMonitor | CaptureSource::DisplayRegion(_)
-        )
-    {
-        match open_dxgi(device, clock, source, events) {
-            Ok(pair) => return Ok(pair),
-            Err(e) => tracing::warn!(
-                event = "desktop_duplication_unavailable",
-                error = %e,
-                fallback = "windows_graphics_capture"
-            ),
-        }
-    }
-
-    let init = |e: &dyn std::fmt::Display| format!("init: {e}");
-    let mut cap = open_wgc(device, clock, source, events)?;
-    let first = cap
-        .next_frame_timeout(FIRST_FRAME_TIMEOUT)
-        .map_err(|e| init(&e))?
-        .ok_or("capture ended before the first frame")?;
-    Ok((LiveBackend::Wgc(cap), first))
+    crate::capture_policy::open_capture(
+        backend,
+        matches!(source, CaptureSource::WindowTitle(_) | CaptureSource::WindowHandle { .. }),
+        || open_dxgi(device, clock, source, events),
+        || {
+            let init = |e: &dyn std::fmt::Display| format!("init: {e}");
+            let mut cap = open_wgc(device, clock, source, events)?;
+            let first = cap
+                .next_frame_timeout(FIRST_FRAME_TIMEOUT)
+                .map_err(|e| init(&e))?
+                .ok_or("capture ended before the first frame")?;
+            Ok((LiveBackend::Wgc(cap), first))
+        },
+    )
 }
 
 /// DXGI Desktop Duplication for a display/region source (never per-window). The

@@ -18,20 +18,7 @@ pub enum CaptureSource {
     DisplayRegion(CaptureRegion),
 }
 
-/// Which screen-capture backend to use for display/region capture (issue #42).
-/// `Auto` and `Wgc` both use Windows Graphics Capture today; `Wgc` is the
-/// persisted force-WGC escape hatch that survives any future change to `Auto`.
-/// `DesktopDuplication` uses DXGI Desktop Duplication, which has no Windows 10
-/// privacy border but is display/region only (never per-window) and silently
-/// falls back to WGC when it can't initialize (multi-GPU, rotated display, etc).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CaptureBackend {
-    #[default]
-    Auto,
-    Wgc,
-    DesktopDuplication,
-}
+pub use crate::capture_policy::CaptureBackend;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]

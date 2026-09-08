@@ -1,5 +1,10 @@
 # Experimental DWM window capture
 
+**Windows 10 AMD validation:** the controlled fixture works, but AMD-accelerated
+WebGL returns unchanged white/gray surfaces in windowed and browser fullscreen
+tests. This probe is not ready for general window recording. See the
+[AMD recording results](research/2026-09-08-win10-amd-recording.md).
+
 This standalone probe tests border-free window capture using an undocumented DWM surface
 export. It does not change Clipline, inject into the target, run WGC, or fall back to display
 capture. Use it only on a window you intend to record. Snapshots and window titles stay local.
