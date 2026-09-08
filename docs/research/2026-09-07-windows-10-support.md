@@ -148,3 +148,11 @@ Two other apparent shortcuts do not establish a general solution: Microsoft's `C
 The isolated `dwm_probe` example now exists; [tester instructions](../dwm-probe.md) describe its use. The branch was fast-forwarded to the inspected 1.0.4 commit before implementation. A controlled Windows 11 26200 / RX 6700 XT experiment returned changing target-window pixels, survived resize and minimize/restore, and saved target content while a magenta window covered it. The 22-second run had 973 successful reads, 859 changed samples, and 176 minimized-window errors; the 8-second overlap run had 368 reads, 266 changes, and no errors. Sampling cost includes CPU readback/BMP packing, and compilation overlapped the second run. These are feasibility observations, not game or performance acceptance. Windows 10 and actual games are still untested.
 
 The prototype does not use WGC or injection and is not wired into the recorder. It does not establish synchronized complete-frame reads: the initial unbuffered GDI fixture produced a snapshot with partial repaint content, and equal opaque update IDs sometimes accompanied different pixel hashes. The fixture now double-buffers; robust game rendering and synchronization still need investigation. No third-party implementation was copied. Workspace tests and the probe's argument/BMP checks pass; unsafe/lifetime review found no experimental-shipping blocker.
+
+**September 8 physical Windows 10 follow-up:** the original probe package failed to
+load because it omitted `vcruntime140.dll`. Official Microsoft app-local deployment
+repairs startup without changing the executable. Controlled overlap and lifecycle
+capture, including a five-minute resource sample, works on Microsoft Basic Render
+Driver; the AMD graphics driver is not installed. Hardware-accelerated game capture
+remains unverified. See the [Windows 10 validation record](2026-09-08-dwm-probe-win10-validation.md)
+for measurements, packaging fixes, and remaining driver/game prerequisites.

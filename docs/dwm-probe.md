@@ -7,9 +7,38 @@ capture. Use it only on a window you intend to record. Snapshots and window titl
 From an extracted probe ZIP, open PowerShell in that directory:
 
 ```powershell
+.\dwm_probe.exe --help
 .\dwm_probe.exe --list
 .\dwm_probe.exe --hwnd 123456 --seconds 30 --fps 60 --out league-test
 ```
+
+Check `$LASTEXITCODE` immediately after each native command. Both preflight commands
+must exit zero before starting capture. `-1073741515` / `0xC0000135` means a required
+DLL could not be loaded; it is **not** a DWM capture failure. The original test ZIP
+omitted `vcruntime140.dll`, which reproduced this failure on clean Windows 10.
+
+The package must include the official Microsoft x64 `vcruntime140.dll` beside
+`dwm_probe.exe`, or the machine must have the appropriate Microsoft Visual C++
+Redistributable installed. Use a runtime at least as recent as the build toolset.
+App-local deployment keeps this test independent of a global runtime installation.
+Do not obtain DLLs from third-party download sites. Microsoft documents both
+[runtime deployment](https://learn.microsoft.com/en-us/cpp/windows/redistributing-visual-cpp-files)
+and [official redistributable downloads](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist).
+The packager checks x64 architecture, original DLL name, Microsoft signature, and
+actual `--help` / `--list` exit codes; it records runtime provenance and hashes.
+Its preflight logs are a sibling directory, outside the distributable, because window
+enumeration can contain private desktop titles.
+
+For an automated controlled run from the extracted package:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\test-dwm-probe.ps1 -OutputDirectory .\fixture-test
+```
+
+This starts the fixture only after successful loader/enumeration checks, preserves
+native exit codes and output (including on timeout), and fails immediately when the
+probe cannot run. A failed probe must never be reported as a missing target window.
+The execution-policy option applies only to that PowerShell process.
 
 Replace `123456` with the first-column HWND for the actual game window. Alternatively use
 `--window "unique title"`; ambiguous matches fail instead of choosing an arbitrary window.
@@ -50,6 +79,21 @@ cargo build -p clipline-capture --release --example dwm_probe
 .\target\release\examples\dwm_probe.exe --list
 ```
 
+Stage a tester package with a redistributable DLL from Microsoft's documented
+Visual Studio VC Redist directory (x64, release runtime, matching or newer toolset).
+Set `$runtimeDll` to that DLL's full path and `$runtimeSource` to its source/version:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-dwm-probe.ps1 -ProbePath target/release/examples/dwm_probe.exe -RuntimePath $runtimeDll -RuntimeSource $runtimeSource -Destination dwm-probe-x64
+Compress-Archive -Path dwm-probe-x64/* -DestinationPath dwm-probe-x64.zip
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tests/test-dwm-probe-runner.ps1
+```
+
+Destination and output directories must be new. The source build on a development
+machine does not test clean-machine loader dependencies. Do not use `crt-static`
+alone as a repair: the attempted static-CRT link still failed on vendored Opus
+imports `__imp_realloc` and `__imp__wassert`.
+
 For a controlled local fixture, run `powershell -NoProfile -File scripts/dwm-probe-target.ps1`
 in another terminal, then capture `--window "Clipline DWM Probe Target"`. The fixture animates
 a green square with red/blue reference blocks, covers it with a magenta window at 4 seconds,
@@ -66,3 +110,6 @@ set after startup was about 36 MB during this short run; this is not a memory so
 measurement. Windows 10 and game acceptance remain pending.
 
 Research and API limitations: [Windows 10 report](research/2026-09-07-windows-10-support.md).
+
+Physical Windows 10 findings and remaining prerequisites:
+[September 8 validation](research/2026-09-08-dwm-probe-win10-validation.md).

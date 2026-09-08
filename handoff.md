@@ -4,6 +4,33 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-09-08): Windows 10 DWM probe runtime repair and software baseline
+
+Continued PR #200 from `e6dd13a2` on physical Windows 10 Home 19045 / Ryzen 9 7940HS.
+The original probe's `--help` and `--list` both failed before capture with `0xC0000135`.
+Official Microsoft x64 `vcruntime140.dll` 14.51.36247.0 deployed app-locally fixes both
+commands without rebuilding the executable or installing a global runtime. The Desktop
+copy now includes that DLL and a corrected launcher; the original launcher is backed up.
+New package/runner scripts check native exits before starting the fixture, preserve timeout
+logs, validate runtime identity, and keep desktop-title logs outside the distributable.
+PowerShell 5.1 regression tests pass and run in Windows CI.
+
+The installed GPU driver is still **Microsoft Basic Display Adapter 10.0.19041.3636**.
+DWM and WebGL both use **Microsoft Basic Render Driver**. A 22-second controlled run
+returned 1,110 reads, excluded the overlapping magenta window, and recovered after resize
+and minimize/restore; all 176 errors were while minimized. Sampled desktop views showed no
+yellow border. A five-minute run returned 17,400 reads; steady working set was 10.95–14.03 MiB,
+private memory 5.09–6.69 MiB, handles 157–160, with no sustained upward trend observed.
+These software-fixture results do not establish AMD acceleration, game compatibility,
+exclusive fullscreen, or synchronized/tear-free frames. No production capture changes.
+
+AMD-signed Adrenalin 26.8.1 was downloaded, but Windows administrator approval was canceled;
+no driver installation or reboot occurred. No League/Valorant/Riot installation was found
+in uninstall records or standard directories. Local workspace tests and Clippy cannot
+compile because MSVC `link.exe` is absent. Full results, hashes, evidence paths, and next
+steps: `docs/research/2026-09-08-dwm-probe-win10-validation.md`. Next establish the AMD driver,
+verify the actual renderer, then test installed/logged-in games in separate rendering modes.
+
 ## Checkpoint (2026-09-06): Nightly 1.0.4 published
 
 Published [Nightly 1.0.4](https://github.com/Clipline-CC/clipline/releases/tag/nightly) from

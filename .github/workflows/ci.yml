@@ -47,6 +47,11 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get update -y
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ffmpeg
 
+      - name: Test DWM probe runner
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: .\scripts\tests\test-dwm-probe-runner.ps1
+
       - name: Test
         run: cargo test --workspace
 
