@@ -4,7 +4,7 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
-## Checkpoint (2026-09-08): fullscreen label qualified by PresentMon
+## Checkpoint (2026-09-08): FSO comparison does not repair window capture
 
 The user-approved elevated PresentMon control completed: all 1,201 frames of the
 original flip mock used Hardware Composed: Independent Flip (a hardware overlay
@@ -13,11 +13,18 @@ exclusive ownership, and prior untraced runs must retain that qualification.
 No production code changed. See
 `docs/research/2026-09-08-fullscreen-presentation-trace.md`.
 
-The copied-fixture FSO/PrintWindow A/B is prepared but needs local UAC acceptance.
-The first combined attempt aborted before capture because a fixed delay did not
-wait for consent; the corrected helper waits for consent explicitly. No FSO
-compatibility setting or group membership has changed. Finish both controls and
-restore the copied fixture's setting before drawing a capture conclusion.
+The copied-fixture A/B is now complete. With FSO enabled, all 1,201 frames used
+hardware-composed independent flip; with FSO disabled, all 1,201 used Hardware:
+Legacy Flip. Both fresh flags=2 PrintWindow probes immediately failed mock counter
+validation. The latter trace establishes native-exclusive presentation during the
+failure, using direct QPC alignment. The enabled CSV required correction for a
+double timezone conversion in PresentMon 2.5.1. This ends the tested FSO/PrintWindow
+branch, not all possible API research. No new classified DWM/display test occurred.
+
+The copied executable's compatibility value was restored to absent and verified.
+No account/group/global settings changed. UAC setup failures are excluded from
+capture evidence. Local helpers now wait for consent, retain the process handle,
+record explicit status, use QPC timestamps and restore the test setting on failure.
 
 ## Earlier checkpoint (2026-09-08): fullscreen recordings preserve aspect
 

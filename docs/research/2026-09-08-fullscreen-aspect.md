@@ -68,14 +68,14 @@ Media in `C:\Users\Dain\Videos\Clipline\2026-09-08 14-24`:
 | `session_1788891862.mp4` | `AC9F1C3FB2AD3F9F908ECBDA1979D98C14DA08035C3C5AC10C5478C6E7FA7C27` |
 | `clip_1788891936.mp4` | `C8306300726F2451C915EC488A29D066619F074D279E5975CB9165D2BCBA22B7` |
 
-## Exclusive classification remains blocked on trace privileges
+## Exclusive classification history
 
 Update: the user subsequently approved an elevated trace, which completed and
-reported hardware-composed independent flip for all 1,201 frames. The remaining
-FSO/window-capture comparison needs a separate local UAC acceptance. See the
-[presentation trace report](2026-09-08-fullscreen-presentation-trace.md); the account
-and initial non-elevated failure below are historical prerequisites, now resolved
-for the completed control.
+reported hardware-composed independent flip for all 1,201 frames. The subsequent
+copied-fixture FSO A/B also completed: disabled FSO produced Legacy Flip, but both
+fresh PrintWindow probes failed their initial counter validation. The copied
+setting was restored. See the [presentation trace report](2026-09-08-fullscreen-presentation-trace.md);
+the initial non-elevated failure below is a historical prerequisite, now resolved.
 
 `GetFullscreenState` alone does not distinguish all presentation paths under
 [Fullscreen Optimizations](https://devblogs.microsoft.com/directx/demystifying-full-screen-optimizations/).
