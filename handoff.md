@@ -4,7 +4,22 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
-## Checkpoint (2026-09-08): FSO comparison does not repair window capture
+## Checkpoint (2026-09-08): direct DWM and thumbnail route fail under Legacy Flip
+
+Completed both controls with concurrent PresentMon: all 1,202 source events were
+Hardware: Legacy Flip, including 306 during direct DWM sampling and 388 during
+thumbnail-host PrintWindow. Direct DWM read 148 unchanged white/black frames.
+Thumbnail PrintWindow returned game pixels, but all three saved snapshots are
+identical at counter 304 while the live source advances 900 to 2310. Correcting
+the thumbnail's changed scale did not recover fresh content. Both probes failed.
+
+The windowed thumbnail-host PrintWindow control did show correct colors and
+advancing saved counters (214/453/688); that positive does not extend to native
+exclusive. The copied fixture setting was restored and verified, all helpers
+exited, and no production backend changed. Evidence and limits are in
+`docs/research/2026-09-08-dwm-native-exclusive-followup.md`.
+
+## Earlier checkpoint (2026-09-08): FSO comparison does not repair window capture
 
 The user-approved elevated PresentMon control completed: all 1,201 frames of the
 original flip mock used Hardware Composed: Independent Flip (a hardware overlay
