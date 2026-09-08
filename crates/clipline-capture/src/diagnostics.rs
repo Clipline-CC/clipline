@@ -4,6 +4,10 @@ use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureDiagnostic {
+    DxgiReopenFailed {
+        hresult: i32,
+        suppressed_since_last: u64,
+    },
     WasapiDataDiscontinuity {
         suppressed_since_last: u64,
     },
@@ -28,6 +32,13 @@ pub enum CaptureDiagnostic {
 impl fmt::Display for CaptureDiagnostic {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::DxgiReopenFailed {
+                hresult,
+                suppressed_since_last,
+            } => write!(
+                formatter,
+                "capture event=dxgi_reopen_failed hresult=0x{hresult:08x} suppressed_since_last={suppressed_since_last} action=retry_same_output"
+            ),
             Self::WasapiDataDiscontinuity {
                 suppressed_since_last,
             } => write!(

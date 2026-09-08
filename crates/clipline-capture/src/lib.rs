@@ -2,6 +2,10 @@ pub mod annexb;
 pub mod av1;
 pub mod avsync;
 pub mod clock;
+#[cfg(any(windows, test))]
+mod capture_geometry;
+#[cfg(any(windows, test))]
+mod reopen_resource;
 pub mod cpu_video;
 pub mod diagnostics;
 pub mod ffmpeg;

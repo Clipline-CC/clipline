@@ -21,6 +21,8 @@ pub enum FrameData {
 
 #[derive(Debug, thiserror::Error)]
 pub enum CaptureError {
+    #[error("capture source changed: {0}")]
+    SourceChanged(String),
     #[error("capture init failed: {0}")]
     Init(String),
     #[error("capture device lost: {0}")]

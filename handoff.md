@@ -4,7 +4,33 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
-## Checkpoint (2026-09-08): native PrintWindow records 720p60 with audio and replay
+## Checkpoint (2026-09-08): exclusive display capture recovers across mode changes
+
+Fixed DXGI access-loss ownership/reseeding and invalid-region error handling.
+Reopening drops the invalid interface first, retries the same output with bounded
+waits and rate-limited diagnostics, and seeds fresh pixels without resetting PTS.
+A fixed region that no longer fits returns a non-timeout error rather than
+recording frozen video. Neutral ownership/geometry tests and a seeded cadence
+regression test cover these paths; live fullscreen transitions cover reseeding.
+
+On this Windows 10 / Radeon 780M machine, explicit `primary_monitor` controls now
+record exclusive blt/flip mocks with H.264, stereo Opus and F6 replays. A 65-second
+blt run remained foreground/exclusive; its 1,800-frame replay had three repeated
+counters, no invalid pixels, and ~95..104 MiB main-process private memory after
+warm-up. A 75-second flip run recovered through two windowed/exclusive cycles.
+Live screenshots show no yellow border. A fixed 1280x720 region correctly stops
+with a visible error when the display changes to 720x480.
+
+This is display capture, not automatic game-only capture. The display dropdown
+still serializes a fixed region; following monitor mode changes requires explicit
+persisted full-display intent. Original settings are restored after controls.
+DWM and all PrintWindow flag variants still fail exclusive window capture; their
+experiments remain outside production. Full-monitor resize currently stretches
+to the fixed encoder aspect ratio. Real games and long-session behavior remain
+unverified. See `docs/research/2026-09-08-exclusive-fullscreen.md` and local evidence
+`C:\Users\Dain\Desktop\CliplineExclusiveTest-20260908-125432`.
+
+## Earlier checkpoint (2026-09-08): native PrintWindow records 720p60 with audio and replay
 
 `cargo run -p clipline-capture --example print_window_record -- --help` exposes a
 standalone experiment, never a production backend. It isolates synchronous capture

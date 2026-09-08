@@ -13,6 +13,11 @@ an alternative full-content PrintWindow path that captures the flip mock in
 windowed/borderless modes. Exclusive fullscreen still fails. It remains a separate
 diagnostic, with no change to production recording.
 
+The [exclusive investigation](research/2026-09-08-exclusive-fullscreen.md) repairs
+production DXGI display recovery and validates explicit monitor recordings through
+fullscreen transitions. It does not repair exclusive DWM/PrintWindow window capture
+or introduce a monitor fallback for game-window sources.
+
 This standalone probe tests border-free window capture using an undocumented DWM surface
 export. It does not change Clipline, inject into the target, run WGC, or fall back to display
 capture. Use it only on a window you intend to record. Snapshots and window titles stay local.
