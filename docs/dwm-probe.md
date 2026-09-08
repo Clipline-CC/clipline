@@ -4,6 +4,10 @@
 WebGL returns unchanged white/gray surfaces in windowed and browser fullscreen
 tests. This probe is not ready for general window recording. See the
 [AMD recording results](research/2026-09-08-win10-amd-recording.md).
+The [native mock-game matrix](research/2026-09-08-mock-game-validation.md) now
+reproduces a presentation distinction: blt windowed/borderless captures correctly,
+while flip presentation and DXGI exclusive modes return stale surfaces. Build the
+[mock executables](mock-games.md) to reproduce without a real-game installation.
 
 This standalone probe tests border-free window capture using an undocumented DWM surface
 export. It does not change Clipline, inject into the target, run WGC, or fall back to display

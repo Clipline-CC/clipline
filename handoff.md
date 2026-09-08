@@ -4,7 +4,25 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
-## Checkpoint (2026-09-08): AMD display recording works; DWM accelerated windows fail
+## Checkpoint (2026-09-08): native mock games isolate DWM presentation failures
+
+`scripts/build-mock-games.ps1` builds hardware D3D11 blt/flip executable fixtures
+with generated stereo audio; see `docs/mock-games.md`. Both register and are
+detected in Clipline. Explicit DXGI rejects their automatically selected window
+sources, so automatic game-only capture/replay remains blocked. The native DWM
+matrix captures blt windowed/borderless content but freezes in DXGI exclusive;
+flip windowed/borderless/exclusive all return stale white/black surfaces. This is
+a reproducible native case for the earlier browser failure, not evidence that all
+GPU windows fail. See `docs/research/2026-09-08-mock-game-validation.md` for exact
+counts, hashes, fixture limits and local evidence. Keep production DWM disabled.
+A separate 30-second display-control replay of the flip mock decodes all 1,800
+frames with correct stereo tones and silent intervals. Fixed the mock's short
+waveOut buffers after they reproduced underruns; no recorder audio code changed.
+The app remains open, paused, with both mock paths registered and automatic game
+switching off. Native-mock global F6 and automatic full-session acceptance remain
+open; the display control used the Save button.
+
+## Earlier checkpoint (2026-09-08): AMD display recording works; DWM WebGL fails
 
 Official AMD driver `32.0.31041.1004` and Microsoft C++ Build Tools are installed on
 the Windows 10 Home 19045 / Radeon 780M machine. Clipline builds and launches.
