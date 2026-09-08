@@ -423,7 +423,8 @@ function updateHotkeyLabels(hotkey = saveHotkeyLabel(), secondary = saveSecondar
 function fallbackCaptureSourceLabel(settings) {
   if (settings && settings.capture_mode === "display_monitor") {
     const display = displays.find((item) => item.id === settings.capture_display_id);
-    return display ? `Full display: ${display.name}` : "Full display (unavailable)";
+    const name = display ? display.name : settings.capture_display_id;
+    return name ? `Full display: ${name}` : "Full display";
   }
   return captureSourceLabel(settings);
 }

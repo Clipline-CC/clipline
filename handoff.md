@@ -26,6 +26,15 @@ No account/group/global settings changed. UAC setup failures are excluded from
 capture evidence. Local helpers now wait for consent, retain the process handle,
 record explicit status, use QPC timestamps and restore the test setting on failure.
 
+During reopening, a valid saved display showed an unavailable rail tooltip until
+Settings loaded the UI display list. The fallback label now uses the saved display
+identity when no friendly name is cached. Backend capture had succeeded; this was
+a startup label defect, not display loss after the fullscreen experiment.
+Verified the raw saved ID before opening Settings and friendly name afterward.
+All 1,531 workspace tests (CI=1) and warning-denied Clippy passed after cleaning
+the app crate; rebuilt and reopened Clipline with capture paused. Screenshots and
+gate logs are in `C:\Users\Dain\Desktop\CliplineAspectTest-20260908-141713`.
+
 ## Earlier checkpoint (2026-09-08): fullscreen recordings preserve aspect
 
 GPU and CPU conversion now fit source/crop aspect into fixed output dimensions
