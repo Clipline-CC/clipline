@@ -25,3 +25,12 @@ the existing Windows 10 AMD machine, registered mocks and audio endpoint.
 No WGC, injection, protection bypass, borrowed-handle closes, driver/global runtime
 changes, or silent presentation-mode changes. Do not claim a window-only fix if
 the successful path captures monitor overlays or requires converting to borderless.
+
+Follow-up: the explicit PrimaryMonitor control also froze. Investigate the DXGI
+access-loss lifecycle before treating the region check as sufficient. Microsoft
+requires releasing the old duplication interface before creating its replacement;
+the existing implementation does the reverse and suppresses creation errors.
+- [ ] Record recreation failure during the exclusive transition.
+- [ ] Add neutral lifecycle regression coverage, then release stale duplication
+  before reopening; preserve bounded retries for temporarily inaccessible desktops.
+- [ ] Repeat fixed-region and explicit full-monitor exclusive replay controls.
