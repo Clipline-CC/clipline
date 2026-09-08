@@ -4,7 +4,23 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
-## Checkpoint (2026-09-08): full-display intent is selectable and persistent
+## Checkpoint (2026-09-08): fullscreen recordings preserve aspect
+
+GPU and CPU conversion now fit source/crop aspect into fixed output dimensions
+with defined black padding. A 720x480 fullscreen source becomes 1080x720 content
+inside 1280x720 output, with 100-pixel side bars. Neutral CPU/layout tests and real
+Radeon pixel readback pass. A 75-second flip-mock transition run saved a decodable
+session and F6 replay with correct geometry and stereo audio; the steady replay
+tail has 1,686 frames, 1,685 counter advances and zero repeats. See
+`docs/research/2026-09-08-fullscreen-aspect.md` for evidence and limits.
+
+Strict game-only exclusive capture remains unresolved. Signed standalone
+PresentMon's PID-scoped non-elevated trace failed with access denied. A bounded
+UAC trace helper is prepared locally, but has not been run elevated; no FSO or
+account-group settings changed. Classify actual presentation before interpreting
+future FSO A/B window-capture controls. DWM/PrintWindow remain experimental.
+
+## Earlier checkpoint (2026-09-08): full-display intent is selectable and persistent
 
 Capture target now offers named full displays and a separate primary-full-display
 choice. Named selection persists `capture_mode=display_monitor` and

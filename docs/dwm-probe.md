@@ -137,3 +137,7 @@ Research and API limitations: [Windows 10 report](research/2026-09-07-windows-10
 
 Physical Windows 10 findings and remaining prerequisites:
 [September 8 validation](research/2026-09-08-dwm-probe-win10-validation.md).
+
+Latest display-control aspect fix and exclusive presentation-classification
+prerequisite: [fullscreen aspect report](research/2026-09-08-fullscreen-aspect.md).
+This display recording result does not establish game-only DWM compatibility.
