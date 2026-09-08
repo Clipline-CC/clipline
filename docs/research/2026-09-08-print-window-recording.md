@@ -35,9 +35,11 @@ The output directory must not exist, so failed runs cannot overwrite earlier evi
 
 ## Implementation boundary
 
-Only a child process calls synchronous `PrintWindow` with SDK flag 2
-(`PW_RENDERFULLCONTENT`). It uses a reusable top-down GDI DIB, `GdiFlush`, and
-client-area cropping. The worker checks the HWND's owning PID, a held process
+Only a child process calls synchronous `PrintWindow`, defaulting to SDK flag 2
+(`PW_RENDERFULLCONTENT`). `--print-flags 0..3` and `--fresh-dib` support controlled
+diagnostics. Client-only flags 1/3 use a client-sized DIB with zero crop offset;
+flags 0/2 use the full window DIB and crop its client area. Each read uses
+`GdiFlush`. Options are recorded in `capture-options.txt`. The worker checks the HWND's owning PID, a held process
 handle's aliveness, capture affinity, visibility and geometry before and after
 each read. Resize/minimize currently stop the fixed-resolution experiment.
 [PrintWindow](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-printwindow),

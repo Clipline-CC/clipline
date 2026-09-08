@@ -1,5 +1,7 @@
 //! Native PrintWindow experiment; never imported by a production backend.
-use super::protocol::{MAGIC, Packet, frame_bytes, mock_counter, read_packet, validate_times};
+use super::protocol::{
+    MAGIC, Packet, frame_bytes, mock_counter, print_layout, read_packet, validate_times,
+};
 use clipline_capture::ffmpeg_encoder::FfmpegVideoEncoder;
 use clipline_capture::probe::{Codec, EncoderBackend};
 use clipline_capture::windows::{
@@ -64,10 +66,16 @@ impl Drop for Job {
     }
 }
 impl Worker {
-    fn new(hwnd: isize, pid: u32, stderr: File) -> Result<Self> {
+    fn new(hwnd: isize, pid: u32, flags: u32, fresh_dib: bool, stderr: File) -> Result<Self> {
         Self::spawn(
             Command::new(std::env::current_exe()?)
-                .args(["--worker", &hwnd.to_string(), &pid.to_string()])
+                .args([
+                    "--worker",
+                    &hwnd.to_string(),
+                    &pid.to_string(),
+                    &flags.to_string(),
+                    &fresh_dib.to_string(),
+                ])
                 .stderr(stderr),
         )
     }
@@ -276,16 +284,27 @@ impl Drop for Dib {
     }
 }
 
-fn worker(hwnd: isize, pid: u32) -> Result<()> {
+fn worker(hwnd: isize, pid: u32, flags: u32, fresh_dib: bool) -> Result<()> {
     // SAFETY: called before any window/geometry work in this isolated process.
     unsafe {
         let _ = SetProcessDPIAware();
     }
     let target = Target::new(hwnd, pid)?;
     let initial = target.geometry()?;
-    let width = (initial.0.right - initial.0.left) as u32;
-    let height = (initial.0.bottom - initial.0.top) as u32;
-    let dib = Dib::new(width, height)?;
+    let window_size = (
+        (initial.0.right - initial.0.left) as u32,
+        (initial.0.bottom - initial.0.top) as u32,
+    );
+    let (width, height, _, _) = print_layout(
+        flags,
+        window_size,
+        (initial.1.right as u32, initial.1.bottom as u32),
+        (
+            (initial.2.x - initial.0.left) as u32,
+            (initial.2.y - initial.0.top) as u32,
+        ),
+    )?;
+    let mut dib = Dib::new(width, height)?;
     let mut input = std::io::stdin().lock();
     let mut output = std::io::stdout().lock();
     let mut request = [0];
@@ -297,18 +316,30 @@ fn worker(hwnd: isize, pid: u32) -> Result<()> {
             return Err("invalid capture request".into());
         }
         let before = target.geometry()?;
-        if before.0.right - before.0.left != width as i32
-            || before.0.bottom - before.0.top != height as i32
+        if before.0.right - before.0.left != window_size.0 as i32
+            || before.0.bottom - before.0.top != window_size.1 as i32
             || before.1 != initial.1
         {
             return Err("target resized; restart the fixed-resolution experiment".into());
+        }
+        let (_, _, crop_x, crop_y) = print_layout(
+            flags,
+            window_size,
+            (before.1.right as u32, before.1.bottom as u32),
+            (
+                (before.2.x - before.0.left) as u32,
+                (before.2.y - before.0.top) as u32,
+            ),
+        )?;
+        if fresh_dib {
+            dib = Dib::new(width, height)?;
         }
         let begin = qpc_now_ticks_100ns()?;
         // SAFETY: valid selected DIB and validated HWND. Initialize to expose
         // incomplete painting; GdiFlush synchronizes access to the DIB's bits.
         unsafe {
             std::ptr::write_bytes(dib.bits, 0xcd, dib.size);
-            if !PrintWindow(target.hwnd, dib.dc, PRINT_WINDOW_FLAGS(2)).as_bool() {
+            if !PrintWindow(target.hwnd, dib.dc, PRINT_WINDOW_FLAGS(flags)).as_bool() {
                 return Err("PrintWindow returned false".into());
             }
             if !GdiFlush().as_bool() {
@@ -327,8 +358,8 @@ fn worker(hwnd: isize, pid: u32) -> Result<()> {
         output.write_all(&sequence.to_le_bytes())?;
         output.write_all(&begin.to_le_bytes())?;
         output.write_all(&end.to_le_bytes())?;
-        let x = (before.2.x - before.0.left) as usize;
-        let y = (before.2.y - before.0.top) as usize;
+        let x = crop_x as usize;
+        let y = crop_y as usize;
         // SAFETY: validated crop bounds, live allocation, GDI has finished writing.
         let pixels = unsafe { std::slice::from_raw_parts(dib.bits.cast::<u8>(), dib.size) };
         for row in y..y + ch as usize {
@@ -442,14 +473,22 @@ impl CaptureEngine for Capture {
 pub fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("--worker") {
-        if args.len() != 3 {
+        if args.len() != 5 {
             return Err("invalid worker arguments".into());
         }
-        return worker(args[1].parse()?, args[2].parse()?);
+        return worker(
+            args[1].parse()?,
+            args[2].parse()?,
+            args[3].parse()?,
+            args[4].parse()?,
+        );
     }
     if args.is_empty() || args.iter().any(|a| a == "--help") {
         println!(
             "Experimental PrintWindow -> AMD H264 MFT + default WASAPI system loopback -> session/replay\n--hwnd HANDLE --pid PID --out NEW_DIRECTORY [--seconds 30] [--fps 30] [--expect-mock] [--ffmpeg-amf]\nFixed client dimensions; stops on resize/minimize/hang. No WGC/display fallback.\n--ffmpeg-amf explicitly tests the separate FFmpeg encoder path; no automatic encoder fallback."
+        );
+        println!(
+            "Diagnostic options: --print-flags 0..3 (default 2); --fresh-dib recreates the memory DC/bitmap for each read."
         );
         return Ok(());
     }
@@ -460,8 +499,14 @@ pub fn run() -> Result<()> {
     let mut fps = 30u32;
     let mut mock = false;
     let mut ffmpeg_encoder = false;
+    let mut print_flags = 2u32;
+    let mut fresh_dib = false;
     let mut args = args.iter();
     while let Some(flag) = args.next() {
+        if flag == "--fresh-dib" {
+            fresh_dib = true;
+            continue;
+        }
         if flag == "--expect-mock" {
             mock = true;
             continue;
@@ -477,6 +522,7 @@ pub fn run() -> Result<()> {
             "--out" => out = Some(PathBuf::from(value)),
             "--seconds" => seconds = value.parse()?,
             "--fps" => fps = value.parse()?,
+            "--print-flags" => print_flags = value.parse()?,
             _ => return Err(format!("unknown option {flag}").into()),
         }
     }
@@ -486,9 +532,20 @@ pub fn run() -> Result<()> {
     let hwnd = hwnd.filter(|v| *v > 0).ok_or("positive --hwnd required")?;
     let pid = pid.filter(|v| *v > 0).ok_or("positive --pid required")?;
     let out = out.ok_or("--out required")?;
+    print_layout(print_flags, (1, 1), (1, 1), (0, 0))?;
     fs::create_dir(&out)?; // never overwrite existing evidence
+    fs::write(
+        out.join("capture-options.txt"),
+        format!("hwnd={hwnd} pid={pid} print_flags={print_flags} fresh_dib={fresh_dib}\n"),
+    )?;
     let outcome = (|| -> Result<()> {
-        let mut worker = Worker::new(hwnd, pid, File::create(out.join("worker.stderr.log"))?)?;
+        let mut worker = Worker::new(
+            hwnd,
+            pid,
+            print_flags,
+            fresh_dib,
+            File::create(out.join("worker.stderr.log"))?,
+        )?;
         // Geometry discovery is explicitly a preflight read, before the recording clock.
         let probe = worker.sample()?;
         if mock {

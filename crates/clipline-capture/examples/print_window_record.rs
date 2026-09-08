@@ -17,6 +17,33 @@ fn main() {
 #[cfg(any(windows, test))]
 mod protocol {
     use std::io::Read;
+    pub fn print_layout(
+        flags: u32,
+        window: (u32, u32),
+        client: (u32, u32),
+        offset: (u32, u32),
+    ) -> Result<(u32, u32, u32, u32), &'static str> {
+        frame_bytes(window.0, window.1)?;
+        frame_bytes(client.0, client.1)?;
+        if flags > 3 {
+            return Err("PrintWindow flags must be 0..3");
+        }
+        if flags & 1 != 0 {
+            return Ok((client.0, client.1, 0, 0));
+        }
+        if offset
+            .0
+            .checked_add(client.0)
+            .is_none_or(|right| right > window.0)
+            || offset
+                .1
+                .checked_add(client.1)
+                .is_none_or(|bottom| bottom > window.1)
+        {
+            return Err("client crop outside window");
+        }
+        Ok((window.0, window.1, offset.0, offset.1))
+    }
     pub const MAGIC: u32 = 0x31575043; // CPW1
     pub struct Packet {
         pub width: u32,
@@ -95,6 +122,27 @@ mod protocol {
     #[cfg(test)]
     mod tests {
         use super::*;
+        #[test]
+        fn client_only_has_no_nonclient_crop() {
+            for flags in [1, 3] {
+                assert_eq!(
+                    print_layout(flags, (816, 489), (800, 450), (8, 31)),
+                    Ok((800, 450, 0, 0))
+                );
+            }
+        }
+        #[test]
+        fn full_window_retains_client_crop() {
+            for flags in [0, 2] {
+                assert_eq!(
+                    print_layout(flags, (816, 489), (800, 450), (8, 31)),
+                    Ok((816, 489, 8, 31))
+                );
+            }
+            assert!(print_layout(4, (800, 450), (800, 450), (0, 0)).is_err());
+            assert!(print_layout(2, (800, 450), (800, 450), (u32::MAX, 0)).is_err());
+            assert!(print_layout(1, (800, 450), (0, 450), (0, 0)).is_err());
+        }
         #[test]
         fn bounds_before_allocation() {
             assert_eq!(frame_bytes(1280, 720), Ok(3_686_400));
