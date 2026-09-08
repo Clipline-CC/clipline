@@ -102,10 +102,51 @@ found no remaining WGC constructor path for explicit Desktop Duplication.
 No League/Valorant installation was found in the earlier uninstall/standard-path
 inspection, and no usable game/login was supplied during this run. Practice-game
 windowed, borderless fullscreen and exclusive fullscreen are untested. Sustained
-game recording, game-only overlap exclusion, audio, frame synchronization and
+game recording, game-only overlap exclusion, physical/game audio, frame synchronization and
 device-loss recovery still need separate acceptance. Do not broaden window capture
 to the desktop silently or claim this meets the complete game-only requirement.
 
-The earlier packaging commits reached PR #200 at `e2c8ca2`, and both Windows and
-Ubuntu CI passed there. The current change and results are prepared for the same PR;
-check its latest head and CI separately from that earlier green run.
+The no-fallback change reached PR #200 at `c5960c3`; Windows and Ubuntu CI both
+passed in run `34200829938`. The PR description includes the accelerated DWM failure.
+
+## Virtual audio follow-up on the PiKVM host
+
+The user installed the official VB-CABLE package after the agent's elevated launch
+was blocked by automatic approval review. Windows exposes an active `CABLE Input`
+playback endpoint (also the Windows default), a `CABLE In 16ch` endpoint and a
+`CABLE Output` recording endpoint. The working driver reports status OK; two extra
+VB-Audio driver entries report Device Manager code 10 and were not modified.
+No reboot was initiated by the agent.
+
+Clipline was restarted and configured explicitly to capture **CABLE Input** with
+output volume 100%, output audio enabled, microphone disabled, and process splitting
+off. A local SoundPlayer/WinForms fixture plays 30 seconds of 48 kHz stereo PCM:
+440 Hz left, 880 Hz right, alternating one second of tone and one second of silence.
+Its visual timer is approximate and is not a sample-synchronized A/V reference.
+
+`session_1788854412.mp4` is 40,438,535 bytes, duration 64.10 seconds, with 1280x720
+H.264 video and a 48 kHz stereo Opus audio track. Complete audio/video decoding
+succeeds (3,840 video frames). All 15 tone bursts are present, with intervening
+silences about 0.997–1.000 seconds. In the 2.0–2.5 second tone interval, channel RMS
+levels are -17.013/-16.989 dBFS and zero-crossing rates are 0.018333/0.036667 per
+sample, consistent with the intended 440/880 Hz channel assignment. The in-app
+player opens the file with one selected audio track. This validates the real WASAPI
+virtual-output path through Opus encoding, MP4 saving and decoding without speakers.
+
+F6 replay saving was tested separately with the same fixture.
+`clip_1788854665.mp4` is 19,069,134 bytes, 30.00 seconds, 1,800 video frames and
+48 kHz stereo Opus. Full decoding exits 0; both audio channels contain the test
+signal (whole-replay RMS about -20.60 dBFS, including silent intervals). Its SHA-256
+is `D7D9EB035187DFA1250C515C5E375742C90314DE716B748CD3E906B7FF30E0CD`.
+The app is left open with the virtual endpoint selected and recording paused.
+
+An earlier settings-triggered capture restart displayed `DuplicateOutput failed:
+The parameter is incorrect (0x80070057)`; a subsequent manual start succeeded and
+produced the recording above. The cause of that transition failure remains open.
+It did not switch to WGC. Audio-driver availability does not resolve the separate
+accelerated DWM capture failure, physical microphone or game-process audio acceptance.
+
+Evidence: `C:\Users\Dain\Desktop\CliplineAudioTest-20260908-035219`, including the
+original WAV, fixture script, selected settings, decode/silence/channel analyses
+and local screenshots. Recorded MP4 SHA-256:
+`966FDC63754F5C632AEEFAC6956B46E085ACBF3A318F299862EAE0F3527C21FC`.
