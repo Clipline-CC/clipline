@@ -150,6 +150,11 @@ measurement. Windows 10 and game acceptance remain pending.
 
 Research and API limitations: [Windows 10 report](research/2026-09-07-windows-10-support.md).
 
+Latest alternate D3D9 reader, metadata-input and FLIP_SEQUENTIAL controls:
+[reader investigation](research/2026-09-08-dwm-reader-controls.md). The blt positive
+works, but flip content remains stale. The new fullscreen matrices are untraced
+and must not be labeled measured native-exclusive results.
+
 Physical Windows 10 findings and remaining prerequisites:
 [September 8 validation](research/2026-09-08-dwm-probe-win10-validation.md).
 

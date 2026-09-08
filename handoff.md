@@ -4,7 +4,26 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
-## Checkpoint (2026-09-08): unchanged-resolution fullscreen control
+## Checkpoint (2026-09-08): alternate reader and preservation controls
+
+An original local D3D9Ex reader passes the blt positive (46 reads/45 changes),
+but reads the same static non-game DWM pixels as D3D11 on the flip fixture.
+Retaining the returned LUID works on the positive; retaining returned flags
+causes surface-unavailable errors. Local signed-user32 inspection shows these
+arguments are read as well as written; the probe's zero initialization remains
+supported by the positive control. No production code changed.
+
+An otherwise identical FLIP_SEQUENTIAL mock does not recover fresh fullscreen
+pixels either. Both original and sequential matrices pass borderless PrintWindow
+before/after and freeze during reported exclusive. These new matrices are
+explicitly **untraced** after Windows canceled the PresentMon UAC launch; earlier
+Legacy Flip traces do not classify them. See
+`docs/research/2026-09-08-dwm-reader-controls.md` for counts, hashes and limits.
+Copied-fixture settings are restored and helpers exited. The user's objective
+remains making experimental window capture work in fullscreen; no passing route
+has been found and no source tradeoff is awaiting approval.
+
+## Earlier checkpoint (2026-09-08): unchanged-resolution fullscreen control
 
 The subsequent elevation comparison also fails: actual administrator-token
 PrintWindow/DWM probes read the same stale content as ordinary probes against
