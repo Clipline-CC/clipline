@@ -70,6 +70,13 @@ Media in `C:\Users\Dain\Videos\Clipline\2026-09-08 14-24`:
 
 ## Exclusive classification remains blocked on trace privileges
 
+Update: the user subsequently approved an elevated trace, which completed and
+reported hardware-composed independent flip for all 1,201 frames. The remaining
+FSO/window-capture comparison needs a separate local UAC acceptance. See the
+[presentation trace report](2026-09-08-fullscreen-presentation-trace.md); the account
+and initial non-elevated failure below are historical prerequisites, now resolved
+for the completed control.
+
 `GetFullscreenState` alone does not distinguish all presentation paths under
 [Fullscreen Optimizations](https://devblogs.microsoft.com/directx/demystifying-full-screen-optimizations/).
 A PID-scoped [PresentMon](https://github.com/GameTechDev/PresentMon/blob/main/README-ConsoleApplication.md)

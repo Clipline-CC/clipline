@@ -4,7 +4,22 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
-## Checkpoint (2026-09-08): fullscreen recordings preserve aspect
+## Checkpoint (2026-09-08): fullscreen label qualified by PresentMon
+
+The user-approved elevated PresentMon control completed: all 1,201 frames of the
+original flip mock used Hardware Composed: Independent Flip (a hardware overlay
+plane), despite the application reporting exclusive. This is not measured native
+exclusive ownership, and prior untraced runs must retain that qualification.
+No production code changed. See
+`docs/research/2026-09-08-fullscreen-presentation-trace.md`.
+
+The copied-fixture FSO/PrintWindow A/B is prepared but needs local UAC acceptance.
+The first combined attempt aborted before capture because a fixed delay did not
+wait for consent; the corrected helper waits for consent explicitly. No FSO
+compatibility setting or group membership has changed. Finish both controls and
+restore the copied fixture's setting before drawing a capture conclusion.
+
+## Earlier checkpoint (2026-09-08): fullscreen recordings preserve aspect
 
 GPU and CPU conversion now fit source/crop aspect into fixed output dimensions
 with defined black padding. A 720x480 fullscreen source becomes 1080x720 content
