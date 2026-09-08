@@ -6,6 +6,15 @@
 
 ## Checkpoint (2026-09-08): unchanged-resolution fullscreen control
 
+The subsequent elevation comparison also fails: actual administrator-token
+PrintWindow/DWM probes read the same stale content as ordinary probes against
+the same normal-integrity mock. All 1,792 presentation events are Legacy Flip.
+PrintWindow remains at counter 457 at both privilege levels; elevated DWM has
+88 unchanged reads. Previous prompts elevated only PresentMon; this comparison
+explicitly elevated capture workers after explaining that scope to the user.
+Clipline and the fixture remain unelevated. Evidence is appended to the same
+surface-continuity report below. The copied fixture setting was restored.
+
 User clarified the objective remains fixing experimental window capture for
 fullscreen. Tested the unchanged flip fixture borderless -> native exclusive ->
 borderless at constant 1280x720, with concurrent PresentMon and 300 geometry rows.

@@ -80,3 +80,52 @@ The copied fixture's compatibility value was restored to absent in cleanup and
 independently verified afterward. Fixture and trace processes exited. No WGC,
 monitor fallback, injection, protection bypass or production backend change was
 introduced. Borrowed DWM handles remain unclosed. Clipline remains paused.
+
+## Capture elevation comparison
+
+The user asked whether the administrator prompts indicated that Clipline needed
+elevation to capture these mocks. Earlier prompts elevated PresentMon for ETW
+tracing only. This follow-up explicitly elevated the capture probes themselves,
+after explaining the changed prompt scope. It did not elevate Clipline or the
+fixture, install anything, or change an account's privileges.
+
+Root: `C:\Users\Dain\Desktop\CliplineCaptureElevation-20260908-181509`.
+Completed run: `run-20260908-181742`. The same fixture hash was used in a new copy.
+One temporary elevated helper owned both elevated probes and the signed trace;
+the ordinary supervisor owned the mock and ordinary probes. Both used the same
+existing probe executables/scripts, source PID 5788 and HWND 3999610.
+
+Token queries confirmed normal integrity RID 8192 with `elevated=False` for
+Clipline, the mock, ordinary supervisor and ordinary probes. The elevated helper
+and both elevated probes reported RID 12288 with `elevated=True`. The helper
+independently confirmed that the target remained at normal integrity.
+
+All 1,792 PresentMon events used Legacy Flip, with zero wrong-process rows. The
+combined 320 source telemetry rows retained foreground and 1280x720 client size.
+
+| Probe | Actual token | Capture result | Concurrent Legacy Flip events |
+| --- | --- | --- | --- |
+| Ordinary PrintWindow | Normal | 51 valid reads, zero advances, all counter 457 | 261 |
+| Ordinary DWM | Normal | Motion-required failure | 183 |
+| Elevated PrintWindow | Administrator | 50 valid reads, zero advances, all counter 457 | 259 |
+| Elevated DWM | Administrator | 88 reads, zero changes/errors | 184 |
+
+All four probes exited 1. During elevated PrintWindow sampling, live source titles
+advanced from 1155 to 1410; during elevated DWM they advanced from 1425 to 1590.
+The ordinary and elevated PrintWindow snapshots contain identical outdated game
+content. Elevated read times averaged 12.459 ms for PrintWindow and 5.916 ms for
+DWM. This rules out capture-process elevation as the fix for this reproduced
+failure, without claiming permission levels are irrelevant to every other game.
+
+| Artifact | SHA-256 |
+| --- | --- |
+| Elevation comparison PresentMon CSV | `93F318FE3B4C81F2D3704A2A222E455D5420D66E305FF3577369D0E21C154CB3` |
+| Each ordinary/elevated PrintWindow BMP | `0714232E1597B9CCF14E70A18473C2C795F4C057E8F6ED8D54EE11360E465C21` |
+| Each ordinary/elevated DWM BMP | `598EB6A5B7E1D3291E1E195CA43891F66990FCFB3307CC205D208D4C9CAA8CAB` |
+
+Local evidence includes ordinary/elevated token records, per-stage PID/token/QPC
+records, source telemetry, counter and presentation summaries, images, and the
+bounded `common.ps1`, `run-elevation.ps1` and `elevated.ps1` harness. Each probe has
+an external deadline; the trace is limited to 30 seconds. The copied fixture's
+compatibility value was restored to absent and independently verified. No
+experimental mechanism was integrated into production recording.
