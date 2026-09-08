@@ -6,6 +6,8 @@
   recompute after input resize and validate crops before conversion.
 - [ ] Test GPU pixel output across wide/tall/source-resize cases, then a live
   fullscreen transition recording with audio/replay and matching-aspect controls.
+- [ ] Apply the same tested placement to the CPU converter so software encoding
+  preserves aspect too; test padding, crop shape and unchanged equal-aspect colors.
 - [ ] Download and verify official standalone PresentMon locally; attempt a bounded
   PID-scoped non-elevated trace first. No service/driver/global runtime installation.
 - [ ] If telemetry is available, compare default vs disabled Fullscreen Optimizations
