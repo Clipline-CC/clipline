@@ -23,6 +23,11 @@ now confirms static direct-DWM pixels under Legacy Flip. A thumbnail-host plus
 PrintWindow combination works in the windowed control but returns stale
 pre-transition game content under the same measured native-exclusive mode.
 
+The [subsequent API audit](research/2026-09-08-capture-api-audit.md) verifies local
+border-control API absence and explains why public Game DVR APIs do not supply
+an isolated third-party game source. No passing native-exclusive replacement has
+been identified under the current constraints.
+
 This standalone probe tests border-free window capture using an undocumented DWM surface
 export. It does not change Clipline, inject into the target, run WGC, or fall back to display
 capture. Use it only on a window you intend to record. Snapshots and window titles stay local.

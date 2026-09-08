@@ -4,7 +4,21 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
-## Checkpoint (2026-09-08): direct DWM and thumbnail route fail under Legacy Flip
+## Checkpoint (2026-09-08): local API audit confirms remaining source limitation
+
+Read-only WinRT metadata checks on build 19045 confirm that `IsBorderRequired`
+and `GraphicsCaptureAccess` are absent. AppRecordingManager is present, but its
+public contract records the calling UWP app; neither that manager nor the reviewed
+Game Bar widget API exposes another game's isolated frames. No WGC session or
+system setting change was made. See `docs/research/2026-09-08-capture-api-audit.md`.
+
+No passing native-exclusive, game-only, non-injected mechanism has been found.
+Continuing the borderless PrintWindow path or explicitly allowing full-display
+recording changes a requirement; neither is silently selected or called a strict
+exclusive fix. The user has been asked which direction is acceptable. Production
+capture remains unchanged and Clipline is open with capture paused.
+
+## Earlier checkpoint (2026-09-08): direct DWM and thumbnail route fail under Legacy Flip
 
 Completed both controls with concurrent PresentMon: all 1,202 source events were
 Hardware: Legacy Flip, including 306 during direct DWM sampling and 388 during
