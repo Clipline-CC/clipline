@@ -9,22 +9,8 @@ function displayForCaptureValue(value) {
   return displays.find((display) => display.id === id) || null;
 }
 
-function isFullDisplayRegion(region, display) {
-  return !!region && !!display
-    && region.display_id === display.id
-    && Number(region.x) === display.x
-    && Number(region.y) === display.y
-    && Number(region.width) === display.width
-    && Number(region.height) === display.height;
-}
-
 function captureSettingsValue(settings = settingsFormSource()) {
-  if (settings && settings.capture_mode === "display_region") {
-    const display = displays.find((item) => isFullDisplayRegion(settings.capture_region, item));
-    return display ? displayCaptureValue(display) : "display_region";
-  }
-  const display = primaryDisplay();
-  return display ? displayCaptureValue(display) : "primary_monitor";
+  return captureSelectionValue(settings);
 }
 
 function displayLabel(display) {
@@ -36,17 +22,22 @@ function renderCaptureTargetSelect() {
   const select = $("set-capture");
   const desired = captureSettingsValue();
   select.replaceChildren();
+  const primary = document.createElement("option");
+  primary.value = "primary_monitor";
+  primary.textContent = "Primary display (full)";
+  select.appendChild(primary);
   if (displays.length) {
     for (const display of displays) {
       const option = document.createElement("option");
       option.value = displayCaptureValue(display);
-      option.textContent = displayLabel(display);
+      option.textContent = `Full display: ${displayLabel(display)}`;
       select.appendChild(option);
     }
-  } else {
+  }
+  if (desired.startsWith("display:") && !displayForCaptureValue(desired)) {
     const option = document.createElement("option");
-    option.value = "primary_monitor";
-    option.textContent = "Primary display";
+    option.value = desired;
+    option.textContent = "Selected full display (unavailable)";
     select.appendChild(option);
   }
   const region = document.createElement("option");
@@ -61,24 +52,10 @@ function renderCaptureTargetSelect() {
 }
 
 function selectedCaptureSettings() {
-  const display = displayForCaptureValue($("set-capture").value);
-  if (display) {
-    return {
-      capture_mode: "display_region",
-      capture_region: regionForDisplay(display),
-    };
-  }
-  return {
-    capture_mode: $("set-capture").value === "display_region" ? "display_region" : "primary_monitor",
-    capture_region: regionState,
-  };
+  return captureSettingsForSelection($("set-capture").value, regionState);
 }
 
 function syncCaptureFields() {
-  const display = displayForCaptureValue($("set-capture").value);
-  if (display) {
-    regionState = regionForDisplay(display);
-  }
   const isEditableRegion = $("set-capture").value === "display_region";
   $("capture-region-editor").hidden = !isEditableRegion;
   if (isEditableRegion) renderRegionEditor();
@@ -444,9 +421,9 @@ function updateHotkeyLabels(hotkey = saveHotkeyLabel(), secondary = saveSecondar
 }
 
 function fallbackCaptureSourceLabel(settings) {
-  if (settings && settings.capture_mode === "display_region") {
-    const display = displays.find((item) => isFullDisplayRegion(settings.capture_region, item));
-    if (display) return `Display: ${display.name}`;
+  if (settings && settings.capture_mode === "display_monitor") {
+    const display = displays.find((item) => item.id === settings.capture_display_id);
+    return display ? `Full display: ${display.name}` : "Full display (unavailable)";
   }
   return captureSourceLabel(settings);
 }

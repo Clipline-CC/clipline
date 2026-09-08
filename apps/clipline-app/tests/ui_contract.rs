@@ -2322,7 +2322,7 @@ fn settings_marks_changed_rows_and_tabs() {
 
     for required in [
         "data-settings-key=\"open_on_startup\"",
-        "data-settings-key=\"capture_mode capture_region window_title\"",
+        "data-settings-key=\"capture_mode capture_display_id capture_region window_title\"",
         "data-settings-key=\"audio.output_enabled audio.output_device_id audio.output_volume audio.split_output_by_process\"",
         "data-settings-key=\"games.plugins\"",
         "data-settings-key=\"games.custom_games\"",

@@ -13,6 +13,7 @@ pub struct CaptureRegion {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CaptureSource {
     PrimaryMonitor,
+    DisplayMonitor(String),
     WindowTitle(String),
     WindowHandle { hwnd: isize, title: String },
     DisplayRegion(CaptureRegion),

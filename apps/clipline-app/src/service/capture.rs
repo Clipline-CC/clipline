@@ -299,6 +299,12 @@ fn open_dxgi(
             DxgiDuplicationCapture::primary_monitor_on(device.clone(), clock)
                 .map_err(|e| e.to_string())?
         }
+        CaptureSource::DisplayMonitor(id) => {
+            let display = clipline_capture::windows::display::display_handle_by_id(Some(id))
+                .map_err(|e| e.to_string())?;
+            DxgiDuplicationCapture::for_monitor_on(device.clone(), display.handle, clock)
+                .map_err(|e| e.to_string())?
+        }
         CaptureSource::DisplayRegion(region) => {
             let (display, recovered) =
                 clipline_capture::windows::display::display_handle_by_id_or_primary(
@@ -348,6 +354,11 @@ fn open_wgc(
         }
         CaptureSource::PrimaryMonitor => {
             WgcCapture::primary_monitor_on(device.clone(), clock).map_err(|e| init(&e))
+        }
+        CaptureSource::DisplayMonitor(id) => {
+            let display = clipline_capture::windows::display::display_handle_by_id(Some(id))
+                .map_err(|e| init(&e))?;
+            WgcCapture::for_monitor_on(device.clone(), display.handle, clock).map_err(|e| init(&e))
         }
         CaptureSource::DisplayRegion(region) => {
             let (display, recovered) =

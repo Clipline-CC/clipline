@@ -110,9 +110,13 @@ Media under `C:\Users\Dain\Videos\Clipline\2026-09-08 13-20`:
 - `clip_1788888186.mp4` (blt), SHA-256
   `CBAC253EBF5052E5ABA76CA33947FEB21837F0DBDBD2E621033616A7CC345087`.
 
-The UI currently persists a display dropdown selection as a fixed `display_region`.
+At this checkpoint the UI persisted a display dropdown selection as a fixed `display_region`.
 That cannot safely be reinterpreted as permission to follow an entire monitor:
 full-display intent needs its own persisted representation before seamless mode
 tracking can be exposed for a selected display. No game-window source was mapped
 to a monitor. Automatic game-only capture remains blocked; real-game validation,
 exclusive overlay behavior and long-session testing remain outstanding.
+
+Follow-up: [explicit full-display selection](2026-09-08-full-display-selection.md)
+now provides that persisted intent in the UI. Strict game-only exclusive capture
+remains unresolved.

@@ -4,7 +4,32 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
-## Checkpoint (2026-09-08): exclusive display capture recovers across mode changes
+## Checkpoint (2026-09-08): full-display intent is selectable and persistent
+
+Capture target now offers named full displays and a separate primary-full-display
+choice. Named selection persists `capture_mode=display_monitor` and
+`capture_display_id`, routes to full-monitor capture without a crop, and fails for
+a missing display identity instead of choosing primary. Legacy region/primary
+modes retain their identity; matching a display rectangle no longer implies a
+full-display selection. Legacy region clamping/recovery itself is unchanged.
+
+Saved the new option through the UI on this Windows 10 AMD machine, then recorded
+75 seconds with two windowed/exclusive cycles and an F6 replay. Decoding succeeded;
+the steady replay tail has 1,685 frames / 1,684 counter advances / zero repeats,
+stereo audio and no yellow border in sampled live views. A simulated missing ID
+survives restart and Save as unavailable. Workspace tests (CI=1, 1,525) and fresh
+app-cache warning-denied Clippy pass. Evidence and media hashes:
+`docs/research/2026-09-08-full-display-selection.md` and
+`C:\Users\Dain\Desktop\CliplineFullDisplayTest-20260908-134725`.
+
+Strict game-only exclusive capture is still unresolved. Reviewed documented AMD
+and kernel alternatives select displays; the similarly named documented DWM API
+is a Windows 7 driver/runtime presentation interface. No new source-isolated
+capture contract was found, and no monitor path is labeled game-only. DWM and
+PrintWindow remain experimental, with exclusive negatives preserved. Actual games
+remain unavailable, and mode-change aspect-ratio scaling remains a separate issue.
+
+## Earlier checkpoint (2026-09-08): exclusive display capture recovers across mode changes
 
 Fixed DXGI access-loss ownership/reseeding and invalid-region error handling.
 Reopening drops the invalid interface first, retries the same output with bounded

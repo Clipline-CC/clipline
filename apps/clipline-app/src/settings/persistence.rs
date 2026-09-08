@@ -150,6 +150,7 @@ impl AppSettings {
         let mut settings = Self {
             capture_mode: deserialize_field(object, "capture_mode")
                 .unwrap_or_else(|| defaults.capture_mode.clone()),
+            capture_display_id: optional_string_field(object, "capture_display_id").flatten(),
             capture_backend: deserialize_field(object, "capture_backend")
                 .unwrap_or(defaults.capture_backend),
             window_title: string_field(object, "window_title")
