@@ -25,6 +25,8 @@ exclusion, resize and minimize/restore. Both ran in the same app instance.
 See [the report](docs/research/2026-09-09-experimental-hybrid-game-capture.md) for
 frame-repeat counts, evidence hashes, short resource samples and limitations.
 Actual games, multimonitor/DPI/HDR and long-duration stability remain unvalidated.
+Local gates pass: 1,541 workspace tests, fresh app-cache Clippy with no warnings,
+and MSVC /W4 /WX for the mock. Implementation commits: `0912544`, `3db7910`.
 
 ## Earlier checkpoint (2026-09-08): web and local surface-access research
 

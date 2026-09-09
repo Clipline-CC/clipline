@@ -168,7 +168,7 @@ fullscreen counter analyses, settings backup and build hashes. A final workspace
 check first encountered Windows’ running-executable file lock; the app was then
 stopped before the clean rebuild and repeated gates.
 
-Final local gates: cargo test --workspace (0 passed, CI=1 to skip real-device
+Final local gates: cargo test --workspace (1,541 passed, CI=1 to skip real-device
 unit tests; the separate app matrices exercised hardware), fresh application-cache
 cargo clippy --workspace --all-targets -- -D warnings, and MSVC mock /W4 /WX
 build all pass. Neutral policy/protocol regressions run on both CI platforms.
