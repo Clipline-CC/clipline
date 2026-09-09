@@ -19,6 +19,16 @@ frame rejection, recovery and the existing multiple-monitor restriction. All
 workspace Clippy passes. Independent review found no additional defects. This is
 injected topology coverage, not physical hotplug validation. See the hybrid report.
 
+Pushed fix: `a031ccd`; Windows/Ubuntu CI and security checks pass. A five-minute
+borderless flip-fixture session fully decodes: 17,860 readable counters, one repeat,
+zero backward jumps, plus black startup/exit frames. A second game recorded in
+the same app instance. Parent+worker private memory was 108.2–115.5 MiB after warmup.
+Pulse analysis shows a stable 71–72 ms video lead over audio (prior replay: 66–67 ms),
+without accumulating drift; localize fixture/device vs recording timing before
+changing timestamps. Native computer-use pipe was unavailable, so no new live
+border screenshot or replay/fullscreen UI matrix is claimed. Clipline is open.
+Evidence: `C:\Users\Dain\Desktop\CliplineTopologyTest-20260909`.
+
 ## Earlier checkpoint (2026-09-09): opt-in hybrid game capture
 
 The user approved isolated experimental window capture plus whole-display capture

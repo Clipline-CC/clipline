@@ -200,3 +200,52 @@ Evidence: `C:\Users\Dain\Desktop\CliplineTopologyTest-20260909` contains the
 red/green and final gate logs. No physical monitor unplug, multiple-monitor, DPI
 or HDR acceptance is implied by these injected failures. The earlier hardware
 matrices remain evidence for their recorded build only.
+
+### Five-minute borderless recording after the review fix
+
+Build `a031ccd` (application SHA-256
+`EC4388911C935D149EDB3130FF064A021C56EE42C4CC8BA0AC460EB19D4B9141`)
+ran the unchanged flip fixture with `--borderless --seconds 300`. The same Win10
+19045 / Radeon 780M / driver 32.0.31041.1004 machine and VB-CABLE settings were
+used. No compatibility override, driver installation or WGC capture was used.
+Clipline PID 17576 automatically selected PrintWindow with worker PID 17040.
+
+`session_1788929174.mp4` is 189,871,425 bytes and fully decodes. It contains
+17,891 video frames, with last video PTS 298.1819 s and decoded audio duration
+298.18158 s. Of those frames, 17,860 have readable fixture counters: 17,858
+advances, one repeat and zero backward jumps. The other 31 counter rows are black
+at the initial debounce and target-exit tail (frames 0–11 and 17,872–17,890).
+The inspected 60-second recording frame has the expected fixture colors/content.
+The fixture exited after its configured duration with empty stderr; the first
+PowerShell process wrapper did not retain its exit code, so no zero-exit claim
+is made for that run.
+
+A second 15-second fixture invocation recorded automatically in the same parent
+instance and exited with code 0. `session_1788929548.mp4` (9,346,520 bytes) also
+fully decodes. Both worker processes exited; Clipline remains open. No fresh
+replay-hotkey or fullscreen-transition acceptance was performed in this run.
+
+For the last 269.47 seconds of the five-minute invocation, parent plus worker
+private memory ranged 108.20–115.52 MiB (108.20 at the start, 110.91 at the end).
+Their combined CPU consumption was 141.83 seconds, approximately 0.53 of one
+logical processor. The worker identity stayed constant and diagnostics logged
+no intermediate source restart. This is a five-minute debug-build observation,
+excluding WebView/GPU memory, not long-duration leak or release-performance proof.
+
+The fixture's yellow/blue pulse follows its waveOut playback position. The local
+analysis compares decoded video PTS at pulse edges with decoded stereo RMS tone
+edges in 1 ms bins (threshold 0.03), resampling audio onto its zero-based timeline.
+Across 291 matched edges, video leads audio by 71.44–72.44 ms; the first and last
+minute medians are both 71.44 ms. Stereo RMS is -20.02/-20.03 dBFS. Reanalyzing
+the earlier optimized replay `clip_1788926715.mp4` with the same method gives a
+66–67 ms video lead. The offset remains to be localized between fixture/device
+timing and recording; these observations show no accumulating drift over this
+sample, not zero A/V offset, physical endpoint latency or synchronized tear-free
+frames. No uncalibrated global timestamp correction was added.
+
+The computer-use native pipe was unavailable during this validation, so no new
+live-desktop yellow-border screenshot is claimed. Recording frames are not a
+substitute for that check. Raw logs, resource samples, hashes, media inventory,
+frame/pulse analysis and baseline comparison are in `CliplineTopologyTest-20260909`.
+Windows/Ubuntu CI and dependency-security checks pass for implementation commit
+`a031ccd` ([CI run](https://github.com/Clipline-CC/clipline/actions/runs/34312274775)).
