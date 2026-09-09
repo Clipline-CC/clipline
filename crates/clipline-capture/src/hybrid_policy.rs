@@ -29,6 +29,14 @@ pub(crate) fn choose(o: Observation) -> Source {
     }
 }
 
+/// Inputs are validated capture dimensions, not window-frame bounds.
+pub(crate) fn initial_canvas(
+    client: Option<(u32, u32)>,
+    display: (u32, u32),
+) -> (u32, u32) {
+    client.unwrap_or(display)
+}
+
 pub(crate) fn accept_frame(
     source: Source,
     before: Observation,
@@ -55,6 +63,27 @@ pub(crate) fn accept_window_packet(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_canvas_on_ultrawide_preserves_game_pixels_without_monitor_padding() {
+        let canvas = initial_canvas(Some((1920, 1080)), (5120, 1440));
+        assert_eq!(canvas, (1920, 1080));
+        let converter = crate::cpu_video::CpuVideoConverter::new(
+            192, 108, None, canvas.0 / 10, canvas.1 / 10,
+        ).unwrap();
+        let pixels = converter.convert(&vec![255; 192 * 108 * 4], 192 * 4).unwrap();
+        assert!(pixels[..192 * 108].iter().all(|&y| y >= 234));
+    }
+
+    #[test]
+    fn full_display_client_keeps_ultrawide_canvas() {
+        assert_eq!(initial_canvas(Some((5120, 1440)), (5120, 1440)), (5120, 1440));
+    }
+
+    #[test]
+    fn unavailable_initial_client_keeps_existing_display_seed() {
+        assert_eq!(initial_canvas(None, (5120, 1440)), (5120, 1440));
+    }
 
     #[test]
     fn delayed_window_packet_keeps_its_request_context_and_has_a_freshness_deadline() {

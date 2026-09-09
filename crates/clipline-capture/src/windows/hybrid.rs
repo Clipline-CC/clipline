@@ -130,8 +130,12 @@ impl HybridCapture {
             .find(|display| display.handle == monitor)
             .map(|display| display.info)
             .ok_or_else(|| error("target display unavailable"))?;
-        let length = crate::print_protocol::frame_bytes(info.width, info.height).map_err(error)?;
-        let black = FrameData::Gpu(upload(&device, info.width, info.height, &vec![0; length])?);
+        let client = target.geometry().ok().map(|(_, client, _)| {
+            (client.right as u32, client.bottom as u32)
+        });
+        let (width, height) = crate::hybrid_policy::initial_canvas(client, (info.width, info.height));
+        let length = crate::print_protocol::frame_bytes(width, height).map_err(error)?;
+        let black = FrameData::Gpu(upload(&device, width, height, &vec![0; length])?);
         Ok(Self {
             target,
             automatic_target: expected_pid.is_some(),
@@ -153,8 +157,9 @@ impl HybridCapture {
         self.status.clone()
     }
 
-    /// The seed fixes output geometry to the initial target display, even when
-    /// recording starts with a small window. Existing conversion fits later input.
+    /// The seed fixes output geometry to the initial validated client, avoiding
+    /// monitor-shaped padding for window capture. Unavailable initial geometry
+    /// retains the display fallback; existing conversion fits later input.
     pub fn seed(&self) -> Result<Frame, CaptureError> {
         self.frame(self.black.clone())
     }
@@ -428,6 +433,44 @@ fn upload(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_seed_texture_uses_client_size_instead_of_display_size() {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WS_POPUP, WS_VISIBLE,
+        };
+        // WARP handles the texture, but this integration test needs a desktop.
+        // The neutral ultrawide/conversion regression runs on every CI OS.
+        if std::env::var_os("CI").is_some()
+            || display::enumerate_complete_display_handles().ok().is_none_or(|d| d.is_empty())
+        {
+            return;
+        }
+        struct TestWindow(HWND);
+        impl Drop for TestWindow {
+            fn drop(&mut self) {
+                // SAFETY: test owns this window on its creating thread.
+                unsafe { let _ = DestroyWindow(self.0); }
+            }
+        }
+        // SAFETY: built-in window class; this test owns the noninteractive fixture
+        // and destroys it before returning. No user window is modified.
+        let window = TestWindow(unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE::default(), windows::core::w!("STATIC"),
+                windows::core::w!("Clipline canvas test"), WS_POPUP | WS_VISIBLE,
+                0, 0, 192, 108, None, None, None, None,
+            ).unwrap()
+        });
+        let (device, _) = super::super::d3d11::create_device_for_tests().unwrap();
+        let capture = HybridCapture::for_window_on(
+            device, window.0.0 as isize, Some(std::process::id()), RelativeClock::new(0),
+        ).unwrap();
+        let FrameData::Gpu(texture) = capture.seed().unwrap().data else {
+            panic!("expected GPU seed");
+        };
+        assert_eq!(super::super::d3d11::texture_size(&texture), (192, 108));
+    }
 
     fn topology_observation(fullscreen: bool) -> Observation {
         Observation {

@@ -4,7 +4,27 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
-## Checkpoint (2026-09-09): Nightly 1.0.5 published
+## Checkpoint (2026-09-09): window canvas correction after Nightly 1.0.5
+
+The user's uploaded 30-second Slay the Spire II replay is 1920x540 with centered
+960x540 gameplay; the user confirms the game window itself has no black margins.
+Hybrid initialization imposed the monitor aspect ratio on isolated window capture.
+The fix seeds from the initial validated client dimensions, preserving full-display
+clients and the existing monitor fallback when client geometry is unavailable.
+The canvas remains fixed for a session; subsequent aspect changes can still produce
+bars. No content-based cropping, stretching, capture-source guard or default changes.
+Start recording with the game visible/restored for its client aspect to be selected.
+
+The ultrawide regression failed on the old policy and passes after correction;
+CPU conversion verifies the entire output luma plane is game content. A Windows
+fixture verifies the actual constructor/seed texture uses client dimensions.
+All 1,550 workspace tests pass locally; fresh capture-cache warning-denied
+workspace Clippy passes. Independent review found no production blocker; the
+desktop-dependent fixture now skips CI/headless hosts while neutral tests run.
+Evidence: `C:\Users\Dain\Desktop\CliplineUltrawideReport-20260909`.
+This correction is not included in published Nightly 1.0.5.
+
+## Earlier checkpoint (2026-09-09): Nightly 1.0.5 published
 
 PR #200 is merged into develop as `e6e0fca`, including Cursor's topology fix.
 Nightly **1.0.5** ships its opt-in PrintWindow/fullscreen-display recorder from

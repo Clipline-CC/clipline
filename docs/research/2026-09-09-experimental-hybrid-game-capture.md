@@ -68,9 +68,14 @@ The request retains its original observation context, discards responses older t
 Resize recreates the owned DIB. Capture/IPC failures produce bounded retries, then
 stop; there is no fallback to another API because PrintWindow failed.
 
-The seed frame uses the target monitor dimensions to establish stable encoder output
-even when starting with a small window. Existing GPU/CPU aspect-preserving conversion
-handles changing input dimensions. Both sources use the existing encoder device,
+The seed frame now uses the initial validated client dimensions to establish stable
+encoder output. Nightly 1.0.5 used the target monitor dimensions: a 16:9 game on a
+32:9 monitor was consequently fitted into a 32:9 recording with unnecessary side
+padding. Initial unavailable client geometry still falls back to monitor dimensions;
+start the recording with a visible, restored game to establish its intended aspect.
+Existing GPU/CPU aspect-preserving conversion handles changing input dimensions.
+The session canvas stays fixed, so later aspect changes can still produce bars.
+Both sources use the existing encoder device,
 clock, audio and replay/session pipeline. Source changes appear in live status and
 structured diagnostics as `experimental_print_window`,
 `experimental_fullscreen_display`, or `experimental_waiting_black`. The recording
