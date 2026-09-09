@@ -4,7 +4,41 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
-## Checkpoint (2026-09-09): hybrid display topology recovery
+## Checkpoint (2026-09-09): Nightly 1.0.5 published
+
+PR #200 is merged into develop as `e6e0fca`, including Cursor's topology fix.
+Nightly **1.0.5** ships its opt-in PrintWindow/fullscreen-display recorder from
+release commit `a9a214eeb15f3597920fc4657d98e5cf62f56fd1`, with immutable tag
+`nightly-v1.0.5`. The release commit was pushed to remote develop before tagging.
+Release: https://github.com/Clipline-CC/clipline/releases/tag/nightly .
+Successful workflow: https://github.com/Clipline-CC/clipline/actions/runs/34321165139 .
+
+All seven public assets passed workflow staged/public byte comparison, plus an
+independent public download/hash/size check. Both updater manifest signatures
+verify the downloaded installers under the committed public key, using the same
+minisign verification library and options as Tauri's updater. The rolling release
+is a published prerelease targeting the exact release commit. Regular installer:
+10,161,518 bytes; standalone: 336,294,951 bytes. GitHub release body now describes
+the feature, activation path, limitations and release gates; workflow-produced
+assets were not replaced.
+
+The release-only diff contains version/runtime-review metadata and the release
+plan. Local 1,546 workspace tests and fresh app-cache warning-denied Clippy pass;
+tag-workflow tests and Clippy pass too. Feature-head Windows/Ubuntu CI, dependency
+checks and Cursor review passed; the develop-only metadata push has no PR CI.
+Microsoft Fixed Version 152.0.4191.62 remains current in the reviewed selector;
+its CAB size/hash and Microsoft-signed executable verify, with review due October 9.
+The full standalone configuration was exercised in a debug playback harness:
+H.264/Opus reached ended with decoded audio, AV1 played, and unsupported HEVC was
+correctly disabled. No local installers were built. See the 1.0.5 release plan.
+
+Evidence: `C:\Users\Dain\Desktop\CliplineNightly-1.0.5-20260909`, including public
+downloads, verification logs, workflow log and standalone playback events. The
+normal local 1.0.5 debug app is open (PID 8684 at handoff), responsive, with the
+experimental backend and automatic game detection still enabled. Broader game,
+HDR/multi-monitor and A/V-offset investigations remain as documented below.
+
+## Earlier checkpoint (2026-09-09): hybrid display topology recovery
 
 Addressed Cursor's PR #200 review: ongoing hybrid capture no longer terminates
 when monitor enumeration fails or the target monitor disappears. One complete
