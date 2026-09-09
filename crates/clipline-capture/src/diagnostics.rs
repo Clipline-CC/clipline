@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureDiagnostic {
+    HybridSourceChanged { source: &'static str },
     DxgiReopenFailed {
         hresult: i32,
         suppressed_since_last: u64,
@@ -32,6 +33,8 @@ pub enum CaptureDiagnostic {
 impl fmt::Display for CaptureDiagnostic {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::HybridSourceChanged { source } => write!(formatter,
+                "capture event=experimental_hybrid_source_changed source={source}"),
             Self::DxgiReopenFailed {
                 hresult,
                 suppressed_since_last,

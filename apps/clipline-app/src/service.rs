@@ -295,6 +295,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
         clock,
         &opts.capture_source,
         opts.capture_backend,
+        opts.active_game.as_ref().and_then(|game| game.process_id),
         events,
     )?;
     let capture_backend_status = cap.diagnostic_label();
@@ -368,7 +369,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
         &rec,
         &full_session,
         &encoder_status,
-        capture_backend_status,
+        capture_backend_status(),
     );
 
     loop {
@@ -493,7 +494,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                 &rec,
                 &full_session,
                 &encoder_status,
-                capture_backend_status,
+                capture_backend_status(),
             );
             if replay_cache_dir.is_some() {
                 if let Err(primary) = ensure_replay_cache_free_space(&opts) {
@@ -694,7 +695,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                         &rec,
                         &full_session,
                         &encoder_status,
-                        capture_backend_status,
+                        capture_backend_status(),
                     );
                 }
                 Ok(Cmd::StopFullSession) => {
@@ -717,7 +718,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                         &rec,
                         &full_session,
                         &encoder_status,
-                        capture_backend_status,
+                        capture_backend_status(),
                     );
                 }
                 Ok(Cmd::Stop { announce }) => {

@@ -1364,6 +1364,16 @@ fn capture_backend_defaults_to_auto() {
 }
 
 #[test]
+fn experimental_hybrid_persists_without_changing_default_backend() {
+    let settings = AppSettings { capture_backend: CaptureBackend::ExperimentalHybrid, ..AppSettings::default() };
+    let json = serde_json::to_value(&settings).unwrap();
+    assert_eq!(json["capture_backend"], "experimental_hybrid");
+    let restored: AppSettings = serde_json::from_value(json).unwrap();
+    assert_eq!(restored.to_service_options(None).unwrap().capture_backend, CaptureBackend::ExperimentalHybrid);
+    assert_eq!(AppSettings::default().capture_backend, CaptureBackend::Auto);
+}
+
+#[test]
 fn service_options_include_output_resolution_choice() {
     let settings = AppSettings {
         output_resolution: OutputResolution::P720,

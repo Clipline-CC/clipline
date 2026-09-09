@@ -10,8 +10,10 @@ while flip presentation and DXGI exclusive modes return stale surfaces. Build th
 [mock executables](mock-games.md) to reproduce without a real-game installation.
 The [blocker investigation](research/2026-09-08-window-capture-blockers.md) identifies
 an alternative full-content PrintWindow path that captures the flip mock in
-windowed/borderless modes. Exclusive fullscreen still fails. It remains a separate
-diagnostic, with no change to production recording.
+windowed/borderless modes. Exclusive fullscreen still fails. The direct-DWM probe remains separate.
+The subsequently approved [experimental hybrid backend](research/2026-09-09-experimental-hybrid-game-capture.md)
+uses PrintWindow for windows and full-display duplication for Windows-reported
+fullscreen; it does not repair direct DWM capture.
 
 The [exclusive investigation](research/2026-09-08-exclusive-fullscreen.md) repairs
 production DXGI display recovery and validates explicit monitor recordings through

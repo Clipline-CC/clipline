@@ -3,6 +3,10 @@ use super::*;
 
 pub(super) trait TimedFrameSource {
     fn next_frame_timeout(&mut self, timeout: Duration) -> Result<Option<Frame>, CaptureError>;
+    /// Pull sources that can immediately paint another copy need caller pacing.
+    fn requires_cadence_wait(&self) -> bool {
+        false
+    }
 }
 
 impl TimedFrameSource for WgcCapture {
@@ -18,27 +22,35 @@ impl TimedFrameSource for DxgiDuplicationCapture {
 }
 
 /// The live screen-capture engine, chosen at recording start. WGC is the
-/// default and the only per-window option; DXGI Desktop Duplication is the
-/// opt-in borderless display/region backend (issue #42).
+/// default; explicit display duplication and the experimental hybrid are opt-in.
 pub(super) enum LiveBackend {
     Wgc(WgcCapture),
     Dxgi(DxgiDuplicationCapture),
+    Hybrid(Box<clipline_capture::windows::hybrid::HybridCapture>),
 }
 
 impl LiveBackend {
-    pub(super) fn diagnostic_label(&self) -> &'static str {
+    pub(super) fn diagnostic_label(&self) -> Box<dyn Fn() -> &'static str> {
         match self {
-            Self::Wgc(_) => "windows_graphics_capture",
-            Self::Dxgi(_) => "desktop_duplication",
+            Self::Wgc(_) => Box::new(|| "windows_graphics_capture"),
+            Self::Dxgi(_) => Box::new(|| "desktop_duplication"),
+            Self::Hybrid(cap) => {
+                let status = cap.status();
+                Box::new(move || status.label())
+            }
         }
     }
 }
 
 impl TimedFrameSource for LiveBackend {
+    fn requires_cadence_wait(&self) -> bool {
+        matches!(self, LiveBackend::Hybrid(_))
+    }
     fn next_frame_timeout(&mut self, timeout: Duration) -> Result<Option<Frame>, CaptureError> {
         match self {
             LiveBackend::Wgc(cap) => cap.next_frame_timeout(timeout),
             LiveBackend::Dxgi(cap) => cap.next_frame_timeout(timeout),
+            LiveBackend::Hybrid(cap) => cap.next_frame_timeout(timeout),
         }
     }
 }
@@ -91,6 +103,42 @@ impl<C> CadencedCapture<C> {
     }
 }
 
+impl<C> CadencedCapture<C> {
+    fn cadence_timeout(
+        &mut self,
+        retry_deadline: Option<Instant>,
+    ) -> Result<Option<Frame>, CaptureError> {
+        let Some(data) = self.last_data.clone() else {
+            return Err(CaptureError::Timeout(self.frame_interval));
+        };
+        let now = Instant::now();
+        let elapsed = now.saturating_duration_since(self.last_emit_wall);
+        if elapsed < self.frame_interval {
+            // A capture backend may report a timeout before the duration it was
+            // asked to wait. Do not pay out a full video cadence slot until that
+            // slot's wall-clock deadline has actually arrived.
+            let wall_remaining = self.frame_interval - elapsed;
+            if retry_deadline.is_some_and(|deadline| deadline > now) {
+                self.retry_deadline = retry_deadline;
+            }
+            let retry_after = retry_deadline
+                .map(|deadline| deadline.saturating_duration_since(now))
+                .map_or(wall_remaining, |remaining| remaining.min(wall_remaining));
+            return Err(CaptureError::Timeout(retry_after));
+        }
+        let elapsed_intervals = (elapsed.as_secs_f64() / self.frame_interval_s).floor() as u64;
+        let intervals = elapsed_intervals.max(1);
+        let skipped = intervals - 1;
+        let min_pts = self.last_emit_pts_s.map(|last| last + 1e-4).unwrap_or(0.0);
+        let pts_s = (self.next_pts_s.unwrap_or(min_pts) + skipped as f64 * self.frame_interval_s)
+            .max(min_pts);
+        self.last_emit_pts_s = Some(pts_s);
+        self.next_pts_s = Some(pts_s + self.frame_interval_s);
+        self.last_emit_wall += Duration::from_secs_f64(intervals as f64 * self.frame_interval_s);
+        Ok(Some(Frame { pts_s, data }))
+    }
+}
+
 impl<C: TimedFrameSource> CaptureEngine for CadencedCapture<C> {
     fn next_frame(&mut self) -> Result<Option<Frame>, CaptureError> {
         let now = Instant::now();
@@ -98,6 +146,24 @@ impl<C: TimedFrameSource> CaptureEngine for CadencedCapture<C> {
             .frame_interval
             .saturating_sub(now.saturating_duration_since(self.last_emit_wall));
         let retry_deadline = self.retry_deadline.take();
+        // The hybrid's pull worker can answer immediately. Honor a scheduled
+        // retry here instead of repeatedly repainting until the PTS catches up.
+        // Keep existing event-driven WGC/DXGI wait behavior unchanged.
+        if self.inner.requires_cadence_wait() {
+            if let Some(deadline) = retry_deadline {
+                let wait = deadline.saturating_duration_since(now).min(wall_remaining);
+                std::thread::sleep(wait.min(Duration::from_millis(16)));
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if !remaining.is_zero() && self.last_emit_wall.elapsed() < self.frame_interval {
+                    self.retry_deadline = retry_deadline;
+                    return Err(CaptureError::Timeout(remaining));
+                }
+            }
+        }
+        let now = Instant::now();
+        let wall_remaining = self
+            .frame_interval
+            .saturating_sub(now.saturating_duration_since(self.last_emit_wall));
         let timeout = retry_deadline
             .map(|deadline| deadline.saturating_duration_since(now).min(wall_remaining))
             .unwrap_or(wall_remaining);
@@ -119,6 +185,9 @@ impl<C: TimedFrameSource> CaptureEngine for CadencedCapture<C> {
                             .saturating_sub(now.saturating_duration_since(self.last_emit_wall));
                         let retry_after = pts_remaining.min(wall_remaining);
                         self.last_data = Some(frame.data);
+                        if self.inner.requires_cadence_wait() && retry_after.is_zero() {
+                            return self.cadence_timeout(None);
+                        }
                         self.retry_deadline = Some(now + retry_after);
                         return Err(CaptureError::Timeout(retry_after));
                     }
@@ -130,39 +199,7 @@ impl<C: TimedFrameSource> CaptureEngine for CadencedCapture<C> {
                 Ok(Some(frame))
             }
             Ok(None) => Ok(None),
-            Err(CaptureError::Timeout(_)) => {
-                let Some(data) = self.last_data.clone() else {
-                    return Err(CaptureError::Timeout(self.frame_interval));
-                };
-                let now = Instant::now();
-                let elapsed = now.saturating_duration_since(self.last_emit_wall);
-                if elapsed < self.frame_interval {
-                    // A capture backend may report a timeout before the duration it was
-                    // asked to wait. Do not pay out a full video cadence slot until that
-                    // slot's wall-clock deadline has actually arrived.
-                    let wall_remaining = self.frame_interval - elapsed;
-                    if retry_deadline.is_some_and(|deadline| deadline > now) {
-                        self.retry_deadline = retry_deadline;
-                    }
-                    let retry_after = retry_deadline
-                        .map(|deadline| deadline.saturating_duration_since(now))
-                        .map_or(wall_remaining, |remaining| remaining.min(wall_remaining));
-                    return Err(CaptureError::Timeout(retry_after));
-                }
-                let elapsed_intervals =
-                    (elapsed.as_secs_f64() / self.frame_interval_s).floor() as u64;
-                let intervals = elapsed_intervals.max(1);
-                let skipped = intervals - 1;
-                let min_pts = self.last_emit_pts_s.map(|last| last + 1e-4).unwrap_or(0.0);
-                let pts_s = (self.next_pts_s.unwrap_or(min_pts)
-                    + skipped as f64 * self.frame_interval_s)
-                    .max(min_pts);
-                self.last_emit_pts_s = Some(pts_s);
-                self.next_pts_s = Some(pts_s + self.frame_interval_s);
-                self.last_emit_wall +=
-                    Duration::from_secs_f64(intervals as f64 * self.frame_interval_s);
-                Ok(Some(Frame { pts_s, data }))
-            }
+            Err(CaptureError::Timeout(_)) => self.cadence_timeout(retry_deadline),
             Err(e) => Err(e),
         }
     }
@@ -226,7 +263,10 @@ pub(super) fn marker_source_kind(opts: &ServiceOptions) -> MarkerSourceKind {
     }
 }
 
-pub(super) fn spawn_marker_source(opts: &ServiceOptions, recording_t0: Instant) -> Receiver<PollerMsg> {
+pub(super) fn spawn_marker_source(
+    opts: &ServiceOptions,
+    recording_t0: Instant,
+) -> Receiver<PollerMsg> {
     let league_game = opts.active_game.as_ref().filter(|game| {
         game.identity.plugin_id() == Some(crate::game_plugins::LEAGUE_OF_LEGENDS_ID)
     });
@@ -267,11 +307,15 @@ pub(super) fn open_screen_capture(
     clock: RelativeClock,
     source: &CaptureSource,
     backend: CaptureBackend,
+    expected_pid: Option<u32>,
     events: &Sender<Event>,
 ) -> Result<(LiveBackend, Frame), String> {
     crate::capture_policy::open_capture(
         backend,
-        matches!(source, CaptureSource::WindowTitle(_) | CaptureSource::WindowHandle { .. }),
+        matches!(
+            source,
+            CaptureSource::WindowTitle(_) | CaptureSource::WindowHandle { .. }
+        ),
         || open_dxgi(device, clock, source, events),
         || {
             let init = |e: &dyn std::fmt::Display| format!("init: {e}");
@@ -281,6 +325,27 @@ pub(super) fn open_screen_capture(
                 .map_err(|e| init(&e))?
                 .ok_or("capture ended before the first frame")?;
             Ok((LiveBackend::Wgc(cap), first))
+        },
+        || {
+            let hwnd = match source {
+                CaptureSource::WindowHandle { hwnd, .. } => *hwnd,
+                CaptureSource::WindowTitle(title) => {
+                    find_window_by_title(title)
+                        .ok_or("target window unavailable")?
+                        .0 as isize
+                }
+                _ => return Err("experimental capture requires a game window".into()),
+            };
+            let cap = clipline_capture::windows::hybrid::HybridCapture::for_window_on(
+                device.clone(),
+                hwnd,
+                expected_pid,
+                clock,
+            )
+            .map_err(|e| e.to_string())?;
+            let first = cap.seed().map_err(|e| e.to_string())?;
+            warn_user(events, "Experimental game capture: PrintWindow for windows; full display for Windows-reported fullscreen. Display capture may include overlays. Uncertain or unfocused fullscreen capture shows black video; audio continues. Fullscreen switching currently requires one monitor.".into());
+            Ok((LiveBackend::Hybrid(Box::new(cap)), first))
         },
     )
 }
@@ -332,8 +397,7 @@ fn open_dxgi(
     Ok((LiveBackend::Dxgi(cap), first))
 }
 
-/// Windows Graphics Capture for any source (the default, and the only
-/// per-window option).
+/// Windows Graphics Capture for any source (the default backend).
 fn open_wgc(
     device: &ID3D11Device,
     clock: RelativeClock,

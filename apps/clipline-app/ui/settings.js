@@ -2,6 +2,7 @@
 var gamePluginSettingsDialogPluginId = null;
 var gamePluginSettingsDialogTab = "general";
 var activeEncoderLabel = "";
+var activeCaptureBackend = "";
 // Live League game-type recording toggles; survives dialog open/close because
 // the checkbox inputs are removed from the DOM when the dialog closes.
 var leagueModeSettings = null;

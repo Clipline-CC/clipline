@@ -12,11 +12,15 @@ pub mod ffmpeg;
 pub mod ffmpeg_encoder;
 pub mod framing;
 pub mod hevc;
+#[cfg(any(windows, test))]
+mod hybrid_policy;
 pub mod mock;
 pub mod opus;
 pub mod pcm;
 pub mod pipeline;
 pub mod probe;
+#[doc(hidden)]
+pub mod print_protocol;
 pub mod traits;
 mod video_layout;
 #[cfg(windows)]

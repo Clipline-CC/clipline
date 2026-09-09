@@ -69,6 +69,9 @@ function syncCaptureBackendSummary() {
   if ($("set-backend").value === "desktop_duplication") {
     summary.textContent =
       "Captures a display or region without the Windows 10 border, including overlapping windows. Recording stops if unavailable. Turn off automatic game switching to use this mode; single-window capture is unsupported. The mouse cursor may be missing on some systems.";
+  } else if ($("set-backend").value === "experimental_hybrid") {
+    summary.textContent =
+      "Experimental: captures the game window, switching to its full display when Windows reports fullscreen. Enable automatic game switching. Fullscreen switching requires one monitor and may include overlays. Unfocused or uncertain fullscreen capture shows black video; audio continues. Some games may return frozen or incomplete window frames.";
   } else {
     summary.textContent =
       "Windows Graphics Capture works everywhere, including single windows. On Windows 10 it may show a yellow capture border.";
@@ -366,9 +369,15 @@ function updateCaptureStatus() {
     activeDetectedGame && activeDetectedGame.active
       ? `Game: ${activeDetectedGame.name}`
       : fallbackCaptureSourceLabel(currentSettings || { capture_mode: "primary_monitor" });
-  const bufferReadyTitle = activeEncoderLabel
+  let bufferReadyTitle = activeEncoderLabel
     ? `Replay buffer ready · ${activeEncoderLabel}`
     : "Replay buffer ready";
+  const captureLabel = {
+    experimental_print_window: "Experimental window capture",
+    experimental_fullscreen_display: "Experimental full-display capture (includes overlays)",
+    experimental_waiting_black: "Experimental capture waiting: black video, audio continues",
+  }[activeCaptureBackend] || "";
+  if (captureLabel) bufferReadyTitle += ` · ${captureLabel}`;
   renderRailGame();
   $("rail-status").classList.toggle("stopped", !fullSessionRecordingActive || storageQuotaBlocked);
   $("rail-status").classList.toggle("blocked", storageQuotaBlocked);
@@ -400,6 +409,13 @@ function updateCaptureStatus() {
         ? "Stop waiting for a game"
         : `Start ${source} replay buffer`;
   $("rail-game").setAttribute("aria-label", $("rail-game").title);
+  if (captureLabel) {
+    $("rail-status").title += ` · ${captureLabel}`;
+    if (fullSessionRecordingActive && !storageQuotaBlocked) {
+      $("rail-status-text").textContent = activeCaptureBackend === "experimental_fullscreen_display"
+        ? "Display" : activeCaptureBackend === "experimental_waiting_black" ? "Wait" : "Rec";
+    }
+  }
   $("rail-save").disabled = storageQuotaBlocked || !recordingActive;
 }
 

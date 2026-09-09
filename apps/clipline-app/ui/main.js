@@ -18,6 +18,7 @@ listen("status", (e) => {
   recorderWaitingForGame = !!s.waiting_for_game;
   recordingRequested = recordingActive || recorderWaitingForGame;
   activeEncoderLabel = s.recording ? String(s.encoder || "") : "";
+  activeCaptureBackend = s.recording ? String(s.capture_backend || "") : "";
   fullSessionRecordingActive = Boolean(s.full_session);
   updateCaptureStatus();
 });

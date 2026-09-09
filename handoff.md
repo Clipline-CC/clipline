@@ -4,7 +4,29 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
-## Checkpoint (2026-09-08): web and local surface-access research
+## Checkpoint (2026-09-09): opt-in hybrid game capture
+
+The user approved isolated experimental window capture plus whole-display capture
+for fullscreen. Settings now offers **Experimental game capture (no border)**:
+PrintWindow for windowed/borderless, guarded Desktop Duplication for shell-reported
+fullscreen. Direct DWM remains a separate, unsuccessful flip-game experiment.
+Existing Auto/WGC and explicit display modes retain their behavior.
+
+The selector is a global Windows heuristic restricted to one monitor, exact
+foreground HWND and full-monitor bounds, with identity/protection and postcapture
+checks. Unknown states/transitions emit black while audio continues. Display mode
+can include overlays; this is not guaranteed desktop isolation. Worker requests
+are bounded, late pixels rejected, and eager-source pacing cannot spin indefinitely.
+A reproduced mock focus-loss failure now rebuilds flip buffers on state changes.
+
+Two complete Win10/Radeon 780M mock matrices passed with FSO disabled/enabled:
+automatic sessions, stereo audio, 30-second replays, fullscreen motion, overlap
+exclusion, resize and minimize/restore. Both ran in the same app instance.
+See [the report](docs/research/2026-09-09-experimental-hybrid-game-capture.md) for
+frame-repeat counts, evidence hashes, short resource samples and limitations.
+Actual games, multimonitor/DPI/HDR and long-duration stability remain unvalidated.
+
+## Earlier checkpoint (2026-09-08): web and local surface-access research
 
 Expanded Microsoft/AMD API review found no new game-only native-exclusive source.
 Local ordinal 100 DwmpDxGetWindowSharedSurface exists; one inspected branch calls
