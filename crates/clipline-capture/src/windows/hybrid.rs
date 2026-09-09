@@ -62,6 +62,30 @@ struct Snapshot {
     client: RECT,
 }
 
+fn observe_topology(
+    mut observation: Observation,
+    monitor: HMONITOR,
+    client: RECT,
+    displays: Result<Vec<display::DisplayHandle>, CaptureError>,
+) -> Observation {
+    // Only topology errors are recoverable here. Identity/protection validation
+    // happens before this function and must still propagate to the recorder.
+    let displays = displays.unwrap_or_default();
+    observation.available &=
+        !monitor.is_invalid() && displays.iter().any(|display| display.handle == monitor);
+    observation.single_monitor = displays.len() == 1;
+    for display in displays {
+        if display.handle == monitor {
+            let info = display.info;
+            observation.covers_monitor = client.left == info.x
+                && client.top == info.y
+                && client.right as i64 == info.x as i64 + info.width as i64
+                && client.bottom as i64 == info.y as i64 + info.height as i64;
+        }
+    }
+    observation
+}
+
 pub struct HybridCapture {
     target: Target,
     automatic_target: bool,
@@ -100,15 +124,11 @@ impl HybridCapture {
         let target = Target::new(hwnd.0 as isize, pid).map_err(error)?;
         // SAFETY: resolve this target's monitor, never substitute primary.
         let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONULL) };
-        let displays = display::enumerate_displays()?;
+        let displays = display::enumerate_complete_display_handles()?;
         let info = displays
             .into_iter()
-            .find_map(|info| {
-                display::display_handle_by_id(Some(&info.id))
-                    .ok()
-                    .filter(|d| d.handle == monitor)
-                    .map(|d| d.info)
-            })
+            .find(|display| display.handle == monitor)
+            .map(|display| display.info)
             .ok_or_else(|| error("target display unavailable"))?;
         let length = crate::print_protocol::frame_bytes(info.width, info.height).map_err(error)?;
         let black = FrameData::Gpu(upload(&device, info.width, info.height, &vec![0; length])?);
@@ -172,8 +192,6 @@ impl HybridCapture {
                 fullscreen,
             )
         };
-        let displays = display::enumerate_displays()?;
-        let mut covers_monitor = false;
         let mut client = RECT::default();
         if let Some((_, size, origin)) = geometry {
             client = RECT {
@@ -182,23 +200,20 @@ impl HybridCapture {
                 right: origin.x.saturating_add(size.right),
                 bottom: origin.y.saturating_add(size.bottom),
             };
-            for info in &displays {
-                if display::display_handle_by_id(Some(&info.id))?.handle == monitor {
-                    covers_monitor = client.left == info.x
-                        && client.top == info.y
-                        && client.right as i64 == info.x as i64 + info.width as i64
-                        && client.bottom as i64 == info.y as i64 + info.height as i64;
-                }
-            }
         }
         Ok(Snapshot {
-            observation: Observation {
-                available: geometry.is_some() && !monitor.is_invalid(),
-                foreground,
-                covers_monitor,
-                single_monitor: displays.len() == 1,
-                fullscreen,
-            },
+            observation: observe_topology(
+                Observation {
+                    available: geometry.is_some(),
+                    foreground,
+                    covers_monitor: false,
+                    single_monitor: false,
+                    fullscreen,
+                },
+                monitor,
+                client,
+                display::enumerate_complete_display_handles(),
+            ),
             monitor,
             client,
         })
@@ -413,6 +428,113 @@ fn upload(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn topology_observation(fullscreen: bool) -> Observation {
+        Observation {
+            available: true,
+            foreground: true,
+            covers_monitor: false,
+            single_monitor: false,
+            fullscreen: Some(fullscreen),
+        }
+    }
+
+    fn test_display() -> display::DisplayHandle {
+        display::DisplayHandle {
+            handle: HMONITOR(std::ptr::dangling_mut()),
+            info: display::DisplayInfo {
+                id: "test-target".into(),
+                name: "test-target".into(),
+                x: 0,
+                y: 0,
+                width: 1280,
+                height: 720,
+                is_primary: true,
+            },
+        }
+    }
+
+    #[test]
+    fn topology_failure_waits_discards_acquired_pixels_and_recovers() {
+        let monitor = test_display().handle;
+        let client = RECT {
+            left: 0,
+            top: 0,
+            right: 1280,
+            bottom: 720,
+        };
+        for fullscreen in [false, true] {
+            let input = topology_observation(fullscreen);
+            let before = observe_topology(input, monitor, client, Ok(vec![test_display()]));
+            let source = choose(before);
+            assert_eq!(
+                source,
+                if fullscreen {
+                    Source::Display
+                } else {
+                    Source::Window
+                }
+            );
+            let unavailable =
+                observe_topology(input, monitor, client, Err(error("monitor info failed")));
+            assert_eq!(choose(unavailable), Source::Waiting);
+            assert!(!accept_frame(source, before, unavailable, true));
+            assert!(!accept_window_packet(
+                before,
+                unavailable,
+                true,
+                Duration::ZERO
+            ));
+            let recovered = observe_topology(input, monitor, client, Ok(vec![test_display()]));
+            assert_eq!(choose(recovered), source);
+        }
+    }
+
+    #[test]
+    fn missing_target_monitor_never_substitutes_primary_or_captures_window() {
+        for fullscreen in [false, true] {
+            for monitor in [HMONITOR::default(), HMONITOR(2usize as *mut _)] {
+                for displays in [vec![], vec![test_display()]] {
+                    let observation = observe_topology(
+                        topology_observation(fullscreen),
+                        monitor,
+                        RECT::default(),
+                        Ok(displays),
+                    );
+                    assert_eq!(choose(observation), Source::Waiting);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn complete_multi_monitor_topology_keeps_window_capture_but_blocks_display() {
+        let target = test_display();
+        let mut secondary = test_display();
+        secondary.handle = HMONITOR(2usize as *mut _);
+        let client = RECT {
+            left: 0,
+            top: 0,
+            right: 1280,
+            bottom: 720,
+        };
+        for fullscreen in [false, true] {
+            let observation = observe_topology(
+                topology_observation(fullscreen),
+                target.handle,
+                client,
+                Ok(vec![target.clone(), secondary.clone()]),
+            );
+            assert_eq!(
+                choose(observation),
+                if fullscreen {
+                    Source::Waiting
+                } else {
+                    Source::Window
+                }
+            );
+        }
+    }
     #[test]
     fn owned_upload_preserves_bgra_and_black_without_mutating_previous_frame() {
         let (device, _) = super::super::d3d11::create_device_for_tests().unwrap();

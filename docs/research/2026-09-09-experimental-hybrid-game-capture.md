@@ -172,3 +172,31 @@ Final local gates: cargo test --workspace (1,541 passed, CI=1 to skip real-devic
 unit tests; the separate app matrices exercised hardware), fresh application-cache
 cargo clippy --workspace --all-targets -- -D warnings, and MSVC mock /W4 /WX
 build all pass. Neutral policy/protocol regressions run on both CI platforms.
+
+## PR review: display topology recovery
+
+Cursor's review at `6f301fa` correctly identified that per-display re-lookups in
+`observe` could return a fatal initialization error during an ongoing recording.
+The hybrid now queries handles and monitor info together, once per observation.
+A strict variant marks enumeration incomplete if any monitor-info query fails or
+returns zero dimensions. Existing non-hybrid callers retain best-effort behavior.
+
+During capture, failed/partial enumeration, an empty result or an absent target
+monitor makes the observation unavailable. Existing source policy emits black,
+releases capture resources and discards pending/acquired pixels, preserving the
+session and audio while valid topology returns. Identity and capture-protection
+validation remain outside this recovery path and still fail recording. Startup
+still needs a valid target display to establish encoder geometry; this change
+does not promise recovery from an initial construction failure.
+
+Two extracted-observation regressions failed with the previous error propagation
+and missing-target handling, then passed after the fix. Five added tests cover
+failure, missing/partial topology, post-acquisition rejection, recovery and the
+existing multiple-monitor restriction; the policy regression also runs on Linux.
+All 1,546 workspace tests and fresh capture-cache warning-denied workspace Clippy
+pass locally. Independent code review found no additional defects.
+
+Evidence: `C:\Users\Dain\Desktop\CliplineTopologyTest-20260909` contains the
+red/green and final gate logs. No physical monitor unplug, multiple-monitor, DPI
+or HDR acceptance is implied by these injected failures. The earlier hardware
+matrices remain evidence for their recorded build only.

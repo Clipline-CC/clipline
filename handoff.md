@@ -4,7 +4,22 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
-## Checkpoint (2026-09-09): opt-in hybrid game capture
+## Checkpoint (2026-09-09): hybrid display topology recovery
+
+Addressed Cursor's PR #200 review: ongoing hybrid capture no longer terminates
+when monitor enumeration fails or the target monitor disappears. One complete
+handle/info enumeration replaces the per-display re-lookups. Failed or partial
+topology produces waiting/black and rejects in-flight pixels; subsequent valid
+observations use the existing debounce to resume. Identity/protection failures
+remain fatal. Existing display callers retain their best-effort enumeration.
+
+Five added regressions cover unavailable/missing/partial topology, before/after
+frame rejection, recovery and the existing multiple-monitor restriction. All
+1,546 workspace tests pass on this machine; fresh capture-cache warning-denied
+workspace Clippy passes. Independent review found no additional defects. This is
+injected topology coverage, not physical hotplug validation. See the hybrid report.
+
+## Earlier checkpoint (2026-09-09): opt-in hybrid game capture
 
 The user approved isolated experimental window capture plus whole-display capture
 for fullscreen. Settings now offers **Experimental game capture (no border)**:

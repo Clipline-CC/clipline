@@ -175,6 +175,33 @@ mod tests {
     }
 
     #[test]
+    fn topology_loss_rejects_both_sources_until_a_new_valid_observation() {
+        for fullscreen in [false, true] {
+            let valid = Observation {
+                fullscreen: Some(fullscreen),
+                ..visible()
+            };
+            let lost = Observation {
+                available: false,
+                covers_monitor: false,
+                single_monitor: false,
+                ..valid
+            };
+            let source = choose(valid);
+            assert_eq!(choose(lost), Source::Waiting);
+            assert!(!accept_frame(source, valid, lost, true));
+            assert!(!accept_frame(source, lost, valid, true));
+            assert!(!accept_window_packet(
+                valid,
+                lost,
+                true,
+                std::time::Duration::ZERO
+            ));
+            assert!(accept_frame(source, valid, valid, true));
+        }
+    }
+
+    #[test]
     fn discard_acquired_display_frame_on_any_post_capture_guard_change() {
         let before = Observation {
             fullscreen: Some(true),
