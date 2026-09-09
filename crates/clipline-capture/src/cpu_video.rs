@@ -34,6 +34,7 @@ pub struct CpuVideoConverter {
     source: CpuCropRect,
     output_width: u32,
     output_height: u32,
+    destination: crate::video_layout::VideoRect,
 }
 
 impl CpuVideoConverter {
@@ -76,6 +77,13 @@ impl CpuVideoConverter {
             source,
             output_width,
             output_height,
+            destination: crate::video_layout::fitted_video_rect(
+                source.width,
+                source.height,
+                output_width,
+                output_height,
+            )
+            .map_err(|_| CpuVideoError::InvalidDimensions)?,
         })
     }
 
@@ -140,10 +148,18 @@ impl CpuVideoConverter {
     }
 
     fn source_pixel(&self, bgra: &[u8], stride: usize, out_x: usize, out_y: usize) -> (u8, u8, u8) {
+        let dest = self.destination;
+        if out_x < dest.x as usize
+            || out_y < dest.y as usize
+            || out_x >= (dest.x + dest.width) as usize
+            || out_y >= (dest.y + dest.height) as usize
+        {
+            return (0, 0, 0);
+        }
         let source_x = self.source.x as usize
-            + out_x * self.source.width as usize / self.output_width as usize;
+            + (out_x - dest.x as usize) * self.source.width as usize / dest.width as usize;
         let source_y = self.source.y as usize
-            + out_y * self.source.height as usize / self.output_height as usize;
+            + (out_y - dest.y as usize) * self.source.height as usize / dest.height as usize;
         let offset = source_y * stride + source_x * 4;
         (bgra[offset], bgra[offset + 1], bgra[offset + 2])
     }
@@ -171,6 +187,46 @@ fn rec709_limited_uv(r: u8, g: u8, b: u8) -> (u8, u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cpu_letterbox_preserves_source_and_crop_shape() {
+        for (width, height, crop, rect) in [
+            (8, 4, None, (0, 2, 8, 4)),
+            (4, 8, None, (2, 0, 4, 8)),
+            (8, 8, None, (0, 0, 8, 8)),
+            (
+                16,
+                8,
+                Some(CpuCropRect {
+                    x: 2,
+                    y: 2,
+                    width: 4,
+                    height: 4,
+                }),
+                (0, 0, 8, 8),
+            ),
+        ] {
+            let converter = CpuVideoConverter::new(width, height, crop, 8, 8).unwrap();
+            let output = converter
+                .convert(
+                    &solid_bgra(width, height, 255, 255, 255),
+                    width as usize * 4,
+                )
+                .unwrap();
+            let (left, top, w, h) = rect;
+            for y in 0..8 {
+                for x in 0..8 {
+                    let expected = if x >= left && x < left + w && y >= top && y < top + h {
+                        235
+                    } else {
+                        16
+                    };
+                    assert_eq!(output[y * 8 + x], expected, "{width}x{height} at {x},{y}");
+                }
+            }
+            assert!(output[64..].iter().all(|&v| v == 128));
+        }
+    }
 
     fn solid_bgra(width: u32, height: u32, b: u8, g: u8, r: u8) -> Vec<u8> {
         [b, g, r, 255]

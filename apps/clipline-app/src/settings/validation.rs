@@ -43,6 +43,11 @@ impl AppSettings {
                 return Err("capture region is too large".into());
             }
         }
+        if matches!(self.capture_mode, CaptureMode::DisplayMonitor)
+            && self.capture_display_id.as_deref().is_none_or(|id| id.trim().is_empty())
+        {
+            return Err("select a display for full-display capture".into());
+        }
         self.validate_games()?;
         validate_range(
             "output volume",

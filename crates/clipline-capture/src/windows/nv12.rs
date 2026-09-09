@@ -8,6 +8,7 @@ use windows::Win32::Graphics::Direct3D11::{
     ID3D11Device, ID3D11DeviceContext, ID3D11Resource, ID3D11Texture2D, ID3D11VideoContext,
     ID3D11VideoContext1, ID3D11VideoDevice, ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
     D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV,
+    D3D11_VIDEO_COLOR, D3D11_VIDEO_COLOR_0, D3D11_VIDEO_COLOR_RGBA,
     D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_COLOR_SPACE,
     D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
     D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
@@ -88,7 +89,7 @@ pub struct VideoConverter {
     in_height: u32,
     out_width: u32,
     out_height: u32,
-    source_rect: Option<RECT>,
+    crop: Option<CropRect>,
 }
 
 impl VideoConverter {
@@ -110,6 +111,7 @@ impl VideoConverter {
         out_h: u32,
         crop: Option<CropRect>,
     ) -> WinResult<Self> {
+        conversion_rects(in_w, in_h, out_w, out_h, crop)?;
         d3d11::ensure_multithread_protected(device)?;
         let video_device: ID3D11VideoDevice = device.cast()?;
         // SAFETY: trivial getter on a valid device.
@@ -127,7 +129,7 @@ impl VideoConverter {
             in_height: in_h,
             out_width: out_w,
             out_height: out_h,
-            source_rect: crop.map(CropRect::to_rect),
+            crop,
         })
     }
 
@@ -135,6 +137,13 @@ impl VideoConverter {
     /// (the encoder holds frames asynchronously; pooling is a follow-up).
     pub fn convert(&mut self, bgra: &ID3D11Texture2D) -> WinResult<ID3D11Texture2D> {
         let (in_width, in_height) = d3d11::texture_size(bgra);
+        let (source_rect, dest_rect) = conversion_rects(
+            in_width,
+            in_height,
+            self.out_width,
+            self.out_height,
+            self.crop,
+        )?;
         if (in_width, in_height) != (self.in_width, self.in_height) {
             let (enumerator, processor) = create_video_processor(
                 &self.video_device,
@@ -189,23 +198,53 @@ impl VideoConverter {
             )?;
         }
 
+        let target_rect = RECT {
+            left: 0,
+            top: 0,
+            right: self.out_width as i32,
+            bottom: self.out_height as i32,
+        };
+        let background = D3D11_VIDEO_COLOR {
+            Anonymous: D3D11_VIDEO_COLOR_0 {
+                RGBA: D3D11_VIDEO_COLOR_RGBA {
+                    R: 0.0,
+                    G: 0.0,
+                    B: 0.0,
+                    A: 1.0,
+                },
+            },
+        };
+        // SAFETY: live processor; validated source/destination rectangles. Fill
+        // the entire output so freshly allocated letterbox pixels are defined.
+        unsafe {
+            self.video_context.VideoProcessorSetStreamSourceRect(
+                &self.processor,
+                0,
+                true,
+                Some(&source_rect),
+            );
+            self.video_context.VideoProcessorSetStreamDestRect(
+                &self.processor,
+                0,
+                true,
+                Some(&dest_rect),
+            );
+            self.video_context.VideoProcessorSetOutputTargetRect(
+                &self.processor,
+                true,
+                Some(&target_rect),
+            );
+            self.video_context.VideoProcessorSetOutputBackgroundColor(
+                &self.processor,
+                false,
+                &background,
+            );
+        }
         let stream = D3D11_VIDEO_PROCESSOR_STREAM {
             Enable: true.into(),
             pInputSurface: std::mem::ManuallyDrop::new(in_view),
             ..Default::default()
         };
-        if let Some(rect) = &self.source_rect {
-            // SAFETY: processor is live and `rect` is a valid source rectangle
-            // for stream 0. The caller validates the crop against the input.
-            unsafe {
-                self.video_context.VideoProcessorSetStreamSourceRect(
-                    &self.processor,
-                    0,
-                    true,
-                    Some(rect),
-                );
-            }
-        }
         // SAFETY: processor/views are live; one enabled stream, no past or
         // future frames. ManuallyDrop field: we drop the view ourselves after.
         let result = unsafe {
@@ -221,6 +260,41 @@ impl VideoConverter {
         result?;
         Ok(out)
     }
+}
+
+fn conversion_rects(
+    in_w: u32,
+    in_h: u32,
+    out_w: u32,
+    out_h: u32,
+    crop: Option<CropRect>,
+) -> WinResult<(RECT, RECT)> {
+    if in_w > i32::MAX as u32 || in_h > i32::MAX as u32 {
+        return Err(WinError::new(
+            E_FAIL,
+            "input dimensions exceed RECT coordinates",
+        ));
+    }
+    let source = crop
+        .unwrap_or(CropRect {
+            x: 0,
+            y: 0,
+            width: in_w,
+            height: in_h,
+        })
+        .in_frame(in_w, in_h)
+        .ok_or_else(|| WinError::new(E_FAIL, "source crop is outside the current frame"))?;
+    let dest = crate::video_layout::fitted_video_rect(source.width, source.height, out_w, out_h)
+        .map_err(|message| WinError::new(E_FAIL, message))?;
+    Ok((
+        source.to_rect(),
+        RECT {
+            left: dest.x as i32,
+            top: dest.y as i32,
+            right: (dest.x + dest.width) as i32,
+            bottom: (dest.y + dest.height) as i32,
+        },
+    ))
 }
 
 fn create_video_processor(
@@ -474,6 +548,94 @@ pub fn read_bgra(device: &ID3D11Device, src: &ID3D11Texture2D) -> WinResult<Bgra
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crop_layout_uses_crop_shape_and_rejects_shrunk_input() {
+        let crop = Some(CropRect {
+            x: 16,
+            y: 8,
+            width: 32,
+            height: 24,
+        });
+        let (_, dest) = conversion_rects(96, 64, 64, 64, crop).unwrap();
+        assert_eq!(
+            (dest.left, dest.top, dest.right, dest.bottom),
+            (0, 8, 64, 56)
+        );
+        assert!(conversion_rects(40, 24, 64, 64, crop).is_err());
+        assert!(conversion_rects(0, 64, 64, 64, None).is_err());
+    }
+
+    #[test]
+    fn hardware_letterbox_pixels_follow_resize_and_crop() {
+        if std::env::var_os("CI").is_some() {
+            return;
+        }
+        let (device, context) = match d3d11::create_device() {
+            Ok(pair) => pair,
+            Err(e) => {
+                eprintln!("SKIP: no hardware D3D11 device: {e}");
+                return;
+            }
+        };
+        let mut conv = match VideoConverter::new(&device, 128, 64, 64, 64) {
+            Ok(converter) => converter,
+            Err(e) => {
+                eprintln!("SKIP: video processor unavailable: {e}");
+                return;
+            }
+        };
+        for (width, height, crop, expected) in [
+            (128, 64, None, (0, 16, 64, 32)),
+            (64, 128, None, (16, 0, 32, 64)),
+            (64, 64, None, (0, 0, 64, 64)),
+            (
+                128,
+                64,
+                Some(CropRect {
+                    x: 16,
+                    y: 8,
+                    width: 32,
+                    height: 48,
+                }),
+                (10, 0, 42, 64),
+            ),
+        ] {
+            conv.crop = crop;
+            let src = d3d11::create_bgra_texture(&device, width, height).unwrap();
+            let pixels = vec![255u8; (width * height * 4) as usize];
+            let resource: ID3D11Resource = src.cast().unwrap();
+            // SAFETY: initialized BGRA bytes cover every row of the live texture.
+            unsafe {
+                context.UpdateSubresource(&resource, 0, None, pixels.as_ptr().cast(), width * 4, 0);
+            }
+            let output = conv.convert(&src).unwrap();
+            let bytes = read_nv12(&device, &output).unwrap();
+            let (left, top, w, h) = expected;
+            for y in 0..64 {
+                for x in 0..64 {
+                    let inside = x >= left && x < left + w && y >= top && y < top + h;
+                    let expected_y = if inside { 235i16 } else { 16i16 };
+                    assert!(
+                        (i16::from(bytes[y * 64 + x]) - expected_y).abs() <= 3,
+                        "source {width}x{height}, pixel ({x},{y}): {} expected {expected_y}",
+                        bytes[y * 64 + x]
+                    );
+                }
+            }
+            assert!(bytes[64 * 64..]
+                .iter()
+                .all(|&v| (i16::from(v) - 128).abs() <= 3));
+        }
+        conv.crop = Some(CropRect {
+            x: 16,
+            y: 8,
+            width: 32,
+            height: 48,
+        });
+        let shrunk = d3d11::create_bgra_texture(&device, 32, 32).unwrap();
+        assert!(conv.convert(&shrunk).is_err());
+    }
 
     #[test]
     fn nv12_layout_checks_pitch_dimensions_offsets_and_overflow() {

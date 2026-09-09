@@ -1215,6 +1215,43 @@ fn display_region_settings_round_trip_json() {
 }
 
 #[test]
+fn selected_full_display_round_trips_without_region_inference() {
+    let dir = TestDir::new("clipline-settings", "full-display-round-trip");
+    let path = dir.path().join("settings.json");
+    let mut value = serde_json::to_value(AppSettings::default()).unwrap();
+    value["capture_mode"] = "display_monitor".into();
+    value["capture_display_id"] = r"\\.\DISPLAY2".into();
+    std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    let loaded = AppSettings::load_from(&path).unwrap();
+    let saved = serde_json::to_value(&loaded).unwrap();
+    assert_eq!(saved["capture_mode"], "display_monitor");
+    assert_eq!(saved["capture_display_id"], r"\\.\DISPLAY2");
+    assert_eq!(saved["capture_region"], value["capture_region"]);
+    loaded.save_to(&path).unwrap();
+    assert_eq!(AppSettings::load_from(&path).unwrap(), loaded);
+    assert_eq!(loaded.to_service_options(None).unwrap().capture_source,
+        CaptureSource::DisplayMonitor(r"\\.\DISPLAY2".into()));
+}
+
+#[test]
+fn selected_full_display_requires_identity_and_ignores_saved_crop_bounds() {
+    let mut settings = AppSettings {
+        capture_mode: CaptureMode::DisplayMonitor,
+        ..AppSettings::default()
+    };
+    for id in [None, Some(String::new()), Some("  ".into())] {
+        settings.capture_display_id = id;
+        assert!(settings.to_service_options(None).err().unwrap().contains("select a display"));
+    }
+    settings.capture_display_id = Some(r"\\.\DISPLAY2".into());
+    settings.capture_region.width = 1;
+    assert_eq!(settings.to_service_options(None).unwrap().capture_source,
+        CaptureSource::DisplayMonitor(r"\\.\DISPLAY2".into()));
+    settings.capture_mode = CaptureMode::DisplayRegion;
+    assert!(settings.to_service_options(None).is_err());
+}
+
+#[test]
 fn validation_rejects_too_small_display_region() {
     let settings = AppSettings {
         capture_mode: CaptureMode::DisplayRegion,
@@ -1323,6 +1360,16 @@ fn service_options_include_capture_backend_choice() {
 
 #[test]
 fn capture_backend_defaults_to_auto() {
+    assert_eq!(AppSettings::default().capture_backend, CaptureBackend::Auto);
+}
+
+#[test]
+fn experimental_hybrid_persists_without_changing_default_backend() {
+    let settings = AppSettings { capture_backend: CaptureBackend::ExperimentalHybrid, ..AppSettings::default() };
+    let json = serde_json::to_value(&settings).unwrap();
+    assert_eq!(json["capture_backend"], "experimental_hybrid");
+    let restored: AppSettings = serde_json::from_value(json).unwrap();
+    assert_eq!(restored.to_service_options(None).unwrap().capture_backend, CaptureBackend::ExperimentalHybrid);
     assert_eq!(AppSettings::default().capture_backend, CaptureBackend::Auto);
 }
 

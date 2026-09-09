@@ -24,6 +24,48 @@ fn player_core_context() -> Context {
 }
 
 #[test]
+fn full_display_selection_preserves_intent_across_mode_changes_and_disconnects() {
+    let mut ctx = player_core_context();
+    assert_eq!(eval(&mut ctx, "PlayerCore.captureSelectionValue({capture_mode:'display_monitor',capture_display_id:'screen2'})"), "display:screen2");
+    assert_eq!(eval(&mut ctx, "PlayerCore.captureSelectionValue({capture_mode:'primary_monitor'})"), "primary_monitor");
+    // A legacy region stays fixed, even if its saved bounds covered the monitor.
+    assert_eq!(eval(&mut ctx, "PlayerCore.captureSelectionValue({capture_mode:'display_region',capture_region:{display_id:'screen2',x:0,y:0,width:1280,height:720}})"), "display_region");
+    assert_eq!(eval(&mut ctx, "JSON.stringify(PlayerCore.captureSettingsForSelection('display:disconnected', {x:10,y:20,width:300,height:200}))"),
+        r#"{"capture_mode":"display_monitor","capture_display_id":"disconnected","capture_region":{"x":10,"y":20,"width":300,"height":200}}"#);
+    assert_eq!(eval(&mut ctx, "JSON.stringify(PlayerCore.captureSettingsForSelection('display_region', {width:640,height:360}))"),
+        r#"{"capture_mode":"display_region","capture_display_id":null,"capture_region":{"width":640,"height":360}}"#);
+}
+
+#[test]
+fn capture_dropdown_preserves_unavailable_display_and_fixed_region() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(r#"
+      const { captureSelectionValue, captureSettingsForSelection, captureSourceLabel } = PlayerCore;
+      const select = { options: [], value: '', replaceChildren() { this.options = []; }, appendChild(option) { this.options.push(option); } };
+      const fields = { 'set-capture': select, 'capture-region-editor': {} };
+      const $ = (id) => fields[id];
+      const document = { createElement: () => ({ value: '', textContent: '' }) };
+      const displays = [{id:'screen2',name:'Display 2',x:0,y:0,width:1280,height:720}];
+      let source = {capture_mode:'display_monitor',capture_display_id:'missing'};
+      const settingsFormSource = () => source;
+      let regionState = {display_id:'screen2',x:0,y:0,width:1280,height:720};
+      const settingsIndicatorBaseline = false;
+    "#)).unwrap();
+    let source = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/settings-capture.js")).unwrap();
+    ctx.eval(Source::from_bytes(&source)).unwrap();
+    ctx.eval(Source::from_bytes("syncCaptureBackendSummary = () => {}; updateCaptureStatus = () => {}; renderRegionEditor = () => {}; renderCaptureTargetSelect();")).unwrap();
+    assert_eq!(eval(&mut ctx, "select.value"), "display:missing");
+    assert_eq!(eval(&mut ctx, "selectedCaptureSettings().capture_display_id"), "missing");
+    assert_eq!(eval(&mut ctx, "select.options.find(o => o.value === select.value).textContent"), "Selected full display (unavailable)");
+    ctx.eval(Source::from_bytes("source = {capture_mode:'display_region',capture_region:regionState}; renderCaptureTargetSelect();")).unwrap();
+    assert_eq!(eval(&mut ctx, "select.value"), "display_region");
+    ctx.eval(Source::from_bytes("select.value = 'display:screen2'; syncCaptureFields();")).unwrap();
+    assert_eq!(eval(&mut ctx, "selectedCaptureSettings().capture_mode"), "display_monitor");
+    assert_eq!(eval(&mut ctx, "selectedCaptureSettings().capture_region === regionState"), "true");
+    assert_eq!(eval(&mut ctx, "fields['capture-region-editor'].hidden"), "true");
+}
+
+#[test]
 fn shared_presentation_normalizes_names_labels_and_dates() {
     let mut ctx = player_core_context();
     assert_eq!(

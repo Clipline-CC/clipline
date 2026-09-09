@@ -485,6 +485,9 @@ impl BundleRedactor {
         if let Some(display_id) = settings.capture_region.display_id.as_deref() {
             values.push(("display_device".into(), display_id));
         }
+        if let Some(display_id) = settings.capture_display_id.as_deref() {
+            values.push(("display_device".into(), display_id));
+        }
         for game in &settings.games.custom_games {
             for value in [
                 game.name.as_str(),

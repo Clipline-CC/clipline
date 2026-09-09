@@ -2,18 +2,27 @@ pub mod annexb;
 pub mod av1;
 pub mod avsync;
 pub mod clock;
+#[cfg(any(windows, test))]
+mod capture_geometry;
+#[cfg(any(windows, test))]
+mod reopen_resource;
 pub mod cpu_video;
 pub mod diagnostics;
 pub mod ffmpeg;
 pub mod ffmpeg_encoder;
 pub mod framing;
 pub mod hevc;
+#[cfg(any(windows, test))]
+mod hybrid_policy;
 pub mod mock;
 pub mod opus;
 pub mod pcm;
 pub mod pipeline;
 pub mod probe;
+#[doc(hidden)]
+pub mod print_protocol;
 pub mod traits;
+mod video_layout;
 #[cfg(windows)]
 pub mod windows;
 

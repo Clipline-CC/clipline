@@ -93,6 +93,8 @@ var {
   smoothnessIndexForFps,
   outputResolutionOption,
   captureSourceLabel,
+  captureSelectionValue,
+  captureSettingsForSelection,
 } = PlayerCore;
 
 var video = $("video");

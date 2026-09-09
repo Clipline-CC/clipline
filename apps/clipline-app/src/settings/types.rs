@@ -36,6 +36,7 @@ fn default_volume() -> f64 {
 #[serde(rename_all = "snake_case")]
 pub enum CaptureMode {
     PrimaryMonitor,
+    DisplayMonitor,
     WindowTitle,
     DisplayRegion,
 }

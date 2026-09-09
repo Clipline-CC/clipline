@@ -85,21 +85,46 @@ fn select_display_handle_or_primary(
 }
 
 fn enumerate_display_handles() -> Result<Vec<DisplayHandle>, CaptureError> {
-    let mut displays = Vec::<DisplayHandle>::new();
+    enumerate_monitor_snapshot()?.finish(false)
+}
+
+/// Hybrid source guards require the complete topology, never a best-effort
+/// subset that could turn two monitors into an apparent single-monitor setup.
+pub(super) fn enumerate_complete_display_handles() -> Result<Vec<DisplayHandle>, CaptureError> {
+    enumerate_monitor_snapshot()?.finish(true)
+}
+
+#[derive(Default)]
+struct MonitorSnapshot {
+    displays: Vec<DisplayHandle>,
+    incomplete: bool,
+}
+
+impl MonitorSnapshot {
+    fn finish(self, require_complete: bool) -> Result<Vec<DisplayHandle>, CaptureError> {
+        if require_complete && self.incomplete {
+            return Err(CaptureError::Init("incomplete display enumeration".into()));
+        }
+        Ok(self.displays)
+    }
+}
+
+fn enumerate_monitor_snapshot() -> Result<MonitorSnapshot, CaptureError> {
+    let mut snapshot = MonitorSnapshot::default();
     // SAFETY: the callback only runs during this call; lparam points at
-    // `displays`, which outlives the enumeration.
+    // `snapshot`, which outlives the enumeration.
     let ok = unsafe {
         EnumDisplayMonitors(
             None,
             None,
             Some(enum_monitor_proc),
-            LPARAM(&mut displays as *mut Vec<DisplayHandle> as isize),
+            LPARAM(&mut snapshot as *mut MonitorSnapshot as isize),
         )
     };
     if !ok.as_bool() {
         return Err(CaptureError::Init("EnumDisplayMonitors failed".into()));
     }
-    Ok(displays)
+    Ok(snapshot)
 }
 
 unsafe extern "system" fn enum_monitor_proc(
@@ -108,15 +133,16 @@ unsafe extern "system" fn enum_monitor_proc(
     _rect: *mut RECT,
     lparam: LPARAM,
 ) -> BOOL {
-    // SAFETY: lparam is the Vec pointer passed by enumerate_display_handles
+    // SAFETY: lparam is the snapshot pointer passed by enumerate_monitor_snapshot
     // on this same thread, alive for the whole enumeration.
-    let displays = unsafe { &mut *(lparam.0 as *mut Vec<DisplayHandle>) };
+    let snapshot = unsafe { &mut *(lparam.0 as *mut MonitorSnapshot) };
     let mut info = MONITORINFOEXW::default();
     info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
     // SAFETY: monitor comes from EnumDisplayMonitors; info points to a
     // properly-sized MONITORINFOEXW whose first field is MONITORINFO.
     let ok = unsafe { GetMonitorInfoW(monitor, &mut info as *mut _ as *mut MONITORINFO) };
     if !ok.as_bool() {
+        snapshot.incomplete = true;
         return BOOL(1);
     }
     let id = utf16_z(&info.szDevice);
@@ -124,13 +150,14 @@ unsafe extern "system" fn enum_monitor_proc(
     let width = (rect.right - rect.left).max(0) as u32;
     let height = (rect.bottom - rect.top).max(0) as u32;
     if width == 0 || height == 0 {
+        snapshot.incomplete = true;
         return BOOL(1);
     }
     let name = id
         .strip_prefix(r"\\.\")
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| id.clone());
-    displays.push(DisplayHandle {
+    snapshot.displays.push(DisplayHandle {
         handle: monitor,
         info: DisplayInfo {
             id,
@@ -153,6 +180,23 @@ fn utf16_z(buf: &[u16]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn incomplete_topology_is_rejected_only_for_strict_callers() {
+        assert!(MonitorSnapshot {
+            incomplete: true,
+            ..Default::default()
+        }
+        .finish(true)
+        .is_err());
+        assert!(MonitorSnapshot {
+            incomplete: true,
+            ..Default::default()
+        }
+        .finish(false)
+        .is_ok());
+        assert!(MonitorSnapshot::default().finish(true).is_ok());
+    }
 
     #[test]
     fn utf16_z_stops_at_nul() {

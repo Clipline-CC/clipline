@@ -7,6 +7,9 @@ fn main() {
 
 #[cfg(windows)]
 fn main() {
+    if clipline_capture::windows::print_window::run_worker_if_requested() {
+        return;
+    }
     if uninstall::run_if_requested() {
         return;
     }
@@ -21,6 +24,8 @@ fn main() {
 mod app;
 #[cfg(windows)]
 mod bounded_http;
+#[cfg(any(windows, test))]
+mod capture_policy;
 #[cfg(windows)]
 mod cloud;
 #[cfg(windows)]

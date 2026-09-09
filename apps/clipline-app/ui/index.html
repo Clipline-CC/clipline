@@ -433,10 +433,10 @@
           </div>
 
           <div class="settings-section" id="settings-panel-capture" data-section="capture" role="tabpanel" aria-labelledby="settings-tab-capture" hidden>
-            <div class="setting-row" data-settings-key="capture_mode capture_region window_title">
+            <div class="setting-row" data-settings-key="capture_mode capture_display_id capture_region window_title">
               <div class="setting-info">
                 <strong>Capture target</strong>
-                <span>What the recorder captures when no custom game is active.</span>
+                <span>Full displays follow resolution changes and include overlapping windows. Choose SET REGION for a rectangle. Used when no custom game is active.</span>
               </div>
               <select id="set-capture">
                 <option value="primary_monitor">loading displays...</option>
@@ -453,6 +453,7 @@
                   <option value="auto">Automatic (recommended)</option>
                   <option value="wgc">Windows Graphics Capture</option>
                   <option value="desktop_duplication">Desktop Duplication (no Windows 10 border)</option>
+                  <option value="experimental_hybrid">Experimental game capture (no border)</option>
                 </select>
                 <span id="backend-summary" class="setting-summary"></span>
               </div>

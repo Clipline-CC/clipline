@@ -32,9 +32,7 @@ function captureTargetIcon() {
   const game = activeGameIcon();
   if (game) return game;
   const settings = currentSettings || { capture_mode: "primary_monitor" };
-  const fullDisplay = settings.capture_mode === "display_region"
-    && displays.some((display) => isFullDisplayRegion(settings.capture_region, display));
-  const region = settings.capture_mode === "display_region" && !fullDisplay;
+  const region = settings.capture_mode === "display_region";
   return {
     url: null,
     label: fallbackCaptureSourceLabel(settings),

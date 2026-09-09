@@ -66,6 +66,9 @@ pub enum UiTheme {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AppSettings {
     pub capture_mode: CaptureMode,
+    /// Selected full display, independent of the saved fixed region.
+    #[serde(default)]
+    pub capture_display_id: Option<String>,
     #[serde(default)]
     pub capture_backend: CaptureBackend,
     pub window_title: String,
@@ -152,6 +155,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             capture_mode: CaptureMode::PrimaryMonitor,
+            capture_display_id: None,
             capture_backend: CaptureBackend::Auto,
             window_title: String::new(),
             capture_region: CaptureRegionSettings::default(),
@@ -233,6 +237,9 @@ impl AppSettings {
         Ok(ServiceOptions {
             capture_source: match self.capture_mode {
                 CaptureMode::PrimaryMonitor => CaptureSource::PrimaryMonitor,
+                CaptureMode::DisplayMonitor => CaptureSource::DisplayMonitor(
+                    self.capture_display_id.clone().expect("validated display ID"),
+                ),
                 CaptureMode::WindowTitle => {
                     CaptureSource::WindowTitle(self.window_title.trim().to_string())
                 }

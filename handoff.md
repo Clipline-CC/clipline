@@ -4,6 +4,386 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-09-09): hybrid display topology recovery
+
+Addressed Cursor's PR #200 review: ongoing hybrid capture no longer terminates
+when monitor enumeration fails or the target monitor disappears. One complete
+handle/info enumeration replaces the per-display re-lookups. Failed or partial
+topology produces waiting/black and rejects in-flight pixels; subsequent valid
+observations use the existing debounce to resume. Identity/protection failures
+remain fatal. Existing display callers retain their best-effort enumeration.
+
+Five added regressions cover unavailable/missing/partial topology, before/after
+frame rejection, recovery and the existing multiple-monitor restriction. All
+1,546 workspace tests pass on this machine; fresh capture-cache warning-denied
+workspace Clippy passes. Independent review found no additional defects. This is
+injected topology coverage, not physical hotplug validation. See the hybrid report.
+
+Pushed fix: `a031ccd`; Windows/Ubuntu CI and security checks pass. A five-minute
+borderless flip-fixture session fully decodes: 17,860 readable counters, one repeat,
+zero backward jumps, plus black startup/exit frames. A second game recorded in
+the same app instance. Parent+worker private memory was 108.2–115.5 MiB after warmup.
+Pulse analysis shows a stable 71–72 ms video lead over audio (prior replay: 66–67 ms),
+without accumulating drift; localize fixture/device vs recording timing before
+changing timestamps. Native computer-use pipe was unavailable, so no new live
+border screenshot or replay/fullscreen UI matrix is claimed. Clipline is open.
+Evidence: `C:\Users\Dain\Desktop\CliplineTopologyTest-20260909`.
+
+## Earlier checkpoint (2026-09-09): opt-in hybrid game capture
+
+The user approved isolated experimental window capture plus whole-display capture
+for fullscreen. Settings now offers **Experimental game capture (no border)**:
+PrintWindow for windowed/borderless, guarded Desktop Duplication for shell-reported
+fullscreen. Direct DWM remains a separate, unsuccessful flip-game experiment.
+Existing Auto/WGC and explicit display modes retain their behavior.
+
+The selector is a global Windows heuristic restricted to one monitor, exact
+foreground HWND and full-monitor bounds, with identity/protection and postcapture
+checks. Unknown states/transitions emit black while audio continues. Display mode
+can include overlays; this is not guaranteed desktop isolation. Worker requests
+are bounded, late pixels rejected, and eager-source pacing cannot spin indefinitely.
+A reproduced mock focus-loss failure now rebuilds flip buffers on state changes.
+
+Two complete Win10/Radeon 780M mock matrices passed with FSO disabled/enabled:
+automatic sessions, stereo audio, 30-second replays, fullscreen motion, overlap
+exclusion, resize and minimize/restore. Both ran in the same app instance.
+See [the report](docs/research/2026-09-09-experimental-hybrid-game-capture.md) for
+frame-repeat counts, evidence hashes, short resource samples and limitations.
+Actual games, multimonitor/DPI/HDR and long-duration stability remain unvalidated.
+Local gates pass: 1,541 workspace tests, fresh app-cache Clippy with no warnings,
+and MSVC /W4 /WX for the mock. Implementation commits: `0912544`, `3db7910`.
+
+## Earlier checkpoint (2026-09-08): web and local surface-access research
+
+Expanded Microsoft/AMD API review found no new game-only native-exclusive source.
+Local ordinal 100 DwmpDxGetWindowSharedSurface exists; one inspected branch calls
+the same user32 export already tested, and its documented producer-update contract
+is not a read-only application capture interface. Presentation-history logical
+IDs do not have a documented conversion to openable game buffers. DirectComposition
+HWND wrapping requires layered windows; newer presentation APIs require Win11.
+
+See `docs/research/2026-09-08-fullscreen-surface-api-research.md`. Private capture
+exports are recorded as unresolved leads, without guessing their ABI or invoking
+them. No further capture, elevation, global setting or backend change occurred.
+A local technical-inquiry evidence package is prepared but has not been sent.
+The next useful evidence is a concrete fresh-surface acquisition contract, not
+another variation of the stale reader. The original requirements remain in force.
+
+## Earlier checkpoint (2026-09-08): D3D9 producer also freezes under traced exclusive
+
+The independent hardware D3D9Ex rendering mock passes before/after borderless
+through PrintWindow and both DWM readers, but all retain counter 1311 during
+native exclusive. Concurrent Legacy Flip events cover every exclusive stage
+(267/184/189/190); all 448 telemetry rows retain foreground and 1280x720 geometry.
+Actual swap-chain state is verified and no non-presenting status overlaps capture.
+This extends the reproduced failure beyond the previous D3D11 producer.
+
+See `docs/research/2026-09-08-d3d9-producer-control.md`. Local setup fixes allow
+the new mock name in the PrintWindow worker copy and recover its D3D9 mode-change
+notification after UAC. Setup failures are excluded. The copied compatibility
+setting is restored; helpers exited; no production backend changed. Experimental
+game-only exclusive capture remains unresolved, with no new passing mechanism.
+
+## Earlier checkpoint (2026-09-08): alternate reader and preservation controls
+
+An original local D3D9Ex reader passes the blt positive (46 reads/45 changes),
+but reads the same static non-game DWM pixels as D3D11 on the flip fixture.
+Retaining the returned LUID works on the positive; retaining returned flags
+causes surface-unavailable errors. Local signed-user32 inspection shows these
+arguments are read as well as written; the probe's zero initialization remains
+supported by the positive control. No production code changed.
+
+An otherwise identical FLIP_SEQUENTIAL mock does not recover fresh fullscreen
+pixels either. Both original and sequential matrices pass borderless PrintWindow
+before/after and freeze during reported exclusive. These new matrices are
+explicitly **untraced** after Windows canceled the PresentMon UAC launch; earlier
+Legacy Flip traces do not classify them. See
+`docs/research/2026-09-08-dwm-reader-controls.md` for counts, hashes and limits.
+Copied-fixture settings are restored and helpers exited. The user's objective
+remains making experimental window capture work in fullscreen; no passing route
+has been found and no source tradeoff is awaiting approval.
+
+## Earlier checkpoint (2026-09-08): unchanged-resolution fullscreen control
+
+The subsequent elevation comparison also fails: actual administrator-token
+PrintWindow/DWM probes read the same stale content as ordinary probes against
+the same normal-integrity mock. All 1,792 presentation events are Legacy Flip.
+PrintWindow remains at counter 457 at both privilege levels; elevated DWM has
+88 unchanged reads. Previous prompts elevated only PresentMon; this comparison
+explicitly elevated capture workers after explaining that scope to the user.
+Clipline and the fixture remain unelevated. Evidence is appended to the same
+surface-continuity report below. The copied fixture setting was restored.
+
+User clarified the objective remains fixing experimental window capture for
+fullscreen. Tested the unchanged flip fixture borderless -> native exclusive ->
+borderless at constant 1280x720, with concurrent PresentMon and 300 geometry rows.
+PrintWindow passes both borderless phases (51 valid reads / 50 advances each)
+but freezes in exclusive (51 valid reads, all counter 5552). Direct DWM reads 88
+unchanged frames in exclusive. Both exclusive stages are entirely Legacy Flip.
+This rules out display resolution changes as the sole explanation, without
+identifying a capture code defect or proving every possible route impossible.
+See `docs/research/2026-09-08-fullscreen-surface-continuity.md`. The copied fixture
+setting was restored, helpers exited, and production recording is unchanged.
+
+## Earlier checkpoint (2026-09-08): local API audit confirms remaining source limitation
+
+Read-only WinRT metadata checks on build 19045 confirm that `IsBorderRequired`
+and `GraphicsCaptureAccess` are absent. AppRecordingManager is present, but its
+public contract records the calling UWP app; neither that manager nor the reviewed
+Game Bar widget API exposes another game's isolated frames. No WGC session or
+system setting change was made. See `docs/research/2026-09-08-capture-api-audit.md`.
+
+No passing native-exclusive, game-only, non-injected mechanism has been found.
+Continuing the borderless PrintWindow path or explicitly allowing full-display
+recording changes a requirement; neither is silently selected or called a strict
+exclusive fix. The user has been asked which direction is acceptable. Production
+capture remains unchanged and Clipline is open with capture paused.
+
+## Earlier checkpoint (2026-09-08): direct DWM and thumbnail route fail under Legacy Flip
+
+Completed both controls with concurrent PresentMon: all 1,202 source events were
+Hardware: Legacy Flip, including 306 during direct DWM sampling and 388 during
+thumbnail-host PrintWindow. Direct DWM read 148 unchanged white/black frames.
+Thumbnail PrintWindow returned game pixels, but all three saved snapshots are
+identical at counter 304 while the live source advances 900 to 2310. Correcting
+the thumbnail's changed scale did not recover fresh content. Both probes failed.
+
+The windowed thumbnail-host PrintWindow control did show correct colors and
+advancing saved counters (214/453/688); that positive does not extend to native
+exclusive. The copied fixture setting was restored and verified, all helpers
+exited, and no production backend changed. Evidence and limits are in
+`docs/research/2026-09-08-dwm-native-exclusive-followup.md`.
+
+## Earlier checkpoint (2026-09-08): FSO comparison does not repair window capture
+
+The user-approved elevated PresentMon control completed: all 1,201 frames of the
+original flip mock used Hardware Composed: Independent Flip (a hardware overlay
+plane), despite the application reporting exclusive. This is not measured native
+exclusive ownership, and prior untraced runs must retain that qualification.
+No production code changed. See
+`docs/research/2026-09-08-fullscreen-presentation-trace.md`.
+
+The copied-fixture A/B is now complete. With FSO enabled, all 1,201 frames used
+hardware-composed independent flip; with FSO disabled, all 1,201 used Hardware:
+Legacy Flip. Both fresh flags=2 PrintWindow probes immediately failed mock counter
+validation. The latter trace establishes native-exclusive presentation during the
+failure, using direct QPC alignment. The enabled CSV required correction for a
+double timezone conversion in PresentMon 2.5.1. This ends the tested FSO/PrintWindow
+branch, not all possible API research. No new classified DWM/display test occurred.
+
+The copied executable's compatibility value was restored to absent and verified.
+No account/group/global settings changed. UAC setup failures are excluded from
+capture evidence. Local helpers now wait for consent, retain the process handle,
+record explicit status, use QPC timestamps and restore the test setting on failure.
+
+During reopening, a valid saved display showed an unavailable rail tooltip until
+Settings loaded the UI display list. The fallback label now uses the saved display
+identity when no friendly name is cached. Backend capture had succeeded; this was
+a startup label defect, not display loss after the fullscreen experiment.
+Verified the raw saved ID before opening Settings and friendly name afterward.
+All 1,531 workspace tests (CI=1) and warning-denied Clippy passed after cleaning
+the app crate; rebuilt and reopened Clipline with capture paused. Screenshots and
+gate logs are in `C:\Users\Dain\Desktop\CliplineAspectTest-20260908-141713`.
+
+## Earlier checkpoint (2026-09-08): fullscreen recordings preserve aspect
+
+GPU and CPU conversion now fit source/crop aspect into fixed output dimensions
+with defined black padding. A 720x480 fullscreen source becomes 1080x720 content
+inside 1280x720 output, with 100-pixel side bars. Neutral CPU/layout tests and real
+Radeon pixel readback pass. A 75-second flip-mock transition run saved a decodable
+session and F6 replay with correct geometry and stereo audio; the steady replay
+tail has 1,686 frames, 1,685 counter advances and zero repeats. See
+`docs/research/2026-09-08-fullscreen-aspect.md` for evidence and limits.
+
+Strict game-only exclusive capture remains unresolved. Signed standalone
+PresentMon's PID-scoped non-elevated trace failed with access denied. A bounded
+UAC trace helper is prepared locally, but has not been run elevated; no FSO or
+account-group settings changed. Classify actual presentation before interpreting
+future FSO A/B window-capture controls. DWM/PrintWindow remain experimental.
+
+## Earlier checkpoint (2026-09-08): full-display intent is selectable and persistent
+
+Capture target now offers named full displays and a separate primary-full-display
+choice. Named selection persists `capture_mode=display_monitor` and
+`capture_display_id`, routes to full-monitor capture without a crop, and fails for
+a missing display identity instead of choosing primary. Legacy region/primary
+modes retain their identity; matching a display rectangle no longer implies a
+full-display selection. Legacy region clamping/recovery itself is unchanged.
+
+Saved the new option through the UI on this Windows 10 AMD machine, then recorded
+75 seconds with two windowed/exclusive cycles and an F6 replay. Decoding succeeded;
+the steady replay tail has 1,685 frames / 1,684 counter advances / zero repeats,
+stereo audio and no yellow border in sampled live views. A simulated missing ID
+survives restart and Save as unavailable. Workspace tests (CI=1, 1,525) and fresh
+app-cache warning-denied Clippy pass. Evidence and media hashes:
+`docs/research/2026-09-08-full-display-selection.md` and
+`C:\Users\Dain\Desktop\CliplineFullDisplayTest-20260908-134725`.
+
+Strict game-only exclusive capture is still unresolved. Reviewed documented AMD
+and kernel alternatives select displays; the similarly named documented DWM API
+is a Windows 7 driver/runtime presentation interface. No new source-isolated
+capture contract was found, and no monitor path is labeled game-only. DWM and
+PrintWindow remain experimental, with exclusive negatives preserved. Actual games
+remain unavailable, and mode-change aspect-ratio scaling remains a separate issue.
+
+## Earlier checkpoint (2026-09-08): exclusive display capture recovers across mode changes
+
+Fixed DXGI access-loss ownership/reseeding and invalid-region error handling.
+Reopening drops the invalid interface first, retries the same output with bounded
+waits and rate-limited diagnostics, and seeds fresh pixels without resetting PTS.
+A fixed region that no longer fits returns a non-timeout error rather than
+recording frozen video. Neutral ownership/geometry tests and a seeded cadence
+regression test cover these paths; live fullscreen transitions cover reseeding.
+
+On this Windows 10 / Radeon 780M machine, explicit `primary_monitor` controls now
+record exclusive blt/flip mocks with H.264, stereo Opus and F6 replays. A 65-second
+blt run remained foreground/exclusive; its 1,800-frame replay had three repeated
+counters, no invalid pixels, and ~95..104 MiB main-process private memory after
+warm-up. A 75-second flip run recovered through two windowed/exclusive cycles.
+Live screenshots show no yellow border. A fixed 1280x720 region correctly stops
+with a visible error when the display changes to 720x480.
+
+This is display capture, not automatic game-only capture. The display dropdown
+still serializes a fixed region; following monitor mode changes requires explicit
+persisted full-display intent. Original settings are restored after controls.
+DWM and all PrintWindow flag variants still fail exclusive window capture; their
+experiments remain outside production. Full-monitor resize currently stretches
+to the fixed encoder aspect ratio. Real games and long-session behavior remain
+unverified. See `docs/research/2026-09-08-exclusive-fullscreen.md` and local evidence
+`C:\Users\Dain\Desktop\CliplineExclusiveTest-20260908-125432`.
+
+## Earlier checkpoint (2026-09-08): native PrintWindow records 720p60 with audio and replay
+
+`cargo run -p clipline-capture --example print_window_record -- --help` exposes a
+standalone experiment, never a production backend. It isolates synchronous capture
+in a supervised child, checks target/protection/geometry, crops client BGRA, uploads
+on the shared D3D device and uses existing AMD H.264 MFT/WASAPI/Recorder code. A
+two-second deadline kills/reaps the worker immediately; a kill-on-close job protects
+abrupt parent exits. The replay ring has byte/time limits. Failures preserve valid
+partial sessions and diagnostics; fixed-resolution resize/minimize currently stop.
+
+Windowed and borderless blt/flip mocks produced decodable video, stereo Opus and
+trailing replays with overlap excluded and no yellow border observed. Strongest
+run: 60 seconds, 1280x720, 60 FPS, 3,600 frames / 3,599 counter advances, no repeats;
+mean PrintWindow 11.36 ms, recorder private memory ~96 MB after warm-up. This does
+not establish tear-free capture, real-game support or long-session performance.
+
+Outstanding: exclusive fails (flip invalid pixels, blt frozen); visual pulse leads
+audio by ~78..85 ms versus ~34 ms in an earlier explicit DXGI control. No timing
+offset was applied. Separate FFmpeg/AMF encoding ignores the requested GOP interval
+in a direct control and trips the ten-second pipeline guard; native MFT succeeds.
+No production capture/encoder changes were made for this prototype. Automatic
+game-only app capture remains blocked. See
+`docs/research/2026-09-08-print-window-recording.md` for commands, exact measurements,
+negative controls and media hashes. Evidence is under
+`C:\Users\Dain\Desktop\CliplineNativePrintTest-20260908-111424`.
+
+## Earlier checkpoint (2026-09-08): PrintWindow captures flip windowed/borderless in isolation
+
+The DWM failure matches redirection-surface limitations, not a reproduced stale
+texture cache. A live DWM thumbnail still reads as only its helper's background
+through the shared-surface export. `PrintWindow(PW_RENDERFULLCONTENT)` does return
+fresh flip windowed/borderless content, including when Clipline covers the source.
+Exclusive fullscreen remains frozen/blank for both mock presentation types. A
+one-minute overlapped run had 1,292 reads / 1,291 changing native mock counters,
+no errors, ~11 ms average API latency, and similar initial/final private bytes.
+The PowerShell harness achieved ~21.5 samples/s; this is not native recorder
+throughput or a synchronization guarantee.
+
+`scripts/test-print-window.ps1` provides a separate process with an external timeout,
+identity/affinity checks, evidence, and optional mock color/counter validation.
+Worker exit-code preservation, invalid/blank pixels and >2s progress gaps were
+reviewed and fixed. The DWM probe/controlled runner now support `--require-motion`
+to reject all-identical animated-target runs after preserving evidence. Production
+capture remains unchanged. Native bounded frame delivery/timestamps, sustained
+border observation, recovery, real games and end-to-end PrintWindow recording
+remain required before integration. See
+`docs/research/2026-09-08-window-capture-blockers.md` for exact scope and commands.
+
+## Earlier checkpoint (2026-09-08): native mock games isolate DWM presentation failures
+
+`scripts/build-mock-games.ps1` builds hardware D3D11 blt/flip executable fixtures
+with generated stereo audio; see `docs/mock-games.md`. Both register and are
+detected in Clipline. Explicit DXGI rejects their automatically selected window
+sources, so automatic game-only capture/replay remains blocked. The native DWM
+matrix captures blt windowed/borderless content but freezes in DXGI exclusive;
+flip windowed/borderless/exclusive all return stale white/black surfaces. This is
+a reproducible native case for the earlier browser failure, not evidence that all
+GPU windows fail. See `docs/research/2026-09-08-mock-game-validation.md` for exact
+counts, hashes, fixture limits and local evidence. Keep production DWM disabled.
+A separate 30-second display-control replay of the flip mock decodes all 1,800
+frames with correct stereo tones and silent intervals. Fixed the mock's short
+waveOut buffers after they reproduced underruns; no recorder audio code changed.
+The app remains open, paused, with both mock paths registered and automatic game
+switching off. Both the Save button and global F6 with the native mock foreground
+save valid 30-second display replays. Automatic full-session acceptance remains
+blocked by the window-source restriction.
+
+## Earlier checkpoint (2026-09-08): AMD display recording works; DWM WebGL fails
+
+Official AMD driver `32.0.31041.1004` and Microsoft C++ Build Tools are installed on
+the Windows 10 Home 19045 / Radeon 780M machine. Clipline builds and launches.
+Desktop Duplication + AMD AMF H.264 saved and played a 30-second replay and decoded
+a 126.5-second session without errors; live sampled views have no yellow border.
+Runtime diagnostics confirm the actual DXGI backend. The initial output-audio
+failure (`0x80070490`) is resolved for this PiKVM host by a user-installed VB-CABLE
+virtual device. Clipline captures `CABLE Input`; a saved H.264+stereo Opus session
+decodes correctly with the expected 440/880 Hz tones and one-second silent gaps.
+Microphone and game-process audio remain unvalidated. Two extra VB-Audio entries
+report code 10, while the selected virtual endpoint works. A settings-triggered
+DXGI restart failed once with `0x80070057`; manual start succeeded, with no WGC
+fallback. Preserve this separate transition failure for follow-up.
+
+The DWM GDI fixture works on AMD, including overlap exclusion/resize/restore and a
+five-minute run without sustained memory growth. **AMD-accelerated WebGL fails:**
+white windowed / gray browser-fullscreen surfaces with zero pixel changes while
+the actual AMD scene animates. Do not integrate the probe into production. Games
+and exclusive fullscreen remain untested; game installation/login prerequisites
+are still missing. Display recording is not isolated game recording.
+
+Explicit Desktop Duplication now stops on initialization/first-frame failure and
+rejects window sources instead of silently using WGC. Auto/WGC defaults and settings
+serialization are unchanged. Four neutral regression tests, workspace tests and
+fresh-app-cache warning-denied workspace Clippy pass locally; independent review
+found no remaining WGC route for explicit DXGI. Clipline is open for testing.
+The no-fallback fix was pushed to PR #200 (`c5960c3`) and both Windows/Ubuntu CI
+passed (run `34200829938`); the publication/linker/driver blockers below are historical.
+
+Evidence and exact limits: `docs/research/2026-09-08-win10-amd-recording.md`.
+Local artifacts: `C:\Users\Dain\Desktop\CliplineWin10E2E-20260908-031609`.
+Private desktop captures/support ZIPs remain local. Verified LGPL FFmpeg is staged;
+the debug launch uses its verified local path through `CLIPLINE_FFMPEG`.
+
+## Earlier checkpoint (2026-09-08): DWM runtime repair and software baseline
+
+Continued PR #200 from `e6dd13a2` on physical Windows 10 Home 19045 / Ryzen 9 7940HS.
+The original probe's `--help` and `--list` both failed before capture with `0xC0000135`.
+Official Microsoft x64 `vcruntime140.dll` 14.51.36247.0 deployed app-locally fixes both
+commands without rebuilding the executable or installing a global runtime. The Desktop
+copy now includes that DLL and a corrected launcher; the original launcher is backed up.
+New package/runner scripts check native exits before starting the fixture, preserve timeout
+logs, validate runtime identity, and keep desktop-title logs outside the distributable.
+PowerShell 5.1 regression tests pass and are configured for Windows CI.
+
+The installed GPU driver is still **Microsoft Basic Display Adapter 10.0.19041.3636**.
+DWM and WebGL both use **Microsoft Basic Render Driver**. A 22-second controlled run
+returned 1,110 reads, excluded the overlapping magenta window, and recovered after resize
+and minimize/restore; all 176 errors were while minimized. Sampled desktop views showed no
+yellow border. A five-minute run returned 17,400 reads; steady working set was 10.95–14.03 MiB,
+private memory 5.09–6.69 MiB, handles 157–160, with no sustained upward trend observed.
+These software-fixture results do not establish AMD acceleration, game compatibility,
+exclusive fullscreen, or synchronized/tear-free frames. No production capture changes.
+
+AMD-signed Adrenalin 26.8.1 was downloaded, but Windows administrator approval was canceled;
+no driver installation or reboot occurred. No League/Valorant/Riot installation was found
+in uninstall records or standard directories. Local workspace tests and Clippy cannot
+compile because MSVC `link.exe` is absent. Full results, hashes, evidence paths, and next
+steps: `docs/research/2026-09-08-dwm-probe-win10-validation.md`. Next establish the AMD driver,
+verify the actual renderer, then test installed/logged-in games in separate rendering modes.
+Publication is also blocked: Git lacks credentials and the GitHub app rejects both commits
+and PR comments with HTTP 403. Changes remain on local `dwm-win10-validation`; PR #200 still
+has head `e6dd13a2`. Patches, a Git bundle, and the repaired ZIP are saved with the evidence.
+
 ## Checkpoint (2026-09-06): Nightly 1.0.4 published
 
 Published [Nightly 1.0.4](https://github.com/Clipline-CC/clipline/releases/tag/nightly) from
@@ -22,6 +402,41 @@ and release-only diff; workflow-generated asset files were left unchanged.
 Standalone now pins WebView2 Fixed Runtime 152.0.4191.62, reviewed through 2026-10-06. Local playback
 and metadata-only release preparation evidence is in
 `docs/superpowers/plans/2026-09-06-nightly-1.0.4.md`.
+
+## Checkpoint (2026-09-07): isolated DWM capture feasibility probe
+
+Branch `improve-windows-10-support` was fast-forwarded to Nightly 1.0.4 (`c4554238`) before
+building this experiment. `cargo run -p clipline-capture --example dwm_probe -- --help` exposes
+a standalone, explicit-window probe, not a selectable Clipline capture backend. See
+`docs/dwm-probe.md` for Windows 10 tester instructions and
+`docs/research/2026-09-07-windows-10-support.md` for the API/support investigation.
+
+The probe dynamically resolves `user32!DwmGetDxSharedSurface`, selects the returned adapter,
+reads a supported SDR texture into owned staging, and writes local BMP samples/CSV statistics.
+It never starts WGC or injects into a game, never closes the borrowed graphics handle, rejects
+capture affinity/unknown synchronization, and does not promise producer frame synchronization.
+All new unsafe code is confined to `examples/windows/dwm_probe.rs`; app behavior is unchanged.
+
+Initial live checks on **Windows 11 26200 / RX 6700 XT** captured an animated controlled window,
+handled resize and minimize/restore, and returned target content while a magenta test window
+covered it. 22-second development build run: 973 readable samples, 859 changed sampled hashes,
+176 minimized-window errors. An 8-second overlap run had 368 reads, 266 changed samples, and
+zero errors. These are sampling observations, not game FPS benchmarks; a compiler was running
+during the overlap check. The first fixture used unbuffered GDI paint and one snapshot showed
+partial repaint content; the fixture now double-buffers. Tearing/production suitability remains
+unproven. Windows 10, League, Valorant, HDR, hybrid GPU, and sustained-memory validation remain.
+
+Plan-first failing checks for arguments and BMP row pitch were followed by passing tests;
+workspace tests and fresh-capture-cache warning-denied workspace Clippy pass. Independent
+unsafe/lifetime review found no blocker to an experimental
+probe. Repository-wide formatting check exposes pre-existing formatting differences in the
+1.0.4 baseline; the new Rust example files pass rustfmt without touching unrelated files.
+
+Packaged release executable also passed an 8-second controlled overlap run: 467 reads, 305
+changed samples, zero errors, 58.36 reads/s, mean probe read cost 1.77 ms. Working set was about
+36 MB after startup over this short sample. Draft PR: https://github.com/Clipline-CC/clipline/pull/200.
+The optimized executable and instructions are packaged locally in
+`target/dwm-probe-windows-x64.zip`; this is an experimental tester build, not a Clipline release.
 
 ## Checkpoint (2026-09-06): PR 193 integration with develop
 

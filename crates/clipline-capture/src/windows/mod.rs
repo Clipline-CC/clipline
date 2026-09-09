@@ -8,6 +8,8 @@ pub mod dxgi_dup;
 pub mod mft;
 pub mod mft_probe;
 pub mod nv12;
+pub mod hybrid;
+pub mod print_window;
 pub mod wasapi;
 pub mod wgc;
 pub mod window;

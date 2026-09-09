@@ -237,6 +237,32 @@ fn clips_dir_resolved_with_probe(
         }
     }
 
+    struct EagerStaleSource { calls: usize }
+    impl TimedFrameSource for EagerStaleSource {
+        fn requires_cadence_wait(&self) -> bool { true }
+        fn next_frame_timeout(&mut self, _: Duration) -> Result<Option<Frame>, CaptureError> {
+            self.calls += 1;
+            Ok(Some(Frame { pts_s: 0.0, data: FrameData::Cpu(vec![7]) }))
+        }
+    }
+
+    #[test]
+    fn cadenced_capture_bounds_eager_reads_and_emits_even_when_source_timestamp_stalls() {
+        let mut cap = CadencedCapture::new(EagerStaleSource { calls: 0 }, 30,
+            Frame { pts_s: 0.0, data: FrameData::Cpu(vec![0]) });
+        let start = Instant::now();
+        let mut frames = Vec::new();
+        for _ in 0..100 {
+            if let Ok(Some(frame)) = cap.next_frame() { frames.push(frame); }
+            if frames.len() == 4 { break; }
+        }
+        assert_eq!(frames.len(), 4, "an eager stale source must not starve video cadence");
+        assert!(start.elapsed() >= Duration::from_millis(120));
+        assert!(cap.inner.calls <= 12, "over-polled eager source: {}", cap.inner.calls);
+        assert!(frames.windows(2).all(|w| w[1].pts_s > w[0].pts_s));
+        assert!(frames.iter().all(|f| matches!(&f.data, FrameData::Cpu(bytes) if bytes == &[7])));
+    }
+
     struct ScriptedTimedSource {
         outcomes: VecDeque<Result<Option<Frame>, CaptureError>>,
         requested_timeouts: Vec<Duration>,
@@ -931,6 +957,22 @@ fn clips_dir_resolved_with_probe(
             pts_elapsed_s <= wall_elapsed_s + frame_interval_s,
             "premature timeouts inflated PTS: pts={pts_elapsed_s:.6}s wall={wall_elapsed_s:.6}s"
         );
+    }
+
+    #[test]
+    fn cadenced_capture_propagates_source_change_instead_of_duplicating() {
+        let seed = Frame {
+            pts_s: 1.0,
+            data: FrameData::Cpu(vec![7, 8, 9]),
+        };
+        let source = ScriptedTimedSource {
+            outcomes: VecDeque::from([Err(CaptureError::SourceChanged(
+                "selected region no longer fits".into(),
+            ))]),
+            requested_timeouts: Vec::new(),
+        };
+        let mut capture = CadencedCapture::new(source, 60, seed);
+        assert!(matches!(capture.next_frame(), Err(CaptureError::SourceChanged(_))));
     }
 
     #[test]

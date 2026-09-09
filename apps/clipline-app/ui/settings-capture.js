@@ -9,22 +9,8 @@ function displayForCaptureValue(value) {
   return displays.find((display) => display.id === id) || null;
 }
 
-function isFullDisplayRegion(region, display) {
-  return !!region && !!display
-    && region.display_id === display.id
-    && Number(region.x) === display.x
-    && Number(region.y) === display.y
-    && Number(region.width) === display.width
-    && Number(region.height) === display.height;
-}
-
 function captureSettingsValue(settings = settingsFormSource()) {
-  if (settings && settings.capture_mode === "display_region") {
-    const display = displays.find((item) => isFullDisplayRegion(settings.capture_region, item));
-    return display ? displayCaptureValue(display) : "display_region";
-  }
-  const display = primaryDisplay();
-  return display ? displayCaptureValue(display) : "primary_monitor";
+  return captureSelectionValue(settings);
 }
 
 function displayLabel(display) {
@@ -36,17 +22,22 @@ function renderCaptureTargetSelect() {
   const select = $("set-capture");
   const desired = captureSettingsValue();
   select.replaceChildren();
+  const primary = document.createElement("option");
+  primary.value = "primary_monitor";
+  primary.textContent = "Primary display (full)";
+  select.appendChild(primary);
   if (displays.length) {
     for (const display of displays) {
       const option = document.createElement("option");
       option.value = displayCaptureValue(display);
-      option.textContent = displayLabel(display);
+      option.textContent = `Full display: ${displayLabel(display)}`;
       select.appendChild(option);
     }
-  } else {
+  }
+  if (desired.startsWith("display:") && !displayForCaptureValue(desired)) {
     const option = document.createElement("option");
-    option.value = "primary_monitor";
-    option.textContent = "Primary display";
+    option.value = desired;
+    option.textContent = "Selected full display (unavailable)";
     select.appendChild(option);
   }
   const region = document.createElement("option");
@@ -61,24 +52,10 @@ function renderCaptureTargetSelect() {
 }
 
 function selectedCaptureSettings() {
-  const display = displayForCaptureValue($("set-capture").value);
-  if (display) {
-    return {
-      capture_mode: "display_region",
-      capture_region: regionForDisplay(display),
-    };
-  }
-  return {
-    capture_mode: $("set-capture").value === "display_region" ? "display_region" : "primary_monitor",
-    capture_region: regionState,
-  };
+  return captureSettingsForSelection($("set-capture").value, regionState);
 }
 
 function syncCaptureFields() {
-  const display = displayForCaptureValue($("set-capture").value);
-  if (display) {
-    regionState = regionForDisplay(display);
-  }
   const isEditableRegion = $("set-capture").value === "display_region";
   $("capture-region-editor").hidden = !isEditableRegion;
   if (isEditableRegion) renderRegionEditor();
@@ -91,7 +68,10 @@ function syncCaptureBackendSummary() {
   if (!summary) return;
   if ($("set-backend").value === "desktop_duplication") {
     summary.textContent =
-      "Removes the Windows 10 capture border for displays and regions. Display/region only (not single windows); the mouse cursor may be missing on some systems. Falls back to Windows Graphics Capture if unavailable.";
+      "Captures a display or region without the Windows 10 border, including overlapping windows. Recording stops if unavailable. Turn off automatic game switching to use this mode; single-window capture is unsupported. The mouse cursor may be missing on some systems.";
+  } else if ($("set-backend").value === "experimental_hybrid") {
+    summary.textContent =
+      "Experimental: captures the game window, switching to its full display when Windows reports fullscreen. Enable automatic game switching. Fullscreen switching requires one monitor and may include overlays. Unfocused or uncertain fullscreen capture shows black video; audio continues. Some games may return frozen or incomplete window frames.";
   } else {
     summary.textContent =
       "Windows Graphics Capture works everywhere, including single windows. On Windows 10 it may show a yellow capture border.";
@@ -389,9 +369,15 @@ function updateCaptureStatus() {
     activeDetectedGame && activeDetectedGame.active
       ? `Game: ${activeDetectedGame.name}`
       : fallbackCaptureSourceLabel(currentSettings || { capture_mode: "primary_monitor" });
-  const bufferReadyTitle = activeEncoderLabel
+  let bufferReadyTitle = activeEncoderLabel
     ? `Replay buffer ready · ${activeEncoderLabel}`
     : "Replay buffer ready";
+  const captureLabel = {
+    experimental_print_window: "Experimental window capture",
+    experimental_fullscreen_display: "Experimental full-display capture (includes overlays)",
+    experimental_waiting_black: "Experimental capture waiting: black video, audio continues",
+  }[activeCaptureBackend] || "";
+  if (captureLabel) bufferReadyTitle += ` · ${captureLabel}`;
   renderRailGame();
   $("rail-status").classList.toggle("stopped", !fullSessionRecordingActive || storageQuotaBlocked);
   $("rail-status").classList.toggle("blocked", storageQuotaBlocked);
@@ -423,6 +409,13 @@ function updateCaptureStatus() {
         ? "Stop waiting for a game"
         : `Start ${source} replay buffer`;
   $("rail-game").setAttribute("aria-label", $("rail-game").title);
+  if (captureLabel) {
+    $("rail-status").title += ` · ${captureLabel}`;
+    if (fullSessionRecordingActive && !storageQuotaBlocked) {
+      $("rail-status-text").textContent = activeCaptureBackend === "experimental_fullscreen_display"
+        ? "Display" : activeCaptureBackend === "experimental_waiting_black" ? "Wait" : "Rec";
+    }
+  }
   $("rail-save").disabled = storageQuotaBlocked || !recordingActive;
 }
 
@@ -444,9 +437,10 @@ function updateHotkeyLabels(hotkey = saveHotkeyLabel(), secondary = saveSecondar
 }
 
 function fallbackCaptureSourceLabel(settings) {
-  if (settings && settings.capture_mode === "display_region") {
-    const display = displays.find((item) => isFullDisplayRegion(settings.capture_region, item));
-    if (display) return `Display: ${display.name}`;
+  if (settings && settings.capture_mode === "display_monitor") {
+    const display = displays.find((item) => item.id === settings.capture_display_id);
+    const name = display ? display.name : settings.capture_display_id;
+    return name ? `Full display: ${name}` : "Full display";
   }
   return captureSourceLabel(settings);
 }

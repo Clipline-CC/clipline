@@ -287,15 +287,15 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
     let mut marker_log = MarkerLog::new();
     let mut player_summary = PlayerSummaryState::default();
     let mut league_queue: Option<LeagueQueue> = None;
-    // Build the capture engine — DXGI Desktop Duplication when the user opted
-    // in for a display/region source, else WGC — and pull the first frame,
-    // which fixes the capture size. A DXGI failure (multi-GPU, rotated display,
-    // secure desktop on the first frame, …) silently falls back to WGC.
+    // Build the selected capture engine and pull the first frame, which fixes
+    // the capture size. Explicit Desktop Duplication rejects window sources
+    // and returns failures without switching to WGC.
     let (cap, first) = open_screen_capture(
         &device,
         clock,
         &opts.capture_source,
         opts.capture_backend,
+        opts.active_game.as_ref().and_then(|game| game.process_id),
         events,
     )?;
     let capture_backend_status = cap.diagnostic_label();
@@ -369,7 +369,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
         &rec,
         &full_session,
         &encoder_status,
-        capture_backend_status,
+        capture_backend_status(),
     );
 
     loop {
@@ -494,7 +494,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                 &rec,
                 &full_session,
                 &encoder_status,
-                capture_backend_status,
+                capture_backend_status(),
             );
             if replay_cache_dir.is_some() {
                 if let Err(primary) = ensure_replay_cache_free_space(&opts) {
@@ -695,7 +695,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                         &rec,
                         &full_session,
                         &encoder_status,
-                        capture_backend_status,
+                        capture_backend_status(),
                     );
                 }
                 Ok(Cmd::StopFullSession) => {
@@ -718,7 +718,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                         &rec,
                         &full_session,
                         &encoder_status,
-                        capture_backend_status,
+                        capture_backend_status(),
                     );
                 }
                 Ok(Cmd::Stop { announce }) => {

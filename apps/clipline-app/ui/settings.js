@@ -2,6 +2,7 @@
 var gamePluginSettingsDialogPluginId = null;
 var gamePluginSettingsDialogTab = "general";
 var activeEncoderLabel = "";
+var activeCaptureBackend = "";
 // Live League game-type recording toggles; survives dialog open/close because
 // the checkbox inputs are removed from the DOM when the dialog closes.
 var leagueModeSettings = null;
@@ -307,6 +308,7 @@ function readSettings() {
     && String(source.window_title || "").trim().length > 0;
   return {
     capture_mode: preserveLegacyWindow ? "window_title" : capture.capture_mode,
+    capture_display_id: capture.capture_display_id,
     capture_backend: $("set-backend").value,
     window_title: preserveLegacyWindow ? source.window_title : "",
     capture_region: preserveLegacyWindow
