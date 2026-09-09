@@ -4,7 +4,23 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
-## Checkpoint (2026-09-08): D3D9 producer also freezes under traced exclusive
+## Checkpoint (2026-09-08): web and local surface-access research
+
+Expanded Microsoft/AMD API review found no new game-only native-exclusive source.
+Local ordinal 100 DwmpDxGetWindowSharedSurface exists; one inspected branch calls
+the same user32 export already tested, and its documented producer-update contract
+is not a read-only application capture interface. Presentation-history logical
+IDs do not have a documented conversion to openable game buffers. DirectComposition
+HWND wrapping requires layered windows; newer presentation APIs require Win11.
+
+See `docs/research/2026-09-08-fullscreen-surface-api-research.md`. Private capture
+exports are recorded as unresolved leads, without guessing their ABI or invoking
+them. No further capture, elevation, global setting or backend change occurred.
+A local technical-inquiry evidence package is prepared but has not been sent.
+The next useful evidence is a concrete fresh-surface acquisition contract, not
+another variation of the stale reader. The original requirements remain in force.
+
+## Earlier checkpoint (2026-09-08): D3D9 producer also freezes under traced exclusive
 
 The independent hardware D3D9Ex rendering mock passes before/after borderless
 through PrintWindow and both DWM readers, but all retain counter 1311 during

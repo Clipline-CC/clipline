@@ -150,6 +150,11 @@ measurement. Windows 10 and game acceptance remain pending.
 
 Research and API limitations: [Windows 10 report](research/2026-09-07-windows-10-support.md).
 
+Latest source-access research:
+[web and local API audit](research/2026-09-08-fullscreen-surface-api-research.md).
+No new fresh native-exclusive window source was established; private export
+presence alone is not a usable capture contract.
+
 Latest independent D3D9 rendering-fixture control:
 [traced D3D9 producer results](research/2026-09-08-d3d9-producer-control.md).
 All readers pass before/after borderless but freeze during concurrent native
