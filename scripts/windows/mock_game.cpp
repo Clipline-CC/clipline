@@ -145,6 +145,9 @@ struct App {
     void changeMode() {
         BOOL actual = FALSE;
         check(swap->GetFullscreenState(&actual, nullptr), "GetFullscreenState");
+        // DXGI may leave fullscreen on focus loss without a useful size change.
+        // Flip-model buffers must be resized even when dimensions stay the same.
+        if (exclusive != (actual != FALSE)) resize = true;
         exclusive = actual != FALSE;
         if (toggleExclusive) {
             toggleExclusive = false;
@@ -224,6 +227,15 @@ struct App {
         }
         const HRESULT result = swap->Present(1, 0);
         if (result == DXGI_STATUS_OCCLUDED) Sleep(10);
+        else if (result == DXGI_ERROR_INVALID_CALL) {
+            BOOL actual = FALSE;
+            check(swap->GetFullscreenState(&actual, nullptr), "fullscreen after Present");
+            // A focus transition can race changeMode/draw. Retry only a confirmed
+            // mode change or resize notification; unrelated errors remain fatal.
+            if (exclusive == (actual != FALSE) && !resize) check(result, "Present");
+            exclusive = actual != FALSE;
+            resize = true;
+        }
         else check(result, "Present");
     }
     ~App() {
