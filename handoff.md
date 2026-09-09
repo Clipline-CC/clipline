@@ -4,7 +4,22 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
-## Checkpoint (2026-09-08): alternate reader and preservation controls
+## Checkpoint (2026-09-08): D3D9 producer also freezes under traced exclusive
+
+The independent hardware D3D9Ex rendering mock passes before/after borderless
+through PrintWindow and both DWM readers, but all retain counter 1311 during
+native exclusive. Concurrent Legacy Flip events cover every exclusive stage
+(267/184/189/190); all 448 telemetry rows retain foreground and 1280x720 geometry.
+Actual swap-chain state is verified and no non-presenting status overlaps capture.
+This extends the reproduced failure beyond the previous D3D11 producer.
+
+See `docs/research/2026-09-08-d3d9-producer-control.md`. Local setup fixes allow
+the new mock name in the PrintWindow worker copy and recover its D3D9 mode-change
+notification after UAC. Setup failures are excluded. The copied compatibility
+setting is restored; helpers exited; no production backend changed. Experimental
+game-only exclusive capture remains unresolved, with no new passing mechanism.
+
+## Earlier checkpoint (2026-09-08): alternate reader and preservation controls
 
 An original local D3D9Ex reader passes the blt positive (46 reads/45 changes),
 but reads the same static non-game DWM pixels as D3D11 on the flip fixture.
