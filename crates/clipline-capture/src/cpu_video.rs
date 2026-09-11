@@ -71,19 +71,33 @@ impl CpuVideoConverter {
         if source.width == 0 || source.height == 0 || right > input_width || bottom > input_height {
             return Err(CpuVideoError::InvalidCrop);
         }
+        let destination = crate::video_layout::fitted_video_rect(
+            source.width,
+            source.height,
+            output_width,
+            output_height,
+        )
+        .map_err(|_| CpuVideoError::InvalidDimensions)?;
+        // The pixel loops require whole 2x2 chroma blocks. Keep this boundary
+        // checked even if the shared layout helper's alignment policy changes.
+        if [
+            destination.x,
+            destination.y,
+            destination.width,
+            destination.height,
+        ]
+        .iter()
+        .any(|value| !value.is_multiple_of(2))
+        {
+            return Err(CpuVideoError::InvalidDimensions);
+        }
         Ok(Self {
             input_width,
             input_height,
             source,
             output_width,
             output_height,
-            destination: crate::video_layout::fitted_video_rect(
-                source.width,
-                source.height,
-                output_width,
-                output_height,
-            )
-            .map_err(|_| CpuVideoError::InvalidDimensions)?,
+            destination,
         })
     }
 
@@ -113,49 +127,62 @@ impl CpuVideoConverter {
         let total_len = y_len
             .checked_add(y_len / 2)
             .ok_or(CpuVideoError::SizeOverflow)?;
-        let mut nv12 = vec![0u8; total_len];
-
-        for out_y in 0..out_h {
-            for out_x in 0..out_w {
-                let (b, g, r) = self.source_pixel(bgra, stride, out_x, out_y);
-                nv12[out_y * out_w + out_x] = rec709_limited_y(r, g, b);
-            }
+        // Limited-range black outside the fitted content: Y=16, U=V=128.
+        // Fitted bounds are even, so each chroma block is wholly inside content
+        // or wholly background. Avoid a clipping branch on every pixel sample.
+        let mut nv12 = vec![rec709_limited_y(0, 0, 0); total_len];
+        let (black_u, black_v) = rec709_limited_uv(0, 0, 0);
+        for uv in nv12[y_len..].as_chunks_mut::<2>().0 {
+            uv.copy_from_slice(&[black_u, black_v]);
         }
+        let dest = self.destination;
+        let left = dest.x as usize;
+        let right = left + dest.width as usize;
+        let top = dest.y as usize;
+        let bottom = top + dest.height as usize;
+        let (y_plane, uv_plane) = nv12.split_at_mut(y_len);
+        let y_pairs = y_plane[top * out_w..bottom * out_w].chunks_exact_mut(out_w * 2);
+        let uv_rows = uv_plane[(top / 2) * out_w..(bottom / 2) * out_w].chunks_exact_mut(out_w);
 
-        for out_y in (0..out_h).step_by(2) {
-            for out_x in (0..out_w).step_by(2) {
-                let mut r_sum = 0u32;
-                let mut g_sum = 0u32;
-                let mut b_sum = 0u32;
-                for dy in 0..2 {
-                    for dx in 0..2 {
-                        let (b, g, r) = self.source_pixel(bgra, stride, out_x + dx, out_y + dy);
-                        r_sum += u32::from(r);
-                        g_sum += u32::from(g);
-                        b_sum += u32::from(b);
-                    }
-                }
-                let r = ((r_sum + 2) / 4) as u8;
-                let g = ((g_sum + 2) / 4) as u8;
-                let b = ((b_sum + 2) / 4) as u8;
+        // Sample each pixel once for both luma and chroma. Row slices bound the
+        // stores before the hot loop, and each iteration owns one complete block.
+        for (pair_y, (y_pair, uv_row)) in y_pairs.zip(uv_rows).enumerate() {
+            let out_y = top + pair_y * 2;
+            let (top_row, bottom_row) = y_pair.split_at_mut(out_w);
+            let top_pixels = top_row[left..right].as_chunks_mut::<2>().0.iter_mut();
+            let bottom_pixels = bottom_row[left..right].as_chunks_mut::<2>().0.iter_mut();
+            let chroma = uv_row[left..right].as_chunks_mut::<2>().0.iter_mut();
+            for (block_x, ((top_pixels, bottom_pixels), chroma)) in
+                top_pixels.zip(bottom_pixels).zip(chroma).enumerate()
+            {
+                let out_x = left + block_x * 2;
+                let (b0, g0, r0) = self.source_pixel(bgra, stride, out_x, out_y);
+                let (b1, g1, r1) = self.source_pixel(bgra, stride, out_x + 1, out_y);
+                let (b2, g2, r2) = self.source_pixel(bgra, stride, out_x, out_y + 1);
+                let (b3, g3, r3) = self.source_pixel(bgra, stride, out_x + 1, out_y + 1);
+                top_pixels[0] = rec709_limited_y(r0, g0, b0);
+                top_pixels[1] = rec709_limited_y(r1, g1, b1);
+                bottom_pixels[0] = rec709_limited_y(r2, g2, b2);
+                bottom_pixels[1] = rec709_limited_y(r3, g3, b3);
+                let r =
+                    ((u32::from(r0) + u32::from(r1) + u32::from(r2) + u32::from(r3) + 2) / 4) as u8;
+                let g =
+                    ((u32::from(g0) + u32::from(g1) + u32::from(g2) + u32::from(g3) + 2) / 4) as u8;
+                let b =
+                    ((u32::from(b0) + u32::from(b1) + u32::from(b2) + u32::from(b3) + 2) / 4) as u8;
                 let (u, v) = rec709_limited_uv(r, g, b);
-                let uv = y_len + (out_y / 2) * out_w + out_x;
-                nv12[uv] = u;
-                nv12[uv + 1] = v;
+                chroma[0] = u;
+                chroma[1] = v;
             }
         }
         Ok(nv12)
     }
 
+    /// Sample a pixel inside the validated fitted destination, never its bars.
     fn source_pixel(&self, bgra: &[u8], stride: usize, out_x: usize, out_y: usize) -> (u8, u8, u8) {
         let dest = self.destination;
-        if out_x < dest.x as usize
-            || out_y < dest.y as usize
-            || out_x >= (dest.x + dest.width) as usize
-            || out_y >= (dest.y + dest.height) as usize
-        {
-            return (0, 0, 0);
-        }
+        debug_assert!(out_x >= dest.x as usize && out_x < (dest.x + dest.width) as usize);
+        debug_assert!(out_y >= dest.y as usize && out_y < (dest.y + dest.height) as usize);
         let source_x = self.source.x as usize
             + (out_x - dest.x as usize) * self.source.width as usize / dest.width as usize;
         let source_y = self.source.y as usize
@@ -228,6 +255,30 @@ mod tests {
         }
     }
 
+    #[test]
+    fn red_content_chroma_stays_inside_letterbox_and_pillarbox() {
+        for (width, height, left, top, content_width, content_height) in
+            [(8, 4, 0, 2, 8, 4), (4, 8, 2, 0, 4, 8)]
+        {
+            let output = CpuVideoConverter::new(width, height, None, 8, 8)
+                .unwrap()
+                .convert(&solid_bgra(width, height, 0, 0, 255), width as usize * 4)
+                .unwrap();
+            for (row, samples) in output[64..].as_chunks::<8>().0.iter().enumerate() {
+                for (column, uv) in samples.as_chunks::<2>().0.iter().enumerate() {
+                    let (x, y) = (column * 2, row * 2);
+                    let inside = x >= left
+                        && x < left + content_width
+                        && y >= top
+                        && y < top + content_height;
+                    // Rec.709 limited-range red differs from neutral black bars.
+                    let expected = if inside { [102, 240] } else { [128, 128] };
+                    assert_eq!(*uv, expected, "{width}x{height}, chroma at {x},{y}");
+                }
+            }
+        }
+    }
+
     fn solid_bgra(width: u32, height: u32, b: u8, g: u8, r: u8) -> Vec<u8> {
         [b, g, r, 255]
             .into_iter()
@@ -257,6 +308,17 @@ mod tests {
 
         let blue = converter.convert(&solid_bgra(2, 2, 255, 0, 0), 8).unwrap();
         assert_eq!(blue, vec![32, 32, 32, 32, 240, 118]);
+    }
+
+    #[test]
+    fn mixed_block_preserves_each_luma_and_averages_chroma() {
+        // Red/green over black/black: rounded RGB average is (64,64,0).
+        let bgra = [0, 0, 255, 255, 0, 255, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255];
+        let output = CpuVideoConverter::new(2, 2, None, 2, 2)
+            .unwrap()
+            .convert(&bgra, 8)
+            .unwrap();
+        assert_eq!(output, [63, 173, 16, 16, 100, 131]);
     }
 
     #[test]
@@ -303,19 +365,21 @@ mod tests {
     fn rejects_invalid_dimensions_crop_stride_and_buffer() {
         assert!(CpuVideoConverter::new(0, 2, None, 2, 2).is_err());
         assert!(CpuVideoConverter::new(2, 2, None, 3, 2).is_err());
-        assert!(CpuVideoConverter::new(
-            2,
-            2,
-            Some(CpuCropRect {
-                x: 1,
-                y: 0,
-                width: 2,
-                height: 2,
-            }),
-            2,
-            2,
-        )
-        .is_err());
+        assert!(
+            CpuVideoConverter::new(
+                2,
+                2,
+                Some(CpuCropRect {
+                    x: 1,
+                    y: 0,
+                    width: 2,
+                    height: 2,
+                }),
+                2,
+                2,
+            )
+            .is_err()
+        );
 
         let converter = CpuVideoConverter::new(2, 2, None, 2, 2).unwrap();
         assert!(converter.convert(&[0; 16], 7).is_err());

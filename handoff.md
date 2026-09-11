@@ -4,7 +4,59 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
-## Checkpoint (2026-09-09): Nightly 1.0.5 published
+## Checkpoint (2026-09-11): PR #202 CPU conversion review revision
+
+The user reports lower in-game FPS on Windows 11 Automatic/WGC. Audits confirm
+Auto/WGC never starts the experimental PrintWindow worker or cadence waits, and
+settings do not migrate users to hybrid. However, 1.0.5 also changed shared CPU/GPU
+conversion, so the entire release cannot be described as isolated from existing
+users. PR #201's unmerged canvas fix remains hybrid-only.
+
+The CPU path is reached only for `EncoderBackend::MfSoftware`, not all software
+encoders. The released clipping guard affected coordinate-division optimization;
+do not describe the measured slowdown as just four comparisons. The reviewed
+648f706 change was correct but lacked chroma-placement coverage and retained
+duplicate sampling. It is superseded by safe row slices and fused 2x2 conversion:
+four source samples produce both Y and averaged UV. A cold constructor guard
+checks alignment; the sampler has debug assertions; black prefill derives from
+the color functions. No new unsafe or full-coverage prefill branch was added.
+
+Red letterbox/pillarbox chroma and mixed-block tests are committed. A width-limited
+odd-height tuple now guards the previously untested height mask. Mutation checks
+confirm the tests catch shifted chroma rows and removed height alignment, while
+the constructor rejects misalignment. The committed benchmark runner verifies
+50,000 cases (41,749 equal outputs, 8,251 equal rejections) before alternating
+timings across five shapes, including bars. Fusion beat the row-slice-only variant;
+current local timings are roughly 45-63% below 1.0.5 conversion time. Timing is
+hardware/compiler/harness-sensitive, not a game FPS measurement.
+
+The user plays League on Win11/RX 6700 XT; quitting/reopening restores FPS and they
+do not think it falls again. Actual encoder/resumed recording remain unverified;
+paired support reports were requested. The CPU fix is not a confirmed explanation.
+The earlier GPU comparison on Win10/Radeon 780M found no consistent slowdown
+(ratios 0.973-1.008), which does not clear the different user hardware/workload.
+
+Work is on separate `fix/cpu-conversion-overhead`, based on develop, in sibling
+worktree `clipline-cpu-perf-audit`. PR #201 and its canvas changes remain on
+`fix/hybrid-window-canvas`; this branch does not include that unmerged fix.
+See [the audit](docs/research/2026-09-11-nonexperimental-performance-audit.md) for
+exact release SHAs, methods and limits. Raw evidence is under
+`C:\Users\Dain\Desktop\CliplineNonexperimentalAudit-20260911`; revision evidence
+is under `C:\Users\Dain\Desktop\CliplineCpuReview-20260911`.
+
+Local gates pass: 1,548 workspace tests, fresh capture-cache warning-denied
+workspace/all-targets Clippy, scoped formatting and diff checks. Independent
+implementation review/byte comparison found no correctness issue. The eight
+CPU tests and three layout tests pass; the reported PowerShell-path failure is
+not reproduced here (`powershell.exe` resolves normally). No path workaround was
+added to the unrelated worker test.
+The revised debug app is open and responsive (PID 14088 at validation), with
+frontend readiness confirmed. It uses this CPU-fix branch and the original shared
+target directory; PR #201 remains separate. Existing local capture settings were
+retained. Exact final-source comparisons also show 27-29% lower conversion time
+than 1.0.4 for the three matching-aspect shapes on this host.
+
+## Earlier checkpoint (2026-09-09): Nightly 1.0.5 published
 
 PR #200 is merged into develop as `e6e0fca`, including Cursor's topology fix.
 Nightly **1.0.5** ships its opt-in PrintWindow/fullscreen-display recorder from

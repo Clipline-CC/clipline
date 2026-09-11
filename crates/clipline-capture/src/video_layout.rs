@@ -97,6 +97,7 @@ mod tests {
     fn fitted_rect_stays_inside_output_and_aligns_nv12_chroma() {
         for (sw, sh, ow, oh) in [
             (853, 479, 1280, 720),
+            (853, 477, 1280, 720), // Width-limited fit has odd height 715 before masking.
             (1001, 777, 640, 360),
             (3840, 2160, 854, 480),
             (u32::MAX, u32::MAX, 1280, 720),
@@ -104,9 +105,11 @@ mod tests {
             let rect = fitted_video_rect(sw, sh, ow, oh).unwrap();
             assert!(rect.x + rect.width <= ow && rect.y + rect.height <= oh);
             assert!(rect.width >= 2 && rect.height >= 2);
-            assert!([rect.x, rect.y, rect.width, rect.height]
-                .iter()
-                .all(|v| v % 2 == 0));
+            assert!(
+                [rect.x, rect.y, rect.width, rect.height]
+                    .iter()
+                    .all(|v| v % 2 == 0)
+            );
             // Rounding either fitted side down costs less than two pixels.
             let expected = (ow as f64 / sw as f64).min(oh as f64 / sh as f64);
             assert!((rect.width as f64 - sw as f64 * expected).abs() < 2.0);
