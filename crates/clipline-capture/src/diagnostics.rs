@@ -4,7 +4,15 @@ use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureDiagnostic {
-    HybridSourceChanged { source: &'static str },
+    HybridCanvasSelected {
+        client_size: Option<(u32, u32)>,
+        display_size: (u32, u32),
+        canvas_size: (u32, u32),
+        reason: &'static str,
+    },
+    HybridSourceChanged {
+        source: &'static str,
+    },
     DxgiReopenFailed {
         hresult: i32,
         suppressed_since_last: u64,
@@ -33,8 +41,19 @@ pub enum CaptureDiagnostic {
 impl fmt::Display for CaptureDiagnostic {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::HybridSourceChanged { source } => write!(formatter,
-                "capture event=experimental_hybrid_source_changed source={source}"),
+            Self::HybridCanvasSelected {
+                client_size,
+                display_size,
+                canvas_size,
+                reason,
+            } => write!(
+                formatter,
+                "capture event=experimental_hybrid_canvas_selected client_size={client_size:?} display_size={display_size:?} canvas_size={canvas_size:?} reason={reason}"
+            ),
+            Self::HybridSourceChanged { source } => write!(
+                formatter,
+                "capture event=experimental_hybrid_source_changed source={source}"
+            ),
             Self::DxgiReopenFailed {
                 hresult,
                 suppressed_since_last,
@@ -123,6 +142,29 @@ impl DiagnosticRateLimiter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canvas_diagnostic_distinguishes_missing_geometry_from_real_ultrawide() {
+        let render = |client_size, reason| {
+            CaptureDiagnostic::HybridCanvasSelected {
+                client_size,
+                display_size: (5120, 1440),
+                canvas_size: (5120, 1440),
+                reason,
+            }
+            .to_string()
+        };
+        let missing = render(None, "client_unavailable");
+        let full = render(Some((5120, 1440)), "client_aspect_monitor_budget");
+        assert!(missing.contains("client_size=None"));
+        assert!(missing.contains("reason=client_unavailable"));
+        assert!(full.contains("client_size=Some((5120, 1440))"));
+        assert!(full.contains("reason=client_aspect_monitor_budget"));
+        for text in [missing, full] {
+            assert!(text.contains("display_size=(5120, 1440)"));
+            assert!(text.contains("canvas_size=(5120, 1440)"));
+        }
+    }
 
     #[test]
     fn device_loss_display_reports_source_hresult_and_action() {

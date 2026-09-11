@@ -279,6 +279,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command, int) {
         if (wcsstr(command, L"--blt")) app.flip = false;
         app.toggleBorderless = wcsstr(command, L"--borderless") != nullptr;
         app.toggleExclusive = wcsstr(command, L"--exclusive") != nullptr;
+        // Reproducible physical capture transition without external input tools.
+        const bool canvasCycle = wcsstr(command, L"--canvas-cycle") != nullptr;
         unsigned duration = 180;
         if (const auto* option = wcsstr(command, L"--seconds ")) {
             wchar_t* end = nullptr;
@@ -298,10 +300,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command, int) {
         if (!app.window) throw std::runtime_error("CreateWindow failed");
         app.graphics();
         ShowWindow(app.window, SW_SHOWNORMAL);
+        // The opt-in fullscreen fixture requires foreground ownership. Request
+        // normal activation once; Windows may deny it, which the stage log shows.
+        if (canvasCycle) SetForegroundWindow(app.window);
         app.audio.start();
         const ULONGLONG started = GetTickCount64();
         bool running = true;
         std::uint64_t frame = 0;
+        unsigned cycleStage = 0;
         while (running && GetTickCount64() - started < static_cast<ULONGLONG>(duration) * 1000) {
             MSG message{};
             while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
@@ -311,9 +317,31 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command, int) {
             }
             if (!running) break;
             app.audio.pump();
+            const auto elapsed = GetTickCount64() - started;
+            bool logStage = canvasCycle && frame == 0;
+            if (canvasCycle && ((cycleStage == 0 && elapsed >= 8000) ||
+                (cycleStage == 1 && elapsed >= 16000))) {
+                app.toggleExclusive = true;
+                ++cycleStage;
+                logStage = true;
+            } else if (canvasCycle && cycleStage == 2 && elapsed >= 20000) {
+                app.toggleBorderless = true;
+                ++cycleStage;
+                logStage = true;
+            }
             app.changeMode();
+            if (logStage && cycleStage != 0 && app.exclusive != (cycleStage == 1))
+                throw std::runtime_error("Canvas cycle reached unexpected fullscreen state");
             if (IsIconic(app.window)) Sleep(5);
             else app.draw(frame++);
+            if (logStage) {
+                RECT size{};
+                GetClientRect(app.window, &size);
+                fprintf(stdout, "canvas_cycle ms=%llu stage=%u client=%ldx%ld fullscreen=%d foreground=%d\n",
+                    elapsed, cycleStage, size.right, size.bottom, app.exclusive ? 1 : 0,
+                    GetForegroundWindow() == app.window ? 1 : 0);
+                fflush(stdout);
+            }
         }
         if (IsWindow(app.window)) DestroyWindow(app.window);
         return 0;

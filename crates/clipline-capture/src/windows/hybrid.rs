@@ -130,8 +130,22 @@ impl HybridCapture {
             .find(|display| display.handle == monitor)
             .map(|display| display.info)
             .ok_or_else(|| error("target display unavailable"))?;
-        let length = crate::print_protocol::frame_bytes(info.width, info.height).map_err(error)?;
-        let black = FrameData::Gpu(upload(&device, info.width, info.height, &vec![0; length])?);
+        let client_size = target
+            .geometry()
+            .ok()
+            .map(|(_, size, _)| (size.right as u32, size.bottom as u32));
+        let canvas = crate::hybrid_policy::initial_canvas(client_size, (info.width, info.height));
+        let (width, height) = canvas.size;
+        crate::diagnostics::emit_diagnostic(
+            crate::diagnostics::CaptureDiagnostic::HybridCanvasSelected {
+                client_size,
+                display_size: (info.width, info.height),
+                canvas_size: canvas.size,
+                reason: canvas.reason,
+            },
+        );
+        let length = crate::print_protocol::frame_bytes(width, height).map_err(error)?;
+        let black = FrameData::Gpu(upload(&device, width, height, &vec![0; length])?);
         Ok(Self {
             target,
             automatic_target: expected_pid.is_some(),
@@ -153,8 +167,9 @@ impl HybridCapture {
         self.status.clone()
     }
 
-    /// The seed fixes output geometry to the initial target display, even when
-    /// recording starts with a small window. Existing conversion fits later input.
+    /// The seed reserves monitor-relative headroom with the initial client aspect.
+    /// This can upscale small windows; the fixed aspect can letterbox later inputs.
+    /// Unavailable/unusable client geometry retains the logged display fallback.
     pub fn seed(&self) -> Result<Frame, CaptureError> {
         self.frame(self.black.clone())
     }
@@ -428,6 +443,97 @@ fn upload(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires desktop; run locally with --ignored --nocapture"]
+    fn window_seed_texture_reserves_monitor_headroom_with_client_aspect() {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            AdjustWindowRectEx, CreateWindowExW, DestroyWindow, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+            WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+        };
+        // WARP handles the texture, but this integration test needs a desktop.
+        // The neutral ultrawide/headroom regression runs on every CI OS.
+        let displays = display::enumerate_complete_display_handles().expect("desktop required");
+        let monitor = &displays.first().expect("connected display required").info;
+        struct TestWindow(HWND);
+        impl Drop for TestWindow {
+            fn drop(&mut self) {
+                // SAFETY: test owns this window on its creating thread.
+                unsafe {
+                    let _ = DestroyWindow(self.0);
+                }
+            }
+        }
+        // SAFETY: built-in window class; this test owns the noninteractive fixture
+        // and destroys it before returning. No user window is modified.
+        let window = TestWindow(unsafe {
+            let mut outer = RECT {
+                left: 0,
+                top: 0,
+                right: 192,
+                bottom: 144,
+            };
+            AdjustWindowRectEx(
+                &mut outer,
+                WS_OVERLAPPEDWINDOW,
+                false,
+                WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+            )
+            .unwrap();
+            let (outer_width, outer_height) = (outer.right - outer.left, outer.bottom - outer.top);
+            CreateWindowExW(
+                WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+                windows::core::w!("STATIC"),
+                windows::core::w!("Clipline canvas test"),
+                WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                // One corner intersects the selected monitor, so the real
+                // MONITOR_DEFAULTTONULL guard remains exercised.
+                monitor.x - outer_width + 1,
+                monitor.y - outer_height + 1,
+                outer_width,
+                outer_height,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+        });
+        // SAFETY: query the fixture's actual monitor, including adjacent displays
+        // that may overlap its mostly off-screen rectangle.
+        let target_monitor = unsafe { MonitorFromWindow(window.0, MONITOR_DEFAULTTONULL) };
+        let monitor = &displays
+            .iter()
+            .find(|d| d.handle == target_monitor)
+            .expect("fixture intersects a monitor")
+            .info;
+        let (device, _) = super::super::d3d11::create_device_for_tests().unwrap();
+        let capture = HybridCapture::for_window_on(
+            device,
+            window.0.0 as isize,
+            Some(std::process::id()),
+            RelativeClock::new(0),
+        )
+        .unwrap();
+        let FrameData::Gpu(texture) = capture.seed().unwrap().data else {
+            panic!("expected GPU seed");
+        };
+        let fitted = crate::video_layout::fitted_video_rect(
+            192,
+            144,
+            monitor.width & !1,
+            monitor.height & !1,
+        )
+        .unwrap();
+        assert_eq!(
+            super::super::d3d11::texture_size(&texture),
+            (fitted.width, fitted.height)
+        );
+        eprintln!(
+            "desktop seed verified: decorated client=192x144 display={}x{} seed={}x{}",
+            monitor.width, monitor.height, fitted.width, fitted.height
+        );
+    }
 
     fn topology_observation(fullscreen: bool) -> Observation {
         Observation {

@@ -319,6 +319,10 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
     // them apart from a support bundle was otherwise guesswork.
     tracing::info!(
         event = "encoder_selected",
+        input_width = in_w,
+        input_height = in_h,
+        output_width = enc_w,
+        output_height = enc_h,
         api = ?active.api,
         backend = ?active.backend,
         codec = ?active.codec,

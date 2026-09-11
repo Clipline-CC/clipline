@@ -68,15 +68,65 @@ The request retains its original observation context, discards responses older t
 Resize recreates the owned DIB. Capture/IPC failures produce bounded retries, then
 stop; there is no fallback to another API because PrintWindow failed.
 
-The seed frame uses the target monitor dimensions to establish stable encoder output
-even when starting with a small window. Existing GPU/CPU aspect-preserving conversion
-handles changing input dimensions. Both sources use the existing encoder device,
-clock, audio and replay/session pipeline. Source changes appear in live status and
+The seed frame reserves the largest even client-aspect canvas inside the initial
+monitor bounds. Nightly 1.0.5 imposed the monitor aspect, adding sides to a narrower
+game. PR #201 initially used the exact client size, which instead capped later
+window/fullscreen detail at a small startup size; the review revision removes that
+cap. For 1280x720 or 1920x1080 clients on 5120x1440, the seed is 2560x1440.
+Source output can then retain 2560x720 of a later fullscreen display frame, or
+1920x540 with P1080, matching Nightly 1.0.5 for this reported aspect pair.
+
+This reserves resolution at a cost: small live windows can be upscaled and consume
+more encoding pixels/bitrate without new detail. There is no additional resize pass:
+the seed is black and live frames convert directly into the final encoder output.
+A 1920x1080 window with P1080 therefore remains 1920x1080. The canvas aspect remains
+fixed; later different-aspect sources still produce bars and may lose more detail
+than the old monitor canvas (for example, a portrait client followed by fullscreen).
+
+Unavailable client geometry, clients below 64 pixels on either side, and fitted
+canvases below that minimum fall back to monitor dimensions. The minimum rejects
+startup placeholders; it does not guarantee encoder support for every aspect.
+Automatic detection can still observe an early splash or transient window aspect:
+this change reserves size headroom, not a guarantee of settled startup geometry.
+The one-shot `experimental_hybrid_canvas_selected` diagnostic records client,
+display, canvas and decision reason; `encoder_selected` records seed input and
+actual output dimensions. These distinguish fallback padding from a real ultrawide
+client without requiring users to time automatic recording startup.
+
+Both sources use the existing encoder device, clock, audio and replay/session
+pipeline. Source changes appear in live status and
 structured diagnostics as `experimental_print_window`,
 `experimental_fullscreen_display`, or `experimental_waiting_black`. The recording
 rail shows Display/Wait and source details in tooltips.
 
 ## Evidence
+
+### 2026-09-11 canvas review revision
+
+Evidence root: `C:\Users\Dain\Desktop\CliplineCanvasHeadroom-20260911`.
+The headroom/tiny-client/odd-monitor regressions failed on the exact-client policy,
+then passed after fitting. The revised workspace run passes 1,552 tests; the
+desktop test is explicitly ignored by default and was run separately to completion.
+It uses a decorated nonactivating 192x144 client with distinct outer bounds and
+verifies a 960x720 seed on this 1280x720 display. Isolated rustfmt 2024 checks and
+fresh capture-cache warning-denied workspace Clippy pass.
+
+Two timed D3D11 flip-fixture attempts automatically recorded an 800x450 window.
+Both diagnostic pairs show a 1280x720 canvas and 1280x720 AMF H.264 encoder input/
+output, so the small initial client no longer caps the real recording at 800x450.
+The second session (`session_1789150283.mp4`) is 7.68 seconds, with 460 decodable
+video frames and 48 kHz stereo Opus; full audio/video decode passes. The sampled
+frame fills the 16:9 output. This is a single 1280x720 physical display, not an
+ultrawide monitor or actual game test; 32:9 headroom is covered by policy tests.
+
+Neither attempt completed the fullscreen transition: the fixture logged
+`foreground=0` and DXGI rejected SetFullscreenState with `0x887A0022` at eight
+seconds. The native computer-use pipe was unavailable, and ordinary activation
+was also denied. Preserve both failed runs; they are not passing matrices.
+Manual foreground/fullscreen validation remains required before merge. The mock's
+opt-in `--canvas-cycle --seconds 28` requests fullscreen at 8 seconds, windowed at
+16, and borderless at 20, logging actual dimensions/state at each stage and failing
+on an unexpected fullscreen state. Default mock behavior is unchanged.
 
 Local root: `C:\Users\Dain\Desktop\CliplineHybridTest-20260908-232342`.
 Keep desktop screenshots and full settings backups local.
