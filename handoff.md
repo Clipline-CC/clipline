@@ -4,24 +4,41 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
-## Checkpoint (2026-09-09): window canvas correction after Nightly 1.0.5
+## Checkpoint (2026-09-11): PR #201 canvas headroom review revision
 
 The user's uploaded 30-second Slay the Spire II replay is 1920x540 with centered
 960x540 gameplay; the user confirms the game window itself has no black margins.
 Hybrid initialization imposed the monitor aspect ratio on isolated window capture.
-The fix seeds from the initial validated client dimensions, preserving full-display
-clients and the existing monitor fallback when client geometry is unavailable.
-The canvas remains fixed for a session; subsequent aspect changes can still produce
-bars. No content-based cropping, stretching, capture-source guard or default changes.
-Start recording with the game visible/restored for its client aspect to be selected.
+The reviewed first attempt (`74d170c`) used exact initial client dimensions and
+unintentionally capped later full-display detail at a small startup window size.
+It is superseded by client-aspect fitting inside monitor bounds. A 1280x720 or
+1920x1080 client on 5120x1440 now reserves 2560x1440, keeping 2560x720 fullscreen
+content under Source, or 1920x540 under P1080. A smaller live window can upscale;
+there is no extra upscale/downscale round trip for P1080's live frames.
 
-The ultrawide regression failed on the old policy and passes after correction;
-CPU conversion verifies the entire output luma plane is game content. A Windows
-fixture verifies the actual constructor/seed texture uses client dimensions.
-All 1,550 workspace tests pass locally; fresh capture-cache warning-denied
-workspace Clippy passes. Independent review found no production blocker; the
-desktop-dependent fixture now skips CI/headless hosts while neutral tests run.
-Evidence: `C:\Users\Dain\Desktop\CliplineUltrawideReport-20260909`.
+The canvas remains fixed, so later different-aspect sources still produce bars and
+can lose detail for other aspect pairs. Initial unavailable, below-64-pixel client
+or too-thin fitted geometry falls back to the monitor. Early splash/temporary aspect
+selection remains a limit; no manual startup workaround is required or claimed as
+a fix. Diagnostics now record canvas decision, client/monitor sizes and final
+encoder dimensions. No capture guard, cropping, default or shared timing changes.
+
+The redundant white-converter test is replaced by aspect/headroom/fallback/odd-size
+policy coverage. A decorated, nonactivating desktop fixture with distinct client
+and outer bounds checks actual seed wiring. It is explicitly ignored by default
+and must be run with `--ignored --nocapture`; it passed locally (192x144 client,
+1280x720 monitor, 960x720 seed). Touched capture Rust files use rustfmt 2024 style.
+New evidence: `C:\Users\Dain\Desktop\CliplineCanvasHeadroom-20260911`.
+Revised workspace run: 1,552 passing tests plus the explicitly run desktop fixture;
+fresh capture-cache workspace Clippy and isolated rustfmt 2024 checks pass.
+Actual 800x450 flip-window capture now records at 1280x720, confirmed by canvas/
+encoder diagnostics and a fully decoded 7.68-second H.264/Opus file. The sampled
+frame fills the output. Both attempted fullscreen cycles failed because the mock
+was not foreground (DXGI 0x887A0022); computer use's native pipe is unavailable.
+These are window-only results on the 1280x720 host. Fullscreen-cycle/ultrawide
+on-device validation remains a pre-merge gap, not a passing matrix. See the report.
+The earlier 1,550-test run is preserved in `CliplineUltrawideReport-20260909` and
+applies to the superseded attempt, not this revision.
 This correction is not included in published Nightly 1.0.5.
 
 ## Earlier checkpoint (2026-09-09): Nightly 1.0.5 published

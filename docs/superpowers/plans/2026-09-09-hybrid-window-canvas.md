@@ -1,5 +1,9 @@
 # Hybrid window recording canvas
 
+The exact-client seed in this initial plan is superseded by
+`2026-09-11-hybrid-canvas-headroom.md` after review identified the fullscreen
+resolution ceiling. Retained as the implementation history.
+
 The supplied 1920x540 replay contains a centered 960x540 game and black sides;
 the user confirms the game window itself contains only gameplay. Hybrid startup
 currently seeds the encoder with monitor dimensions, imposing the monitor aspect
