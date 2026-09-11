@@ -1,10 +1,11 @@
 # Nonexperimental capture performance audit
 
 The user reports lower **in-game FPS** on Windows 11 using Automatic/WGC after
-updating. The experimental backend is not selected. Their GPU, game, actual
-encoder and recording-on/off comparison are still unknown. The local validation
-host is Windows 10 build 19045, Ryzen 9 7940HS / Radeon 780M, driver
-32.0.31041.1004. These are different environments.
+updating. The experimental backend is not selected. They play League of Legends
+on a Radeon RX 6700 XT; quitting/reopening Clipline restores FPS, and they do not
+think it drops again afterward. Whether the same recording/encoder resumed is
+unverified. The local validation host is Windows 10 build 19045, Ryzen 9 7940HS /
+Radeon 780M, driver 32.0.31041.1004. These are different environments.
 
 ## Scope and isolation
 
@@ -31,46 +32,85 @@ passes covered routing/settings/cadence, shared conversion, and measured behavio
 
 ## Reproduced CPU regression and fix
 
-The released CPU converter checks the destination bounds in `source_pixel` for
-every luma/chroma sample, approximately twice per output pixel. This added a
-measurable cost even when source and output have matching aspect ratios.
-`SoftwareMftH264Encoder` and FFmpeg's `MfSoftware` path use this converter, including
-when capture uses WGC. Hardware encoder paths use the GPU converter instead.
+In the app this converter is reached only through `EncoderBackend::MfSoftware`,
+the inbox last resort, via Software MFT or FFmpeg's `MfSoftware` path. Other FFmpeg
+backends, including x264/x265/SVT-AV1, use GPU conversion; hardware MFT also uses
+GPU conversion. This usually concerns software-only adapters/VMs or unavailable
+hardware encoding, not every software encoder or Auto/WGC user. Capture backend
+selection alone does not identify the affected population.
 
-The fix initializes the NV12 background to limited-range black (Y=16, U=V=128)
-and converts only the fitted content rectangle. Its even origin and dimensions
-keep every 2x2 chroma block entirely inside content or background, allowing removal
-of the repeated clipping guard. Crop, scale, color math, input validation and
-encoder selection are unchanged.
+The released converter samples each pixel separately for Y and UV and checks
+destination bounds on every sample. Those early returns also affect optimization
+of the coordinate divisions; the 39-40% local slowdown must not be attributed
+solely to the cost of four comparisons. Reviewer measurements on another host
+reported larger slowdowns. Neither magnitude is a universal calibration.
 
-Optimized, alternating comparisons of exact source copies:
+The revised fix uses safe row slices and one loop over complete 2x2 blocks. Four
+source samples supply both the individual Y values and the averaged U/V value,
+halving source sampling relative to the separate loops. Background values are
+derived from the same Rec.709 functions (Y=16, U=V=128). The constructor rejects
+misaligned fitted bounds and the private sampler has debug assertions. Crop,
+scale, rounding, encoder selection and hardware paths retain their behavior.
 
-| Input -> output | 1.0.5 / 1.0.4 median paired duration | Fixed / 1.0.4 median paired duration |
-|---|---:|---:|
-| 1920x1080 -> 1920x1080 | 1.402 | 1.024 |
-| 5120x1440 -> 1920x540 | 1.389 | 1.020 |
-| 5120x1440 -> 2560x720 | 1.400 | 1.017 |
+We measured the reviewed 648f706 implementation, a row-slice variant and fused
+2x2 conversion before choosing fusion. Fusion won in all five local shapes.
+Prototype assembly inspection confirms that row slices eliminate the UV output-store
+bounds checks seen in 648f706; input checks remain. Some row division is hoisted,
+but not all, so do not claim complete division elimination. The inspected fused
+variant's derived prefill compiles to two constant `memset` calls. The final
+version uses fixed-size array chunks as required by Clippy; no full-coverage
+prefill branch was added. Final timings below measure that version directly.
 
-These are separate alternating benchmark runs; each ratio compares paired rounds
-within its own run. The fix removes most of the observed 39-40% conversion slowdown.
-This percentage is **not** a measured game FPS change.
+The committed runner's exact final-source comparison:
+
+| Input -> output | 1.0.5 median ms/frame | Revised median ms/frame | Median paired ratio |
+|---|---:|---:|---:|
+| 1920x1080 -> 1920x1080 | 12.214 | 6.656 | 0.545 |
+| 5120x1440 -> 1920x540 | 6.255 | 3.387 | 0.542 |
+| 5120x1440 -> 2560x720 | 11.105 | 6.021 | 0.543 |
+| 1920x1080 -> 1920x1200 (letterbox) | 12.472 | 6.728 | 0.539 |
+| 1080x1920 -> 1920x1080 (pillarbox) | 6.669 | 2.483 | 0.372 |
+
+These are roughly 45-63% lower conversion times on this host, **not game FPS
+gains**. A separate exact-final-source comparison against 1.0.4 measured paired
+ratios 0.725, 0.719 and 0.714 for the three matching-aspect shapes (about 27-29%
+less time). Do not compare 1.0.4's bars-case timing as equal work: that converter
+stretched instead of fitting. The initial 648f706 revision
+measured 1.017-1.024x 1.0.4 locally versus reviewer-reported 1.07-1.10x elsewhere;
+those earlier numbers are superseded, not evidence of universal near-parity.
 
 Method: rustc 1.98.1 / LLVM 22.1.8, x86_64-pc-windows-msvc, opt-level 3,
-codegen-units 1, generic x86-64 target. Source copies remove only `thiserror`
-metadata for standalone compilation. Deterministic varied BGRA input, `black_box`,
+codegen-units 1, generic x86-64 target. Standalone source copies adapt only
+`thiserror` metadata and module paths. Deterministic varied BGRA input, `black_box`,
 8 warmups, 12 alternating-order rounds of 16 conversions; allocation/free included,
 GPU readback and encoding excluded. No concurrent cargo/GPU benchmark was started;
-ordinary background load was not controlled. No timing threshold is added to CI.
+ordinary background load was not controlled. Hardware, harness and compiler
+code generation affect timings. No timing threshold is added to CI.
 
-The actual implementation matches 1.0.5 bytes or constructor rejection across
-216 size/crop/stride combinations, including tiny/odd/portrait sources and padded
-rows. Existing CPU correctness tests cover colors, black bars, cropping, pitch
-and invalid inputs. Independent review found no correctness issue.
+Reproduce from the repo with git history and rustc available:
 
-Local gates: all 1,546 workspace tests pass (two explicitly ignored tests), and
-workspace/all-targets Clippy passes with warnings denied after cleaning the
-capture crate cache. Scoped rustfmt with style edition 2024 and `git diff --check`
-pass. The six focused CPU converter tests also pass.
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/benchmark-cpu-conversion.ps1
+```
+
+The runner snapshots released 1.0.5 and working sources, records compiler/source
+metadata, verifies deterministic size/crop/stride cases, then saves CSV timings.
+`-VerifyOnly` skips timings. Its 50,000 cases produced 41,749 byte-equal outputs
+and 8,251 matching constructor rejections, including odd/1px inputs, random crops
+and 0/7/14-byte row padding with no trailing last-row padding. The same final
+snapshot passes all 50,000 cases with debug assertions enabled. Independent
+fused-prototype verification also passed 216 fixed cases plus 32,768 accepted
+randomized cases and 2,257 matching rejections.
+
+Durable tests now check red content chroma placement against neutral bars in both
+letterbox and pillarbox outputs, mixed-pixel Y and averaged UV, and a width-limited
+fit whose unrounded height is odd (715). The new tests detect both the reported
+content-relative UV-row mutant and removal of the height mask. The original
+white-only bars test did not cover chroma placement; that gap is now closed.
+
+Local gates: 1,548 workspace tests pass (two explicitly ignored tests), as do fresh
+capture-cache workspace/all-targets Clippy with warnings denied, scoped rustfmt
+2024-style checks, and `git diff --check`. All eight CPU converter tests pass.
 
 ## GPU comparison
 
@@ -101,14 +141,14 @@ reported backend and no sustained DD performance defect is established here.
 
 Local evidence:
 `C:\Users\Dain\Desktop\CliplineNonexperimentalAudit-20260911`.
-`CPU_AUDIT.md`, `cpu-ab.csv`, `cpu-final-ab.csv`, `cpu-final-verify.log` and their
-source/harness copies preserve the CPU comparisons. `gpu-ab.csv` and `gpu/`
-preserve the GPU comparison. The final benchmarked CPU source SHA256 is
-`7FF380C2D0AEA959E0540F0A3287D63DFE58B033B3D4F849CAF5B5B25F13E848`.
+`CPU_AUDIT.md` and adjacent sources/results preserve the superseded CPU comparisons;
+`gpu-ab.csv` and `gpu/` preserve the GPU comparison. Revision evidence is under
+`C:\Users\Dain\Desktop\CliplineCpuReview-20260911`: `REVIEW.md`, `final-*`,
+`final-mutants.log`, `array-old-*` and `verified-head-run/`. The final benchmarked CPU source
+SHA256 is `7A8811143725BAF7F1AF779F49817CD2ADCE0313CC789546D4063D059C75F86C`.
 
 The CPU fix is a separate PR from #201. The user's Windows 11 in-game slowdown
-remains unconfirmed: obtain their GPU/game, selected and actual encoder, recording
-resolution/FPS, and FPS with recording active, paused and Clipline fully exited.
-A same-scene 1.0.4/1.0.5 comparison is useful if those observations implicate
-Clipline. Do not label this CPU fix as the solution to their report without that
-evidence.
+remains unconfirmed. Obtain paired support reports while FPS is low and after
+reopening when FPS is normal and recording resumes, to compare actual encoder,
+capture state and errors. A same-scene 1.0.4/1.0.5 comparison may then help.
+Do not label this CPU fix as the solution to their report without that evidence.
