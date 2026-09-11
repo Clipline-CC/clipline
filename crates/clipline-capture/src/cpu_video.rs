@@ -113,17 +113,24 @@ impl CpuVideoConverter {
         let total_len = y_len
             .checked_add(y_len / 2)
             .ok_or(CpuVideoError::SizeOverflow)?;
-        let mut nv12 = vec![0u8; total_len];
+        // Limited-range black outside the fitted content: Y=16, U=V=128.
+        // Fitted bounds are even, so each chroma block is wholly inside content
+        // or wholly background. Avoid a clipping branch on every pixel sample.
+        let mut nv12 = vec![16u8; total_len];
+        nv12[y_len..].fill(128);
+        let dest = self.destination;
+        let rows = dest.y as usize..(dest.y + dest.height) as usize;
+        let columns = dest.x as usize..(dest.x + dest.width) as usize;
 
-        for out_y in 0..out_h {
-            for out_x in 0..out_w {
+        for out_y in rows.clone() {
+            for out_x in columns.clone() {
                 let (b, g, r) = self.source_pixel(bgra, stride, out_x, out_y);
                 nv12[out_y * out_w + out_x] = rec709_limited_y(r, g, b);
             }
         }
 
-        for out_y in (0..out_h).step_by(2) {
-            for out_x in (0..out_w).step_by(2) {
+        for out_y in rows.step_by(2) {
+            for out_x in columns.clone().step_by(2) {
                 let mut r_sum = 0u32;
                 let mut g_sum = 0u32;
                 let mut b_sum = 0u32;
@@ -149,13 +156,6 @@ impl CpuVideoConverter {
 
     fn source_pixel(&self, bgra: &[u8], stride: usize, out_x: usize, out_y: usize) -> (u8, u8, u8) {
         let dest = self.destination;
-        if out_x < dest.x as usize
-            || out_y < dest.y as usize
-            || out_x >= (dest.x + dest.width) as usize
-            || out_y >= (dest.y + dest.height) as usize
-        {
-            return (0, 0, 0);
-        }
         let source_x = self.source.x as usize
             + (out_x - dest.x as usize) * self.source.width as usize / dest.width as usize;
         let source_y = self.source.y as usize
@@ -303,19 +303,21 @@ mod tests {
     fn rejects_invalid_dimensions_crop_stride_and_buffer() {
         assert!(CpuVideoConverter::new(0, 2, None, 2, 2).is_err());
         assert!(CpuVideoConverter::new(2, 2, None, 3, 2).is_err());
-        assert!(CpuVideoConverter::new(
-            2,
-            2,
-            Some(CpuCropRect {
-                x: 1,
-                y: 0,
-                width: 2,
-                height: 2,
-            }),
-            2,
-            2,
-        )
-        .is_err());
+        assert!(
+            CpuVideoConverter::new(
+                2,
+                2,
+                Some(CpuCropRect {
+                    x: 1,
+                    y: 0,
+                    width: 2,
+                    height: 2,
+                }),
+                2,
+                2,
+            )
+            .is_err()
+        );
 
         let converter = CpuVideoConverter::new(2, 2, None, 2, 2).unwrap();
         assert!(converter.convert(&[0; 16], 7).is_err());

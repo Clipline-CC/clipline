@@ -4,7 +4,39 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
-## Checkpoint (2026-09-09): Nightly 1.0.5 published
+## Checkpoint (2026-09-11): nonexperimental performance audit
+
+The user reports lower in-game FPS on Windows 11 Automatic/WGC. Audits confirm
+Auto/WGC never starts the experimental PrintWindow worker or cadence waits, and
+settings do not migrate users to hybrid. However, 1.0.5 also changed shared CPU/GPU
+conversion, so the entire release cannot be described as isolated from existing
+users. PR #201's unmerged canvas fix remains hybrid-only.
+
+An optimized exact-source CPU comparison reproduced 39-40% slower conversion in
+1.0.5 vs 1.0.4 from per-sample clipping guards. The fix initializes black NV12
+background and visits only fitted content, removing those guards. Actual output
+matches 1.0.5 in 216 size/crop/stride cases; paired duration is now 1.017-1.024x
+1.0.4. Hardware/GPU conversion comparison on this Win10 Radeon 780M showed no
+consistent slowdown (ratios 0.973-1.008). Neither benchmark measures game FPS.
+The user's GPU, game, actual encoder and recording-on/off comparison are still
+unknown; the CPU defect is not a confirmed explanation for their Win11 report.
+
+Work is on separate `fix/cpu-conversion-overhead`, based on develop, in sibling
+worktree `clipline-cpu-perf-audit`. PR #201 and its canvas changes remain on
+`fix/hybrid-window-canvas`; this branch does not include that unmerged fix.
+See [the audit](docs/research/2026-09-11-nonexperimental-performance-audit.md) for
+exact release SHAs, methods and limits. Raw evidence is under
+`C:\Users\Dain\Desktop\CliplineNonexperimentalAudit-20260911`.
+
+Local gates pass: 1,546 workspace tests, fresh capture-cache warning-denied
+workspace/all-targets Clippy, scoped formatting and diff checks. Independent
+exact-implementation review/byte comparison found no correctness issue.
+The normal debug app is open and responsive (PID 16416 at validation); frontend
+readiness completed. It was rebuilt from this CPU-fix branch using the shared
+original worktree target directory, so its binary does not currently include
+PR #201. Existing local experimental/automatic-detection settings were retained.
+
+## Earlier checkpoint (2026-09-09): Nightly 1.0.5 published
 
 PR #200 is merged into develop as `e6e0fca`, including Cursor's topology fix.
 Nightly **1.0.5** ships its opt-in PrintWindow/fullscreen-display recorder from
