@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Clipline has no persistent services or per-thread authentication to restore.

@@ -4,6 +4,20 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-09-13): Amp orb setup
+
+Fresh Amp orbs now install stable Rust with Clippy, the native build tools, and FFmpeg through
+`.agents/setup`, then fetch the locked dependency graph and prebuild all workspace test targets.
+The setup also selects the reviewed Ubuntu 22.04 x86_64 Opus artifact in repository-scoped orb
+login shells because the vendored build script does not identify Debian 12 directly. There are no
+persistent services or resume-time authentication steps.
+
+Validation: the cold setup completed in 2m50s, two cached runs completed in about one second each,
+the no-op resume hook completed immediately, a clean login shell found Cargo, Rust, Clippy,
+FFprobe, and the Opus target, and the full workspace test suite passed. Rust 1.98's new
+`chunks_exact_to_as_chunks` lint currently prevents a warning-denied workspace Clippy pass in
+`crates/clipline-mp4/src/trim.rs`; this setup-only change leaves that existing source code alone.
+
 ## Checkpoint (2026-08-16): Nightly 1.0.2
 
 Plan: `docs/superpowers/plans/2026-08-16-nightly-1.0.2.md`.
