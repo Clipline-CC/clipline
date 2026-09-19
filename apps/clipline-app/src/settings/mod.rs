@@ -123,6 +123,12 @@ pub struct AppSettings {
     pub close_to_tray: bool,
     #[serde(default)]
     pub minimize_to_tray: bool,
+    /// Whether the window comes back after an update installs. The installer
+    /// relaunches Clipline with the argv it replaced, so a copy the autostart
+    /// entry started would otherwise return to the tray alone even though
+    /// someone pressed Install and is waiting for it.
+    #[serde(default = "default_enabled")]
+    pub reopen_window_after_update: bool,
     #[serde(default)]
     pub legacy_timeline_editor: bool,
     #[serde(default)]
@@ -182,6 +188,7 @@ impl Default for AppSettings {
             open_on_startup: false,
             close_to_tray: true,
             minimize_to_tray: false,
+            reopen_window_after_update: true,
             legacy_timeline_editor: false,
             ui_theme: UiTheme::default(),
             update_channel: UpdateChannel::default(),

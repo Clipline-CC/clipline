@@ -280,6 +280,7 @@ function fillSettings(s) {
   $("set-theme").value = s.ui_theme || "booth";
   applyUiTheme(s.ui_theme);
   $("set-update-channel").value = s.update_channel || "nightly";
+  $("set-reopen-window-after-update").checked = s.reopen_window_after_update !== false;
   fillCloudSettings(cloud);
   endAllHotkeyCaptures();
   syncCaptureFields();
@@ -359,6 +360,7 @@ function readSettings() {
     legacy_timeline_editor: $("set-legacy-timeline-editor").checked,
     ui_theme: $("set-theme").value,
     update_channel: $("set-update-channel").value,
+    reopen_window_after_update: $("set-reopen-window-after-update").checked,
     cloud: readCloudSettings(),
     osu: readOsuApiSettings(),
     league: { ...leagueModeSettings },
