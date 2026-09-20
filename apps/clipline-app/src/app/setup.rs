@@ -337,8 +337,17 @@ pub fn run() {
             // When launched by the autostart registry entry, start in the tray
             // instead of flashing the main window.
             let launched_by_autostart = std::env::args().any(|arg| arg == "--autostart");
+            // Except after an update: the installer relaunches Clipline with
+            // the argv it replaced, so an autostart copy comes back claiming
+            // to be an autostart launch even though a person pressed Install
+            // and is waiting for the window. Read the marker on every launch,
+            // not just autostart ones, so a failed install cannot leave one
+            // sitting there.
+            let relaunched_after_update = crate::updates::take_update_relaunch_request();
+            let start_in_tray =
+                crate::updates::should_start_in_tray(launched_by_autostart, relaunched_after_update);
             log_diagnostic(format!(
-                "setup start launched_by_autostart={launched_by_autostart} webviews={}",
+                "setup start launched_by_autostart={launched_by_autostart} relaunched_after_update={relaunched_after_update} webviews={}",
                 webview_labels(app.handle())
             ));
 
@@ -425,8 +434,9 @@ pub fn run() {
             spawn_game_detector(app.handle().clone());
 
             // `"create": false` keeps cold --autostart WebView-free. Normal
-            // launches and tray Open build through open_main_window.
-            if !launched_by_autostart {
+            // launches, post-update relaunches and tray Open build through
+            // open_main_window.
+            if !start_in_tray {
                 log_diagnostic("normal launch opening main window");
                 if let Err(e) = open_main_window(app.handle()) {
                     log_diagnostic(format!("normal launch open failed: {e}"));

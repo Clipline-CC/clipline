@@ -1128,6 +1128,40 @@ fn legacy_audio_preview_code_is_absent() {
 }
 
 #[test]
+fn reopen_window_after_update_is_an_option_the_installer_relaunch_honors() {
+    let settings = settings_js();
+    let html = index_html();
+    let settings_root = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/settings/mod.rs"),
+    )
+    .expect("read src/settings/mod.rs");
+    let app_updates = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app/updates.rs"),
+    )
+    .expect("read src/app/updates.rs");
+
+    assert!(
+        html.contains("data-settings-key=\"reopen_window_after_update\""),
+        "the option needs a settings row so the dirty indicator tracks it"
+    );
+    assert!(
+        settings.contains("$(\"set-reopen-window-after-update\").checked = s.reopen_window_after_update !== false")
+            && settings.contains("reopen_window_after_update: $(\"set-reopen-window-after-update\").checked"),
+        "the settings form must both render and submit the option"
+    );
+    assert!(
+        settings_root.contains("pub reopen_window_after_update: bool")
+            && settings_root.contains("reopen_window_after_update: true"),
+        "the option must persist and default to reopening the window"
+    );
+    assert!(
+        app_updates.contains("state.settings().reopen_window_after_update")
+            && app_updates.contains("crate::updates::request_window_on_update_relaunch()"),
+        "install must consult the option before marking the relaunch"
+    );
+}
+
+#[test]
 fn league_game_type_recording_gate_controls_are_persisted_and_wired() {
     let settings = settings_js();
     let general_tab = js_function_body(&settings, "renderGamePluginSettingsGeneralTab");
@@ -1270,6 +1304,7 @@ fn review_player_owns_all_controls() {
         "id=\"set-minimize-to-tray\"",
         "id=\"set-legacy-timeline-editor\"",
         "id=\"set-update-channel\"",
+        "id=\"set-reopen-window-after-update\"",
         "id=\"check-updates\"",
         "id=\"update-status\"",
         "id=\"set-capture\"",

@@ -209,6 +209,8 @@ impl AppSettings {
             close_to_tray: bool_field(object, "close_to_tray").unwrap_or(defaults.close_to_tray),
             minimize_to_tray: bool_field(object, "minimize_to_tray")
                 .unwrap_or(defaults.minimize_to_tray),
+            reopen_window_after_update: bool_field(object, "reopen_window_after_update")
+                .unwrap_or(defaults.reopen_window_after_update),
             legacy_timeline_editor: bool_field(object, "legacy_timeline_editor")
                 .unwrap_or(defaults.legacy_timeline_editor),
             ui_theme: deserialize_field(object, "ui_theme").unwrap_or(defaults.ui_theme),

@@ -47,6 +47,7 @@ fn defaults_match_current_recorder_behavior() {
     assert!(!settings.open_on_startup);
     assert!(settings.close_to_tray);
     assert!(!settings.minimize_to_tray);
+    assert!(settings.reopen_window_after_update);
     assert_eq!(settings.update_channel, UpdateChannel::install_default());
     assert!(!settings.legacy_timeline_editor);
     assert_eq!(serialized["legacy_timeline_editor"], false);
@@ -224,6 +225,51 @@ fn legacy_settings_default_capture_region() {
     assert!(!settings.minimize_to_tray);
     assert_eq!(settings.update_channel, UpdateChannel::Nightly);
     assert!(settings.validate().is_ok());
+}
+
+#[test]
+fn a_settings_file_predating_the_option_reopens_the_window_after_an_update() {
+    let settings = AppSettings::load_from_object(
+        serde_json::from_str::<Value>(
+            r#"{
+                "capture_mode": "primary_monitor",
+                "window_title": "",
+                "replay_window_s": 60.0,
+                "bitrate_mbps": 12.0,
+                "fps": 60,
+                "disk_quota_gb": 10.0,
+                "hotkey": "F6"
+            }"#,
+        )
+        .unwrap()
+        .as_object()
+        .unwrap(),
+    );
+
+    assert!(settings.reopen_window_after_update);
+}
+
+#[test]
+fn load_preserves_a_tray_only_update_restart_preference() {
+    let settings = AppSettings::load_from_object(
+        serde_json::from_str::<Value>(
+            r#"{
+                "capture_mode": "primary_monitor",
+                "window_title": "",
+                "replay_window_s": 60.0,
+                "bitrate_mbps": 12.0,
+                "fps": 60,
+                "disk_quota_gb": 10.0,
+                "hotkey": "F6",
+                "reopen_window_after_update": false
+            }"#,
+        )
+        .unwrap()
+        .as_object()
+        .unwrap(),
+    );
+
+    assert!(!settings.reopen_window_after_update);
 }
 
 #[test]
