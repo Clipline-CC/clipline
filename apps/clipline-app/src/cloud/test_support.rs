@@ -30,6 +30,7 @@ pub(crate) fn audio_markers() -> ClipMarkers {
                 kind: Some("microphone".into()),
             },
         ],
+        selected_audio_track_ids: None,
         plays: Vec::new(),
         markers: Vec::new(),
     }

@@ -479,11 +479,21 @@ function applyFirstRunFormToSettings() {
   $("set-output-enabled").checked = $("first-run-output-enabled").checked;
   const outputDeviceId = selectedDeviceId("first-run-output-device");
   const outputDevice = audioDevices.outputs.find((device) => device.id === outputDeviceId);
-  renderPlaybackSourceRows([{
+  const firstSource = {
     device_id: outputDeviceId,
     label: outputDevice ? outputDevice.name : "Output Audio",
     volume: Number($("first-run-output-volume").value),
-  }]);
+  };
+  const existingSources = firstRunReplay
+    ? playbackSourcesFromAudio(settingsFormSource().audio || defaultAudioSettings())
+    : [];
+  const playbackSources = outputDeviceId
+    ? [
+        firstSource,
+        ...existingSources.slice(1).filter((source) => source.device_id !== outputDeviceId),
+      ]
+    : [firstSource];
+  renderPlaybackSourceRows(playbackSources);
   $("set-mic-enabled").checked = $("first-run-mic-enabled").checked;
   $("set-mic-device").value = $("first-run-mic-device").value;
   $("set-mic-volume").value = $("first-run-mic-volume").value;

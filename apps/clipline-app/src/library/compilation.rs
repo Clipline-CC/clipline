@@ -1,10 +1,10 @@
-use super::groups::{group_members_unrecovered, recover_group_order_transaction_unlocked, MAX_COMPILATION_CLIPS, group_fingerprint, group_members, GroupMember};
+use super::groups::{group_members_unrecovered, recover_group_order_transaction_unlocked, MAX_COMPILATION_CLIPS, group_members, windows_clip_path_key, GroupMember};
 use super::*;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct CompilationInput {
     pub(crate) path: PathBuf,
-    pub(crate) audio_tracks: usize,
+    pub(crate) audio_track_indices: Vec<u32>,
     pub(crate) duration_s: f64,
 }
 
@@ -15,7 +15,7 @@ pub(crate) fn export_group_file(
 ) -> Result<ClipInfo, String> {
     let members = group_members(root, name)?;
     validate_compilation_size(&members)?;
-    let fingerprint = group_fingerprint(&members);
+    let fingerprint = compilation_fingerprint(&members)?;
     let inputs = compilation_inputs(&members)?;
     let target = unique_compilation_path(root, name)?;
     let tmp = crate::settings::persistence::sibling_tmp_path(&target)?;
@@ -41,7 +41,7 @@ fn publish_group_compilation(
     let _guard = crate::gc::lock_clip_mutations();
     let validate = (|| {
         recover_group_order_transaction_unlocked(root)?;
-        if group_fingerprint(&group_members_unrecovered(root, name)?) != fingerprint {
+        if compilation_fingerprint(&group_members_unrecovered(root, name)?)? != fingerprint {
             return Err("group changed during compilation; try again".to_string());
         }
         Ok(())
@@ -62,6 +62,7 @@ fn publish_group_compilation(
         duration_s,
         player_summary: None,
         audio_tracks: Vec::new(),
+        selected_audio_track_ids: None,
         plays: Vec::new(),
         markers: Vec::new(),
         bookmarks: Vec::new(),
@@ -138,6 +139,28 @@ pub(crate) fn validate_compilation_size(members: &[GroupMember]) -> Result<(), S
     Ok(())
 }
 
+pub(crate) fn compilation_fingerprint(members: &[GroupMember]) -> Result<String, String> {
+    members
+        .iter()
+        .map(|member| {
+            let selected = util::markers_with_inferred_audio_tracks(
+                &member.path,
+                util::read_markers_raw(&member.path),
+            )
+            .as_ref()
+            .map(util::effective_audio_track_ids)
+            .transpose()?
+            .unwrap_or_default();
+            Ok(format!(
+                "{}\u{1f}{}",
+                windows_clip_path_key(&member.path),
+                selected.join("\u{1e}")
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()
+        .map(|parts| parts.join("\0"))
+}
+
 pub(crate) fn validate_compilation_command_line(ffmpeg: &Path, args: &[String]) -> Result<(), String> {
     const SAFE_WINDOWS_COMMAND_LINE_CHARS: usize = 32_000;
     let chars = ffmpeg.as_os_str().encode_wide().count()
@@ -171,9 +194,29 @@ pub(crate) fn compilation_inputs(members: &[GroupMember]) -> Result<Vec<Compilat
                 .map_err(|error| format!("inspect group clip duration {:?}: {error}", member.path))?
                 .filter(|duration| duration.is_finite() && *duration > 0.0)
                 .ok_or_else(|| format!("group clip {:?} has no valid duration", member.path))?;
+            let markers = util::markers_with_inferred_audio_tracks(
+                &member.path,
+                util::read_markers_raw(&member.path),
+            );
+            let audio_track_ids = markers
+                .as_ref()
+                .map(util::effective_audio_track_ids)
+                .transpose()?
+                .unwrap_or_default();
+            let audio_track_indices = markers
+                .as_ref()
+                .map(|markers| util::selected_audio_track_indices(markers, &audio_track_ids))
+                .transpose()?
+                .unwrap_or_default();
+            if audio_track_indices
+                .iter()
+                .any(|index| usize::try_from(*index).map_or(true, |index| index >= counts.audio))
+            {
+                return Err(format!("group clip {:?} has invalid audio metadata", member.path));
+            }
             Ok(CompilationInput {
                 path: member.path.clone(),
-                audio_tracks: counts.audio,
+                audio_track_indices,
                 duration_s,
             })
         })
@@ -246,7 +289,7 @@ pub(crate) fn ffmpeg_compilation_args(
         let video_input = next_input;
         args.extend(["-i".into(), input.path.display().to_string()]);
         next_input += 1;
-        let audio_input = if input.audio_tracks > 0 {
+        let audio_input = if !input.audio_track_indices.is_empty() {
             video_input
         } else {
             let audio_input = next_input;
@@ -261,29 +304,37 @@ pub(crate) fn ffmpeg_compilation_args(
             next_input += 1;
             audio_input
         };
-        stream_inputs.push((video_input, audio_input, input.audio_tracks.max(1)));
+        stream_inputs.push((
+            video_input,
+            audio_input,
+            input.audio_track_indices.clone(),
+        ));
     }
 
     let mut filters = Vec::with_capacity(inputs.len() * 2 + 1);
-    for (index, (video_input, audio_input, audio_tracks)) in stream_inputs.iter().enumerate() {
+    for (index, (video_input, audio_input, audio_track_indices)) in
+        stream_inputs.iter().enumerate()
+    {
         let duration_s = inputs[index].duration_s;
         filters.push(format!(
             "[{video_input}:v:0]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=60,format=nv12,tpad=stop_mode=clone:stop_duration={duration_s:.6},trim=duration={duration_s:.6},setpts=PTS-STARTPTS[v{index}]"
         ));
-        if *audio_tracks == 1 {
+        if audio_track_indices.len() <= 1 {
+            let track = audio_track_indices.first().copied().unwrap_or(0);
             filters.push(format!(
-                "[{audio_input}:a:0]aresample=48000:async=1:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo,apad=whole_dur={duration_s:.6},atrim=duration={duration_s:.6},asetpts=N/SR/TB[a{index}]"
+                "[{audio_input}:a:{track}]aresample=48000:async=1:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo,apad=whole_dur={duration_s:.6},atrim=duration={duration_s:.6},asetpts=N/SR/TB[a{index}]"
             ));
         } else {
             let mut mix_inputs = String::new();
-            for track in 0..*audio_tracks {
+            for (selected_index, track) in audio_track_indices.iter().enumerate() {
                 filters.push(format!(
-                    "[{audio_input}:a:{track}]aresample=48000:async=1:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo[a{index}_{track}]"
+                    "[{audio_input}:a:{track}]aresample=48000:async=1:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo[a{index}_{selected_index}]"
                 ));
-                mix_inputs.push_str(&format!("[a{index}_{track}]"));
+                mix_inputs.push_str(&format!("[a{index}_{selected_index}]"));
             }
+            let selected_count = audio_track_indices.len();
             filters.push(format!(
-                "{mix_inputs}amix=inputs={audio_tracks}:duration=longest:dropout_transition=0:normalize=1,apad=whole_dur={duration_s:.6},atrim=duration={duration_s:.6},asetpts=N/SR/TB[a{index}]"
+                "{mix_inputs}amix=inputs={selected_count}:duration=longest:dropout_transition=0:normalize=1,apad=whole_dur={duration_s:.6},atrim=duration={duration_s:.6},asetpts=N/SR/TB[a{index}]"
             ));
         }
     }
@@ -338,7 +389,7 @@ impl CompilationInput {
     fn test(path: &str, audio_tracks: usize, duration_s: f64) -> Self {
         Self {
             path: PathBuf::from(path),
-            audio_tracks,
+            audio_track_indices: (0..audio_tracks as u32).collect(),
             duration_s,
         }
     }
@@ -412,6 +463,73 @@ mod tests {
             assert!(joined.contains("-c:a libopus"));
             assert!(joined.ends_with("out.mp4"));
         }
+        #[test]
+        fn ffmpeg_compilation_args_honor_a_nonzero_selected_audio_track() {
+            let mut input = CompilationInput::test("selected.mp4", 2, 2.5);
+            input.audio_track_indices = vec![1];
+            let args = ffmpeg_compilation_args(
+                &[input],
+                Path::new("out.mp4"),
+                "h264_mf",
+                EncoderBackend::MfSoftware,
+            )
+            .join(" ");
+
+            assert!(args.contains("[0:a:1]aresample=48000"));
+            assert!(!args.contains("[0:a:0]aresample=48000"));
+        }
+        #[test]
+        fn compilation_fingerprint_changes_with_saved_audio_selection() {
+            let dir = clipline_test_utils::TestDir::new(
+                "clipline-groups",
+                "audio-selection-fingerprint",
+            );
+            let source = dir.path().join("member.mp4");
+            std::fs::write(&source, b"member").unwrap();
+            let member = GroupMember::test(source.to_str().unwrap(), 0);
+            let mut markers = ClipMarkers {
+                recording_start_s: 0.0,
+                duration_s: 1.0,
+                player_summary: None,
+                audio_tracks: vec![
+                    clipline_events::ClipAudioTrack {
+                        id: "playback:0".into(),
+                        track_index: 0,
+                        label: "Game".into(),
+                        kind: Some("playback_endpoint".into()),
+                    },
+                    clipline_events::ClipAudioTrack {
+                        id: "playback:1".into(),
+                        track_index: 1,
+                        label: "Chat".into(),
+                        kind: Some("playback_endpoint".into()),
+                    },
+                ],
+                selected_audio_track_ids: Some(vec!["playback:0".into()]),
+                plays: Vec::new(),
+                markers: Vec::new(),
+                bookmarks: Vec::new(),
+            };
+            std::fs::write(
+                source.with_extension("markers.json"),
+                serde_json::to_vec(&markers).unwrap(),
+            )
+            .unwrap();
+            let before = compilation_fingerprint(std::slice::from_ref(&member)).unwrap();
+
+            markers.selected_audio_track_ids = Some(vec!["playback:1".into()]);
+            std::fs::write(
+                source.with_extension("markers.json"),
+                serde_json::to_vec(&markers).unwrap(),
+            )
+            .unwrap();
+
+            assert_ne!(
+                before,
+                compilation_fingerprint(&[member]).unwrap(),
+                "a changed saved mix must invalidate the old compilation"
+            );
+        }
 
     #[test]
     fn compilation_publication_rejects_changed_membership() {
@@ -423,7 +541,7 @@ mod tests {
                 group: Some(ClipGroup { name: "G".into(), order: 0 }),
                 ..ClipMetadata::default()
             }).unwrap();
-            let fingerprint = group_fingerprint(&group_members(dir.path(), "G").unwrap());
+            let fingerprint = compilation_fingerprint(&group_members(dir.path(), "G").unwrap()).unwrap();
             let tmp = dir.path().join("encoded.tmp");
             let target = dir.path().join("compilation.mp4");
             std::fs::write(&tmp, b"encoded").unwrap();

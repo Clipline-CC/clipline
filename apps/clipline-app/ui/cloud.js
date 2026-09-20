@@ -730,6 +730,7 @@ async function uploadClipToCloud(clip, request = {}) {
   setNotice("cloud upload started", { transient: true });
   $("error").textContent = "";
   try {
+    await flushAudioSelectionSave(clip.path);
     const result = await invoke("upload_clip_to_cloud", {
       request: {
         path: clip.path,

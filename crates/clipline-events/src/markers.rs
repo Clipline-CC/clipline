@@ -148,6 +148,9 @@ pub struct ClipMarkers {
     pub player_summary: Option<PlayerSummary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub audio_tracks: Vec<ClipAudioTrack>,
+    /// Saved Review inclusion. `None` keeps legacy defaults; an empty list is muted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_audio_track_ids: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plays: Vec<ClipPlay>,
     pub markers: Vec<ClipMarker>,
@@ -249,6 +252,7 @@ impl MarkerLog {
             duration_s: end_s - start_s,
             player_summary: None,
             audio_tracks: Vec::new(),
+            selected_audio_track_ids: None,
             plays: Vec::new(),
             markers,
             bookmarks,
@@ -538,6 +542,7 @@ mod tests {
             duration_s: 180.0,
             player_summary: None,
             audio_tracks: Vec::new(),
+            selected_audio_track_ids: None,
             markers: Vec::new(),
             bookmarks: Vec::new(),
             plays: vec![ClipPlay {

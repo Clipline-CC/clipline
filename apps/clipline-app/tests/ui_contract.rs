@@ -3086,6 +3086,22 @@ fn review_and_upload_audio_controls_render_exact_selected_ids() {
 }
 
 #[test]
+fn review_audio_selection_is_persisted_before_clip_outputs() {
+    let core = read_ui_js("app-core.js");
+    let review = read_ui_js("review-clips.js");
+    let cloud = read_ui_js("cloud.js");
+    let setup = app_rs();
+
+    assert!(core.contains("selected_audio_track_ids"));
+    assert!(core.contains("invoke(\"set_clip_audio_selection\""));
+    assert!(core.contains("queueAudioSelectionSave(currentClip"));
+    assert!(review.contains("await flushAudioSelectionSave(sourceClip.path)"));
+    assert!(review.contains("await flushAudioSelectionSave(clip.path)"));
+    assert!(cloud.contains("await flushAudioSelectionSave(clip.path)"));
+    assert!(setup.contains("crate::library::set_clip_audio_selection"));
+}
+
+#[test]
 fn review_audio_pruning_preserves_fallback_and_muted_selection() {
     let app_core = read_ui_js("app-core.js");
     let prune = js_function_body(&app_core, "pruneSelectedAudioTracks");
@@ -5090,7 +5106,7 @@ fn clipboard_copy_distinguishes_shareable_and_original_paths() {
     );
     assert!(
         js.contains("async function copyClipToClipboard(event, clip = currentClip, originalOverride = null)")
-            && js.contains("Boolean(event?.shiftKey) || Number(clip.duration_s) > 5 * 60")
+            && js.contains("originalOverride ?? Boolean(event?.shiftKey)")
             && js.contains("original,")
             && js.contains("setDeckStatus(\"preparing shareable clip...\")")
             && js.contains("setDeckStatus(message, { transient: true })")
@@ -5542,6 +5558,11 @@ fn replayed_first_run_setup_is_cancelable_and_preserves_hidden_settings() {
     assert!(
         wizard.contains("outputResolutionOption($(\"first-run-resolution\").value).id",),
         "Review and field syncing must normalize output resolution consistently"
+    );
+    assert!(
+        wizard.contains("existingSources.slice(1).filter")
+            && wizard.contains("renderPlaybackSourceRows(playbackSources)"),
+        "replaying first-run must not collapse advanced playback sources"
     );
 }
 

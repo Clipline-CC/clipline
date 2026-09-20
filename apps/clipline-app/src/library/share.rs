@@ -571,6 +571,7 @@ mod tests {
                         kind: Some("microphone".into()),
                     },
                 ],
+                selected_audio_track_ids: None,
                 plays: Vec::new(),
                 markers: Vec::new(),
             };

@@ -4,6 +4,38 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-09-19): supported multi-endpoint playback audio
+
+Settings > Capture now owns an ordered playback-source list instead of one
+output selector. Users can add/remove up to 16 distinct Windows playback
+endpoints and set recording gain per source; first-run remains one Default
+output at 100%. Existing `output_device_id`/`output_volume` settings migrate to
+one list entry, while an explicit empty list stays empty. Rust validates bounds,
+labels, gains, duplicate endpoints, and the rule that Default must be alone.
+
+Every configured endpoint receives a fixed `playback:N` Opus track before the
+optional microphone. Explicit endpoint activation is strict: a missing device
+cannot silently become Default. Missing-at-start sources encode aligned silence
+and retry on the existing one-second recovery cadence; mid-session loss retains
+the same track/clock behavior. Diagnostics identify individual playback tracks
+without logging opaque device ids.
+
+Review audio checkboxes now persist atomically in marker sidecars. Legacy clips
+with no saved choice keep their old defaults; an empty saved list is intentional
+mute. Trims preserve all source tracks and the saved choice even when game-event
+markers are excluded. Normal clipboard copy and individual upload wait for the
+saved choice; Shift-copy remains the explicit original/all-tracks path. Group
+compilation maps only each member's selected stream indices, supplies silence for
+muted members, and includes selections in its persisted fingerprint so stale
+mixes are not reused.
+
+Plan: `docs/superpowers/plans/2026-09-19-reliable-playback-audio-sources.md`.
+The full workspace suite passes (681 app unit tests, 129 UI contracts, 249
+capture tests, plus every workspace integration/doc test); fresh-cache
+warning-denied workspace/all-target Clippy is clean. The debug app launched
+successfully. Native Computer Use was unavailable for visual automation, so the
+source-list layout and multi-device recording remain on the user checklist.
+
 ## Checkpoint (2026-09-19): experimental app audio tracks withdrawn
 
 The startup-only per-process audio experiment is removed before replacing the

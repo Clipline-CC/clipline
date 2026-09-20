@@ -15,6 +15,7 @@ async function exportRangeAsClip(startS, endS, {
   setDeckStatus("exporting…");
   await afterNextPaint();
   try {
+    await flushAudioSelectionSave(sourceClip.path);
     const request = {
       path: sourceClip.path,
       startS,
@@ -303,8 +304,7 @@ async function copyClipToClipboard(event, clip = currentClip, originalOverride =
   if (!clip) return;
   if (isCloudOnlyReviewClip(clip)) return;
   const reviewingClip = currentClip && PlayerCore.sameClipPath(currentClip.path, clip.path);
-  const original = originalOverride
-    ?? (Boolean(event?.shiftKey) || Number(clip.duration_s) > 5 * 60);
+  const original = originalOverride ?? Boolean(event?.shiftKey);
   const audioTrackIds = reviewingClip
     ? selectedAudioTrackIdsForClip(clip)
     : defaultAudioTrackIds(clip);
@@ -317,6 +317,7 @@ async function copyClipToClipboard(event, clip = currentClip, originalOverride =
     else setNotice("preparing shareable clip...");
   }
   try {
+    await flushAudioSelectionSave(clip.path);
     await invoke("copy_clip_to_clipboard", {
       request: {
         path: clip.path,

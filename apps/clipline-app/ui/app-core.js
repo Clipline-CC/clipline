@@ -202,6 +202,8 @@ var groupReorderPending = false;
 var groupCompilationInflight = new Map();
 var selectedAudioTrackIds = new Set();
 var uploadSelectedAudioTrackIds = new Set();
+var pendingAudioSelectionSave = Promise.resolve();
+var audioSelectionSaveErrors = new Map();
 var currentReviewAudioKey = null;
 var currentReviewAudioTrackIds = [];
 var currentReviewMediaPath = null;
@@ -393,7 +395,49 @@ function clipAudioTracks(clip = currentClip) {
 }
 
 function defaultAudioTrackIds(clip = currentClip) {
+  const saved = clip && clip.markers && clip.markers.selected_audio_track_ids;
+  if (Array.isArray(saved)) {
+    return PlayerCore.selectedReviewAudioTrackIds(clipAudioTracks(clip), saved);
+  }
   return PlayerCore.defaultAudioTrackIds(clipAudioTracks(clip));
+}
+
+function setSavedAudioTrackIds(clip, ids) {
+  if (!clip || !clip.markers) return;
+  clip.markers.selected_audio_track_ids = [...ids];
+  for (const candidate of clipsCache) {
+    if (candidate && candidate.markers && PlayerCore.sameClipPath(candidate.path, clip.path)) {
+      candidate.markers.selected_audio_track_ids = [...ids];
+    }
+  }
+}
+
+function queueAudioSelectionSave(clip, ids) {
+  if (!clip || isCloudOnlyReviewClip(clip)) return;
+  const path = clip.path;
+  const pathKey = GalleryWindowCore.clipPathKey(path);
+  const selected = [...ids];
+  setSavedAudioTrackIds(clip, selected);
+  pendingAudioSelectionSave = pendingAudioSelectionSave.then(async () => {
+    try {
+      await invoke("set_clip_audio_selection", {
+        request: { path, audioTrackIds: selected },
+      });
+      audioSelectionSaveErrors.delete(pathKey);
+    } catch (error) {
+      const message = String(error);
+      audioSelectionSaveErrors.set(pathKey, message);
+      if (currentClip && PlayerCore.sameClipPath(currentClip.path, path)) {
+        $("error").textContent = message;
+      }
+    }
+  });
+}
+
+async function flushAudioSelectionSave(path) {
+  await pendingAudioSelectionSave;
+  const error = audioSelectionSaveErrors.get(GalleryWindowCore.clipPathKey(path));
+  if (error) throw new Error(error);
 }
 
 function resetSelectedAudioTracks(clip = currentClip) {
@@ -463,6 +507,7 @@ function renderAudioTrackPanel() {
     selectedAudioTrackIds = new Set(
       PlayerCore.applyReviewAudioTrackToggle(tracks, [...selectedAudioTrackIds], track.id, checked),
     );
+    queueAudioSelectionSave(currentClip, selectedAudioTrackIdsForClip());
     renderAudioTrackPanel();
     requestSelectedAudioPreview();
   }, { rowState: PlayerCore.reviewAudioTrackRowState });

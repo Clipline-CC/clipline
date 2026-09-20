@@ -319,6 +319,7 @@ mod tests {
                 duration_s: 20.0,
                 player_summary: None,
                 audio_tracks: Vec::new(),
+                selected_audio_track_ids: None,
                 plays: Vec::new(),
                 markers: vec![
                     marker_with(1.0, EventKind::DragonKill, false),
