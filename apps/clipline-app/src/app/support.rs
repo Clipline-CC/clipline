@@ -332,6 +332,7 @@ pub(super) fn safe_settings(settings: &AppSettings) -> serde_json::Value {
             "open_on_startup": settings.open_on_startup,
             "close_to_tray": settings.close_to_tray,
             "minimize_to_tray": settings.minimize_to_tray,
+            "reopen_window_after_update": settings.reopen_window_after_update,
             "legacy_timeline_editor": settings.legacy_timeline_editor,
             "ui_theme": settings.ui_theme,
             "update_channel": settings.update_channel,

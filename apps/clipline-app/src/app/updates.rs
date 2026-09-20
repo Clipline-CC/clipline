@@ -168,10 +168,29 @@ pub(crate) async fn install_update<R: Runtime>(
 
     app.state::<MicTestState>().stop();
     state.send(Cmd::Stop { announce: false });
-    update
-        .download_and_install(|_, _| {}, || {})
+    let package = update
+        .download(|_, _| {}, || {})
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    // The installer relaunches Clipline with this process's argv, so a copy
+    // the autostart entry started would come back to the tray alone. Reading
+    // the setting here, not at the next launch, means the restart honors what
+    // was configured when Install was pressed.
+    let reopen_window = state.settings().reopen_window_after_update;
+    if reopen_window {
+        if let Err(error) = crate::updates::request_window_on_update_relaunch() {
+            tracing::warn!(event = "update_relaunch_marker_write_failed", error = %error);
+        }
+    }
+
+    // `install` replaces this process on success and never returns, so the
+    // only path past it is a failure that leaves the old build running.
+    let installed = update.install(package).map_err(|e| e.to_string());
+    if installed.is_err() && reopen_window {
+        crate::updates::clear_update_relaunch_request();
+    }
+    installed
 }
 
 #[cfg(test)]
