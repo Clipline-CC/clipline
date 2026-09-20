@@ -7,10 +7,6 @@ pub(crate) enum EndpointTarget {
     OutputLoopback {
         device_id: Option<String>,
     },
-    ProcessOutput {
-        pid: u32,
-        identity: ProcessIdentity,
-    },
     Microphone {
         device_id: Option<String>,
         channels: WasapiChannelMode,
@@ -20,9 +16,7 @@ pub(crate) enum EndpointTarget {
 impl EndpointTarget {
     pub(crate) fn mode(&self) -> EndpointMode {
         match self {
-            Self::OutputLoopback { .. } | Self::ProcessOutput { .. } => {
-                EndpointMode::OutputLoopback
-            }
+            Self::OutputLoopback { .. } => EndpointMode::OutputLoopback,
             Self::Microphone { channels, .. } => EndpointMode::InputCapture(*channels),
         }
     }
@@ -41,24 +35,12 @@ impl EndpointTarget {
                 device_id.as_deref(),
                 selected_endpoint_fallback_allowed(device_id.as_deref(), phase),
             ),
-            Self::ProcessOutput { pid, .. } => {
-                init_com()?;
-                let client = activate_process_loopback_client(*pid)?;
-                let (streamflags, buffer_duration_100ns) = process_loopback_stream_config();
-                initialize_client(
-                    client,
-                    streamflags,
-                    buffer_duration_100ns,
-                    Some(process_loopback_format()),
-                )
-            }
         }
     }
 
     pub(crate) fn record_initial_endpoint(&mut self, endpoint_id: Option<&str>) {
         let selected_id = match self {
             Self::OutputLoopback { device_id } | Self::Microphone { device_id, .. } => device_id,
-            Self::ProcessOutput { .. } => return,
         };
         if selected_id
             .as_deref()
@@ -68,12 +50,6 @@ impl EndpointTarget {
         }
     }
 
-    pub(crate) fn process_identity_matches(&self) -> bool {
-        match self {
-            Self::ProcessOutput { pid, identity } => identity.matches(*pid),
-            Self::OutputLoopback { .. } | Self::Microphone { .. } => true,
-        }
-    }
 }
 
 /// A freshly activated and started WASAPI endpoint.
@@ -82,14 +58,6 @@ pub(crate) struct ActivatedDevice {
     pub(crate) capture: IAudioCaptureClient,
     pub(crate) mix: MixFormat,
     pub(crate) endpoint_id: Option<String>,
-}
-
-impl ActivatedDevice {
-    pub(crate) fn stop(self) {
-        // SAFETY: the client was successfully started by `initialize_client`;
-        // this rejected activation is never installed on a capture owner.
-        let _ = unsafe { self.client.Stop() };
-    }
 }
 
 pub(crate) fn activate_endpoint(
@@ -112,8 +80,7 @@ pub(crate) fn activate_endpoint(
         .map_err(init)?;
         let endpoint_id = device_id_string(&device)?;
         let client: IAudioClient = device.Activate(CLSCTX_ALL, None).map_err(init)?;
-        let mut activated =
-            initialize_client(client, streamflags, POLLING_BUFFER_DURATION_100NS, None)?;
+        let mut activated = initialize_client(client, streamflags, POLLING_BUFFER_DURATION_100NS)?;
         activated.endpoint_id = Some(endpoint_id);
         Ok(activated)
     }
@@ -123,20 +90,14 @@ pub(crate) fn initialize_client(
     client: IAudioClient,
     streamflags: u32,
     buffer_duration_100ns: i64,
-    fixed_mix_format: Option<WAVEFORMATEX>,
 ) -> Result<ActivatedDevice, CaptureError> {
     // SAFETY: IAudioClient initialization follows the WASAPI contract and
     // releases the mix-format allocation after Initialize consumes it.
     unsafe {
-        let mut fixed_mix_format = fixed_mix_format;
-        let mut format_storage = if let Some(format) = fixed_mix_format.as_mut() {
-            WaveFormatStorage::borrowed(format)
-        } else {
-            let format = client.GetMixFormat().map_err(init)?;
-            WaveFormatStorage::co_task_mem(format).ok_or_else(|| {
-                CaptureError::Init("WASAPI GetMixFormat returned a null format".into())
-            })?
-        };
+        let format = client.GetMixFormat().map_err(init)?;
+        let mut format_storage = CoTaskMemWaveFormat::new(format).ok_or_else(|| {
+            CaptureError::Init("WASAPI GetMixFormat returned a null format".into())
+        })?;
         let format_ptr = format_storage.as_mut_ptr();
         let format = &*format_ptr;
         // Copy packed fields to locals (references into packed structs are UB).
@@ -188,40 +149,23 @@ pub(crate) fn wasapi_error_recoverable(code: HRESULT) -> bool {
         || code == AUDCLNT_E_RESOURCES_INVALIDATED
 }
 
-enum WaveFormatStorage<'a> {
-    Borrowed(&'a mut WAVEFORMATEX),
-    CoTaskMem(*mut WAVEFORMATEX),
-}
+struct CoTaskMemWaveFormat(*mut WAVEFORMATEX);
 
-impl<'a> WaveFormatStorage<'a> {
-    fn borrowed(format: &'a mut WAVEFORMATEX) -> Self {
-        Self::Borrowed(format)
-    }
-
-    fn co_task_mem(format: *mut WAVEFORMATEX) -> Option<Self> {
-        (!format.is_null()).then_some(Self::CoTaskMem(format))
+impl CoTaskMemWaveFormat {
+    fn new(format: *mut WAVEFORMATEX) -> Option<Self> {
+        (!format.is_null()).then_some(Self(format))
     }
 
     fn as_mut_ptr(&mut self) -> *mut WAVEFORMATEX {
-        match self {
-            Self::Borrowed(format) => *format as *mut WAVEFORMATEX,
-            Self::CoTaskMem(format) => *format,
-        }
-    }
-
-    #[cfg(test)]
-    fn owns_allocation(&self) -> bool {
-        matches!(self, Self::CoTaskMem(_))
+        self.0
     }
 }
 
-impl Drop for WaveFormatStorage<'_> {
+impl Drop for CoTaskMemWaveFormat {
     fn drop(&mut self) {
-        if let Self::CoTaskMem(format) = self {
-            // SAFETY: this variant is created only from `GetMixFormat`, which
-            // transfers one COM-task allocation to the caller.
-            unsafe { CoTaskMemFree(Some((*format).cast())) };
-        }
+        // SAFETY: this wrapper is created only from `GetMixFormat`, which
+        // transfers one COM-task allocation to the caller.
+        unsafe { CoTaskMemFree(Some(self.0.cast())) };
     }
 }
 
@@ -234,6 +178,7 @@ mod tests {
     use super::*;
     use windows::Win32::Foundation::{E_FAIL, E_INVALIDARG};
     use windows::Win32::Media::Audio::AUDCLNT_E_NOT_INITIALIZED;
+    use windows::Win32::System::Com::CoTaskMemAlloc;
 
     #[test]
     fn recoverable_audclnt_errors_are_classified_by_hresult() {
@@ -288,21 +233,11 @@ mod tests {
     }
 
     #[test]
-    fn fixed_wave_format_storage_is_borrowed() {
-        let mut format = process_loopback_format();
-        let storage = WaveFormatStorage::borrowed(&mut format);
-
-        assert!(!storage.owns_allocation());
-    }
-
-    #[test]
     fn com_wave_format_storage_owns_its_allocation() {
         let allocation = unsafe { CoTaskMemAlloc(size_of::<WAVEFORMATEX>()) } as *mut WAVEFORMATEX;
         assert!(!allocation.is_null());
-        unsafe { allocation.write(process_loopback_format()) };
-        let storage = WaveFormatStorage::co_task_mem(allocation).expect("COM allocation");
-
-        assert!(storage.owns_allocation());
+        unsafe { allocation.write(WAVEFORMATEX::default()) };
+        let storage = CoTaskMemWaveFormat::new(allocation).expect("COM allocation");
         drop(storage);
     }
 }

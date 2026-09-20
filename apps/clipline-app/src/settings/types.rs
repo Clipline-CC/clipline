@@ -102,8 +102,6 @@ pub struct AudioSettings {
     #[serde(default = "default_volume")]
     pub output_volume: f64,
     #[serde(default)]
-    pub split_output_by_process: bool,
-    #[serde(default)]
     pub mic_enabled: bool,
     #[serde(default)]
     pub mic_device_id: Option<String>,
@@ -119,7 +117,6 @@ impl Default for AudioSettings {
             output_enabled: true,
             output_device_id: None,
             output_volume: 1.0,
-            split_output_by_process: false,
             mic_enabled: false,
             mic_device_id: None,
             mic_volume: 1.0,
@@ -142,8 +139,6 @@ impl AudioSettings {
             output_volume: f64_field(object, "output_volume")
                 .map(|value| value.clamp(0.0, MAX_AUDIO_VOLUME))
                 .unwrap_or(defaults.output_volume),
-            split_output_by_process: bool_field(object, "split_output_by_process")
-                .unwrap_or(defaults.split_output_by_process),
             mic_enabled: bool_field(object, "mic_enabled").unwrap_or(defaults.mic_enabled),
             mic_device_id: optional_string_field(object, "mic_device_id")
                 .unwrap_or(defaults.mic_device_id),
@@ -163,7 +158,6 @@ impl AudioSettings {
                 .clone()
                 .filter(|id| !id.trim().is_empty()),
             output_volume: self.output_volume,
-            split_output_by_process: self.split_output_by_process,
             mic_enabled: self.mic_enabled,
             mic_device_id: self
                 .mic_device_id

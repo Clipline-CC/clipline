@@ -17,9 +17,7 @@ use clipline_capture::traits::{
     AudioSource, CaptureEngine, CaptureError, Encoder, Frame, FrameData,
 };
 use clipline_capture::windows::nv12::CropRect;
-use clipline_capture::windows::wasapi::{
-    enumerate_output_processes, process_loopback_available, AudioProcessInfo, WasapiChannelMode,
-};
+use clipline_capture::windows::wasapi::WasapiChannelMode;
 use clipline_capture::windows::{
     d3d11, find_window_by_title, mft_probe, window_from_raw_handle, DxgiDuplicationCapture,
     ID3D11Device, MftConfig, MftH264Encoder, SoftwareMftH264Encoder, WasapiLoopback, WgcCapture,

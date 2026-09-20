@@ -218,7 +218,6 @@ function syncAudioFields() {
   const outputEnabled = $("set-output-enabled").checked;
   $("set-output-device").disabled = !outputEnabled;
   $("set-output-volume").disabled = !outputEnabled;
-  $("set-audio-split-output").disabled = !outputEnabled;
   const testingHere = micTestRunning && micTestSurface === "settings";
   $("set-mic-device").disabled = testingHere;
   $("set-mic-volume").disabled = testingHere;

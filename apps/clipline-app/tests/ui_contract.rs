@@ -1311,7 +1311,6 @@ fn review_player_owns_all_controls() {
         "id=\"set-backend\"",
         "id=\"backend-summary\"",
         "id=\"set-output-enabled\"",
-        "id=\"set-audio-split-output\"",
         "id=\"set-output-device\"",
         "id=\"set-output-volume\"",
         "id=\"output-volume-summary\"",
@@ -1436,13 +1435,9 @@ fn review_player_owns_all_controls() {
         html.contains("value=\"display_region\""),
         "capture target must expose the display_region mode"
     );
-    assert!(
-        html.contains("Experimental")
-            && html.contains("set-audio-split-output")
-            && main_js().contains("split_output_by_process")
-            && main_js().contains("split_output_by_process: false"),
-        "capture settings must expose and persist the experimental audio-splitting toggle"
-    );
+    assert!(!html.contains("set-audio-split-output"));
+    assert!(!html.contains("Experimental app audio tracks"));
+    assert!(!main_js().contains("split_output_by_process"));
     assert!(
         html.contains("Close to Tray")
             && html.contains("Minimize to Tray")
@@ -2372,7 +2367,7 @@ fn settings_marks_changed_rows_and_tabs() {
     for required in [
         "data-settings-key=\"open_on_startup\"",
         "data-settings-key=\"capture_mode capture_display_id capture_region window_title\"",
-        "data-settings-key=\"audio.output_enabled audio.output_device_id audio.output_volume audio.split_output_by_process\"",
+        "data-settings-key=\"audio.output_enabled audio.output_device_id audio.output_volume\"",
         "data-settings-key=\"games.plugins\"",
         "data-settings-key=\"games.custom_games\"",
         "data-settings-key=\"cloud.default_visibility\"",
@@ -5257,7 +5252,6 @@ fn first_run_setup_covers_approved_defaults_and_save_flow() {
         "id=\"first-run-output-enabled\" type=\"checkbox\" checked",
         "id=\"first-run-output-device\"",
         "id=\"first-run-output-volume\"",
-        "id=\"first-run-split-output\"",
         "id=\"first-run-mic-enabled\"",
         "id=\"first-run-mic-device\"",
         "id=\"first-run-mic-volume\"",
@@ -5283,6 +5277,7 @@ fn first_run_setup_covers_approved_defaults_and_save_flow() {
             "first-run setup must include `{required}`"
         );
     }
+    assert!(!html.contains("first-run-split-output"));
 
     assert!(
         css.contains(".first-run-setup[hidden]")
@@ -5366,7 +5361,6 @@ fn first_run_setup_offers_a_one_click_recommended_preset() {
         "$(\"first-run-quota\").value = \"10\"",
         "$(\"first-run-startup\").checked = true",
         "$(\"first-run-output-enabled\").checked = true",
-        "$(\"first-run-split-output\").checked = false",
         "audioDevices.inputs.length > 0",
         "$(\"first-run-pause-no-game\").checked = true",
         "$(\"first-run-replay\").value = \"30\"",
@@ -5385,6 +5379,7 @@ fn first_run_setup_offers_a_one_click_recommended_preset() {
             "recommended preset must include `{required}`"
         );
     }
+    assert!(!wizard.contains("first-run-split-output"));
     assert!(
         !helper.contains("save_settings"),
         "recommended setup must remain a draft until Start Clipline"

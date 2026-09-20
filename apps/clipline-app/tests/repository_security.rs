@@ -170,18 +170,19 @@ fn capture_diagnostics_and_snapshot_names_match_production_behavior() {
     let wasapi_production = production_tree(&capture, "windows/wasapi.rs", "windows/wasapi");
     let ffmpeg_production = production_tree(&capture, "ffmpeg_encoder.rs", "ffmpeg_encoder");
 
-    let snapshot = wasapi_production
-        .split_once("struct ProcessSnapshotEntry")
-        .expect("process snapshot entry")
-        .1
-        .split_once('}')
-        .expect("process snapshot fields")
-        .0;
-    assert!(snapshot.contains("image_name:"));
-    assert!(
-        !snapshot.contains("process_path:"),
-        "ToolHelp exposes a bare executable image name, not a full path"
-    );
+    for removed in [
+        "AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK",
+        "VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK",
+        "AudioProcessInfo",
+        "ProcessOutput",
+        "enumerate_output_processes",
+        "start_process_output",
+    ] {
+        assert!(
+            !wasapi_production.contains(removed),
+            "removed process-loopback API remains in production: {removed}"
+        );
+    }
     assert!(!wasapi_production.contains("InitPropVariantFromBuffer"));
     assert!(
         !wasapi_production.contains("eprintln!"),

@@ -311,7 +311,6 @@ pub(super) fn safe_settings(settings: &AppSettings) -> serde_json::Value {
         },
         "audio": {
             "output_enabled": settings.audio.output_enabled,
-            "split_output_by_process": settings.audio.split_output_by_process,
             "mic_enabled": settings.audio.mic_enabled,
             "mic_channels": settings.audio.mic_channels,
         },

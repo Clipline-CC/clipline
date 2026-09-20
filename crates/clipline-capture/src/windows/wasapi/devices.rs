@@ -13,21 +13,6 @@ pub fn enumerate_audio_devices() -> Result<AudioDeviceList, CaptureError> {
     }
 }
 
-pub fn process_loopback_available() -> bool {
-    // Per-process application loopback (ActivateAudioInterfaceAsync with
-    // AUDIOCLIENT_PROCESS_LOOPBACK) is *documented* as Windows 10 build 20348+,
-    // but in practice works on fully updated Windows 10 2004+ (build 19041):
-    // OBS's Application Audio Capture relies on exactly this API there, and we
-    // deliberately target it too (see ddoc.md). Below 2004 the activation fails
-    // or its completion callback never fires — but `activate_process_loopback_client`
-    // caps the wait at 1.5s and `add_output_audio_sources` falls back to
-    // full-system mixed output, so attempting it on an unsupported build costs at
-    // most one bounded stall. This gate only skips that pointless attempt on
-    // pre-2004 builds; do not raise it to 20348 without revisiting that tradeoff.
-    const MIN_PROCESS_LOOPBACK_BUILD: u32 = 19_041;
-    windows_build_number().is_some_and(|build| build >= MIN_PROCESS_LOOPBACK_BUILD)
-}
-
 /// The OS build number via `RtlGetVersion` (the manifest-independent source of
 /// truth). `None` if the query somehow fails.
 pub fn windows_build_number() -> Option<u32> {
@@ -122,18 +107,6 @@ pub(crate) fn pwstr_to_string_and_free(raw: PWSTR) -> Result<String, std::string
     let value = unsafe { raw.to_string() };
     unsafe { CoTaskMemFree(Some(raw.0 as *const _)) };
     value
-}
-
-pub(crate) fn pwstr_to_optional_string_and_free(
-    raw: PWSTR,
-) -> Result<Option<String>, std::string::FromUtf16Error> {
-    if raw.0.is_null() {
-        return Ok(None);
-    }
-    pwstr_to_string_and_free(raw).map(|value| {
-        let trimmed = value.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_string())
-    })
 }
 
 pub(crate) fn utf16z_from_buf(buf: &[u16]) -> String {

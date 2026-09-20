@@ -505,7 +505,7 @@
                 </div>
               </div>
             </div>
-            <div class="setting-row" data-settings-key="audio.output_enabled audio.output_device_id audio.output_volume audio.split_output_by_process">
+            <div class="setting-row" data-settings-key="audio.output_enabled audio.output_device_id audio.output_volume">
               <div class="setting-info">
                 <strong>Audio output</strong>
                 <span>Sound from the selected Windows playback device.</span>
@@ -514,10 +514,6 @@
                 <label class="check-line">
                   <input id="set-output-enabled" type="checkbox" />
                   <span>Record output audio</span>
-                </label>
-                <label class="check-line">
-                  <input id="set-audio-split-output" type="checkbox" />
-                  <span>Experimental app audio tracks</span>
                 </label>
                 <select id="set-output-device"></select>
                 <div class="volume-line">
@@ -1067,7 +1063,6 @@
               <div><strong>Audio output</strong><span>Sound from the selected Windows playback device.</span></div>
               <div class="first-run-control-stack">
                 <label class="first-run-check"><input id="first-run-output-enabled" type="checkbox" checked />Record output audio</label>
-                <label class="first-run-check"><input id="first-run-split-output" type="checkbox" />Experimental app audio tracks</label>
                 <select id="first-run-output-device" aria-label="Audio output device"><option value="">Default output device</option></select>
                 <div class="first-run-range-line">
                   <input id="first-run-output-volume" aria-label="Audio output volume" type="range" min="0" max="2" step="0.05" value="1" />

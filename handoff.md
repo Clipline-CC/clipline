@@ -4,6 +4,26 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-09-19): experimental app audio tracks withdrawn
+
+The startup-only per-process audio experiment is removed before replacing the
+single output setting with supported multi-endpoint capture. Settings and first
+run no longer expose Experimental app audio tracks; legacy
+`split_output_by_process` JSON is ignored and is not persisted again. The app
+records the selected output endpoint plus the existing optional microphone.
+
+The native process-loopback activation, render-session discovery/grouping,
+process identity recovery, public process-audio types, and the now-unused Windows
+feature bindings are deleted. Endpoint loopback, microphone capture, PCM format
+conversion, Opus encoding, and endpoint-loss recovery are unchanged. Generic
+`process_output` marker/player/publisher behavior remains so historical clips
+retain their labels and selection semantics.
+
+Plan: `docs/superpowers/plans/2026-09-19-reliable-playback-audio-sources.md`.
+The complete workspace test suite, including 250 capture tests and live local
+WASAPI recovery, passes. Fresh-cache warning-denied workspace/all-target Clippy
+is clean.
+
 ## Checkpoint (2026-09-19): experimental hybrid capture withdrawn
 
 The opt-in **Experimental game capture (no border)** backend is removed.

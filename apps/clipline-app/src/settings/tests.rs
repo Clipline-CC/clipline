@@ -24,10 +24,14 @@ fn defaults_match_current_recorder_behavior() {
     assert!(settings.audio.output_enabled);
     assert_eq!(settings.audio.output_device_id, None);
     assert_eq!(settings.audio.output_volume, 1.0);
-    assert!(!settings.audio.split_output_by_process);
     let serialized = serde_json::to_value(&settings).unwrap();
     assert_eq!(serialized["games"]["pause_when_no_game"], false);
-    assert_eq!(serialized["audio"]["split_output_by_process"], false);
+    assert!(
+        serialized["audio"]
+            .get("split_output_by_process")
+            .is_none(),
+        "removed experimental settings must not be serialized"
+    );
     assert!(!settings.audio.mic_enabled);
     assert_eq!(settings.audio.mic_device_id, None);
     assert_eq!(settings.audio.mic_volume, 1.0);
@@ -1342,7 +1346,6 @@ fn service_options_include_audio_settings() {
             output_enabled: true,
             output_device_id: Some("output-id".into()),
             output_volume: 0.75,
-            split_output_by_process: false,
             mic_enabled: true,
             mic_device_id: Some("mic-id".into()),
             mic_volume: 1.5,
@@ -1356,7 +1359,6 @@ fn service_options_include_audio_settings() {
     assert!(opts.audio.output_enabled);
     assert_eq!(opts.audio.output_device_id.as_deref(), Some("output-id"));
     assert_eq!(opts.audio.output_volume, 0.75);
-    assert!(!opts.audio.split_output_by_process);
     assert!(opts.audio.mic_enabled);
     assert_eq!(opts.audio.mic_device_id.as_deref(), Some("mic-id"));
     assert_eq!(opts.audio.mic_volume, 1.5);
@@ -1364,7 +1366,7 @@ fn service_options_include_audio_settings() {
 }
 
 #[test]
-fn load_audio_split_toggle_from_json() {
+fn load_ignores_removed_audio_split_toggle() {
     let json = r#"{
             "audio": {
                 "split_output_by_process": false
@@ -1377,7 +1379,11 @@ fn load_audio_split_toggle_from_json() {
             .unwrap(),
     );
 
-    assert!(!settings.audio.split_output_by_process);
+    assert!(settings.audio.output_enabled);
+    assert_eq!(settings.audio.output_device_id, None);
+    assert_eq!(settings.audio.output_volume, 1.0);
+    let serialized = serde_json::to_value(settings).unwrap();
+    assert!(serialized["audio"].get("split_output_by_process").is_none());
 }
 
 #[test]

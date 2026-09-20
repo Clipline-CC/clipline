@@ -235,7 +235,6 @@ function fillSettings(s) {
   $("set-games-auto-detect").checked = !!games.auto_detect;
   $("set-games-pause-when-empty").checked = !!games.pause_when_no_game;
   $("set-output-enabled").checked = !!audio.output_enabled;
-  $("set-audio-split-output").checked = audio.split_output_by_process === true;
   $("set-output-volume").value = String(Number.isFinite(audio.output_volume) ? audio.output_volume : 1);
   $("set-mic-enabled").checked = !!audio.mic_enabled;
   $("set-mic-volume").value = String(Number.isFinite(audio.mic_volume) ? audio.mic_volume : 1);
@@ -325,7 +324,6 @@ function readSettings() {
       output_enabled: $("set-output-enabled").checked,
       output_device_id: selectedDeviceId("set-output-device"),
       output_volume: Number($("set-output-volume").value),
-      split_output_by_process: $("set-audio-split-output").checked,
       mic_enabled: $("set-mic-enabled").checked,
       mic_device_id: selectedDeviceId("set-mic-device"),
       mic_volume: Number($("set-mic-volume").value),
@@ -396,7 +394,6 @@ function defaultAudioSettings() {
     output_enabled: true,
     output_device_id: null,
     output_volume: 1,
-    split_output_by_process: false,
     mic_enabled: false,
     mic_device_id: null,
     mic_volume: 1,

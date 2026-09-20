@@ -99,23 +99,6 @@ impl WasapiPcmCapture {
         )
     }
 
-    fn start_process_output(
-        clock: RelativeClock,
-        pid: u32,
-        volume: f64,
-    ) -> Result<Self, CaptureError> {
-        let identity = process_identity(pid).ok_or_else(|| {
-            CaptureError::Init(format!(
-                "WASAPI process loopback could not identify process {pid}"
-            ))
-        })?;
-        Self::start(
-            EndpointTarget::ProcessOutput { pid, identity },
-            clock,
-            volume,
-        )
-    }
-
     fn start_microphone(
         clock: RelativeClock,
         device_id: Option<&str>,
@@ -138,12 +121,6 @@ impl WasapiPcmCapture {
         volume: f64,
     ) -> Result<Self, CaptureError> {
         let device = target.activate(ActivationPhase::Initial)?;
-        if !target.process_identity_matches() {
-            device.stop();
-            return Err(CaptureError::Init(
-                "WASAPI process changed during loopback activation".into(),
-            ));
-        }
         target.record_initial_endpoint(device.endpoint_id.as_deref());
         // Anchor the audio timeline at the clock origin (recording
         // start): the gap fill turns any lead-in before the first
@@ -222,19 +199,8 @@ impl WasapiPcmCapture {
         if !self.reactivation.retry_due(now) {
             return;
         }
-        // A dead pid cannot be re-activated; check cheaply before paying
-        // for a COM activation that can block up to its timeout.
-        if !self.target.process_identity_matches() {
-            self.reactivation.note_retry_failed(Instant::now());
-            return;
-        }
         match self.target.activate(ActivationPhase::Recovery) {
             Ok(device) => {
-                if !self.target.process_identity_matches() {
-                    device.stop();
-                    self.reactivation.note_retry_failed(Instant::now());
-                    return;
-                }
                 let recovered_at = Instant::now();
                 let outage = self.reactivation.note_recovered(recovered_at);
                 self.install_device(device);
@@ -450,14 +416,6 @@ impl WasapiLoopback {
         volume: f64,
     ) -> Result<Self, CaptureError> {
         Self::from_pcm(WasapiPcmCapture::start_output(clock, device_id, volume)?)
-    }
-
-    pub fn start_process_output(
-        clock: RelativeClock,
-        pid: u32,
-        volume: f64,
-    ) -> Result<Self, CaptureError> {
-        Self::from_pcm(WasapiPcmCapture::start_process_output(clock, pid, volume)?)
     }
 
     pub fn start_microphone(
