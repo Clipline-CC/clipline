@@ -57,7 +57,3 @@ clipline-test-utils = { path = "../clipline-test-utils" }
 [[example]]
 name = "dwm_probe"
 test = true
-
-[[example]]
-name = "print_window_record"
-test = true

@@ -1,7 +1,7 @@
 use super::*;
 use crate::service::{
-    AudioChannelMode, AudioOptions, CaptureRegion, CaptureSource, ReplayStorageOptions,
-    VideoEncoder, DEFAULT_DISK_QUOTA_BYTES,
+    AudioChannelMode, AudioOptions, CaptureBackend, CaptureRegion, CaptureSource,
+    ReplayStorageOptions, VideoEncoder, DEFAULT_DISK_QUOTA_BYTES,
 };
 use crate::settings::persistence::sibling_tmp_path;
 use crate::settings::types::ReplayStorageMode;
@@ -1364,13 +1364,26 @@ fn capture_backend_defaults_to_auto() {
 }
 
 #[test]
-fn experimental_hybrid_persists_without_changing_default_backend() {
-    let settings = AppSettings { capture_backend: CaptureBackend::ExperimentalHybrid, ..AppSettings::default() };
-    let json = serde_json::to_value(&settings).unwrap();
-    assert_eq!(json["capture_backend"], "experimental_hybrid");
-    let restored: AppSettings = serde_json::from_value(json).unwrap();
-    assert_eq!(restored.to_service_options(None).unwrap().capture_backend, CaptureBackend::ExperimentalHybrid);
-    assert_eq!(AppSettings::default().capture_backend, CaptureBackend::Auto);
+fn experimental_hybrid_settings_load_as_auto() {
+    let dir = TestDir::new("clipline-settings", "withdraw-experimental-hybrid");
+    let path = dir.path().join("settings.json");
+    std::fs::write(
+        &path,
+        r#"{
+                "capture_mode": "primary_monitor",
+                "capture_backend": "experimental_hybrid",
+                "window_title": "",
+                "replay_window_s": 30.0,
+                "bitrate_mbps": 12.0,
+                "fps": 60
+            }"#,
+    )
+    .unwrap();
+
+    let settings = AppSettings::load_from(&path).unwrap();
+
+    assert_eq!(settings.capture_backend, CaptureBackend::Auto);
+    assert_eq!(settings.fps, 60);
 }
 
 #[test]

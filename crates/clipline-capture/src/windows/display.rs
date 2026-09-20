@@ -88,12 +88,6 @@ fn enumerate_display_handles() -> Result<Vec<DisplayHandle>, CaptureError> {
     enumerate_monitor_snapshot()?.finish(false)
 }
 
-/// Hybrid source guards require the complete topology, never a best-effort
-/// subset that could turn two monitors into an apparent single-monitor setup.
-pub(super) fn enumerate_complete_display_handles() -> Result<Vec<DisplayHandle>, CaptureError> {
-    enumerate_monitor_snapshot()?.finish(true)
-}
-
 #[derive(Default)]
 struct MonitorSnapshot {
     displays: Vec<DisplayHandle>,

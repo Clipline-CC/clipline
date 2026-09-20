@@ -10,7 +10,6 @@ pub enum CaptureBackend {
     Auto,
     Wgc,
     DesktopDuplication,
-    ExperimentalHybrid,
 }
 
 pub(crate) fn open_capture<T>(
@@ -18,15 +17,8 @@ pub(crate) fn open_capture<T>(
     is_window: bool,
     open_dxgi: impl FnOnce() -> Result<T, String>,
     open_wgc: impl FnOnce() -> Result<T, String>,
-    open_hybrid: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
     match backend {
-        CaptureBackend::ExperimentalHybrid => {
-            if !is_window {
-                return Err("Experimental game capture requires a window. Enable automatic game switching and start a selected game.".into());
-            }
-            open_hybrid()
-        }
         CaptureBackend::DesktopDuplication => {
             if is_window {
                 return Err("Desktop Duplication cannot capture a single window. Select a display or region and turn off automatic game switching in Settings to keep capture border-free.".into());
@@ -55,7 +47,6 @@ mod tests {
                 false,
                 || Err(error.into()),
                 || panic!("explicit border-free capture must never start WGC"),
-                || panic!("hybrid"),
             );
             assert_eq!(result, Err(error.into()));
         }
@@ -68,7 +59,6 @@ mod tests {
             true,
             || panic!("DXGI cannot isolate a window"),
             || panic!("window selection must not override the no-border choice"),
-            || panic!("hybrid"),
         )
         .unwrap_err();
         assert!(error.contains("display or region"));
@@ -81,8 +71,7 @@ mod tests {
                 CaptureBackend::DesktopDuplication,
                 false,
                 || Ok(42),
-                || panic!("WGC"),
-                || panic!("hybrid")
+                || panic!("WGC")
             ),
             Ok(42),
         );
@@ -94,13 +83,7 @@ mod tests {
             for is_window in [false, true] {
                 for result in [Ok(42), Err("WGC unavailable".into())] {
                     assert_eq!(
-                        open_capture(
-                            backend,
-                            is_window,
-                            || panic!("DXGI"),
-                            || result.clone(),
-                            || panic!("hybrid")
-                        ),
+                        open_capture(backend, is_window, || panic!("DXGI"), || result.clone()),
                         result,
                     );
                 }
@@ -109,22 +92,13 @@ mod tests {
     }
 
     #[test]
-    fn hybrid_never_opens_other_backends_or_broadens_an_unrelated_source() {
-        for is_window in [false, true] {
-            let result = open_capture::<()>(
-                CaptureBackend::ExperimentalHybrid,
-                is_window,
-                || panic!("explicit display opener"),
-                || panic!("WGC"),
-                || {
-                    assert!(is_window);
-                    Err("window worker failed".into())
-                },
-            );
-            assert!(result.is_err());
-            if is_window {
-                assert_eq!(result.unwrap_err(), "window worker failed");
-            }
-        }
+    fn withdrawn_hybrid_backend_is_not_a_capture_choice() {
+        let names = [
+            CaptureBackend::Auto,
+            CaptureBackend::Wgc,
+            CaptureBackend::DesktopDuplication,
+        ]
+        .map(|backend| format!("{backend:?}"));
+        assert!(!names.iter().any(|name| name.contains("Hybrid")));
     }
 }

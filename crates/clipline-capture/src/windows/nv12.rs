@@ -215,7 +215,7 @@ impl VideoConverter {
             },
         };
         // SAFETY: live processor; validated source/destination rectangles. Fill
-        // the entire output so freshly allocated letterbox pixels are defined.
+        // the output first so unused pixels stay defined if a blit is clipped.
         unsafe {
             self.video_context.VideoProcessorSetStreamSourceRect(
                 &self.processor,
@@ -284,15 +284,22 @@ fn conversion_rects(
         })
         .in_frame(in_w, in_h)
         .ok_or_else(|| WinError::new(E_FAIL, "source crop is outside the current frame"))?;
-    let dest = crate::video_layout::fitted_video_rect(source.width, source.height, out_w, out_h)
-        .map_err(|message| WinError::new(E_FAIL, message))?;
+    if out_w < 2
+        || out_h < 2
+        || !out_w.is_multiple_of(2)
+        || !out_h.is_multiple_of(2)
+        || out_w > i32::MAX as u32
+        || out_h > i32::MAX as u32
+    {
+        return Err(WinError::new(E_FAIL, "invalid video dimensions"));
+    }
     Ok((
         source.to_rect(),
         RECT {
-            left: dest.x as i32,
-            top: dest.y as i32,
-            right: (dest.x + dest.width) as i32,
-            bottom: (dest.y + dest.height) as i32,
+            left: 0,
+            top: 0,
+            right: out_w as i32,
+            bottom: out_h as i32,
         },
     ))
 }
@@ -560,14 +567,14 @@ mod tests {
         let (_, dest) = conversion_rects(96, 64, 64, 64, crop).unwrap();
         assert_eq!(
             (dest.left, dest.top, dest.right, dest.bottom),
-            (0, 8, 64, 56)
+            (0, 0, 64, 64)
         );
         assert!(conversion_rects(40, 24, 64, 64, crop).is_err());
         assert!(conversion_rects(0, 64, 64, 64, None).is_err());
     }
 
     #[test]
-    fn hardware_letterbox_pixels_follow_resize_and_crop() {
+    fn hardware_conversion_fills_the_output_after_resize_and_crop() {
         if std::env::var_os("CI").is_some() {
             return;
         }
@@ -585,10 +592,10 @@ mod tests {
                 return;
             }
         };
-        for (width, height, crop, expected) in [
-            (128, 64, None, (0, 16, 64, 32)),
-            (64, 128, None, (16, 0, 32, 64)),
-            (64, 64, None, (0, 0, 64, 64)),
+        for (width, height, crop) in [
+            (128, 64, None),
+            (64, 128, None),
+            (64, 64, None),
             (
                 128,
                 64,
@@ -598,7 +605,6 @@ mod tests {
                     width: 32,
                     height: 48,
                 }),
-                (10, 0, 42, 64),
             ),
         ] {
             conv.crop = crop;
@@ -611,14 +617,11 @@ mod tests {
             }
             let output = conv.convert(&src).unwrap();
             let bytes = read_nv12(&device, &output).unwrap();
-            let (left, top, w, h) = expected;
             for y in 0..64 {
                 for x in 0..64 {
-                    let inside = x >= left && x < left + w && y >= top && y < top + h;
-                    let expected_y = if inside { 235i16 } else { 16i16 };
                     assert!(
-                        (i16::from(bytes[y * 64 + x]) - expected_y).abs() <= 3,
-                        "source {width}x{height}, pixel ({x},{y}): {} expected {expected_y}",
+                        (i16::from(bytes[y * 64 + x]) - 235).abs() <= 3,
+                        "source {width}x{height}, pixel ({x},{y}): {} expected filled content",
                         bytes[y * 64 + x]
                     );
                 }
