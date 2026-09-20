@@ -105,10 +105,12 @@ fn unix_secs(time: SystemTime) -> u64 {
 }
 
 /// Whether a marker stamped at `written_unix_secs` still describes this
-/// launch. A clock that moved backwards puts the stamp in the future; count
-/// that as fresh rather than dropping a restart the user just asked for.
+/// launch. The window is symmetric: NTP correcting a fast clock between
+/// writing the marker and the relaunch puts the stamp slightly ahead, which
+/// must still count, but a stamp days ahead is a broken clock rather than a
+/// restart anyone asked for.
 pub fn update_relaunch_marker_is_fresh(written_unix_secs: u64, now: SystemTime) -> bool {
-    unix_secs(now).saturating_sub(written_unix_secs) <= UPDATE_RELAUNCH_MAX_AGE.as_secs()
+    unix_secs(now).abs_diff(written_unix_secs) <= UPDATE_RELAUNCH_MAX_AGE.as_secs()
 }
 
 pub fn request_window_on_update_relaunch_at(path: &Path, now: SystemTime) -> std::io::Result<()> {
@@ -236,10 +238,20 @@ mod tests {
     }
 
     #[test]
-    fn a_clock_that_moved_backwards_keeps_the_marker_fresh() {
+    fn a_small_backwards_clock_correction_keeps_the_marker_fresh() {
         let written = unix_secs(SystemTime::now());
-        let earlier = SystemTime::now() - Duration::from_secs(3600);
-        assert!(update_relaunch_marker_is_fresh(written, earlier));
+        let slightly_earlier = SystemTime::now() - Duration::from_secs(30);
+        assert!(update_relaunch_marker_is_fresh(written, slightly_earlier));
+    }
+
+    #[test]
+    fn a_marker_stamped_far_in_the_future_expires() {
+        // A clock set days ahead while the marker was written, then corrected
+        // back, must not leave one that survives to open the window at some
+        // unrelated later launch.
+        let now = SystemTime::now();
+        let far_future = unix_secs(now + Duration::from_secs(7 * 24 * 3600));
+        assert!(!update_relaunch_marker_is_fresh(far_future, now));
     }
 
     #[test]
