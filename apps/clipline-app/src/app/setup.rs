@@ -253,6 +253,7 @@ pub fn run() {
             crate::library::groups::reorder_group,
             crate::library::groups::remove_from_group,
             crate::library::prepare_clip_audio_sidecars,
+            crate::library::set_clip_audio_selection,
             crate::library::reveal_clip,
             crate::library::copy_clip_to_clipboard,
             crate::library::copy_text_to_clipboard,

@@ -71,6 +71,7 @@ pub(crate) fn write_audio_track_markers(source: &Path, tracks: Vec<(&str, u32, &
                 kind: Some("test".into()),
             })
             .collect(),
+        selected_audio_track_ids: None,
         plays: Vec::new(),
         markers: Vec::new(),
     };

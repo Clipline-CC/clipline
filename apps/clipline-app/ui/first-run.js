@@ -24,7 +24,6 @@ function syncFirstRunAudioFields() {
   const outputEnabled = $("first-run-output-enabled").checked;
   $("first-run-output-device").disabled = !outputEnabled;
   $("first-run-output-volume").disabled = !outputEnabled;
-  $("first-run-split-output").disabled = !outputEnabled;
   const testingHere = micTestRunning && micTestSurface === "first-run";
   $("first-run-mic-device").disabled = testingHere;
   $("first-run-mic-volume").disabled = testingHere;
@@ -100,6 +99,7 @@ function renderFirstRunCaptureTargets() {
 
 function seedFirstRunFromSettings(settings) {
   const audio = { ...defaultAudioSettings(), ...(settings.audio || {}) };
+  const output = playbackSourcesFromAudio(audio)[0] || defaultAudioSettings().playback_sources[0];
   const games = { ...defaultGameSettings(), ...(settings.games || {}) };
   const replay = Math.min(120, Math.max(5, Number(settings.replay_window_s) || 60));
   const resolution = outputResolutionOption(settings.output_resolution).id;
@@ -108,9 +108,8 @@ function seedFirstRunFromSettings(settings) {
   $("first-run-quota").value = String(settings.disk_quota_gb ?? 10);
   $("first-run-startup").checked = !!settings.open_on_startup;
   $("first-run-output-enabled").checked = !!audio.output_enabled;
-  $("first-run-split-output").checked = audio.split_output_by_process === true;
-  $("first-run-output-device").value = audio.output_device_id || "";
-  $("first-run-output-volume").value = String(audio.output_volume ?? 1);
+  $("first-run-output-device").value = output.device_id || "";
+  $("first-run-output-volume").value = String(output.volume ?? 1);
   $("first-run-mic-enabled").checked = !!audio.mic_enabled;
   $("first-run-mic-device").value = audio.mic_device_id || "";
   $("first-run-mic-volume").value = String(audio.mic_volume ?? 1);
@@ -315,7 +314,6 @@ async function applyFirstRunRecommendedSetup() {
     $("first-run-quota").value = "10";
     $("first-run-startup").checked = true;
     $("first-run-output-enabled").checked = true;
-    $("first-run-split-output").checked = false;
     $("first-run-output-device").value = "";
     $("first-run-output-volume").value = "1";
     const microphoneAvailable = audioDevices.inputs.length > 0;
@@ -479,9 +477,23 @@ function applyFirstRunFormToSettings() {
   $("set-quota").value = $("first-run-quota").value;
   $("set-open-on-startup").checked = $("first-run-startup").checked;
   $("set-output-enabled").checked = $("first-run-output-enabled").checked;
-  $("set-audio-split-output").checked = $("first-run-split-output").checked;
-  $("set-output-device").value = $("first-run-output-device").value;
-  $("set-output-volume").value = $("first-run-output-volume").value;
+  const outputDeviceId = selectedDeviceId("first-run-output-device");
+  const outputDevice = audioDevices.outputs.find((device) => device.id === outputDeviceId);
+  const firstSource = {
+    device_id: outputDeviceId,
+    label: outputDevice ? outputDevice.name : "Output Audio",
+    volume: Number($("first-run-output-volume").value),
+  };
+  const existingSources = firstRunReplay
+    ? playbackSourcesFromAudio(settingsFormSource().audio || defaultAudioSettings())
+    : [];
+  const playbackSources = outputDeviceId
+    ? [
+        firstSource,
+        ...existingSources.slice(1).filter((source) => source.device_id !== outputDeviceId),
+      ]
+    : [firstSource];
+  renderPlaybackSourceRows(playbackSources);
   $("set-mic-enabled").checked = $("first-run-mic-enabled").checked;
   $("set-mic-device").value = $("first-run-mic-device").value;
   $("set-mic-volume").value = $("first-run-mic-volume").value;
@@ -678,7 +690,7 @@ $("first-run-hotkey").addEventListener("mousedown", (event) => {
   }
 });
 
-for (const id of ["first-run-output-enabled", "first-run-split-output"]) {
+for (const id of ["first-run-output-enabled"]) {
   $(id).addEventListener("change", syncFirstRunAudioFields);
 }
 for (const id of ["first-run-output-volume", "first-run-mic-volume"]) {

@@ -176,12 +176,27 @@ pub fn encoder_label(candidate: EncoderCandidate) -> String {
     format!("{backend} · {codec}")
 }
 
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct PlaybackSource {
+    pub device_id: Option<String>,
+    pub label: String,
+    pub volume: f64,
+}
+
+impl Default for PlaybackSource {
+    fn default() -> Self {
+        Self {
+            device_id: None,
+            label: "Output Audio".into(),
+            volume: 1.0,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct AudioOptions {
     pub output_enabled: bool,
-    pub output_device_id: Option<String>,
-    pub output_volume: f64,
-    pub split_output_by_process: bool,
+    pub playback_sources: Vec<PlaybackSource>,
     pub mic_enabled: bool,
     pub mic_device_id: Option<String>,
     pub mic_volume: f64,
@@ -192,9 +207,7 @@ impl Default for AudioOptions {
     fn default() -> Self {
         Self {
             output_enabled: true,
-            output_device_id: None,
-            output_volume: 1.0,
-            split_output_by_process: false,
+            playback_sources: vec![PlaybackSource::default()],
             mic_enabled: false,
             mic_device_id: None,
             mic_volume: 1.0,

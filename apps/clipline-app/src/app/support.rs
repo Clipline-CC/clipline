@@ -311,7 +311,6 @@ pub(super) fn safe_settings(settings: &AppSettings) -> serde_json::Value {
         },
         "audio": {
             "output_enabled": settings.audio.output_enabled,
-            "split_output_by_process": settings.audio.split_output_by_process,
             "mic_enabled": settings.audio.mic_enabled,
             "mic_channels": settings.audio.mic_channels,
         },
@@ -474,12 +473,12 @@ impl BundleRedactor {
         {
             values.push(("private".into(), value));
         }
-        for value in [
-            settings.audio.output_device_id.as_deref(),
-            settings.audio.mic_device_id.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
+        for value in settings
+            .audio
+            .playback_sources
+            .iter()
+            .filter_map(|source| source.device_id.as_deref())
+            .chain(settings.audio.mic_device_id.as_deref())
         {
             values.push(("audio_device".into(), value));
         }

@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use crate::service::{
     AudioChannelMode, AudioOptions, CaptureRegion, OutputResolution, OutputResolutionBounds,
-    ReplayStorageOptions,
+    PlaybackSource, ReplayStorageOptions,
 };
 
 use super::persistence::{
@@ -97,12 +97,8 @@ impl CaptureRegionSettings {
 pub struct AudioSettings {
     #[serde(default = "default_enabled")]
     pub output_enabled: bool,
-    #[serde(default)]
-    pub output_device_id: Option<String>,
-    #[serde(default = "default_volume")]
-    pub output_volume: f64,
-    #[serde(default)]
-    pub split_output_by_process: bool,
+    #[serde(default = "default_playback_sources")]
+    pub playback_sources: Vec<PlaybackSource>,
     #[serde(default)]
     pub mic_enabled: bool,
     #[serde(default)]
@@ -113,13 +109,15 @@ pub struct AudioSettings {
     pub mic_channels: AudioChannelMode,
 }
 
+fn default_playback_sources() -> Vec<PlaybackSource> {
+    vec![PlaybackSource::default()]
+}
+
 impl Default for AudioSettings {
     fn default() -> Self {
         Self {
             output_enabled: true,
-            output_device_id: None,
-            output_volume: 1.0,
-            split_output_by_process: false,
+            playback_sources: default_playback_sources(),
             mic_enabled: false,
             mic_device_id: None,
             mic_volume: 1.0,
@@ -135,15 +133,30 @@ impl AudioSettings {
             return defaults;
         };
 
+        let legacy_device_id = optional_string_field(object, "output_device_id")
+            .flatten()
+            .filter(|id| !id.trim().is_empty());
+        let legacy_volume = f64_field(object, "output_volume")
+            .map(|value| value.clamp(0.0, MAX_AUDIO_VOLUME))
+            .unwrap_or(1.0);
+        let playback_sources = match object.get("playback_sources") {
+            Some(value) => serde_json::from_value(value.clone()).unwrap_or_else(|_| {
+                vec![PlaybackSource {
+                    device_id: Some("\0".into()),
+                    label: String::new(),
+                    volume: 1.0,
+                }]
+            }),
+            None => vec![PlaybackSource {
+                device_id: legacy_device_id,
+                label: "Output Audio".into(),
+                volume: legacy_volume,
+            }],
+        };
+
         Self {
             output_enabled: bool_field(object, "output_enabled").unwrap_or(defaults.output_enabled),
-            output_device_id: optional_string_field(object, "output_device_id")
-                .unwrap_or(defaults.output_device_id),
-            output_volume: f64_field(object, "output_volume")
-                .map(|value| value.clamp(0.0, MAX_AUDIO_VOLUME))
-                .unwrap_or(defaults.output_volume),
-            split_output_by_process: bool_field(object, "split_output_by_process")
-                .unwrap_or(defaults.split_output_by_process),
+            playback_sources,
             mic_enabled: bool_field(object, "mic_enabled").unwrap_or(defaults.mic_enabled),
             mic_device_id: optional_string_field(object, "mic_device_id")
                 .unwrap_or(defaults.mic_device_id),
@@ -158,12 +171,7 @@ impl AudioSettings {
     pub fn to_service_options(&self) -> AudioOptions {
         AudioOptions {
             output_enabled: self.output_enabled,
-            output_device_id: self
-                .output_device_id
-                .clone()
-                .filter(|id| !id.trim().is_empty()),
-            output_volume: self.output_volume,
-            split_output_by_process: self.split_output_by_process,
+            playback_sources: self.playback_sources.clone(),
             mic_enabled: self.mic_enabled,
             mic_device_id: self
                 .mic_device_id

@@ -138,6 +138,7 @@ pub(crate) fn has_marker_sidecar_content(markers: &ClipMarkers) -> bool {
         || !markers.bookmarks.is_empty()
         || markers.player_summary.is_some()
         || !markers.audio_tracks.is_empty()
+        || markers.selected_audio_track_ids.is_some()
         || !markers.plays.is_empty()
 }
 
@@ -169,6 +170,7 @@ pub(crate) fn crop_markers(markers: &ClipMarkers, start_s: f64, end_s: f64) -> C
         duration_s: end_s - start_s,
         player_summary: markers.player_summary.clone(),
         audio_tracks: markers.audio_tracks.clone(),
+        selected_audio_track_ids: markers.selected_audio_track_ids.clone(),
         plays,
         markers: cropped,
         bookmarks,
@@ -199,12 +201,20 @@ pub(crate) fn export_markers_for_range(
     end_s: f64,
     include_markers: bool,
 ) -> Result<Option<ClipMarkers>, String> {
-    if !include_markers {
-        return Ok(None);
-    }
-    let Some(markers) = util::read_markers_raw(source).map(filter_review_markers) else {
+    let Some(mut markers) = util::markers_with_inferred_audio_tracks(
+        source,
+        util::read_markers_raw(source),
+    ) else {
         return Ok(None);
     };
+    if include_markers {
+        markers = filter_review_markers(markers);
+    } else {
+        markers.player_summary = None;
+        markers.plays.clear();
+        markers.markers.clear();
+        markers.bookmarks.clear();
+    }
     let cropped = crop_markers(&markers, start_s, end_s);
     Ok(has_marker_sidecar_content(&cropped).then_some(cropped))
 }
@@ -310,6 +320,7 @@ mod tests {
                     items: Vec::new(),
                 }),
                 audio_tracks: Vec::new(),
+                selected_audio_track_ids: None,
                 plays: Vec::new(),
                 markers: vec![marker(0.5), marker(1.5), marker(2.5)],
             };
@@ -337,6 +348,7 @@ mod tests {
                 duration_s: 5.0,
                 player_summary: None,
                 audio_tracks: Vec::new(),
+                selected_audio_track_ids: None,
                 plays: Vec::new(),
                 markers: Vec::new(),
                 bookmarks: vec![
@@ -376,6 +388,7 @@ mod tests {
                     items: Vec::new(),
                 }),
                 audio_tracks: Vec::new(),
+                selected_audio_track_ids: None,
                 plays: Vec::new(),
                 markers: vec![
                     marker_with(1.0, EventKind::ChampionKill, true),
@@ -439,6 +452,7 @@ mod tests {
                     items: Vec::new(),
                 }),
                 audio_tracks: Vec::new(),
+                selected_audio_track_ids: None,
                 plays: Vec::new(),
                 markers: Vec::new(),
             };
@@ -453,6 +467,7 @@ mod tests {
                 duration_s: 20.0,
                 player_summary: None,
                 audio_tracks: Vec::new(),
+                selected_audio_track_ids: None,
                 plays: Vec::new(),
                 markers: Vec::new(),
             };
@@ -467,6 +482,7 @@ mod tests {
                 duration_s: 20.0,
                 player_summary: None,
                 audio_tracks: Vec::new(),
+                selected_audio_track_ids: None,
                 plays: vec![osu_play(2.0, Some(8.0), "score-1")],
                 markers: Vec::new(),
             };
@@ -484,6 +500,7 @@ mod tests {
                 duration_s: 20.0,
                 player_summary: None,
                 audio_tracks: Vec::new(),
+                selected_audio_track_ids: None,
                 plays: vec![osu_play(2.0, Some(8.0), "score-1")],
                 markers: Vec::new(),
             };
@@ -505,6 +522,7 @@ mod tests {
                 duration_s: 20.0,
                 player_summary: None,
                 audio_tracks: Vec::new(),
+                selected_audio_track_ids: None,
                 plays: vec![
                     osu_play(0.0, Some(2.0), "before"),
                     osu_play(2.0, Some(8.0), "overlap"),
@@ -541,6 +559,7 @@ mod tests {
                 duration_s: 20.0,
                 player_summary: None,
                 audio_tracks: tracks.clone(),
+                selected_audio_track_ids: Some(vec!["microphone".into()]),
                 plays: Vec::new(),
                 markers: Vec::new(),
             };
@@ -549,6 +568,10 @@ mod tests {
             let cropped = crop_markers(&markers, 3.0, 7.0);
 
             assert_eq!(cropped.audio_tracks, tracks);
+            assert_eq!(
+                cropped.selected_audio_track_ids,
+                Some(vec!["microphone".into()])
+            );
             assert_eq!(cropped.markers.len(), 0);
             assert!((cropped.duration_s - 4.0).abs() < 1e-9);
         }

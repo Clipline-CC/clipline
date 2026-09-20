@@ -156,22 +156,6 @@ pub(crate) fn decode_sample_bytes(
     })
 }
 
-pub(crate) fn process_loopback_format() -> WAVEFORMATEX {
-    const CHANNELS: u16 = 2;
-    const BITS_PER_SAMPLE: u16 = 16;
-    const SAMPLE_RATE: u32 = 44_100;
-    let block_align = CHANNELS * (BITS_PER_SAMPLE / 8);
-    WAVEFORMATEX {
-        wFormatTag: WAVE_FORMAT_PCM as u16,
-        nChannels: CHANNELS,
-        nSamplesPerSec: SAMPLE_RATE,
-        nAvgBytesPerSec: SAMPLE_RATE * block_align as u32,
-        nBlockAlign: block_align,
-        wBitsPerSample: BITS_PER_SAMPLE,
-        cbSize: 0,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,18 +241,4 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn process_loopback_format_matches_windows_sample_pcm16() {
-        let format = process_loopback_format();
-        let tag = format.wFormatTag;
-        let channels = format.nChannels;
-        let sample_rate = format.nSamplesPerSec;
-        let bits = format.wBitsPerSample;
-        let block_align = format.nBlockAlign;
-        assert_eq!(tag as u32, WAVE_FORMAT_PCM);
-        assert_eq!(channels, 2);
-        assert_eq!(sample_rate, 44_100);
-        assert_eq!(bits, 16);
-        assert_eq!(block_align, 4);
-    }
 }

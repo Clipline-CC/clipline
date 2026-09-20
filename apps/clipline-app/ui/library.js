@@ -131,7 +131,9 @@ function activeGroup() {
 
 function groupFingerprint(group) {
   return group && group.members
-    ? group.members.map((clip) => GalleryWindowCore.clipPathKey(clip.path)).join("\0")
+    ? group.members.map((clip) =>
+      `${GalleryWindowCore.clipPathKey(clip.path)}\x1f${defaultAudioTrackIds(clip).join("\x1e")}`
+    ).join("\0")
     : "";
 }
 
@@ -303,7 +305,7 @@ function syncGroupReviewChrome() {
   $("open-folder").title = active ? "Show current group clip in Explorer" : "Show this clip in Explorer";
   $("copy-clip").title = active
     ? "Copy group compilation to clipboard"
-    : "Copy shareable clip to clipboard (clips over 5 minutes copy the media file; Shift+click copies the original)";
+    : "Copy shareable clip to clipboard (Shift+click copies the original)";
   $("delete-clip").title = active ? "Delete group and all clips" : "Delete source clip from disk";
   if (active) simpleTrimMode = false;
 }
@@ -454,6 +456,10 @@ async function createOpenGroupCompilation() {
     setDeckStatus("exporting compilation…");
     await afterNextPaint();
     try {
+      const group = activeGroup();
+      for (const member of (group && group.members) || []) {
+        await flushAudioSelectionSave(member.path);
+      }
       const exportedClip = await invoke("export_group", { name });
       invalidateLocalClipsRefresh();
       clipsCache = [

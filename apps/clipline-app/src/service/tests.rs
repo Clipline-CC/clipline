@@ -657,30 +657,6 @@ fn clips_dir_resolved_with_probe(
         );
     }
 
-    #[test]
-    fn split_output_candidates_exclude_clipline_process() {
-        let own_pid = 42;
-        let processes = vec![
-            clipline_capture::windows::wasapi::AudioProcessInfo {
-                pid: own_pid,
-                label: "clipline-app".into(),
-                process_name: Some("clipline-app".into()),
-                process_path: Some(r"C:\Clipline\clipline-app.exe".into()),
-            },
-            clipline_capture::windows::wasapi::AudioProcessInfo {
-                pid: 99,
-                label: "Game".into(),
-                process_name: Some("Game".into()),
-                process_path: Some(r"C:\Games\Game.exe".into()),
-            },
-        ];
-
-        let candidates = split_output_process_candidates(processes, own_pid);
-
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].label, "Game");
-    }
-
     fn player_summary(champion_name: &str, kills: u32, deaths: u32, assists: u32) -> PlayerSummary {
         PlayerSummary {
             champion_name: champion_name.into(),

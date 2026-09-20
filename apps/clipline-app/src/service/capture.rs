@@ -420,7 +420,9 @@ pub(super) fn audio_sources_from_options(
 
     let mut sources = Vec::<(Box<dyn AudioSource>, ClipAudioTrack)>::new();
     if options.output_enabled {
-        add_output_audio_sources(clock, options, events, &mut sources);
+        for (source_index, source) in options.playback_sources.iter().enumerate() {
+            add_output_audio_source(clock, source, source_index, events, &mut sources);
+        }
     }
     if options.mic_enabled {
         match WasapiLoopback::start_microphone(
@@ -444,102 +446,42 @@ pub(super) fn audio_sources_from_options(
     sources
 }
 
-pub(super) fn add_output_audio_sources(
+pub(super) fn add_output_audio_source(
     clock: RelativeClock,
-    options: &AudioOptions,
+    source: &PlaybackSource,
+    source_index: usize,
     events: &Sender<Event>,
     sources: &mut Vec<(Box<dyn AudioSource>, ClipAudioTrack)>,
 ) {
-    let mut process_tracks = Vec::new();
-    let mut process_loopback_failed = false;
-    let mut process_loopback_error = None::<String>;
-    if options.split_output_by_process && process_loopback_available() {
-        match enumerate_output_processes(options.output_device_id.as_deref()) {
-            Ok(processes) => {
-                for process in split_output_process_candidates(processes, std::process::id()) {
-                    match WasapiLoopback::start_process_output(
-                        clock,
-                        process.pid,
-                        options.output_volume,
-                    ) {
-                        Ok(audio) => process_tracks.push((process, audio)),
-                        Err(e) if e.is_timeout() => {
-                            process_loopback_failed = true;
-                            process_loopback_error.get_or_insert_with(|| e.to_string());
-                            break;
-                        }
-                        Err(e) => {
-                            process_loopback_failed = true;
-                            process_loopback_error
-                                .get_or_insert_with(|| format!("{}: {e}", process.label));
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                process_loopback_failed = true;
-                process_loopback_error = Some(e.to_string());
-            }
-        }
-    }
-
-    if process_loopback_failed {
-        let detail = process_loopback_error
-            .map(|error| format!(": {error}"))
-            .unwrap_or_default();
-        warn_user(
-            events,
-            format!("some app audio tracks unavailable; adding mixed output fallback{detail}"),
-        );
-    }
-
-    let process_track_count = process_tracks.len();
-    add_mixed_output_audio_source(clock, options, events, sources);
-
-    if process_track_count > 0 {
-        for (process, audio) in process_tracks {
-            let index = sources.len() as u32;
-            let id = format!("process:{}", process.pid);
-            sources.push((
-                Box::new(audio),
-                audio_track(&id, index, &process.label, "process_output"),
-            ));
-        }
-    }
-}
-
-pub(super) fn split_output_process_candidates(
-    processes: Vec<AudioProcessInfo>,
-    own_pid: u32,
-) -> Vec<AudioProcessInfo> {
-    // Split process tracks should not include Clipline's own notification
-    // sounds. The mixed Output Audio safety track remains raw speaker loopback.
-    processes
-        .into_iter()
-        .filter(|process| process.pid != own_pid)
-        .collect()
-}
-
-pub(super) fn add_mixed_output_audio_source(
-    clock: RelativeClock,
-    options: &AudioOptions,
-    events: &Sender<Event>,
-    sources: &mut Vec<(Box<dyn AudioSource>, ClipAudioTrack)>,
-) {
-    match WasapiLoopback::start_output(
+    match WasapiLoopback::start_output_resilient(
         clock,
-        options.output_device_id.as_deref(),
-        options.output_volume,
+        source.device_id.as_deref(),
+        source.volume,
     ) {
         Ok(audio) => {
+            let audio = audio.with_diagnostic_source(format!("playback:{source_index}"));
+            if !audio.is_live() {
+                warn_user(
+                    events,
+                    format!("{} unavailable; recording silence until it returns", source.label),
+                );
+            }
             let index = sources.len() as u32;
             sources.push((
                 Box::new(audio),
-                audio_track("output", index, "Output Audio", "output"),
+                audio_track(
+                    &format!("playback:{source_index}"),
+                    index,
+                    &source.label,
+                    "playback_endpoint",
+                ),
             ));
         }
         Err(e) => {
-            warn_user(events, format!("output audio unavailable; continuing: {e}"));
+            warn_user(
+                events,
+                format!("{} unavailable; continuing: {e}", source.label),
+            );
         }
     }
 }

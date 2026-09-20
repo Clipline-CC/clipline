@@ -3,7 +3,7 @@ use boa_engine::{Context, Source};
 fn context() -> Context {
     let mut ctx = Context::default();
     ctx.eval(Source::from_bytes(
-        "function $(id) { return {addEventListener() {}}; }",
+        "function $(id) { return {addEventListener() {}}; } function defaultAudioTrackIds(clip) { return clip && clip.markers && Array.isArray(clip.markers.selected_audio_track_ids) ? clip.markers.selected_audio_track_ids : []; }",
     ))
     .unwrap();
     for source in [

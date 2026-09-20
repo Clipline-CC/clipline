@@ -62,6 +62,8 @@ mod audio_sidecars;
 mod audio_publish;
 #[path = "library/audio_preview.rs"]
 mod audio_preview;
+#[path = "library/audio_selection.rs"]
+mod audio_selection;
 #[path = "library/share.rs"]
 mod share;
 #[path = "library/status.rs"]
@@ -79,6 +81,7 @@ mod naming;
 pub(crate) mod groups;
 
 pub(crate) use audio_preview::*;
+pub(crate) use audio_selection::*;
 pub(crate) use audio_publish::*;
 pub(crate) use audio_sidecars::*;
 pub(crate) use clipboard::*;

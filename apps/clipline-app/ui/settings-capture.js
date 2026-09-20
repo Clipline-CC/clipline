@@ -155,31 +155,172 @@ function selectedDeviceId(id) {
 }
 
 function fillDeviceSelect(id, devices, defaultLabel, selectedId) {
-  const select = $(id);
+  fillDeviceSelectElement($(id), devices, defaultLabel, selectedId);
+}
+
+function fillDeviceSelectElement(
+  select,
+  devices,
+  defaultLabel,
+  selectedId,
+  { staleLabel = "Unavailable device", allowDefault = true, usedIds = new Set() } = {},
+) {
   const selected = selectedId || "";
   select.replaceChildren();
-  const def = document.createElement("option");
-  def.value = "";
-  def.textContent = defaultLabel;
-  select.appendChild(def);
+  if (allowDefault) {
+    const def = document.createElement("option");
+    def.value = "";
+    def.textContent = defaultLabel;
+    def.dataset.deviceName = "Output Audio";
+    select.appendChild(def);
+  }
   for (const device of devices) {
     const opt = document.createElement("option");
     opt.value = device.id;
     opt.textContent = device.name + (device.is_default ? " (default)" : "");
+    opt.dataset.deviceName = device.name;
+    opt.disabled = device.id !== selected && usedIds.has(device.id);
     select.appendChild(opt);
   }
   if (selected && !devices.some((device) => device.id === selected)) {
     const stale = document.createElement("option");
     stale.value = selected;
-    stale.textContent = "Unavailable device";
+    stale.textContent = `${staleLabel} (unavailable)`;
+    stale.dataset.deviceName = staleLabel;
     select.appendChild(stale);
   }
   select.value = selected;
 }
 
+const MAX_PLAYBACK_SOURCES = 16;
+
+function playbackSourcesFromAudio(audio) {
+  if (Array.isArray(audio && audio.playback_sources)) {
+    return audio.playback_sources.map((source) => ({
+      device_id: source && source.device_id ? String(source.device_id) : null,
+      label: String((source && source.label) || "Output Audio"),
+      volume: Number.isFinite(Number(source && source.volume)) ? Number(source.volume) : 1,
+    }));
+  }
+  return [{
+    device_id: audio && audio.output_device_id ? String(audio.output_device_id) : null,
+    label: "Output Audio",
+    volume: Number.isFinite(Number(audio && audio.output_volume)) ? Number(audio.output_volume) : 1,
+  }];
+}
+
+function readPlaybackSourceRows() {
+  return Array.from($("set-playback-sources").querySelectorAll(".playback-source-row"))
+    .map((row) => {
+      const select = row.querySelector("select");
+      const selected = select.selectedOptions[0];
+      return {
+        device_id: select.value || null,
+        label: selected && selected.dataset.deviceName
+          ? selected.dataset.deviceName
+          : "Output Audio",
+        volume: Number(row.querySelector("input[type='range']").value),
+      };
+    });
+}
+
+function renderPlaybackSourceRows(sources = null) {
+  const container = $("set-playback-sources");
+  const rows = sources || playbackSourcesFromAudio(
+    settingsFormSource().audio || defaultAudioSettings(),
+  );
+  const usedIds = new Set(rows.map((source) => source.device_id).filter(Boolean));
+  container.replaceChildren();
+  for (const [index, source] of rows.entries()) {
+    const row = document.createElement("div");
+    row.className = "playback-source-row";
+
+    const select = document.createElement("select");
+    select.setAttribute("aria-label", `Playback source ${index + 1}`);
+    fillDeviceSelectElement(
+      select,
+      audioDevices.outputs,
+      "Default output device",
+      source.device_id,
+      {
+        staleLabel: source.label,
+        allowDefault: rows.length === 1,
+        usedIds,
+      },
+    );
+    select.addEventListener("change", () => {
+      const next = readPlaybackSourceRows();
+      renderPlaybackSourceRows(next);
+      syncAudioFields();
+      syncSettingsDraftFromForm();
+      container.querySelectorAll("select")[index]?.focus();
+    });
+
+    const volume = document.createElement("div");
+    volume.className = "volume-line";
+    const range = document.createElement("input");
+    range.type = "range";
+    range.min = "0";
+    range.max = "2";
+    range.step = "0.05";
+    range.value = String(source.volume);
+    range.setAttribute("aria-label", `${source.label} recording volume`);
+    const summary = document.createElement("span");
+    summary.className = "setting-summary";
+    summary.textContent = volumeLabel(range.value);
+    range.addEventListener("input", () => {
+      syncRangeProgress(range);
+      summary.textContent = volumeLabel(range.value);
+    });
+    volume.append(range, summary);
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "playback-source-remove";
+    remove.textContent = "Remove";
+    remove.setAttribute("aria-label", `Remove ${source.label}`);
+    remove.addEventListener("click", () => {
+      const next = readPlaybackSourceRows();
+      next.splice(index, 1);
+      renderPlaybackSourceRows(next);
+      syncAudioFields();
+      syncSettingsDraftFromForm();
+      $("add-playback-source").focus();
+    });
+
+    row.append(select, volume, remove);
+    container.appendChild(row);
+    syncRangeProgress(range);
+  }
+}
+
+function addPlaybackSource() {
+  const sources = readPlaybackSourceRows();
+  if (sources.length >= MAX_PLAYBACK_SOURCES) {
+    $("error").textContent = `You can add up to ${MAX_PLAYBACK_SOURCES} playback sources.`;
+    return;
+  }
+  if (sources.some((source) => !source.device_id)) {
+    $("error").textContent = "Choose a specific output device before adding another source.";
+    return;
+  }
+  const used = new Set(sources.map((source) => source.device_id));
+  const device = audioDevices.outputs.find((candidate) => !used.has(candidate.id));
+  if (!device) {
+    $("error").textContent = "No additional playback devices are available.";
+    return;
+  }
+  $("error").textContent = "";
+  sources.push({ device_id: device.id, label: device.name, volume: 1 });
+  renderPlaybackSourceRows(sources);
+  syncAudioFields();
+  syncSettingsDraftFromForm();
+  $("set-playback-sources").querySelectorAll("select")[sources.length - 1]?.focus();
+}
+
 function renderAudioDeviceSelects() {
   const audio = settingsFormSource().audio || defaultAudioSettings();
-  fillDeviceSelect("set-output-device", audioDevices.outputs, "Default output device", audio.output_device_id);
+  renderPlaybackSourceRows(playbackSourcesFromAudio(audio));
   fillDeviceSelect("set-mic-device", audioDevices.inputs, "Default microphone", audio.mic_device_id);
   if (settingsIndicatorBaseline) refreshSettingsBaselineIfClean();
 }
@@ -216,18 +357,18 @@ function selectedVideoEncoder() {
 
 function syncAudioFields() {
   const outputEnabled = $("set-output-enabled").checked;
-  $("set-output-device").disabled = !outputEnabled;
-  $("set-output-volume").disabled = !outputEnabled;
-  $("set-audio-split-output").disabled = !outputEnabled;
+  $("set-playback-sources").querySelectorAll("select, input, button")
+    .forEach((control) => { control.disabled = !outputEnabled; });
+  $("add-playback-source").disabled = !outputEnabled;
   const testingHere = micTestRunning && micTestSurface === "settings";
   $("set-mic-device").disabled = testingHere;
   $("set-mic-volume").disabled = testingHere;
   $("set-mic-mono").disabled = testingHere;
   $("test-mic").disabled = false;
   $("test-mic").textContent = testingHere ? "Stop testing" : "Test mic";
-  syncRangeProgress($("set-output-volume"));
+  $("set-playback-sources").querySelectorAll("input[type='range']")
+    .forEach(syncRangeProgress);
   syncRangeProgress($("set-mic-volume"));
-  $("output-volume-summary").textContent = volumeLabel($("set-output-volume").value);
   $("mic-volume-summary").textContent = volumeLabel($("set-mic-volume").value);
   if (typeof syncFirstRunAudioFields === "function") syncFirstRunAudioFields();
 }

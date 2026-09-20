@@ -383,12 +383,14 @@ fn write_plays_sidecar(
     pending: &OsuPendingEnrichment,
     plays: Vec<ClipPlay>,
 ) -> Result<(), String> {
+    let _guard = crate::gc::lock_clip_mutations();
     let mut markers = crate::util::read_markers_raw(clip_path).unwrap_or(ClipMarkers {
         bookmarks: Vec::new(),
         recording_start_s: 0.0,
         duration_s: pending.clip_duration_s,
         player_summary: None,
         audio_tracks: Vec::new(),
+        selected_audio_track_ids: None,
         plays: Vec::new(),
         markers: Vec::new(),
     });

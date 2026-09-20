@@ -135,6 +135,7 @@ pub(crate) fn windows_clip_path_key(path: &Path) -> String {
     format!("windows:{normalized}")
 }
 
+#[cfg(test)]
 pub(crate) fn group_fingerprint(members: &[GroupMember]) -> String {
     members
         .iter()

@@ -176,6 +176,7 @@ mod tests {
                 duration_s: 42.5,
                 player_summary: None,
                 audio_tracks: Vec::new(),
+                selected_audio_track_ids: None,
                 plays: Vec::new(),
                 markers: vec![marker(1.0)],
             };

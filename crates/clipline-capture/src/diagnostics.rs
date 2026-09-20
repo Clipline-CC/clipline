@@ -2,29 +2,30 @@ use std::fmt;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CaptureDiagnostic {
     DxgiReopenFailed {
         hresult: i32,
         suppressed_since_last: u64,
     },
     WasapiDataDiscontinuity {
+        source: String,
         suppressed_since_last: u64,
     },
     WasapiLateAudioReanchored {
-        source: &'static str,
+        source: String,
         correction_ms: u64,
         total_correction_ms: u64,
         chunk_ms: u64,
         suppressed_since_last: u64,
     },
     WasapiDeviceLost {
-        source: &'static str,
+        source: String,
         hresult: i32,
         suppressed_since_last: u64,
     },
     WasapiDeviceRecovered {
-        source: &'static str,
+        source: String,
         outage_ms: u64,
     },
 }
@@ -40,10 +41,11 @@ impl fmt::Display for CaptureDiagnostic {
                 "capture event=dxgi_reopen_failed hresult=0x{hresult:08x} suppressed_since_last={suppressed_since_last} action=retry_same_output"
             ),
             Self::WasapiDataDiscontinuity {
+                source,
                 suppressed_since_last,
             } => write!(
                 formatter,
-                "capture event=wasapi_data_discontinuity suppressed_since_last={suppressed_since_last} action=audio_gap_fill_capped"
+                "capture event=wasapi_data_discontinuity source={source} suppressed_since_last={suppressed_since_last} action=audio_gap_fill_capped"
             ),
             Self::WasapiLateAudioReanchored {
                 source,
@@ -124,7 +126,7 @@ mod tests {
     #[test]
     fn device_loss_display_reports_source_hresult_and_action() {
         let event = CaptureDiagnostic::WasapiDeviceLost {
-            source: "output",
+            source: "output".into(),
             hresult: 0x88890004u32 as i32,
             suppressed_since_last: 2,
         };
@@ -139,7 +141,7 @@ mod tests {
     #[test]
     fn device_recovery_display_reports_outage_and_action() {
         let event = CaptureDiagnostic::WasapiDeviceRecovered {
-            source: "microphone",
+            source: "microphone".into(),
             outage_ms: 12_500,
         };
         let text = event.to_string();

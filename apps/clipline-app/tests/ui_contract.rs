@@ -1311,10 +1311,8 @@ fn review_player_owns_all_controls() {
         "id=\"set-backend\"",
         "id=\"backend-summary\"",
         "id=\"set-output-enabled\"",
-        "id=\"set-audio-split-output\"",
-        "id=\"set-output-device\"",
-        "id=\"set-output-volume\"",
-        "id=\"output-volume-summary\"",
+        "id=\"set-playback-sources\"",
+        "id=\"add-playback-source\"",
         "id=\"set-mic-enabled\"",
         "id=\"set-mic-device\"",
         "id=\"set-mic-volume\"",
@@ -1436,13 +1434,12 @@ fn review_player_owns_all_controls() {
         html.contains("value=\"display_region\""),
         "capture target must expose the display_region mode"
     );
-    assert!(
-        html.contains("Experimental")
-            && html.contains("set-audio-split-output")
-            && main_js().contains("split_output_by_process")
-            && main_js().contains("split_output_by_process: false"),
-        "capture settings must expose and persist the experimental audio-splitting toggle"
-    );
+    assert!(!html.contains("set-audio-split-output"));
+    assert!(!html.contains("Experimental app audio tracks"));
+    assert!(!main_js().contains("split_output_by_process"));
+    assert!(html.contains("playback-source-list"));
+    assert!(main_js().contains("renderPlaybackSourceRows"));
+    assert!(main_js().contains("playback_sources"));
     assert!(
         html.contains("Close to Tray")
             && html.contains("Minimize to Tray")
@@ -2372,7 +2369,7 @@ fn settings_marks_changed_rows_and_tabs() {
     for required in [
         "data-settings-key=\"open_on_startup\"",
         "data-settings-key=\"capture_mode capture_display_id capture_region window_title\"",
-        "data-settings-key=\"audio.output_enabled audio.output_device_id audio.output_volume audio.split_output_by_process\"",
+        "data-settings-key=\"audio.output_enabled audio.playback_sources\"",
         "data-settings-key=\"games.plugins\"",
         "data-settings-key=\"games.custom_games\"",
         "data-settings-key=\"cloud.default_visibility\"",
@@ -3086,6 +3083,22 @@ fn review_and_upload_audio_controls_render_exact_selected_ids() {
     assert!(review_panel.contains("PlayerCore.applyReviewAudioTrackToggle"));
     assert!(upload_panel.contains("PlayerCore.reviewAudioTrackRowState"));
     assert!(upload_panel.contains("PlayerCore.applyReviewAudioTrackToggle"));
+}
+
+#[test]
+fn review_audio_selection_is_persisted_before_clip_outputs() {
+    let core = read_ui_js("app-core.js");
+    let review = read_ui_js("review-clips.js");
+    let cloud = read_ui_js("cloud.js");
+    let setup = app_rs();
+
+    assert!(core.contains("selected_audio_track_ids"));
+    assert!(core.contains("invoke(\"set_clip_audio_selection\""));
+    assert!(core.contains("queueAudioSelectionSave(currentClip"));
+    assert!(review.contains("await flushAudioSelectionSave(sourceClip.path)"));
+    assert!(review.contains("await flushAudioSelectionSave(clip.path)"));
+    assert!(cloud.contains("await flushAudioSelectionSave(clip.path)"));
+    assert!(setup.contains("crate::library::set_clip_audio_selection"));
 }
 
 #[test]
@@ -5093,7 +5106,7 @@ fn clipboard_copy_distinguishes_shareable_and_original_paths() {
     );
     assert!(
         js.contains("async function copyClipToClipboard(event, clip = currentClip, originalOverride = null)")
-            && js.contains("Boolean(event?.shiftKey) || Number(clip.duration_s) > 5 * 60")
+            && js.contains("originalOverride ?? Boolean(event?.shiftKey)")
             && js.contains("original,")
             && js.contains("setDeckStatus(\"preparing shareable clip...\")")
             && js.contains("setDeckStatus(message, { transient: true })")
@@ -5257,7 +5270,6 @@ fn first_run_setup_covers_approved_defaults_and_save_flow() {
         "id=\"first-run-output-enabled\" type=\"checkbox\" checked",
         "id=\"first-run-output-device\"",
         "id=\"first-run-output-volume\"",
-        "id=\"first-run-split-output\"",
         "id=\"first-run-mic-enabled\"",
         "id=\"first-run-mic-device\"",
         "id=\"first-run-mic-volume\"",
@@ -5283,6 +5295,7 @@ fn first_run_setup_covers_approved_defaults_and_save_flow() {
             "first-run setup must include `{required}`"
         );
     }
+    assert!(!html.contains("first-run-split-output"));
 
     assert!(
         css.contains(".first-run-setup[hidden]")
@@ -5366,7 +5379,6 @@ fn first_run_setup_offers_a_one_click_recommended_preset() {
         "$(\"first-run-quota\").value = \"10\"",
         "$(\"first-run-startup\").checked = true",
         "$(\"first-run-output-enabled\").checked = true",
-        "$(\"first-run-split-output\").checked = false",
         "audioDevices.inputs.length > 0",
         "$(\"first-run-pause-no-game\").checked = true",
         "$(\"first-run-replay\").value = \"30\"",
@@ -5385,6 +5397,7 @@ fn first_run_setup_offers_a_one_click_recommended_preset() {
             "recommended preset must include `{required}`"
         );
     }
+    assert!(!wizard.contains("first-run-split-output"));
     assert!(
         !helper.contains("save_settings"),
         "recommended setup must remain a draft until Start Clipline"
@@ -5545,6 +5558,11 @@ fn replayed_first_run_setup_is_cancelable_and_preserves_hidden_settings() {
     assert!(
         wizard.contains("outputResolutionOption($(\"first-run-resolution\").value).id",),
         "Review and field syncing must normalize output resolution consistently"
+    );
+    assert!(
+        wizard.contains("existingSources.slice(1).filter")
+            && wizard.contains("renderPlaybackSourceRows(playbackSources)"),
+        "replaying first-run must not collapse advanced playback sources"
     );
 }
 

@@ -56,12 +56,12 @@ impl From<windows::core::Error> for DrainFailure {
 }
 
 struct WasapiPcmCapture {
-    client: IAudioClient,
-    capture: IAudioCaptureClient,
+    device: Option<ActivatedDevice>,
     clock: RelativeClock,
     channels: u16,
     sample_format: SampleFormat,
     mode: EndpointMode,
+    diagnostic_source: String,
     target: EndpointTarget,
     volume: f32,
     level: AudioLevelAccumulator,
@@ -99,18 +99,15 @@ impl WasapiPcmCapture {
         )
     }
 
-    fn start_process_output(
+    fn start_output_resilient(
         clock: RelativeClock,
-        pid: u32,
+        device_id: Option<&str>,
         volume: f64,
     ) -> Result<Self, CaptureError> {
-        let identity = process_identity(pid).ok_or_else(|| {
-            CaptureError::Init(format!(
-                "WASAPI process loopback could not identify process {pid}"
-            ))
-        })?;
-        Self::start(
-            EndpointTarget::ProcessOutput { pid, identity },
+        Self::start_resilient(
+            EndpointTarget::OutputLoopback {
+                device_id: device_id.map(str::to_owned),
+            },
             clock,
             volume,
         )
@@ -132,19 +129,30 @@ impl WasapiPcmCapture {
         )
     }
 
-    fn start(
-        mut target: EndpointTarget,
+    fn start(target: EndpointTarget, clock: RelativeClock, volume: f64) -> Result<Self, CaptureError> {
+        let device = target.activate()?;
+        Ok(Self::from_target(target, Some(device), clock, volume))
+    }
+
+    fn start_resilient(
+        target: EndpointTarget,
         clock: RelativeClock,
         volume: f64,
     ) -> Result<Self, CaptureError> {
-        let device = target.activate(ActivationPhase::Initial)?;
-        if !target.process_identity_matches() {
-            device.stop();
-            return Err(CaptureError::Init(
-                "WASAPI process changed during loopback activation".into(),
-            ));
-        }
-        target.record_initial_endpoint(device.endpoint_id.as_deref());
+        let device = match target.activate() {
+            Ok(device) => Some(device),
+            Err(CaptureError::DeviceLost(_)) => None,
+            Err(error) => return Err(error),
+        };
+        Ok(Self::from_target(target, device, clock, volume))
+    }
+
+    fn from_target(
+        target: EndpointTarget,
+        device: Option<ActivatedDevice>,
+        clock: RelativeClock,
+        volume: f64,
+    ) -> Self {
         // Anchor the audio timeline at the clock origin (recording
         // start): the gap fill turns any lead-in before the first
         // device buffer into silence, keeping the muxed track aligned
@@ -152,21 +160,28 @@ impl WasapiPcmCapture {
         let mut assembler = LoopbackAssembler::new();
         assembler.push_chunk(0.0, &[]);
         let mode = target.mode();
-        Ok(Self {
-            client: device.client,
-            capture: device.capture,
+        let mix = device.as_ref().map(|device| device.mix);
+        let mut reactivation = DeviceReactivation::new(DEVICE_REACTIVATION_RETRY_INTERVAL);
+        if device.is_none() {
+            reactivation.note_lost(Instant::now());
+        }
+        Self {
+            device,
             clock,
-            channels: device.mix.channels,
-            sample_format: device.mix.sample_format,
+            channels: mix.map_or(2, |mix| mix.channels),
+            sample_format: mix.map_or(SampleFormat::Float32, |mix| mix.sample_format),
             mode,
+            diagnostic_source: mode.diagnostic_label().into(),
             target,
             volume: (volume.clamp(0.0, 2.0)) as f32,
             level: AudioLevelAccumulator::default(),
-            resampler: (device.mix.sample_rate != OPUS_SAMPLE_RATE)
-                .then(|| StereoResampler::new(device.mix.sample_rate, OPUS_SAMPLE_RATE)),
+            resampler: mix.and_then(|mix| {
+                (mix.sample_rate != OPUS_SAMPLE_RATE)
+                    .then(|| StereoResampler::new(mix.sample_rate, OPUS_SAMPLE_RATE))
+            }),
             discontinuity_fade: DiscontinuityFade::new(),
             packet_timeline: DevicePacketTimeline::new(),
-            reactivation: DeviceReactivation::new(DEVICE_REACTIVATION_RETRY_INTERVAL),
+            reactivation,
             last_device_hresult: 0,
             last_device_packet_at: Instant::now(),
             assembler,
@@ -174,22 +189,22 @@ impl WasapiPcmCapture {
             discontinuity_diagnostics: DiagnosticRateLimiter::new(Duration::from_secs(30)),
             late_audio_diagnostics: DiagnosticRateLimiter::new(Duration::from_secs(30)),
             device_diagnostics: DiagnosticRateLimiter::new(Duration::from_secs(30)),
-        })
+        }
     }
 
     /// Swap in a freshly activated endpoint after device loss. The
     /// assembler and queues survive: synthesized silence covered the
     /// outage, and the next live packet re-anchors on its QPC timestamp.
     fn install_device(&mut self, device: ActivatedDevice) {
-        // SAFETY: Stop on the invalidated client is a no-op error and the
-        // fresh device is already started by `initialize_client`.
-        let _ = unsafe { self.client.Stop() };
-        self.client = device.client;
-        self.capture = device.capture;
-        self.channels = device.mix.channels;
-        self.sample_format = device.mix.sample_format;
-        self.resampler = (device.mix.sample_rate != OPUS_SAMPLE_RATE)
-            .then(|| StereoResampler::new(device.mix.sample_rate, OPUS_SAMPLE_RATE));
+        let mix = device.mix;
+        if let Some(previous) = self.device.take() {
+            previous.stop();
+        }
+        self.device = Some(device);
+        self.channels = mix.channels;
+        self.sample_format = mix.sample_format;
+        self.resampler = (mix.sample_rate != OPUS_SAMPLE_RATE)
+            .then(|| StereoResampler::new(mix.sample_rate, OPUS_SAMPLE_RATE));
         self.discontinuity_fade.restart();
         self.packet_timeline.require_timestamp_anchor();
         self.last_device_packet_at = Instant::now();
@@ -205,13 +220,13 @@ impl WasapiPcmCapture {
             // Prime the limiter so the immediate report is not duplicated.
             let _ = self.device_diagnostics.observe(now);
             emit_diagnostic(CaptureDiagnostic::WasapiDeviceLost {
-                source: self.mode.diagnostic_label(),
+                source: self.diagnostic_source.clone(),
                 hresult: code.0,
                 suppressed_since_last: 0,
             });
         } else if let Some(suppressed_since_last) = self.device_diagnostics.observe(now) {
             emit_diagnostic(CaptureDiagnostic::WasapiDeviceLost {
-                source: self.mode.diagnostic_label(),
+                source: self.diagnostic_source.clone(),
                 hresult: code.0,
                 suppressed_since_last,
             });
@@ -222,24 +237,13 @@ impl WasapiPcmCapture {
         if !self.reactivation.retry_due(now) {
             return;
         }
-        // A dead pid cannot be re-activated; check cheaply before paying
-        // for a COM activation that can block up to its timeout.
-        if !self.target.process_identity_matches() {
-            self.reactivation.note_retry_failed(Instant::now());
-            return;
-        }
-        match self.target.activate(ActivationPhase::Recovery) {
+        match self.target.activate() {
             Ok(device) => {
-                if !self.target.process_identity_matches() {
-                    device.stop();
-                    self.reactivation.note_retry_failed(Instant::now());
-                    return;
-                }
                 let recovered_at = Instant::now();
                 let outage = self.reactivation.note_recovered(recovered_at);
                 self.install_device(device);
                 emit_diagnostic(CaptureDiagnostic::WasapiDeviceRecovered {
-                    source: self.mode.diagnostic_label(),
+                    source: self.diagnostic_source.clone(),
                     outage_ms: outage.map_or(0, |outage| outage.as_millis() as u64),
                 });
             }
@@ -248,7 +252,7 @@ impl WasapiPcmCapture {
                 self.reactivation.note_retry_failed(failed_at);
                 if let Some(suppressed_since_last) = self.device_diagnostics.observe(failed_at) {
                     emit_diagnostic(CaptureDiagnostic::WasapiDeviceLost {
-                        source: self.mode.diagnostic_label(),
+                        source: self.diagnostic_source.clone(),
                         hresult: self.last_device_hresult,
                         suppressed_since_last,
                     });
@@ -307,7 +311,7 @@ impl WasapiPcmCapture {
             if let Some(suppressed_since_last) = self.late_audio_diagnostics.observe(Instant::now())
             {
                 emit_diagnostic(CaptureDiagnostic::WasapiLateAudioReanchored {
-                    source: self.mode.diagnostic_label(),
+                    source: self.diagnostic_source.clone(),
                     correction_ms: (correction_s * 1_000.0).round() as u64,
                     total_correction_ms: (outcome.total_correction_s * 1_000.0).round() as u64,
                     chunk_ms: (outcome.chunk_duration_s * 1_000.0).round() as u64,
@@ -332,24 +336,27 @@ impl WasapiPcmCapture {
     }
 
     fn drain_available_packets(&mut self) -> Result<(), DrainFailure> {
+        let Some(capture) = self.device.as_ref().map(|device| device.capture.clone()) else {
+            return Ok(());
+        };
         // SAFETY: GetBuffer/ReleaseBuffer pairs per the capture-client
         // contract; the data pointer is valid for `frames` frames until
         // ReleaseBuffer.
         unsafe {
-            while self.capture.GetNextPacketSize()? > 0 {
+            while capture.GetNextPacketSize()? > 0 {
                 self.last_device_packet_at = Instant::now();
                 let mut data = std::ptr::null_mut();
                 let mut frames = 0u32;
                 let mut flags = 0u32;
                 let mut qpc_100ns = 0u64;
-                self.capture.GetBuffer(
+                capture.GetBuffer(
                     &mut data,
                     &mut frames,
                     &mut flags,
                     None,
                     Some(&mut qpc_100ns),
                 )?;
-                let packet = WasapiPacket::new(&self.capture, frames);
+                let packet = WasapiPacket::new(&capture, frames);
                 let timestamp_valid = wasapi_timestamp_valid(flags);
                 let data_discontinuous = wasapi_data_discontinuous(flags);
                 let pts_s = timestamp_valid.then(|| self.clock.pts_s(qpc_100ns as i64));
@@ -383,6 +390,7 @@ impl WasapiPcmCapture {
                         self.discontinuity_diagnostics.observe(Instant::now())
                     {
                         emit_diagnostic(CaptureDiagnostic::WasapiDataDiscontinuity {
+                            source: self.diagnostic_source.clone(),
                             suppressed_since_last,
                         });
                     }
@@ -431,8 +439,9 @@ impl WasapiPcmCapture {
 
 impl Drop for WasapiPcmCapture {
     fn drop(&mut self) {
-        // SAFETY: Stop on a started client is always valid.
-        let _ = unsafe { self.client.Stop() };
+        if let Some(device) = self.device.take() {
+            device.stop();
+        }
     }
 }
 
@@ -452,12 +461,14 @@ impl WasapiLoopback {
         Self::from_pcm(WasapiPcmCapture::start_output(clock, device_id, volume)?)
     }
 
-    pub fn start_process_output(
+    pub fn start_output_resilient(
         clock: RelativeClock,
-        pid: u32,
+        device_id: Option<&str>,
         volume: f64,
     ) -> Result<Self, CaptureError> {
-        Self::from_pcm(WasapiPcmCapture::start_process_output(clock, pid, volume)?)
+        Self::from_pcm(WasapiPcmCapture::start_output_resilient(
+            clock, device_id, volume,
+        )?)
     }
 
     pub fn start_microphone(
@@ -481,6 +492,15 @@ impl WasapiLoopback {
 
     pub fn take_level(&mut self) -> AudioLevel {
         self.pcm.take_level()
+    }
+
+    pub fn is_live(&self) -> bool {
+        self.pcm.reactivation.is_live()
+    }
+
+    pub fn with_diagnostic_source(mut self, source: impl Into<String>) -> Self {
+        self.pcm.diagnostic_source = source.into();
+        self
     }
 
     pub fn poll_monitor_chunk(&mut self) -> Result<WasapiMonitorChunk, CaptureError> {
@@ -593,6 +613,28 @@ mod tests {
         ));
         let fatal = DrainFailure::from(windows::core::Error::from_hresult(E_FAIL));
         assert!(matches!(fatal, DrainFailure::Fatal(_)));
+    }
+
+    #[test]
+    fn unavailable_explicit_output_starts_dormant_without_default_fallback() {
+        if std::env::var_os("CI").is_some() {
+            eprintln!("SKIP: audio endpoint test");
+            return;
+        }
+        let clock = RelativeClock::new(crate::windows::qpc_now_ticks_100ns().unwrap());
+        let mut source = WasapiLoopback::start_output_resilient(
+            clock,
+            Some("clipline-missing-playback-endpoint"),
+            1.0,
+        )
+        .expect("missing endpoint becomes a dormant source");
+
+        assert!(!source.is_live(), "missing endpoint must not capture default");
+        std::thread::sleep(Duration::from_millis(120));
+        assert!(
+            !source.poll_packets(0.2).unwrap().is_empty(),
+            "dormant source must preserve its timeline with encoded silence"
+        );
     }
 
     /// Simulated endpoint invalidation: polls must keep succeeding (the

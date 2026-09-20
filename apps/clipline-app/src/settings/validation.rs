@@ -21,6 +21,9 @@ pub const MIN_ADVANCED_OUTPUT_WIDTH: u32 = 640;
 pub const MIN_ADVANCED_OUTPUT_HEIGHT: u32 = 360;
 pub const MIN_AUDIO_VOLUME: f64 = 0.0;
 pub const MAX_AUDIO_VOLUME: f64 = 2.0;
+pub const MAX_PLAYBACK_SOURCES: usize = 16;
+const MAX_AUDIO_DEVICE_ID_LEN: usize = 4096;
+const MAX_AUDIO_SOURCE_LABEL_LEN: usize = 256;
 pub const MIN_CAPTURE_REGION_SIDE: u32 = 2;
 pub const MAX_CAPTURE_REGION_SIDE: u32 = 16_384;
 
@@ -49,12 +52,7 @@ impl AppSettings {
             return Err("select a display for full-display capture".into());
         }
         self.validate_games()?;
-        validate_range(
-            "output volume",
-            self.audio.output_volume,
-            MIN_AUDIO_VOLUME,
-            MAX_AUDIO_VOLUME,
-        )?;
+        self.validate_playback_sources()?;
         validate_range(
             "microphone volume",
             self.audio.mic_volume,
@@ -205,6 +203,50 @@ impl AppSettings {
                     game.name
                 ));
             }
+        }
+        Ok(())
+    }
+
+    fn validate_playback_sources(&self) -> Result<(), String> {
+        if self.audio.playback_sources.len() > MAX_PLAYBACK_SOURCES {
+            return Err(format!(
+                "at most {MAX_PLAYBACK_SOURCES} playback sources may be configured"
+            ));
+        }
+        let mut device_ids = HashSet::new();
+        let mut default_sources = 0;
+        for source in &self.audio.playback_sources {
+            validate_range(
+                "playback source volume",
+                source.volume,
+                MIN_AUDIO_VOLUME,
+                MAX_AUDIO_VOLUME,
+            )?;
+            if source.label.trim().is_empty()
+                || source.label.contains('\0')
+                || source.label.chars().count() > MAX_AUDIO_SOURCE_LABEL_LEN
+            {
+                return Err("playback source label is invalid".into());
+            }
+            match source.device_id.as_deref() {
+                None => default_sources += 1,
+                Some(id)
+                    if id.trim().is_empty()
+                        || id.contains('\0')
+                        || id.chars().count() > MAX_AUDIO_DEVICE_ID_LEN =>
+                {
+                    return Err("playback source device id is invalid".into());
+                }
+                Some(id) if !device_ids.insert(id) => {
+                    return Err("playback source device is duplicated".into());
+                }
+                Some(_) => {}
+            }
+        }
+        if default_sources > 1
+            || (default_sources == 1 && self.audio.playback_sources.len() > 1)
+        {
+            return Err("Default output must be the only playback source".into());
         }
         Ok(())
     }
