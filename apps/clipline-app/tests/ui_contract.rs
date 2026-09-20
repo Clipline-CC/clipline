@@ -1311,9 +1311,8 @@ fn review_player_owns_all_controls() {
         "id=\"set-backend\"",
         "id=\"backend-summary\"",
         "id=\"set-output-enabled\"",
-        "id=\"set-output-device\"",
-        "id=\"set-output-volume\"",
-        "id=\"output-volume-summary\"",
+        "id=\"set-playback-sources\"",
+        "id=\"add-playback-source\"",
         "id=\"set-mic-enabled\"",
         "id=\"set-mic-device\"",
         "id=\"set-mic-volume\"",
@@ -1438,6 +1437,9 @@ fn review_player_owns_all_controls() {
     assert!(!html.contains("set-audio-split-output"));
     assert!(!html.contains("Experimental app audio tracks"));
     assert!(!main_js().contains("split_output_by_process"));
+    assert!(html.contains("playback-source-list"));
+    assert!(main_js().contains("renderPlaybackSourceRows"));
+    assert!(main_js().contains("playback_sources"));
     assert!(
         html.contains("Close to Tray")
             && html.contains("Minimize to Tray")
@@ -2367,7 +2369,7 @@ fn settings_marks_changed_rows_and_tabs() {
     for required in [
         "data-settings-key=\"open_on_startup\"",
         "data-settings-key=\"capture_mode capture_display_id capture_region window_title\"",
-        "data-settings-key=\"audio.output_enabled audio.output_device_id audio.output_volume\"",
+        "data-settings-key=\"audio.output_enabled audio.playback_sources\"",
         "data-settings-key=\"games.plugins\"",
         "data-settings-key=\"games.custom_games\"",
         "data-settings-key=\"cloud.default_visibility\"",

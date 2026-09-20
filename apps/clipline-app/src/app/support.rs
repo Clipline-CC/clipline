@@ -473,12 +473,12 @@ impl BundleRedactor {
         {
             values.push(("private".into(), value));
         }
-        for value in [
-            settings.audio.output_device_id.as_deref(),
-            settings.audio.mic_device_id.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
+        for value in settings
+            .audio
+            .playback_sources
+            .iter()
+            .filter_map(|source| source.device_id.as_deref())
+            .chain(settings.audio.mic_device_id.as_deref())
         {
             values.push(("audio_device".into(), value));
         }

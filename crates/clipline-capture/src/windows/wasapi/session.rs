@@ -21,35 +21,18 @@ impl EndpointTarget {
         }
     }
 
-    pub(crate) fn activate(&self, phase: ActivationPhase) -> Result<ActivatedDevice, CaptureError> {
+    pub(crate) fn activate(&self) -> Result<ActivatedDevice, CaptureError> {
         match self {
             Self::OutputLoopback { device_id } => activate_endpoint(
                 eRender,
                 AUDCLNT_STREAMFLAGS_LOOPBACK,
                 device_id.as_deref(),
-                selected_endpoint_fallback_allowed(device_id.as_deref(), phase),
             ),
-            Self::Microphone { device_id, .. } => activate_endpoint(
-                eCapture,
-                0,
-                device_id.as_deref(),
-                selected_endpoint_fallback_allowed(device_id.as_deref(), phase),
-            ),
+            Self::Microphone { device_id, .. } => {
+                activate_endpoint(eCapture, 0, device_id.as_deref())
+            }
         }
     }
-
-    pub(crate) fn record_initial_endpoint(&mut self, endpoint_id: Option<&str>) {
-        let selected_id = match self {
-            Self::OutputLoopback { device_id } | Self::Microphone { device_id, .. } => device_id,
-        };
-        if selected_id
-            .as_deref()
-            .is_some_and(|id| !id.trim().is_empty())
-        {
-            *selected_id = endpoint_id.map(str::to_owned);
-        }
-    }
-
 }
 
 /// A freshly activated and started WASAPI endpoint.
@@ -57,32 +40,30 @@ pub(crate) struct ActivatedDevice {
     pub(crate) client: IAudioClient,
     pub(crate) capture: IAudioCaptureClient,
     pub(crate) mix: MixFormat,
-    pub(crate) endpoint_id: Option<String>,
+}
+
+impl ActivatedDevice {
+    pub(crate) fn stop(self) {
+        // SAFETY: the client was started successfully by `initialize_client`.
+        let _ = unsafe { self.client.Stop() };
+    }
 }
 
 pub(crate) fn activate_endpoint(
     dataflow: EDataFlow,
     streamflags: u32,
     device_id: Option<&str>,
-    allow_selected_device_fallback: bool,
 ) -> Result<ActivatedDevice, CaptureError> {
     init_com()?;
     // SAFETY: standard MMDevice activation chain; all results checked.
     unsafe {
         let enumerator: IMMDeviceEnumerator =
             CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).map_err(init)?;
-        let device = endpoint_device(
-            &enumerator,
-            dataflow,
-            device_id,
-            allow_selected_device_fallback,
-        )
-        .map_err(init)?;
-        let endpoint_id = device_id_string(&device)?;
+        let device = endpoint_device(&enumerator, dataflow, device_id).map_err(|error| {
+            CaptureError::DeviceLost(format!("WASAPI endpoint unavailable: {error}"))
+        })?;
         let client: IAudioClient = device.Activate(CLSCTX_ALL, None).map_err(init)?;
-        let mut activated = initialize_client(client, streamflags, POLLING_BUFFER_DURATION_100NS)?;
-        activated.endpoint_id = Some(endpoint_id);
-        Ok(activated)
+        initialize_client(client, streamflags, POLLING_BUFFER_DURATION_100NS)
     }
 }
 
@@ -135,7 +116,6 @@ pub(crate) fn initialize_client(
             client,
             capture,
             mix,
-            endpoint_id: None,
         })
     }
 }
@@ -169,10 +149,6 @@ impl Drop for CoTaskMemWaveFormat {
     }
 }
 
-fn selected_endpoint_fallback_allowed(device_id: Option<&str>, phase: ActivationPhase) -> bool {
-    device_id.is_some_and(|id| !id.trim().is_empty()) && phase == ActivationPhase::Initial
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,38 +174,6 @@ mod tests {
                 "{fatal:?} must stay fatal"
             );
         }
-    }
-
-    #[test]
-    fn selected_endpoint_fallback_is_startup_only() {
-        assert!(selected_endpoint_fallback_allowed(
-            Some("selected-device"),
-            ActivationPhase::Initial
-        ));
-        assert!(!selected_endpoint_fallback_allowed(
-            Some("selected-device"),
-            ActivationPhase::Recovery
-        ));
-        assert!(!selected_endpoint_fallback_allowed(
-            None,
-            ActivationPhase::Initial
-        ));
-    }
-
-    #[test]
-    fn startup_fallback_tracks_the_endpoint_that_actually_activated() {
-        let mut target = EndpointTarget::OutputLoopback {
-            device_id: Some("stale-selection".into()),
-        };
-
-        target.record_initial_endpoint(Some("actual-default"));
-
-        assert!(matches!(
-            target,
-            EndpointTarget::OutputLoopback {
-                device_id: Some(ref id)
-            } if id == "actual-default"
-        ));
     }
 
     #[test]

@@ -44,12 +44,6 @@ pub(crate) enum EndpointMode {
     InputCapture(WasapiChannelMode),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ActivationPhase {
-    Initial,
-    Recovery,
-}
-
 impl EndpointMode {
     pub(crate) fn diagnostic_label(self) -> &'static str {
         match self {

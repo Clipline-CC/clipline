@@ -2346,6 +2346,27 @@ button.primary.settings-save-glow {
   min-width: 0;
 }
 
+.playback-source-list {
+  display: grid;
+  gap: 8px;
+}
+
+.playback-source-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(150px, 0.7fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.playback-source-row .volume-line {
+  grid-template-columns: minmax(0, 1fr) 42px;
+}
+
+.playback-source-remove {
+  min-width: 0;
+  padding-inline: 10px;
+}
+
 .folder-control {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

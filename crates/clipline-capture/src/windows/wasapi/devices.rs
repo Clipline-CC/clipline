@@ -32,18 +32,12 @@ pub(crate) fn endpoint_device(
     enumerator: &IMMDeviceEnumerator,
     dataflow: EDataFlow,
     device_id: Option<&str>,
-    allow_selected_device_fallback: bool,
 ) -> windows::core::Result<IMMDevice> {
     // SAFETY: the optional PCWSTR is null-terminated for the duration of GetDevice.
     unsafe {
         if let Some(id) = device_id.filter(|id| !id.trim().is_empty()) {
             let wide: Vec<u16> = id.encode_utf16().chain(std::iter::once(0)).collect();
-            let selected = enumerator.GetDevice(PCWSTR(wide.as_ptr()));
-            if allow_selected_device_fallback {
-                selected.or_else(|_| enumerator.GetDefaultAudioEndpoint(dataflow, eConsole))
-            } else {
-                selected
-            }
+            enumerator.GetDevice(PCWSTR(wide.as_ptr()))
         } else {
             enumerator.GetDefaultAudioEndpoint(dataflow, eConsole)
         }

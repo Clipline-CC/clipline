@@ -1,7 +1,7 @@
 use super::*;
 use crate::service::{
     AudioChannelMode, AudioOptions, CaptureBackend, CaptureRegion, CaptureSource,
-    ReplayStorageOptions, VideoEncoder, DEFAULT_DISK_QUOTA_BYTES,
+    PlaybackSource, ReplayStorageOptions, VideoEncoder, DEFAULT_DISK_QUOTA_BYTES,
 };
 use crate::settings::persistence::sibling_tmp_path;
 use crate::settings::types::ReplayStorageMode;
@@ -11,6 +11,14 @@ use std::path::PathBuf;
 use clipline_lol::LeagueQueueCategory;
 use clipline_test_utils::TestDir;
 use serde_json::Value;
+
+fn playback_source(device_id: Option<&str>, label: &str, volume: f64) -> PlaybackSource {
+    PlaybackSource {
+        device_id: device_id.map(str::to_string),
+        label: label.to_string(),
+        volume,
+    }
+}
 
 #[test]
 fn defaults_match_current_recorder_behavior() {
@@ -22,8 +30,7 @@ fn defaults_match_current_recorder_behavior() {
     assert!(settings.games.plugins.is_empty());
     assert!(settings.games.custom_games.is_empty());
     assert!(settings.audio.output_enabled);
-    assert_eq!(settings.audio.output_device_id, None);
-    assert_eq!(settings.audio.output_volume, 1.0);
+    assert_eq!(settings.audio.playback_sources, vec![PlaybackSource::default()]);
     let serialized = serde_json::to_value(&settings).unwrap();
     assert_eq!(serialized["games"]["pause_when_no_game"], false);
     assert!(
@@ -810,7 +817,7 @@ fn legacy_bitrate_migration_uses_output_resolution() {
 fn validation_rejects_out_of_range_audio_volume() {
     let settings = AppSettings {
         audio: AudioSettings {
-            output_volume: 2.1,
+            playback_sources: vec![playback_source(Some("output"), "Output", 2.1)],
             ..AudioSettings::default()
         },
         ..AppSettings::default()
@@ -1222,10 +1229,9 @@ fn load_repairs_invalid_fields_without_resetting_valid_neighbors() {
     assert_eq!(settings.capture_region.height, 16_384);
     assert!(!settings.audio.output_enabled);
     assert_eq!(
-        settings.audio.output_device_id.as_deref(),
-        Some("speaker-id")
+        settings.audio.playback_sources,
+        vec![playback_source(Some("speaker-id"), "Output Audio", 2.0)]
     );
-    assert_eq!(settings.audio.output_volume, 2.0);
     assert!(settings.audio.mic_enabled);
     assert_eq!(settings.audio.mic_device_id, None);
     assert_eq!(settings.audio.mic_volume, 0.0);
@@ -1344,8 +1350,10 @@ fn service_options_include_audio_settings() {
     let settings = AppSettings {
         audio: AudioSettings {
             output_enabled: true,
-            output_device_id: Some("output-id".into()),
-            output_volume: 0.75,
+            playback_sources: vec![
+                playback_source(Some("game-id"), "Game", 0.75),
+                playback_source(Some("chat-id"), "Chat", 1.25),
+            ],
             mic_enabled: true,
             mic_device_id: Some("mic-id".into()),
             mic_volume: 1.5,
@@ -1357,8 +1365,7 @@ fn service_options_include_audio_settings() {
     let opts = settings.to_service_options(None).unwrap();
 
     assert!(opts.audio.output_enabled);
-    assert_eq!(opts.audio.output_device_id.as_deref(), Some("output-id"));
-    assert_eq!(opts.audio.output_volume, 0.75);
+    assert_eq!(opts.audio.playback_sources, settings.audio.playback_sources);
     assert!(opts.audio.mic_enabled);
     assert_eq!(opts.audio.mic_device_id.as_deref(), Some("mic-id"));
     assert_eq!(opts.audio.mic_volume, 1.5);
@@ -1380,10 +1387,88 @@ fn load_ignores_removed_audio_split_toggle() {
     );
 
     assert!(settings.audio.output_enabled);
-    assert_eq!(settings.audio.output_device_id, None);
-    assert_eq!(settings.audio.output_volume, 1.0);
+    assert_eq!(settings.audio.playback_sources, vec![PlaybackSource::default()]);
     let serialized = serde_json::to_value(settings).unwrap();
     assert!(serialized["audio"].get("split_output_by_process").is_none());
+}
+
+#[test]
+fn new_playback_source_list_is_authoritative_over_legacy_output_fields() {
+    let json = r#"{
+            "audio": {
+                "output_enabled": true,
+                "output_device_id": "legacy-id",
+                "output_volume": 0.25,
+                "playback_sources": []
+            }
+        }"#;
+    let settings = AppSettings::load_from_object(
+        serde_json::from_str::<Value>(json)
+            .unwrap()
+            .as_object()
+            .unwrap(),
+    );
+
+    assert!(settings.audio.playback_sources.is_empty());
+    let serialized = serde_json::to_value(settings).unwrap();
+    assert!(serialized["audio"].get("output_device_id").is_none());
+    assert!(serialized["audio"].get("output_volume").is_none());
+}
+
+#[test]
+fn playback_source_validation_rejects_ambiguous_or_excessive_lists() {
+    let settings_with = |playback_sources| AppSettings {
+        audio: AudioSettings {
+            playback_sources,
+            ..AudioSettings::default()
+        },
+        ..AppSettings::default()
+    };
+
+    assert!(settings_with(vec![
+        playback_source(Some("same"), "Game", 1.0),
+        playback_source(Some("same"), "Chat", 1.0),
+    ])
+    .validate()
+    .is_err());
+    assert!(settings_with(vec![
+        PlaybackSource::default(),
+        playback_source(Some("chat"), "Chat", 1.0),
+    ])
+    .validate()
+    .is_err());
+    assert!(settings_with(
+        (0..16)
+            .map(|index| playback_source(Some(&format!("device-{index}")), "Audio", 1.0))
+            .collect()
+    )
+    .validate()
+    .is_ok());
+    assert!(settings_with(
+        (0..17)
+            .map(|index| playback_source(Some(&format!("device-{index}")), "Audio", 1.0))
+            .collect()
+    )
+    .validate()
+    .is_err());
+}
+
+#[test]
+fn malformed_present_playback_source_list_is_rejected_instead_of_defaulted() {
+    let dir = TestDir::new("clipline-settings", "invalid-playback-sources");
+    let path = dir.path().join("settings.json");
+    std::fs::write(
+        &path,
+        r#"{
+            "audio": {
+                "playback_sources": "not-a-list"
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let error = AppSettings::load_from(&path).unwrap_err();
+    assert!(error.contains("playback source label is invalid"), "{error}");
 }
 
 #[test]

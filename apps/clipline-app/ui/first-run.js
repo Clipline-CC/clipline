@@ -99,6 +99,7 @@ function renderFirstRunCaptureTargets() {
 
 function seedFirstRunFromSettings(settings) {
   const audio = { ...defaultAudioSettings(), ...(settings.audio || {}) };
+  const output = playbackSourcesFromAudio(audio)[0] || defaultAudioSettings().playback_sources[0];
   const games = { ...defaultGameSettings(), ...(settings.games || {}) };
   const replay = Math.min(120, Math.max(5, Number(settings.replay_window_s) || 60));
   const resolution = outputResolutionOption(settings.output_resolution).id;
@@ -107,8 +108,8 @@ function seedFirstRunFromSettings(settings) {
   $("first-run-quota").value = String(settings.disk_quota_gb ?? 10);
   $("first-run-startup").checked = !!settings.open_on_startup;
   $("first-run-output-enabled").checked = !!audio.output_enabled;
-  $("first-run-output-device").value = audio.output_device_id || "";
-  $("first-run-output-volume").value = String(audio.output_volume ?? 1);
+  $("first-run-output-device").value = output.device_id || "";
+  $("first-run-output-volume").value = String(output.volume ?? 1);
   $("first-run-mic-enabled").checked = !!audio.mic_enabled;
   $("first-run-mic-device").value = audio.mic_device_id || "";
   $("first-run-mic-volume").value = String(audio.mic_volume ?? 1);
@@ -476,8 +477,13 @@ function applyFirstRunFormToSettings() {
   $("set-quota").value = $("first-run-quota").value;
   $("set-open-on-startup").checked = $("first-run-startup").checked;
   $("set-output-enabled").checked = $("first-run-output-enabled").checked;
-  $("set-output-device").value = $("first-run-output-device").value;
-  $("set-output-volume").value = $("first-run-output-volume").value;
+  const outputDeviceId = selectedDeviceId("first-run-output-device");
+  const outputDevice = audioDevices.outputs.find((device) => device.id === outputDeviceId);
+  renderPlaybackSourceRows([{
+    device_id: outputDeviceId,
+    label: outputDevice ? outputDevice.name : "Output Audio",
+    volume: Number($("first-run-output-volume").value),
+  }]);
   $("set-mic-enabled").checked = $("first-run-mic-enabled").checked;
   $("set-mic-device").value = $("first-run-mic-device").value;
   $("set-mic-volume").value = $("first-run-mic-volume").value;

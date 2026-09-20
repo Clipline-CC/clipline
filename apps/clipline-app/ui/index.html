@@ -505,21 +505,18 @@
                 </div>
               </div>
             </div>
-            <div class="setting-row" data-settings-key="audio.output_enabled audio.output_device_id audio.output_volume">
+            <div class="setting-row" data-settings-key="audio.output_enabled audio.playback_sources">
               <div class="setting-info">
-                <strong>Audio output</strong>
-                <span>Sound from the selected Windows playback device.</span>
+                <strong>Playback audio</strong>
+                <span>Record each selected Windows playback device as a separate clip track.</span>
               </div>
               <div class="audio-control">
                 <label class="check-line">
                   <input id="set-output-enabled" type="checkbox" />
-                  <span>Record output audio</span>
+                  <span>Record playback audio</span>
                 </label>
-                <select id="set-output-device"></select>
-                <div class="volume-line">
-                  <input id="set-output-volume" type="range" min="0" max="2" step="0.05" />
-                  <span id="output-volume-summary" class="setting-summary"></span>
-                </div>
+                <div id="set-playback-sources" class="playback-source-list"></div>
+                <button id="add-playback-source" type="button">Add playback source</button>
               </div>
             </div>
             <div class="setting-row" data-settings-key="audio.mic_enabled audio.mic_device_id audio.mic_volume audio.mic_channels">

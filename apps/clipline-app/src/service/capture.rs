@@ -420,7 +420,9 @@ pub(super) fn audio_sources_from_options(
 
     let mut sources = Vec::<(Box<dyn AudioSource>, ClipAudioTrack)>::new();
     if options.output_enabled {
-        add_output_audio_source(clock, options, events, &mut sources);
+        for (source_index, source) in options.playback_sources.iter().enumerate() {
+            add_output_audio_source(clock, source, source_index, events, &mut sources);
+        }
     }
     if options.mic_enabled {
         match WasapiLoopback::start_microphone(
@@ -446,24 +448,40 @@ pub(super) fn audio_sources_from_options(
 
 pub(super) fn add_output_audio_source(
     clock: RelativeClock,
-    options: &AudioOptions,
+    source: &PlaybackSource,
+    source_index: usize,
     events: &Sender<Event>,
     sources: &mut Vec<(Box<dyn AudioSource>, ClipAudioTrack)>,
 ) {
-    match WasapiLoopback::start_output(
+    match WasapiLoopback::start_output_resilient(
         clock,
-        options.output_device_id.as_deref(),
-        options.output_volume,
+        source.device_id.as_deref(),
+        source.volume,
     ) {
         Ok(audio) => {
+            let audio = audio.with_diagnostic_source(format!("playback:{source_index}"));
+            if !audio.is_live() {
+                warn_user(
+                    events,
+                    format!("{} unavailable; recording silence until it returns", source.label),
+                );
+            }
             let index = sources.len() as u32;
             sources.push((
                 Box::new(audio),
-                audio_track("output", index, "Output Audio", "output"),
+                audio_track(
+                    &format!("playback:{source_index}"),
+                    index,
+                    &source.label,
+                    "playback_endpoint",
+                ),
             ));
         }
         Err(e) => {
-            warn_user(events, format!("output audio unavailable; continuing: {e}"));
+            warn_user(
+                events,
+                format!("{} unavailable; continuing: {e}", source.label),
+            );
         }
     }
 }

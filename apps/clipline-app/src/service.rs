@@ -71,8 +71,8 @@ use self::session::*;
 
 pub use self::config::{
     ActiveGame, AudioChannelMode, AudioOptions, CaptureBackend, CaptureRegion, CaptureSource,
-    EncoderOption, OutputResolution, OutputResolutionBounds, RecordingMode, ReplayStorageOptions,
-    VideoEncoder, available_encoder_options, encoder_label,
+    EncoderOption, OutputResolution, OutputResolutionBounds, PlaybackSource, RecordingMode,
+    ReplayStorageOptions, VideoEncoder, available_encoder_options, encoder_label,
 };
 pub use self::encoders::refresh_ffmpeg_encoder_capabilities;
 pub use self::replay::DEFAULT_DISK_QUOTA_BYTES;
