@@ -295,7 +295,6 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
         clock,
         &opts.capture_source,
         opts.capture_backend,
-        opts.active_game.as_ref().and_then(|game| game.process_id),
         events,
     )?;
     let capture_backend_status = cap.diagnostic_label();

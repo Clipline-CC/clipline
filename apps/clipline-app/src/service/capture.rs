@@ -22,11 +22,10 @@ impl TimedFrameSource for DxgiDuplicationCapture {
 }
 
 /// The live screen-capture engine, chosen at recording start. WGC is the
-/// default; explicit display duplication and the experimental hybrid are opt-in.
+/// default; explicit display duplication is opt-in.
 pub(super) enum LiveBackend {
     Wgc(WgcCapture),
     Dxgi(DxgiDuplicationCapture),
-    Hybrid(Box<clipline_capture::windows::hybrid::HybridCapture>),
 }
 
 impl LiveBackend {
@@ -34,23 +33,15 @@ impl LiveBackend {
         match self {
             Self::Wgc(_) => Box::new(|| "windows_graphics_capture"),
             Self::Dxgi(_) => Box::new(|| "desktop_duplication"),
-            Self::Hybrid(cap) => {
-                let status = cap.status();
-                Box::new(move || status.label())
-            }
         }
     }
 }
 
 impl TimedFrameSource for LiveBackend {
-    fn requires_cadence_wait(&self) -> bool {
-        matches!(self, LiveBackend::Hybrid(_))
-    }
     fn next_frame_timeout(&mut self, timeout: Duration) -> Result<Option<Frame>, CaptureError> {
         match self {
             LiveBackend::Wgc(cap) => cap.next_frame_timeout(timeout),
             LiveBackend::Dxgi(cap) => cap.next_frame_timeout(timeout),
-            LiveBackend::Hybrid(cap) => cap.next_frame_timeout(timeout),
         }
     }
 }
@@ -146,9 +137,9 @@ impl<C: TimedFrameSource> CaptureEngine for CadencedCapture<C> {
             .frame_interval
             .saturating_sub(now.saturating_duration_since(self.last_emit_wall));
         let retry_deadline = self.retry_deadline.take();
-        // The hybrid's pull worker can answer immediately. Honor a scheduled
-        // retry here instead of repeatedly repainting until the PTS catches up.
-        // Keep existing event-driven WGC/DXGI wait behavior unchanged.
+        // Pull sources that answer immediately honor a scheduled retry here
+        // instead of repeatedly repainting until the PTS catches up.
+        // Event-driven WGC/DXGI wait behavior stays unchanged.
         if self.inner.requires_cadence_wait() {
             if let Some(deadline) = retry_deadline {
                 let wait = deadline.saturating_duration_since(now).min(wall_remaining);
@@ -307,7 +298,6 @@ pub(super) fn open_screen_capture(
     clock: RelativeClock,
     source: &CaptureSource,
     backend: CaptureBackend,
-    expected_pid: Option<u32>,
     events: &Sender<Event>,
 ) -> Result<(LiveBackend, Frame), String> {
     crate::capture_policy::open_capture(
@@ -325,27 +315,6 @@ pub(super) fn open_screen_capture(
                 .map_err(|e| init(&e))?
                 .ok_or("capture ended before the first frame")?;
             Ok((LiveBackend::Wgc(cap), first))
-        },
-        || {
-            let hwnd = match source {
-                CaptureSource::WindowHandle { hwnd, .. } => *hwnd,
-                CaptureSource::WindowTitle(title) => {
-                    find_window_by_title(title)
-                        .ok_or("target window unavailable")?
-                        .0 as isize
-                }
-                _ => return Err("experimental capture requires a game window".into()),
-            };
-            let cap = clipline_capture::windows::hybrid::HybridCapture::for_window_on(
-                device.clone(),
-                hwnd,
-                expected_pid,
-                clock,
-            )
-            .map_err(|e| e.to_string())?;
-            let first = cap.seed().map_err(|e| e.to_string())?;
-            warn_user(events, "Experimental game capture: PrintWindow for windows; full display for Windows-reported fullscreen. Display capture may include overlays. Uncertain or unfocused fullscreen capture shows black video; audio continues. Fullscreen switching currently requires one monitor.".into());
-            Ok((LiveBackend::Hybrid(Box::new(cap)), first))
         },
     )
 }

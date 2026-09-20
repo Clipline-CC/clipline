@@ -4,6 +4,20 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-09-19): experimental hybrid capture withdrawn
+
+The opt-in **Experimental game capture (no border)** backend is removed.
+PrintWindow worker capture, fullscreen Desktop Duplication switching, hybrid
+status labels, and the PrintWindow example/CI runner are gone. Saved
+`experimental_hybrid` settings load as Auto.
+
+The shared CPU/GPU converter no longer letterboxes or pillarboxes to preserve
+aspect. That path ran for Auto/WGC and every encoder, not just the experiment,
+and is restored to stretch-to-fill. Named full-display selection and explicit
+Desktop Duplication stay. Direct DWM research tools stay out of the recorder.
+
+See `docs/superpowers/plans/2026-09-19-remove-experimental-hybrid.md`.
+
 ## Checkpoint (2026-09-13): Amp orb setup
 
 Fresh Amp orbs now install stable Rust with Clippy, the native build tools, and FFmpeg through

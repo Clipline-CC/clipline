@@ -41,6 +41,20 @@ fn read_ui_js(name: &str) -> String {
 }
 
 #[test]
+fn experimental_hybrid_capture_is_withdrawn() {
+    let html = index_html();
+    let settings_capture = read_ui_js("settings-capture.js");
+    assert!(
+        !html.contains("experimental_hybrid")
+            && !html.contains("Experimental game capture")
+            && !settings_capture.contains("experimental_hybrid")
+            && !settings_capture.contains("experimental_print_window")
+            && !settings_capture.contains("experimental_waiting_black"),
+        "the withdrawn hybrid backend must not remain in settings or status copy"
+    );
+}
+
+#[test]
 fn legacy_buffer_setting_mirrors_the_replay_window() {
     let html = index_html();
     let settings = settings_js();
