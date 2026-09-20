@@ -106,34 +106,42 @@ impl CpuVideoConverter {
             .checked_add(y_len / 2)
             .ok_or(CpuVideoError::SizeOverflow)?;
         let mut nv12 = vec![0u8; total_len];
+        let (y_plane, uv_plane) = nv12.split_at_mut(y_len);
+        let y_pairs = y_plane.chunks_exact_mut(out_w * 2);
+        let uv_rows = uv_plane.chunks_exact_mut(out_w);
 
-        for out_y in 0..out_h {
-            for out_x in 0..out_w {
-                let (b, g, r) = self.source_pixel(bgra, stride, out_x, out_y);
-                nv12[out_y * out_w + out_x] = rec709_limited_y(r, g, b);
-            }
-        }
-
-        for out_y in (0..out_h).step_by(2) {
-            for out_x in (0..out_w).step_by(2) {
-                let mut r_sum = 0u32;
-                let mut g_sum = 0u32;
-                let mut b_sum = 0u32;
-                for dy in 0..2 {
-                    for dx in 0..2 {
-                        let (b, g, r) = self.source_pixel(bgra, stride, out_x + dx, out_y + dy);
-                        r_sum += u32::from(r);
-                        g_sum += u32::from(g);
-                        b_sum += u32::from(b);
-                    }
-                }
-                let r = ((r_sum + 2) / 4) as u8;
-                let g = ((g_sum + 2) / 4) as u8;
-                let b = ((b_sum + 2) / 4) as u8;
+        // Sample each pixel once for both luma and chroma. Output dimensions
+        // are validated even and stretch-to-fill writes every pixel, so each
+        // iteration owns one whole 2x2 block: its four luma stores and the
+        // chroma pair they average to. Row slices bound the stores before the
+        // hot loop rather than indexing per pixel.
+        for (pair_y, (y_pair, uv_row)) in y_pairs.zip(uv_rows).enumerate() {
+            let out_y = pair_y * 2;
+            let (top_row, bottom_row) = y_pair.split_at_mut(out_w);
+            let top_pixels = top_row.as_chunks_mut::<2>().0.iter_mut();
+            let bottom_pixels = bottom_row.as_chunks_mut::<2>().0.iter_mut();
+            let chroma = uv_row.as_chunks_mut::<2>().0.iter_mut();
+            for (block_x, ((top_pixels, bottom_pixels), chroma)) in
+                top_pixels.zip(bottom_pixels).zip(chroma).enumerate()
+            {
+                let out_x = block_x * 2;
+                let (b0, g0, r0) = self.source_pixel(bgra, stride, out_x, out_y);
+                let (b1, g1, r1) = self.source_pixel(bgra, stride, out_x + 1, out_y);
+                let (b2, g2, r2) = self.source_pixel(bgra, stride, out_x, out_y + 1);
+                let (b3, g3, r3) = self.source_pixel(bgra, stride, out_x + 1, out_y + 1);
+                top_pixels[0] = rec709_limited_y(r0, g0, b0);
+                top_pixels[1] = rec709_limited_y(r1, g1, b1);
+                bottom_pixels[0] = rec709_limited_y(r2, g2, b2);
+                bottom_pixels[1] = rec709_limited_y(r3, g3, b3);
+                let r =
+                    ((u32::from(r0) + u32::from(r1) + u32::from(r2) + u32::from(r3) + 2) / 4) as u8;
+                let g =
+                    ((u32::from(g0) + u32::from(g1) + u32::from(g2) + u32::from(g3) + 2) / 4) as u8;
+                let b =
+                    ((u32::from(b0) + u32::from(b1) + u32::from(b2) + u32::from(b3) + 2) / 4) as u8;
                 let (u, v) = rec709_limited_uv(r, g, b);
-                let uv = y_len + (out_y / 2) * out_w + out_x;
-                nv12[uv] = u;
-                nv12[uv + 1] = v;
+                chroma[0] = u;
+                chroma[1] = v;
             }
         }
         Ok(nv12)
@@ -201,6 +209,19 @@ mod tests {
 
         let blue = converter.convert(&solid_bgra(2, 2, 255, 0, 0), 8).unwrap();
         assert_eq!(blue, vec![32, 32, 32, 32, 240, 118]);
+    }
+
+    #[test]
+    fn mixed_block_preserves_each_luma_and_averages_chroma() {
+        // Red/green over black/black: rounded RGB average is (64,64,0). Pins
+        // the fused block loop, which must keep all four luma samples distinct
+        // while the chroma pair averages the block.
+        let bgra = [0, 0, 255, 255, 0, 255, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255];
+        let output = CpuVideoConverter::new(2, 2, None, 2, 2)
+            .unwrap()
+            .convert(&bgra, 8)
+            .unwrap();
+        assert_eq!(output, [63, 173, 16, 16, 100, 131]);
     }
 
     #[test]
