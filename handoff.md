@@ -4,6 +4,29 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-09-20): Nightly 1.0.6 published
+
+PR #209 shipped supported multi-endpoint playback audio and removed the
+experimental per-process track feature. Follow-up PR #210 preserves unavailable
+source labels, retries recoverable WASAPI startup failures into the same dormant
+track, and snapshots compilation selections/fingerprints atomically. Both PRs
+passed Windows/Ubuntu CI and GitHub review bots before their develop merges.
+
+Release commit `a5c0aaa0a97c951e8e60dddd92966e087260d4da` is on develop and tagged
+`nightly-v1.0.6`. [Nightly Release run 35492779052](https://github.com/Clipline-CC/clipline/actions/runs/35492779052)
+passed tests, warning-denied Clippy, regular/standalone builds, signing, updater
+manifest generation, transactional promotion, and public byte verification. The
+rolling [Nightly release](https://github.com/Clipline-CC/clipline/releases/tag/nightly)
+targets that exact commit and exposes exactly seven 1.0.6 assets; public
+`latest.json` reports 1.0.6.
+
+Local prepublication checks also passed both runtime payload preflights, the full
+workspace suite, and warning-denied workspace Clippy. A standalone-config debug
+smoke used the staged WebView2 153.0.4234.48 executable and played H.264/Opus,
+HEVC, and AV1 samples through ended with 60 presented frames each; HEVC and AV1
+probe results matched playback. The smoke entrypoint/media lived only under
+ignored `target/` paths and are not release assets.
+
 ## Checkpoint (2026-09-19): supported multi-endpoint playback audio
 
 Settings > Capture now owns an ordered playback-source list instead of one
@@ -5812,7 +5835,9 @@ report describes.
    warn. A native FFmpeg decode path feeding frames to the review player would close that gap.
    Smaller follow-ups from milestone 23: bundle the lgpl-shared ffmpeg into the installer and
    revisit NVENC/QSV arg tuning (only AMF + SVT-AV1 were verified live on this RDNA2 box).
-5. **Dynamic audio-session tracking** (ddoc §10): process audio is split at recorder start; new app sessions that appear mid-recording and multi-process grouping remain next.
+5. **Multi-endpoint audio field validation:** exercise two or more physical/virtual playback
+   endpoints, unplug/replug recovery, and saved per-clip selections through share/compilation on
+   user hardware. A Sonar-style router/mixer remains a separate service scope.
 6. **Polish toward release:** display-capture privacy warning (ddoc §9), borderless-fullscreen
    guidance (§8), WebView2-destroyed-when-minimized RAM trick (§4), installer/signing (§4).
 
