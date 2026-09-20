@@ -58,11 +58,14 @@ pub(crate) fn activate_endpoint(
     // SAFETY: standard MMDevice activation chain; all results checked.
     unsafe {
         let enumerator: IMMDeviceEnumerator =
-            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).map_err(init)?;
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
+                .map_err(|error| activation_error("enumerator activation", error))?;
         let device = endpoint_device(&enumerator, dataflow, device_id).map_err(|error| {
             CaptureError::DeviceLost(format!("WASAPI endpoint unavailable: {error}"))
         })?;
-        let client: IAudioClient = device.Activate(CLSCTX_ALL, None).map_err(init)?;
+        let client: IAudioClient = device
+            .Activate(CLSCTX_ALL, None)
+            .map_err(|error| activation_error("endpoint activation", error))?;
         initialize_client(client, streamflags, POLLING_BUFFER_DURATION_100NS)
     }
 }
@@ -75,7 +78,9 @@ pub(crate) fn initialize_client(
     // SAFETY: IAudioClient initialization follows the WASAPI contract and
     // releases the mix-format allocation after Initialize consumes it.
     unsafe {
-        let format = client.GetMixFormat().map_err(init)?;
+        let format = client
+            .GetMixFormat()
+            .map_err(|error| activation_error("GetMixFormat", error))?;
         let mut format_storage = CoTaskMemWaveFormat::new(format).ok_or_else(|| {
             CaptureError::Init("WASAPI GetMixFormat returned a null format".into())
         })?;
@@ -103,14 +108,14 @@ pub(crate) fn initialize_client(
                 format_ptr,
                 None,
             )
-            .map_err(|e| CaptureError::Init(format!("WASAPI Initialize: {e}")))?;
+            .map_err(|error| activation_error("Initialize", error))?;
 
         let capture: IAudioCaptureClient = client
             .GetService()
-            .map_err(|e| CaptureError::Init(format!("WASAPI GetService: {e}")))?;
+            .map_err(|error| activation_error("GetService", error))?;
         client
             .Start()
-            .map_err(|e| CaptureError::Init(format!("WASAPI Start: {e}")))?;
+            .map_err(|error| activation_error("Start", error))?;
 
         Ok(ActivatedDevice {
             client,
@@ -127,6 +132,15 @@ pub(crate) fn wasapi_error_recoverable(code: HRESULT) -> bool {
     code == AUDCLNT_E_DEVICE_INVALIDATED
         || code == AUDCLNT_E_SERVICE_NOT_RUNNING
         || code == AUDCLNT_E_RESOURCES_INVALIDATED
+}
+
+fn activation_error(operation: &str, error: windows::core::Error) -> CaptureError {
+    let message = format!("WASAPI {operation}: {error}");
+    if wasapi_error_recoverable(error.code()) {
+        CaptureError::DeviceLost(message)
+    } else {
+        CaptureError::Init(message)
+    }
 }
 
 struct CoTaskMemWaveFormat(*mut WAVEFORMATEX);
@@ -174,6 +188,21 @@ mod tests {
                 "{fatal:?} must stay fatal"
             );
         }
+    }
+
+    #[test]
+    fn recoverable_startup_errors_create_device_loss_for_dormant_capture() {
+        let error = activation_error(
+            "Start",
+            windows::core::Error::from_hresult(AUDCLNT_E_SERVICE_NOT_RUNNING),
+        );
+        assert!(matches!(error, CaptureError::DeviceLost(message) if message.contains("Start")));
+
+        let error = activation_error(
+            "Start",
+            windows::core::Error::from_hresult(E_FAIL),
+        );
+        assert!(matches!(error, CaptureError::Init(message) if message.contains("Start")));
     }
 
     #[test]

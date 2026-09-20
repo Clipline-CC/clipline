@@ -61,12 +61,14 @@ function syncFirstRunRecordingFields() {
   ]) syncRangeProgress($(id));
 }
 
-function renderFirstRunAudioDevices() {
+function renderFirstRunAudioDevices(audio = settingsFormSource().audio || defaultAudioSettings()) {
+  const output = playbackSourcesFromAudio(audio)[0] || defaultAudioSettings().playback_sources[0];
   fillDeviceSelect(
     "first-run-output-device",
     audioDevices.outputs,
     "Default output device",
-    null,
+    output.device_id,
+    { staleLabel: output.label },
   );
   fillDeviceSelect(
     "first-run-mic-device",
@@ -479,14 +481,17 @@ function applyFirstRunFormToSettings() {
   $("set-output-enabled").checked = $("first-run-output-enabled").checked;
   const outputDeviceId = selectedDeviceId("first-run-output-device");
   const outputDevice = audioDevices.outputs.find((device) => device.id === outputDeviceId);
-  const firstSource = {
-    device_id: outputDeviceId,
-    label: outputDevice ? outputDevice.name : "Output Audio",
-    volume: Number($("first-run-output-volume").value),
-  };
   const existingSources = firstRunReplay
     ? playbackSourcesFromAudio(settingsFormSource().audio || defaultAudioSettings())
     : [];
+  const selectedOutputLabel = $("first-run-output-device").selectedOptions[0]?.dataset.deviceName;
+  const firstSource = {
+    device_id: outputDeviceId,
+    label: outputDevice
+      ? outputDevice.name
+      : selectedOutputLabel || existingSources[0]?.label || "Output Audio",
+    volume: Number($("first-run-output-volume").value),
+  };
   const playbackSources = outputDeviceId
     ? [
         firstSource,
@@ -624,7 +629,7 @@ async function openFirstRunSetup(settings, replay = false) {
   $("first-run-start-setup").focus();
   await Promise.all([ensureDisplaysLoaded(), ensureAudioDevicesLoaded()]);
   renderFirstRunCaptureTargets();
-  renderFirstRunAudioDevices();
+  renderFirstRunAudioDevices(settings.audio || defaultAudioSettings());
   if (replay) seedFirstRunFromSettings(settings);
   else syncFirstRunRecordingFields();
   return closed;
