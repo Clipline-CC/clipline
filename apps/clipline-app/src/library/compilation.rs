@@ -1,4 +1,4 @@
-use super::groups::{group_members_unrecovered, recover_group_order_transaction_unlocked, MAX_COMPILATION_CLIPS, group_members, windows_clip_path_key, GroupMember};
+use super::groups::{group_members_unrecovered, recover_group_order_transaction_unlocked, MAX_COMPILATION_CLIPS, windows_clip_path_key, GroupMember};
 use super::*;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -13,10 +13,7 @@ pub(crate) fn export_group_file(
     name: &str,
     job: &ClipboardExportJob,
 ) -> Result<ClipInfo, String> {
-    let members = group_members(root, name)?;
-    validate_compilation_size(&members)?;
-    let fingerprint = compilation_fingerprint(&members)?;
-    let inputs = compilation_inputs(&members)?;
+    let (fingerprint, inputs) = compilation_snapshot(root, name)?;
     let target = unique_compilation_path(root, name)?;
     let tmp = crate::settings::persistence::sibling_tmp_path(&target)?;
     if let Err(error) = run_compilation_ffmpeg(&inputs, &tmp, job) {
@@ -28,6 +25,19 @@ pub(crate) fn export_group_file(
         return Err("group compilation cancelled".into());
     }
     publish_group_compilation(root, name, &fingerprint, &inputs, &tmp, &target)
+}
+
+fn compilation_snapshot(
+    root: &Path,
+    name: &str,
+) -> Result<(String, Vec<CompilationInput>), String> {
+    let _guard = crate::gc::lock_clip_mutations();
+    recover_group_order_transaction_unlocked(root)?;
+    let members = group_members_unrecovered(root, name)?;
+    validate_compilation_size(&members)?;
+    let fingerprint = compilation_fingerprint(&members)?;
+    let inputs = compilation_inputs(&members)?;
+    Ok((fingerprint, inputs))
 }
 
 fn publish_group_compilation(
@@ -403,7 +413,7 @@ pub(crate) fn member_paths(members: &[GroupMember]) -> Vec<&str> {
 }
 #[cfg(test)]
 mod tests {
-    use super::super::groups::remove_from_group_file;
+    use super::super::groups::{group_members, remove_from_group_file};
     use super::groups::sort_group_members;
     use super::*;
         #[test]

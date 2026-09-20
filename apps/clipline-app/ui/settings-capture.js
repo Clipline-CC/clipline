@@ -154,8 +154,8 @@ function selectedDeviceId(id) {
   return value ? value : null;
 }
 
-function fillDeviceSelect(id, devices, defaultLabel, selectedId) {
-  fillDeviceSelectElement($(id), devices, defaultLabel, selectedId);
+function fillDeviceSelect(id, devices, defaultLabel, selectedId, options = {}) {
+  fillDeviceSelectElement($(id), devices, defaultLabel, selectedId, options);
 }
 
 function fillDeviceSelectElement(

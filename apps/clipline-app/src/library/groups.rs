@@ -85,6 +85,7 @@ pub(crate) fn canonical_group(existing: &[ClipGroup], requested: &str) -> (Strin
     (name, order)
 }
 
+#[cfg(test)]
 pub(crate) fn group_members(root: &Path, name: &str) -> Result<Vec<GroupMember>, String> {
     recover_group_order_transaction(root)?;
     group_members_unrecovered(root, name)

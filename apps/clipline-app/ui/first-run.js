@@ -61,12 +61,14 @@ function syncFirstRunRecordingFields() {
   ]) syncRangeProgress($(id));
 }
 
-function renderFirstRunAudioDevices() {
+function renderFirstRunAudioDevices(audio = settingsFormSource().audio || defaultAudioSettings()) {
+  const output = playbackSourcesFromAudio(audio)[0] || defaultAudioSettings().playback_sources[0];
   fillDeviceSelect(
     "first-run-output-device",
     audioDevices.outputs,
     "Default output device",
-    null,
+    output.device_id,
+    { staleLabel: output.label },
   );
   fillDeviceSelect(
     "first-run-mic-device",
@@ -624,7 +626,7 @@ async function openFirstRunSetup(settings, replay = false) {
   $("first-run-start-setup").focus();
   await Promise.all([ensureDisplaysLoaded(), ensureAudioDevicesLoaded()]);
   renderFirstRunCaptureTargets();
-  renderFirstRunAudioDevices();
+  renderFirstRunAudioDevices(settings.audio || defaultAudioSettings());
   if (replay) seedFirstRunFromSettings(settings);
   else syncFirstRunRecordingFields();
   return closed;
