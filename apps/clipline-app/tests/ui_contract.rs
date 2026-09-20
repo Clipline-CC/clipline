@@ -5566,7 +5566,8 @@ fn replayed_first_run_setup_is_cancelable_and_preserves_hidden_settings() {
     );
     assert!(
         wizard.contains("renderFirstRunAudioDevices(settings.audio || defaultAudioSettings())")
-            && wizard.contains("staleLabel: output.label"),
+            && wizard.contains("staleLabel: output.label")
+            && wizard.contains("selectedOptions[0]?.dataset.deviceName"),
         "replaying first-run must preserve an unavailable saved playback endpoint"
     );
 }
