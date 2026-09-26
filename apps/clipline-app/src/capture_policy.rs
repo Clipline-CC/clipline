@@ -1,33 +1,38 @@
 //! Capture selection shared by the live recorder and hardware-independent tests.
 
-/// Auto and Wgc retain Windows Graphics Capture. Explicit Desktop Duplication
-/// is a border-free display/region choice, never an isolated-window backend.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(windows, derive(serde::Deserialize, serde::Serialize))]
 #[cfg_attr(windows, serde(rename_all = "snake_case"))]
 pub enum CaptureBackend {
     #[default]
     Auto,
-    Wgc,
-    DesktopDuplication,
+    #[cfg_attr(windows, serde(alias = "wgc"))]
+    Default,
+    #[cfg_attr(windows, serde(alias = "desktop_duplication"))]
+    Fallback,
 }
 
-pub(crate) fn open_capture<T>(
-    backend: CaptureBackend,
-    is_window: bool,
-    open_dxgi: impl FnOnce() -> Result<T, String>,
-    open_wgc: impl FnOnce() -> Result<T, String>,
-) -> Result<T, String> {
-    match backend {
-        CaptureBackend::DesktopDuplication => {
-            if is_window {
-                return Err("Desktop Duplication cannot capture a single window. Select a display or region and turn off automatic game switching in Settings to keep capture border-free.".into());
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CapturePlan {
+    Wgc,
+    Dxgi,
+    FullscreenFallback,
+}
+
+impl CapturePlan {
+    pub(crate) fn for_source(
+        backend: CaptureBackend,
+        is_windows_11_or_later: bool,
+        is_window: bool,
+    ) -> Self {
+        match backend {
+            CaptureBackend::Default => Self::Wgc,
+            CaptureBackend::Auto if is_windows_11_or_later => Self::Wgc,
+            CaptureBackend::Auto | CaptureBackend::Fallback if is_window => {
+                Self::FullscreenFallback
             }
-            // The opener includes first-frame acquisition. Neither initialization
-            // nor first-frame failure may switch to a bordered capture API.
-            open_dxgi()
+            CaptureBackend::Auto | CaptureBackend::Fallback => Self::Dxgi,
         }
-        CaptureBackend::Auto | CaptureBackend::Wgc => open_wgc(),
     }
 }
 
@@ -36,69 +41,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn explicit_dxgi_never_opens_wgc_after_initialization_or_first_frame_failure() {
-        for error in [
-            "DXGI initialization failed",
-            "first frame timed out",
-            "capture ended",
-        ] {
-            let result = open_capture::<()>(
-                CaptureBackend::DesktopDuplication,
-                false,
-                || Err(error.into()),
-                || panic!("explicit border-free capture must never start WGC"),
-            );
-            assert_eq!(result, Err(error.into()));
-        }
-    }
-
-    #[test]
-    fn explicit_dxgi_rejects_windows_before_opening_either_backend() {
-        let error = open_capture::<()>(
-            CaptureBackend::DesktopDuplication,
-            true,
-            || panic!("DXGI cannot isolate a window"),
-            || panic!("window selection must not override the no-border choice"),
-        )
-        .unwrap_err();
-        assert!(error.contains("display or region"));
-    }
-
-    #[test]
-    fn explicit_dxgi_returns_its_capture() {
+    fn automatic_routes_by_windows_generation_and_source() {
         assert_eq!(
-            open_capture(
-                CaptureBackend::DesktopDuplication,
-                false,
-                || Ok(42),
-                || panic!("WGC")
-            ),
-            Ok(42),
+            CapturePlan::for_source(CaptureBackend::Auto, true, true),
+            CapturePlan::Wgc
+        );
+        assert_eq!(
+            CapturePlan::for_source(CaptureBackend::Auto, true, false),
+            CapturePlan::Wgc
+        );
+        assert_eq!(
+            CapturePlan::for_source(CaptureBackend::Auto, false, true),
+            CapturePlan::FullscreenFallback
+        );
+        assert_eq!(
+            CapturePlan::for_source(CaptureBackend::Auto, false, false),
+            CapturePlan::Dxgi
         );
     }
 
     #[test]
-    fn auto_and_wgc_preserve_success_and_errors_for_every_source() {
-        for backend in [CaptureBackend::Auto, CaptureBackend::Wgc] {
+    fn explicit_choices_ignore_windows_generation() {
+        for is_windows_11 in [false, true] {
             for is_window in [false, true] {
-                for result in [Ok(42), Err("WGC unavailable".into())] {
-                    assert_eq!(
-                        open_capture(backend, is_window, || panic!("DXGI"), || result.clone()),
-                        result,
-                    );
-                }
+                assert_eq!(
+                    CapturePlan::for_source(CaptureBackend::Default, is_windows_11, is_window),
+                    CapturePlan::Wgc
+                );
+                assert_eq!(
+                    CapturePlan::for_source(CaptureBackend::Fallback, is_windows_11, is_window),
+                    if is_window {
+                        CapturePlan::FullscreenFallback
+                    } else {
+                        CapturePlan::Dxgi
+                    }
+                );
             }
         }
-    }
-
-    #[test]
-    fn withdrawn_hybrid_backend_is_not_a_capture_choice() {
-        let names = [
-            CaptureBackend::Auto,
-            CaptureBackend::Wgc,
-            CaptureBackend::DesktopDuplication,
-        ]
-        .map(|backend| format!("{backend:?}"));
-        assert!(!names.iter().any(|name| name.contains("Hybrid")));
     }
 }

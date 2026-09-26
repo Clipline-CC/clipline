@@ -108,7 +108,8 @@ public:
 struct App {
     HWND window = nullptr;
     bool resize = true, toggleBorderless = false, toggleExclusive = false;
-    bool borderless = false, exclusive = false, flip = false;
+    bool borderless = false, exclusive = false, flip = false, silent = false;
+    ULONGLONG silentStarted = GetTickCount64();
     RECT savedRect{};
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
@@ -199,7 +200,7 @@ struct App {
         }
         RECT client{};
         GetClientRect(window, &client);
-        const double time = audio.seconds();
+        const double time = silent ? static_cast<double>(GetTickCount64() - silentStarted) / 1000 : audio.seconds();
         const bool tone = static_cast<unsigned>(time) % 2 == 0;
         const float navy[]{0, 0, 0.20f, 1}, red[]{1, 0, 0, 1}, blue[]{0, 0, 1, 1};
         const float green[]{0, 1, 0, 1}, yellow[]{1, 1, 0, 1}, white[]{1, 1, 1, 1};
@@ -277,6 +278,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command, int) {
         app.flip = wcsstr(separator ? separator + 1 : executable, L"Flip") != nullptr;
         if (wcsstr(command, L"--flip")) app.flip = true;
         if (wcsstr(command, L"--blt")) app.flip = false;
+        app.silent = wcsstr(command, L"--no-audio") != nullptr;
         app.toggleBorderless = wcsstr(command, L"--borderless") != nullptr;
         app.toggleExclusive = wcsstr(command, L"--exclusive") != nullptr;
         unsigned duration = 180;
@@ -298,7 +300,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command, int) {
         if (!app.window) throw std::runtime_error("CreateWindow failed");
         app.graphics();
         ShowWindow(app.window, SW_SHOWNORMAL);
-        app.audio.start();
+        if (!app.silent) app.audio.start();
         const ULONGLONG started = GetTickCount64();
         bool running = true;
         std::uint64_t frame = 0;
@@ -310,7 +312,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command, int) {
                 DispatchMessageW(&message);
             }
             if (!running) break;
-            app.audio.pump();
+            if (!app.silent) app.audio.pump();
             app.changeMode();
             if (IsIconic(app.window)) Sleep(5);
             else app.draw(frame++);

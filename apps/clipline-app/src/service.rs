@@ -19,8 +19,9 @@ use clipline_capture::traits::{
 use clipline_capture::windows::nv12::CropRect;
 use clipline_capture::windows::wasapi::WasapiChannelMode;
 use clipline_capture::windows::{
-    d3d11, find_window_by_title, mft_probe, window_from_raw_handle, DxgiDuplicationCapture,
-    ID3D11Device, MftConfig, MftH264Encoder, SoftwareMftH264Encoder, WasapiLoopback, WgcCapture,
+    d3d11, find_window_by_title, is_windows_11_or_later, mft_probe, window_from_raw_handle,
+    DxgiDuplicationCapture, FullscreenFallbackCapture, ID3D11Device, MftConfig, MftH264Encoder,
+    SoftwareMftH264Encoder, WasapiLoopback, WgcCapture,
 };
 use clipline_capture::{
     even_dimensions, PipelineError, Recorder, RelativeClock, ReplayStorageConfig,

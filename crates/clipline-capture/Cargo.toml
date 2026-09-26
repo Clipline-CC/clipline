@@ -11,6 +11,7 @@ clipline-mp4 = { path = "../clipline-mp4" }
 thiserror = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
+tracing = "0.1"
 windows-core = "0.62"
 windows = { version = "0.62", features = [
     "Foundation",

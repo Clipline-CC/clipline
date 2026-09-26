@@ -4,6 +4,33 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-09-25): Windows 10 fullscreen capture fallback
+
+Settings > Capture now offers Automatic (recommended), Default (Windows 11),
+and Fallback mode. Automatic uses WGC on Windows 11 and Fallback on Windows 10.
+Fallback uses WGC for an ordinary selected game window, Desktop Duplication
+while that exact foreground window's client area fills its monitor, and Desktop
+Duplication for full-display/region targets. Existing `wgc` and
+`desktop_duplication` settings migrate to the new explicit choices.
+
+The fullscreen switch releases WGC before opening Desktop Duplication and
+rechecks the window and monitor after frame acquisition. It inserts black
+transition frames so a previous desktop frame is not repeated after focus or
+geometry changes. Both sources share the recording's D3D device and clock.
+Windowed games on Windows 10 still show WGC's yellow border; fullscreen
+Desktop Duplication captures the entire monitor, including overlays, and may
+omit a hardware cursor. A game spanning more than one monitor does not meet
+the fullscreen guard.
+
+The Windows 10 Radeon 780M mock ran windowed → borderless → windowed and
+windowed → DXGI exclusive → windowed; the live probe observed WGC → black →
+Desktop Duplication → black → WGC in both. The mock now accepts `--no-audio`
+for hosts with no default playback endpoint. Workspace tests and fresh-cache
+warning-denied workspace/all-target Clippy pass. Focus loss and real games
+remain on the user test list; the automated focus probe could not move focus
+from the fullscreen mock in this session. Plan:
+`docs/superpowers/plans/2026-09-25-win10-fullscreen-fallback.md`.
+
 ## Checkpoint (2026-09-20): Nightly 1.0.6 published
 
 PR #209 shipped supported multi-endpoint playback audio and removed the
