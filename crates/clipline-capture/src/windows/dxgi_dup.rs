@@ -1,7 +1,8 @@
 //! DXGI Desktop Duplication capture (issue #42): a borderless display/region
 //! engine for Windows 10, where WGC's `SetIsBorderRequired(false)` is ignored
-//! and the yellow privacy border remains. Display/region only — window capture
-//! stays on WGC (Desktop Duplication cannot target a single window).
+//! and the yellow privacy border remains. A duplication always captures a
+//! monitor or region. The fullscreen fallback may open that monitor while a
+//! selected game covers it; windowed capture stays on WGC.
 //!
 //! Mirrors `WgcCapture`'s contracts: a caller-provided device (shared with the
 //! encoder — textures don't cross devices) and clock (shared with audio — one

@@ -1486,13 +1486,33 @@ fn service_options_include_video_encoder_choice() {
 #[test]
 fn service_options_include_capture_backend_choice() {
     let settings = AppSettings {
-        capture_backend: CaptureBackend::DesktopDuplication,
+        capture_backend: CaptureBackend::Fallback,
         ..AppSettings::default()
     };
 
     let opts = settings.to_service_options(None).unwrap();
 
-    assert_eq!(opts.capture_backend, CaptureBackend::DesktopDuplication);
+    assert_eq!(opts.capture_backend, CaptureBackend::Fallback);
+}
+
+#[test]
+fn legacy_capture_backend_values_migrate_to_the_new_choices() {
+    assert_eq!(
+        serde_json::from_str::<CaptureBackend>(r#""wgc""#).unwrap(),
+        CaptureBackend::Default
+    );
+    assert_eq!(
+        serde_json::from_str::<CaptureBackend>(r#""desktop_duplication""#).unwrap(),
+        CaptureBackend::Fallback
+    );
+    assert_eq!(
+        serde_json::to_string(&CaptureBackend::Default).unwrap(),
+        r#""default""#
+    );
+    assert_eq!(
+        serde_json::to_string(&CaptureBackend::Fallback).unwrap(),
+        r#""fallback""#
+    );
 }
 
 #[test]
