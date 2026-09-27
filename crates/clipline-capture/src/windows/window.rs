@@ -198,7 +198,7 @@ fn exe_name_from_path(path: &str) -> Option<String> {
         .map(|name| name.to_string())
 }
 
-unsafe fn window_frame_rect(hwnd: HWND) -> Option<RECT> {
+pub(super) unsafe fn window_frame_rect(hwnd: HWND) -> Option<RECT> {
     let mut frame = RECT::default();
     let dwm_frame = unsafe {
         DwmGetWindowAttribute(

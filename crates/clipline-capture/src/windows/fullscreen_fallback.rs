@@ -1,6 +1,7 @@
-//! WGC for a selected game window, Desktop Duplication while that exact window
-//! fills its monitor and is foreground. The desktop source is dropped as soon
-//! as either guard changes. Its frames are checked again after acquisition.
+//! WGC for a selected game window, Desktop Duplication while that window fills
+//! its monitor and no other app's foreground window can cover it. The desktop
+//! source is dropped as soon as either guard changes. Its frames are checked
+//! again after acquisition.
 
 use std::sync::{
     atomic::{AtomicU8, Ordering},
@@ -23,9 +24,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     IsWindowVisible,
 };
 
-use crate::fallback_policy::{accept_frame, choose, Observation, Source};
+use crate::fallback_policy::{
+    accept_frame, choose, classify_focus, Focus, Observation, ScreenRect, Source,
+};
 use crate::{CaptureError, Frame, FrameData, RelativeClock};
 
+use super::window::window_frame_rect;
 use super::{d3d11, qpc_now_ticks_100ns, DxgiDuplicationCapture, WgcCapture};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(16);
@@ -68,7 +72,7 @@ impl Snapshot {
         Self {
             observation: Observation {
                 available: false,
-                foreground: false,
+                focus: Focus::Covered,
                 covers_monitor: false,
                 display_supported: true,
             },
@@ -317,16 +321,38 @@ impl FullscreenFallbackCapture {
                 && origin.y == info.rcMonitor.top
                 && origin.x.saturating_add(width) == info.rcMonitor.right
                 && origin.y.saturating_add(height) == info.rcMonitor.bottom;
+            let foreground = GetForegroundWindow();
+            let mut foreground_process = 0;
+            let foreground_bounds = if foreground.is_invalid() {
+                None
+            } else {
+                GetWindowThreadProcessId(foreground, Some(&mut foreground_process));
+                window_frame_rect(foreground).map(screen_rect)
+            };
+            let focus = classify_focus(
+                foreground_process == self.process_id,
+                foreground_bounds,
+                screen_rect(info.rcMonitor),
+            );
             Some(Snapshot {
                 observation: Observation {
                     available: width > 0 && height > 0,
-                    foreground: GetForegroundWindow() == self.hwnd,
+                    focus,
                     covers_monitor,
                     display_supported: self.unsupported_display != Some(monitor),
                 },
                 monitor: Some(monitor),
             })
         }
+    }
+}
+
+fn screen_rect(rect: RECT) -> ScreenRect {
+    ScreenRect {
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
     }
 }
 
