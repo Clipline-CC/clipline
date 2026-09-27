@@ -9,7 +9,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{HWND, POINT, RECT};
+use windows::Win32::Foundation::{SetLastError, ERROR_SUCCESS, HWND, POINT, RECT};
 use windows::Win32::Graphics::Direct3D11::{
     ID3D11Device, ID3D11Texture2D, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE,
     D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
@@ -337,7 +337,13 @@ impl FullscreenFallbackCapture {
             if process_id != self.process_id {
                 return None;
             }
-            if !IsWindowVisible(self.hwnd).as_bool() || IsIconic(self.hwnd).as_bool() {
+            // A cloaked game (e.g. on another virtual desktop) keeps its
+            // fullscreen geometry but is not drawn; duplication would record
+            // whatever the monitor shows instead.
+            if !IsWindowVisible(self.hwnd).as_bool()
+                || IsIconic(self.hwnd).as_bool()
+                || is_cloaked(self.hwnd)
+            {
                 return Some(Snapshot::unavailable());
             }
             let monitor = MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTONULL);
@@ -401,14 +407,45 @@ impl FullscreenFallbackCapture {
 /// already rules out (the game's own, hidden, minimized, cloaked) skip the
 /// costlier style, affinity, class and bounds queries.
 fn windows_above(hwnd: HWND, game_process: u32) -> impl Iterator<Item = (HWND, WindowAbove)> {
-    // SAFETY: GetWindow only reads the z-order; stale handles end the walk.
-    let mut next = unsafe { GetWindow(hwnd, GW_HWNDPREV) }.ok();
-    std::iter::from_fn(move || {
-        let current = next?;
-        // SAFETY: as above.
-        next = unsafe { GetWindow(current, GW_HWNDPREV) }.ok();
-        Some((current, describe_window(current, game_process)))
+    let mut next = step_up(hwnd);
+    std::iter::from_fn(move || match std::mem::replace(&mut next, Step::End) {
+        Step::End => None,
+        // Unreadable bounds fail closed, so a walk that lost its place
+        // counts as covered for this poll instead of ending early.
+        Step::Lost => Some((
+            HWND::default(),
+            WindowAbove {
+                shown: true,
+                bounds: None,
+                ..WindowAbove::default()
+            },
+        )),
+        Step::Window(current) => {
+            next = step_up(current);
+            Some((current, describe_window(current, game_process)))
+        }
     })
+}
+
+enum Step {
+    Window(HWND),
+    End,
+    Lost,
+}
+
+/// `GetWindow` returns null both at the top of the stack and on failure, e.g.
+/// for a window destroyed mid-walk. Only a clean end may stop the walk.
+fn step_up(hwnd: HWND) -> Step {
+    // SAFETY: SetLastError touches only this thread's error slot; GetWindow
+    // only reads the z-order.
+    unsafe {
+        SetLastError(ERROR_SUCCESS);
+        match GetWindow(hwnd, GW_HWNDPREV) {
+            Ok(next) => Step::Window(next),
+            Err(error) if error.code().is_ok() => Step::End,
+            Err(_) => Step::Lost,
+        }
+    }
 }
 
 fn describe_window(hwnd: HWND, game_process: u32) -> WindowAbove {
@@ -599,9 +636,12 @@ mod tests {
             return;
         };
         let started = Instant::now();
-        let count = windows_above(bottom, 0).count();
+        let walked: Vec<HWND> = windows_above(bottom, 0).map(|(hwnd, _)| hwnd).collect();
         let elapsed = started.elapsed();
-        eprintln!("z-order walk: {count} windows in {elapsed:?}");
-        assert!(count < MAX_WINDOWS_ABOVE, "{count} windows");
+        eprintln!("z-order walk: {} windows in {elapsed:?}", walked.len());
+        assert!(walked.len() < MAX_WINDOWS_ABOVE, "{} windows", walked.len());
+        // A clean top of stack must end the walk, not read as a lost place
+        // (which fails closed and would black out every poll).
+        assert!(walked.iter().all(|hwnd| !hwnd.is_invalid()));
     }
 }

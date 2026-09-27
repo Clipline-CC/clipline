@@ -287,7 +287,10 @@ mod tests {
     }
 
     #[test]
-    fn windows_that_duplication_would_not_show_do_not_cover() {
+    fn intentional_exceptions_and_undrawn_windows_do_not_cover() {
+        // Hidden and capture-excluded windows never reach a duplication. The
+        // game's own windows, click-through overlays and the taskbar do; they
+        // are deliberate exceptions and are recorded as they appear.
         let ignored = [
             WindowAbove {
                 same_process: true,
