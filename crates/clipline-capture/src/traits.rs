@@ -25,6 +25,10 @@ pub enum CaptureError {
     SourceChanged(String),
     #[error("capture init failed: {0}")]
     Init(String),
+    /// The target can never be captured by this API (retrying cannot help),
+    /// e.g. a rotated or cross-GPU monitor for Desktop Duplication.
+    #[error("capture unsupported: {0}")]
+    Unsupported(String),
     #[error("capture device lost: {0}")]
     DeviceLost(String),
     #[error("no frame arrived within {0:?}")]
@@ -72,6 +76,11 @@ pub trait Encoder {
     fn finish(&mut self) -> Result<Vec<EncodedPacket>, EncodeError> {
         Ok(Vec::new())
     }
+    /// How later frames whose shape differs from the fixed output are placed.
+    /// Encoders without a BGRA→NV12 converter have nothing to place.
+    fn set_video_fit(&mut self, _fit: crate::VideoFit) -> Result<(), EncodeError> {
+        Ok(())
+    }
 }
 
 /// Lets the recorder hold a runtime-selected encoder (MFT or FFmpeg) behind
@@ -85,6 +94,9 @@ impl Encoder for Box<dyn Encoder> {
     }
     fn finish(&mut self) -> Result<Vec<EncodedPacket>, EncodeError> {
         (**self).finish()
+    }
+    fn set_video_fit(&mut self, fit: crate::VideoFit) -> Result<(), EncodeError> {
+        (**self).set_video_fit(fit)
     }
 }
 
@@ -205,6 +217,29 @@ mod tests {
         }
         let mut enc = MinimalEncoder;
         assert!(enc.finish().unwrap().is_empty());
+        // Encoders without a converter accept any fit and ignore it.
+        assert!(enc.set_video_fit(crate::VideoFit::Contain).is_ok());
+    }
+
+    #[test]
+    fn box_dyn_encoder_delegates_video_fit() {
+        struct FitEncoder(std::rc::Rc<std::cell::Cell<crate::VideoFit>>);
+        impl Encoder for FitEncoder {
+            fn encode(&mut self, _: &Frame) -> Result<Vec<EncodedPacket>, EncodeError> {
+                Ok(Vec::new())
+            }
+            fn track_config(&self) -> VideoTrackConfig {
+                VideoTrackConfig::h264(32, 32, 90_000, Vec::new(), Vec::new())
+            }
+            fn set_video_fit(&mut self, fit: crate::VideoFit) -> Result<(), EncodeError> {
+                self.0.set(fit);
+                Ok(())
+            }
+        }
+        let fit = std::rc::Rc::new(std::cell::Cell::new(crate::VideoFit::Stretch));
+        let mut enc: Box<dyn Encoder> = Box::new(FitEncoder(fit.clone()));
+        enc.set_video_fit(crate::VideoFit::Contain).unwrap();
+        assert_eq!(fit.get(), crate::VideoFit::Contain);
     }
 
     #[test]
@@ -222,6 +257,9 @@ mod tests {
         };
         assert!(err.is_timeout());
         assert!(format!("{err}").contains("process loopback activation"));
+        let err = CaptureError::Unsupported("rotated display".into());
+        assert!(format!("{err}").contains("rotated display"));
+        assert!(!err.is_timeout());
     }
 
     #[test]

@@ -88,6 +88,11 @@ fn enumerate_display_handles() -> Result<Vec<DisplayHandle>, CaptureError> {
     enumerate_monitor_snapshot()?.finish(false)
 }
 
+/// Every attached monitor, or an error if any one could not be read.
+pub(super) fn complete_display_handles() -> Result<Vec<DisplayHandle>, CaptureError> {
+    enumerate_monitor_snapshot()?.finish(true)
+}
+
 #[derive(Default)]
 struct MonitorSnapshot {
     displays: Vec<DisplayHandle>,

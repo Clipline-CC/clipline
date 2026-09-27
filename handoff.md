@@ -4,6 +4,81 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-09-25): Windows 10 fullscreen capture fallback
+
+Settings > Capture now offers Automatic (recommended), Windows Graphics
+Capture, and Fallback mode. Automatic uses WGC on Windows 11 and Fallback on
+Windows 10. Fallback uses WGC for an ordinary selected game window, Desktop
+Duplication while that window's client area fills its monitor, and Desktop
+Duplication for full-display/region targets. Saved `wgc` stays WGC and saved
+`desktop_duplication` loads as Fallback.
+
+The fullscreen switch releases WGC before opening Desktop Duplication and
+rechecks the window and monitor after frame acquisition. It inserts black
+transition frames so a previous desktop frame is not repeated after focus or
+geometry changes. Both sources share the recording's D3D device and clock.
+Windowed games on Windows 10 still show WGC's yellow border; fullscreen
+Desktop Duplication captures the entire monitor, including overlays, and may
+omit a hardware cursor.
+
+PR #211 review follow-ups, all in the same PR:
+- **Unsupported monitors.** Desktop Duplication reports rotated and cross-GPU
+  monitors as `CaptureError::Unsupported`. Automatic on Windows 10 retries such
+  a display/region target with WGC; explicit Fallback mode does not. In the
+  switcher, an Unsupported monitor keeps the game on WGC for the rest of the
+  recording. Other duplication failures keep the 5 s retry budget.
+- **Cover guard.** Instead of checking focus, each poll walks the top-level
+  windows stacked above the game (`GW_HWNDPREV`, capped at 4096, deeper fails
+  closed) and forces black when another process's shown window reaches the
+  game's monitor. Ignored: the game's own windows, hidden/minimized/DWM-cloaked
+  windows, click-through layered overlays, display-affinity-excluded windows,
+  and the taskbar. A second-monitor browser no longer blanks the recording;
+  always-on-top and unfocused popups over the game now do. Transitions log
+  `fullscreen_capture_covered` with the covering window's class and pid. On the
+  dev desktop a full walk is 203 windows in 0.57 ms (debug), and only real app
+  windows counted. Windows 10 toasts are not in the `EnumWindows` list at all
+  (verified with a live toast), so notifications and system overlays still
+  reach fullscreen recordings. Click-through overlays are recorded on purpose:
+  always-present transparent layers (tao's 16x16 helpers, NVIDIA's overlay)
+  would otherwise black out every session, and Windows cannot report whether a
+  per-pixel-alpha layer draws anything (Greptile P1, GPT-6-Astra advisor
+  agreed). The guard is best-effort; the Automatic and Fallback settings copy
+  says the display is recorded whole. A cloaked game (another virtual desktop)
+  counts as unavailable, and a `GetWindow` failure mid-walk (checked via
+  `SetLastError`) fails closed instead of ending the walk. Follow-up: a
+  first-use notice for whole-display capture.
+- **Fullscreen guard.** A client that contains its monitor counts as fullscreen,
+  including a few pixels of overhang, unless the overhang reaches another
+  monitor.
+- **Output size.** The fallback records at its monitor's size (taken when
+  capture opens) with the opt-in `VideoFit::Contain` letterbox restored from
+  `380a392`, set through the new `Encoder::set_video_fit`. Every other capture
+  keeps stretch-to-fill. The canvas-sized black frame exists from the start, so
+  a game that is fullscreen but covered at start no longer fails the
+  first-frame wait.
+
+The Windows 10 Radeon 780M mock ran windowed → borderless → windowed and
+windowed → DXGI exclusive → windowed; the live probe observed WGC → black →
+Desktop Duplication → black → WGC in both. The mock now accepts `--no-audio`
+for hosts with no default playback endpoint.
+
+Final live probe (2026-09-27, all follow-ups, real app on Automatic, 1280x720
+PiKVM display): the registered blt mock was auto-detected and cycled windowed
+(800x450) → borderless → Clipline window raised over it → borderless →
+windowed → DXGI exclusive (display mode 720x480) → windowed, then F6 saved a
+30 s replay. The log showed WGC → DD → `fullscreen_capture_covered`
+(`Tauri Window`) → uncovered → WGC → DD → WGC, with 3–112 ms black
+transitions. In the 1280x720 clip, windowed frames scale up to fill the frame,
+borderless is native, the 3:2 exclusive mode is pillarboxed at x=100..1179
+without stretching, and the cover period is exactly 200 black frames at 60 fps
+with no Clipline UI pixels on either side (the detector flags 81% of a real
+Clipline screenshot). Drive the mock with posted WM_KEYDOWN F10/F11. To gain
+foreground rights, tap F24, not Alt: a lone Alt tap puts the mock in modal
+menu mode and freezes rendering. Probe clips are left in `Videos\Clipline`; the
+mock builds are in `C:\CliplineMockGames`. Real games, multiple monitors,
+rotated monitors, and other desktops' windows are left to Nightly users. Plan:
+`docs/superpowers/plans/2026-09-25-win10-fullscreen-fallback.md`.
+
 ## Checkpoint (2026-09-20): Nightly 1.0.6 published
 
 PR #209 shipped supported multi-endpoint playback audio and removed the

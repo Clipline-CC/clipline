@@ -87,6 +87,7 @@ struct CpuFrameConverter {
     input_height: u32,
     output_width: u32,
     output_height: u32,
+    fit: crate::VideoFit,
 }
 
 #[cfg(windows)]
@@ -114,7 +115,28 @@ impl CpuFrameConverter {
             input_height,
             output_width,
             output_height,
+            fit: crate::VideoFit::Stretch,
         })
+    }
+
+    fn rebuild(&mut self, input_width: u32, input_height: u32) -> Result<(), EncodeError> {
+        self.converter = CpuVideoConverter::new_fitted(
+            input_width,
+            input_height,
+            self.crop,
+            self.output_width,
+            self.output_height,
+            self.fit,
+        )
+        .map_err(|e| EncodeError::Backend(format!("CPU nv12 converter resize: {e}")))?;
+        self.input_width = input_width;
+        self.input_height = input_height;
+        Ok(())
+    }
+
+    fn set_fit(&mut self, fit: crate::VideoFit) -> Result<(), EncodeError> {
+        self.fit = fit;
+        self.rebuild(self.input_width, self.input_height)
     }
 
     fn convert(
@@ -125,16 +147,7 @@ impl CpuFrameConverter {
         let bgra = crate::windows::nv12::read_bgra(device, texture)
             .map_err(|e| EncodeError::Backend(format!("BGRA readback: {e}")))?;
         if (bgra.width, bgra.height) != (self.input_width, self.input_height) {
-            self.converter = CpuVideoConverter::new(
-                bgra.width,
-                bgra.height,
-                self.crop,
-                self.output_width,
-                self.output_height,
-            )
-            .map_err(|e| EncodeError::Backend(format!("CPU nv12 converter resize: {e}")))?;
-            self.input_width = bgra.width;
-            self.input_height = bgra.height;
+            self.rebuild(bgra.width, bgra.height)?;
         }
         self.converter
             .convert(&bgra.bytes, bgra.stride)
@@ -402,6 +415,18 @@ impl Encoder for FfmpegVideoEncoder {
 
     fn finish(&mut self) -> Result<Vec<EncodedPacket>, EncodeError> {
         self.finish_with_timeout(ENCODER_FLUSH_TIMEOUT)
+    }
+
+    fn set_video_fit(&mut self, fit: crate::VideoFit) -> Result<(), EncodeError> {
+        #[cfg(windows)]
+        match self.converter.as_mut() {
+            Some(FrameConverter::Gpu(converter)) => converter.set_fit(fit),
+            Some(FrameConverter::Cpu(converter)) => converter.set_fit(fit)?,
+            None => {}
+        }
+        #[cfg(not(windows))]
+        let _ = fit;
+        Ok(())
     }
 }
 /// Empty-parameter-set config for the configured codec — used only as the

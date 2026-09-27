@@ -21,18 +21,38 @@ impl TimedFrameSource for DxgiDuplicationCapture {
     }
 }
 
-/// The live screen-capture engine, chosen at recording start. WGC is the
-/// default; explicit display duplication is opt-in.
+impl TimedFrameSource for FullscreenFallbackCapture {
+    fn next_frame_timeout(&mut self, timeout: Duration) -> Result<Option<Frame>, CaptureError> {
+        FullscreenFallbackCapture::next_frame_timeout(self, timeout)
+    }
+}
+
+/// The live screen-capture engine, chosen at recording start.
 pub(super) enum LiveBackend {
     Wgc(WgcCapture),
     Dxgi(DxgiDuplicationCapture),
+    FullscreenFallback(FullscreenFallbackCapture),
 }
 
 impl LiveBackend {
+    /// Encoder source size and placement. The fullscreen fallback records a
+    /// window and its monitor into one monitor-sized, letterboxed output;
+    /// every other engine keeps the first frame's size and stretch-to-fill.
+    pub(super) fn encoder_layout(&self, first_frame: (u32, u32)) -> ((u32, u32), VideoFit) {
+        match self {
+            Self::FullscreenFallback(cap) => (cap.canvas_size(), VideoFit::Contain),
+            Self::Wgc(_) | Self::Dxgi(_) => (first_frame, VideoFit::Stretch),
+        }
+    }
+
     pub(super) fn diagnostic_label(&self) -> Box<dyn Fn() -> &'static str> {
         match self {
             Self::Wgc(_) => Box::new(|| "windows_graphics_capture"),
             Self::Dxgi(_) => Box::new(|| "desktop_duplication"),
+            Self::FullscreenFallback(cap) => {
+                let status = cap.status();
+                Box::new(move || status.label())
+            }
         }
     }
 }
@@ -42,6 +62,7 @@ impl TimedFrameSource for LiveBackend {
         match self {
             LiveBackend::Wgc(cap) => cap.next_frame_timeout(timeout),
             LiveBackend::Dxgi(cap) => cap.next_frame_timeout(timeout),
+            LiveBackend::FullscreenFallback(cap) => cap.next_frame_timeout(timeout),
         }
     }
 }
@@ -290,9 +311,8 @@ pub(super) fn spawn_marker_source(
 pub(super) const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Build the capture engine and pull its first frame (which fixes the capture
-/// size). Explicit Desktop Duplication requires a display/region source and
-/// returns construction or first-frame failures without starting WGC. Auto and
-/// explicit WGC retain their existing capture behavior.
+/// size). Automatic uses WGC on Windows 11 and the fullscreen fallback on
+/// Windows 10; explicit choices can override either route.
 pub(super) fn open_screen_capture(
     device: &ID3D11Device,
     clock: RelativeClock,
@@ -300,23 +320,73 @@ pub(super) fn open_screen_capture(
     backend: CaptureBackend,
     events: &Sender<Event>,
 ) -> Result<(LiveBackend, Frame), String> {
-    crate::capture_policy::open_capture(
+    let plan = crate::capture_policy::CapturePlan::for_source(
         backend,
+        is_windows_11_or_later(),
         matches!(
             source,
             CaptureSource::WindowTitle(_) | CaptureSource::WindowHandle { .. }
         ),
-        || open_dxgi(device, clock, source, events),
-        || {
-            let init = |e: &dyn std::fmt::Display| format!("init: {e}");
-            let mut cap = open_wgc(device, clock, source, events)?;
-            let first = cap
-                .next_frame_timeout(FIRST_FRAME_TIMEOUT)
-                .map_err(|e| init(&e))?
-                .ok_or("capture ended before the first frame")?;
-            Ok((LiveBackend::Wgc(cap), first))
-        },
-    )
+    );
+    match plan {
+        crate::capture_policy::CapturePlan::Dxgi => open_dxgi(device, clock, source, events),
+        crate::capture_policy::CapturePlan::DxgiThenWgc => {
+            open_dxgi(device, clock, source, events).or_else(|error| {
+                tracing::warn!(event = "desktop_duplication_unavailable", error = %error);
+                open_wgc_first_frame(device, clock, source, events)
+            })
+        }
+        crate::capture_policy::CapturePlan::FullscreenFallback => {
+            open_fullscreen_fallback(device, clock, source)
+        }
+        crate::capture_policy::CapturePlan::Wgc => {
+            open_wgc_first_frame(device, clock, source, events)
+        }
+    }
+}
+
+fn open_wgc_first_frame(
+    device: &ID3D11Device,
+    clock: RelativeClock,
+    source: &CaptureSource,
+    events: &Sender<Event>,
+) -> Result<(LiveBackend, Frame), String> {
+    let init = |e: &dyn std::fmt::Display| format!("init: {e}");
+    let mut cap = open_wgc(device, clock, source, events)?;
+    let first = cap
+        .next_frame_timeout(FIRST_FRAME_TIMEOUT)
+        .map_err(|e| init(&e))?
+        .ok_or("capture ended before the first frame")?;
+    Ok((LiveBackend::Wgc(cap), first))
+}
+
+fn open_fullscreen_fallback(
+    device: &ID3D11Device,
+    clock: RelativeClock,
+    source: &CaptureSource,
+) -> Result<(LiveBackend, Frame), String> {
+    let hwnd = match source {
+        CaptureSource::WindowTitle(needle) => find_window_by_title(needle)
+            .ok_or_else(|| format!("no visible window matching {needle:?}"))?,
+        CaptureSource::WindowHandle { hwnd, title } => window_from_raw_handle(*hwnd)
+            .ok_or_else(|| format!("game window {title:?} is no longer available"))?,
+        _ => return Err("fullscreen fallback requires a game window".into()),
+    };
+    let mut cap = FullscreenFallbackCapture::for_window_on(device.clone(), hwnd, clock)
+        .map_err(|e| format!("init: {e}"))?;
+    let deadline = Instant::now() + FIRST_FRAME_TIMEOUT;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("fullscreen fallback did not deliver a first frame within 5 seconds".into());
+        }
+        match cap.next_frame_timeout(remaining.min(Duration::from_millis(100))) {
+            Ok(Some(first)) => return Ok((LiveBackend::FullscreenFallback(cap), first)),
+            Ok(None) => return Err("game window ended before the first frame".into()),
+            Err(CaptureError::Timeout(_)) => {}
+            Err(error) => return Err(format!("init: {error}")),
+        }
+    }
 }
 
 /// DXGI Desktop Duplication for a display/region source (never per-window). The

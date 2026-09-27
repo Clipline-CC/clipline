@@ -66,12 +66,18 @@ function syncCaptureFields() {
 function syncCaptureBackendSummary() {
   const summary = $("backend-summary");
   if (!summary) return;
-  if ($("set-backend").value === "desktop_duplication") {
-    summary.textContent =
-      "Captures a display or region without the Windows 10 border, including overlapping windows. Recording stops if unavailable. Turn off automatic game switching to use this mode; single-window capture is unsupported. The mouse cursor may be missing on some systems.";
-  } else {
-    summary.textContent =
-      "Windows Graphics Capture works everywhere, including single windows. On Windows 10 it may show a yellow capture border.";
+  switch ($("set-backend").value) {
+    case "wgc":
+      summary.textContent =
+        "Uses Windows Graphics Capture for every target. On Windows 10, a yellow border may remain around a game even in fullscreen.";
+      break;
+    case "fallback":
+      summary.textContent =
+        "Uses Windows Graphics Capture for windowed games, then Desktop Duplication while the selected game fills its display. Desktop Duplication records the entire display, including notifications, overlays, and the taskbar; recording turns black while another app's window is over the game. Game recordings use the display's size, with black bars around a windowed game. Full displays and regions use Desktop Duplication. A hardware mouse cursor may be missing.";
+      break;
+    default:
+      summary.textContent =
+        "Uses Windows Graphics Capture on Windows 11 and fallback mode on Windows 10. On Windows 10, a fullscreen game switches to Desktop Duplication so the yellow border disappears; it records the entire display, including notifications, overlays, and the taskbar.";
   }
 }
 

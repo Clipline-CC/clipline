@@ -21,6 +21,7 @@ use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_RATIONAL,
 };
 
+use crate::video_layout::{destination_rect, VideoFit};
 use crate::windows::d3d11;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +91,7 @@ pub struct VideoConverter {
     out_width: u32,
     out_height: u32,
     crop: Option<CropRect>,
+    fit: VideoFit,
 }
 
 impl VideoConverter {
@@ -111,7 +113,7 @@ impl VideoConverter {
         out_h: u32,
         crop: Option<CropRect>,
     ) -> WinResult<Self> {
-        conversion_rects(in_w, in_h, out_w, out_h, crop)?;
+        conversion_rects(in_w, in_h, out_w, out_h, crop, VideoFit::Stretch)?;
         d3d11::ensure_multithread_protected(device)?;
         let video_device: ID3D11VideoDevice = device.cast()?;
         // SAFETY: trivial getter on a valid device.
@@ -130,7 +132,14 @@ impl VideoConverter {
             out_width: out_w,
             out_height: out_h,
             crop,
+            fit: VideoFit::Stretch,
         })
+    }
+
+    /// Placement for later frames. The output is already filled with black
+    /// before each blit, so a contained source gets black bars.
+    pub fn set_fit(&mut self, fit: VideoFit) {
+        self.fit = fit;
     }
 
     /// Convert one BGRA texture into a freshly allocated NV12 texture
@@ -143,6 +152,7 @@ impl VideoConverter {
             self.out_width,
             self.out_height,
             self.crop,
+            self.fit,
         )?;
         if (in_width, in_height) != (self.in_width, self.in_height) {
             let (enumerator, processor) = create_video_processor(
@@ -268,6 +278,7 @@ fn conversion_rects(
     out_w: u32,
     out_h: u32,
     crop: Option<CropRect>,
+    fit: VideoFit,
 ) -> WinResult<(RECT, RECT)> {
     if in_w > i32::MAX as u32 || in_h > i32::MAX as u32 {
         return Err(WinError::new(
@@ -284,22 +295,15 @@ fn conversion_rects(
         })
         .in_frame(in_w, in_h)
         .ok_or_else(|| WinError::new(E_FAIL, "source crop is outside the current frame"))?;
-    if out_w < 2
-        || out_h < 2
-        || !out_w.is_multiple_of(2)
-        || !out_h.is_multiple_of(2)
-        || out_w > i32::MAX as u32
-        || out_h > i32::MAX as u32
-    {
-        return Err(WinError::new(E_FAIL, "invalid video dimensions"));
-    }
+    let dest = destination_rect(fit, source.width, source.height, out_w, out_h)
+        .map_err(|message| WinError::new(E_FAIL, message))?;
     Ok((
         source.to_rect(),
         RECT {
-            left: 0,
-            top: 0,
-            right: out_w as i32,
-            bottom: out_h as i32,
+            left: dest.x as i32,
+            top: dest.y as i32,
+            right: (dest.x + dest.width) as i32,
+            bottom: (dest.y + dest.height) as i32,
         },
     ))
 }
@@ -564,13 +568,27 @@ mod tests {
             width: 32,
             height: 24,
         });
-        let (_, dest) = conversion_rects(96, 64, 64, 64, crop).unwrap();
+        let (_, dest) = conversion_rects(96, 64, 64, 64, crop, VideoFit::Stretch).unwrap();
         assert_eq!(
             (dest.left, dest.top, dest.right, dest.bottom),
             (0, 0, 64, 64)
         );
-        assert!(conversion_rects(40, 24, 64, 64, crop).is_err());
-        assert!(conversion_rects(0, 64, 64, 64, None).is_err());
+        assert!(conversion_rects(40, 24, 64, 64, crop, VideoFit::Stretch).is_err());
+        assert!(conversion_rects(0, 64, 64, 64, None, VideoFit::Stretch).is_err());
+    }
+
+    #[test]
+    fn contain_layout_centers_the_source_shape() {
+        let (_, dest) = conversion_rects(1280, 720, 1920, 1080, None, VideoFit::Contain).unwrap();
+        assert_eq!(
+            (dest.left, dest.top, dest.right, dest.bottom),
+            (0, 0, 1920, 1080)
+        );
+        let (_, dest) = conversion_rects(1440, 1080, 1920, 1080, None, VideoFit::Contain).unwrap();
+        assert_eq!(
+            (dest.left, dest.top, dest.right, dest.bottom),
+            (240, 0, 1680, 1080)
+        );
     }
 
     #[test]
@@ -638,6 +656,48 @@ mod tests {
         });
         let shrunk = d3d11::create_bgra_texture(&device, 32, 32).unwrap();
         assert!(conv.convert(&shrunk).is_err());
+    }
+
+    #[test]
+    fn hardware_contain_pillarboxes_with_limited_range_black() {
+        if std::env::var_os("CI").is_some() {
+            return;
+        }
+        let (device, context) = match d3d11::create_device() {
+            Ok(pair) => pair,
+            Err(e) => {
+                eprintln!("SKIP: no hardware D3D11 device: {e}");
+                return;
+            }
+        };
+        let mut conv = match VideoConverter::new(&device, 32, 64, 64, 64) {
+            Ok(converter) => converter,
+            Err(e) => {
+                eprintln!("SKIP: video processor unavailable: {e}");
+                return;
+            }
+        };
+        conv.set_fit(VideoFit::Contain);
+        let src = d3d11::create_bgra_texture(&device, 32, 64).unwrap();
+        let pixels = vec![255u8; 32 * 64 * 4];
+        let resource: ID3D11Resource = src.cast().unwrap();
+        // SAFETY: initialized BGRA bytes cover every row of the live texture.
+        unsafe {
+            context.UpdateSubresource(&resource, 0, None, pixels.as_ptr().cast(), 32 * 4, 0);
+        }
+        let bytes = read_nv12(&device, &conv.convert(&src).unwrap()).unwrap();
+        // Rows away from the scaler's edge filter: bars 0..16 and 48..64,
+        // white content 16..48.
+        for y in 0..64 {
+            for x in [0usize, 8, 24, 40, 55, 63] {
+                let expected = if (16..48).contains(&x) { 235 } else { 16 };
+                assert!(
+                    (i16::from(bytes[y * 64 + x]) - expected).abs() <= 3,
+                    "pixel ({x},{y}): {} expected {expected}",
+                    bytes[y * 64 + x]
+                );
+            }
+        }
     }
 
     #[test]

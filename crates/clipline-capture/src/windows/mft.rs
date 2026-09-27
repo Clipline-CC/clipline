@@ -35,6 +35,7 @@ use clipline_mp4::VideoTrackConfig;
 
 use crate::annexb::{annexb_to_avcc, extract_sps_pps};
 use crate::cpu_video::{CpuCropRect, CpuVideoConverter};
+use crate::VideoFit;
 use crate::probe::EncoderBackend;
 use crate::traits::{EncodeError, EncodedPacket, Encoder, Frame, FrameData};
 use crate::windows::mft_probe;

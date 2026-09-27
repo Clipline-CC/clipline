@@ -1,7 +1,8 @@
 //! DXGI Desktop Duplication capture (issue #42): a borderless display/region
 //! engine for Windows 10, where WGC's `SetIsBorderRequired(false)` is ignored
-//! and the yellow privacy border remains. Display/region only — window capture
-//! stays on WGC (Desktop Duplication cannot target a single window).
+//! and the yellow privacy border remains. A duplication always captures a
+//! monitor or region. The fullscreen fallback may open that monitor while a
+//! selected game covers it; windowed capture stays on WGC.
 //!
 //! Mirrors `WgcCapture`'s contracts: a caller-provided device (shared with the
 //! encoder — textures don't cross devices) and clock (shared with audio — one
@@ -358,7 +359,7 @@ impl Drop for DxgiDuplicationCapture {
 /// Enumerate the capture device's own adapter outputs and match the target
 /// monitor. If the monitor is not among them, the encoder/capture device lives
 /// on a different GPU (multi-GPU/hybrid) and `DuplicateOutput` would fail — we
-/// catch it here and return `Init` so the app can fall back to WGC.
+/// catch it here and return `Unsupported` so callers can fall back to WGC.
 fn find_output_for_monitor(
     device: &ID3D11Device,
     monitor: HMONITOR,
@@ -378,7 +379,7 @@ fn find_output_for_monitor(
         let output: IDXGIOutput = match unsafe { adapter.EnumOutputs(index) } {
             Ok(output) => output,
             Err(e) if e.code() == DXGI_ERROR_NOT_FOUND => {
-                return Err(init(
+                return Err(CaptureError::Unsupported(
                     "target monitor is not on the capture device's GPU (multi-GPU/hybrid)".into(),
                 ));
             }
@@ -391,7 +392,7 @@ fn find_output_for_monitor(
             if !is_identity_rotation(desc.Rotation) {
                 // AcquireNextFrame hands back an un-rotated surface with the
                 // image rotated within it; v1 doesn't re-rotate, so fall back.
-                return Err(init(
+                return Err(CaptureError::Unsupported(
                     "rotated displays are not supported by the Desktop Duplication backend".into(),
                 ));
             }
@@ -447,6 +448,27 @@ mod tests {
         assert!(
             matches!(result, Err(CaptureError::Init(_))),
             "invalid handle must fail with Init"
+        );
+    }
+
+    /// WARP owns no outputs, so any real monitor is on "another GPU" for it.
+    /// Callers rely on `Unsupported` to stop retrying Desktop Duplication.
+    #[test]
+    fn monitor_on_another_adapter_is_unsupported() {
+        use windows::Win32::Foundation::POINT;
+        use windows::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTOPRIMARY};
+
+        // SAFETY: MonitorFromPoint has no preconditions.
+        let monitor = unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) };
+        if monitor.is_invalid() {
+            eprintln!("SKIP: no monitor attached");
+            return;
+        }
+        let (device, _ctx) = crate::windows::d3d11::create_device_for_tests().expect("device");
+        let result = DxgiDuplicationCapture::for_monitor_on(device, monitor, RelativeClock::new(0));
+        assert!(
+            matches!(result, Err(CaptureError::Unsupported(_))),
+            "cross-adapter monitor must be Unsupported"
         );
     }
 
