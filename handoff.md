@@ -60,11 +60,23 @@ PR #211 review follow-ups, all in the same PR:
 The Windows 10 Radeon 780M mock ran windowed → borderless → windowed and
 windowed → DXGI exclusive → windowed; the live probe observed WGC → black →
 Desktop Duplication → black → WGC in both. The mock now accepts `--no-audio`
-for hosts with no default playback endpoint. The follow-ups are covered by
-neutral tests plus real-GPU tests for the cross-adapter rejection and the GPU
-pillarbox. They have not been live-probed. Real games, focus changes across
-monitors, rotated monitors, and a windowed start followed by fullscreen remain
-on the user test list. Plan:
+for hosts with no default playback endpoint.
+
+Final live probe (2026-09-27, all follow-ups, real app on Automatic, 1280x720
+PiKVM display): the registered blt mock was auto-detected and cycled windowed
+(800x450) → borderless → Clipline window raised over it → borderless →
+windowed → DXGI exclusive (display mode 720x480) → windowed, then F6 saved a
+30 s replay. The log showed WGC → DD → `fullscreen_capture_covered`
+(`Tauri Window`) → uncovered → WGC → DD → WGC, with 3–112 ms black
+transitions. In the 1280x720 clip, windowed frames scale up to fill the frame,
+borderless is native, the 3:2 exclusive mode is pillarboxed at x=100..1179
+without stretching, and the cover period is exactly 200 black frames at 60 fps
+with no Clipline UI pixels on either side (the detector flags 81% of a real
+Clipline screenshot). Drive the mock with posted WM_KEYDOWN F10/F11. To gain
+foreground rights, tap F24, not Alt: a lone Alt tap puts the mock in modal
+menu mode and freezes rendering. Probe clips are left in `Videos\Clipline`; the
+mock builds are in `C:\CliplineMockGames`. Real games, multiple monitors,
+rotated monitors, and other desktops' windows are left to Nightly users. Plan:
 `docs/superpowers/plans/2026-09-25-win10-fullscreen-fallback.md`.
 
 ## Checkpoint (2026-09-20): Nightly 1.0.6 published
