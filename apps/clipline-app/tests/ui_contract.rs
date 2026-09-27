@@ -65,6 +65,15 @@ fn capture_backend_settings_expose_auto_wgc_and_fullscreen_fallback() {
     assert!(!html.contains("<option value=\"desktop_duplication\">"));
     assert!(summary.contains("fullscreen"));
     assert!(summary.contains("Windows 10"));
+    // Automatic (on Windows 10) and Fallback both duplicate the whole display;
+    // the cover guard is best-effort, so neither may promise game-only capture.
+    assert_eq!(
+        summary
+            .matches("entire display, including notifications, overlays, and the taskbar")
+            .count(),
+        2
+    );
+    assert!(!summary.contains("no other app covers it"));
 }
 
 #[test]

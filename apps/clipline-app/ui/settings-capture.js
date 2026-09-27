@@ -73,11 +73,11 @@ function syncCaptureBackendSummary() {
       break;
     case "fallback":
       summary.textContent =
-        "Uses Windows Graphics Capture for windowed games, then Desktop Duplication while the selected game fills its display and no other app covers it. Game recordings use the display's size, with black bars around a windowed game. Full displays and regions use Desktop Duplication. Fullscreen capture includes overlays; a hardware mouse cursor may be missing.";
+        "Uses Windows Graphics Capture for windowed games, then Desktop Duplication while the selected game fills its display. Desktop Duplication records the entire display, including notifications, overlays, and the taskbar; recording turns black while another app's window is over the game. Game recordings use the display's size, with black bars around a windowed game. Full displays and regions use Desktop Duplication. A hardware mouse cursor may be missing.";
       break;
     default:
       summary.textContent =
-        "Uses Windows Graphics Capture on Windows 11 and fallback mode on Windows 10. Fullscreen fallback switches to Desktop Duplication so the yellow border disappears.";
+        "Uses Windows Graphics Capture on Windows 11 and fallback mode on Windows 10. On Windows 10, a fullscreen game switches to Desktop Duplication so the yellow border disappears; it records the entire display, including notifications, overlays, and the taskbar.";
   }
 }
 
