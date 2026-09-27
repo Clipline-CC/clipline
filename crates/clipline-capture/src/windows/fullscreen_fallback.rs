@@ -1,7 +1,7 @@
 //! WGC for a selected game window, Desktop Duplication while that window fills
-//! its monitor and no other app's foreground window can cover it. The desktop
-//! source is dropped as soon as either guard changes. Its frames are checked
-//! again after acquisition.
+//! its monitor and no other app's window stacked above it reaches that monitor.
+//! The desktop source is dropped as soon as either guard changes. Its frames
+//! are checked again after acquisition.
 
 use std::sync::{
     atomic::{AtomicU8, Ordering},
@@ -19,14 +19,16 @@ use windows::Win32::Graphics::Gdi::{
     ClientToScreen, GetMonitorInfoW, MonitorFromWindow, HMONITOR, MONITORINFO,
     MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL,
 };
+use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetClientRect, GetForegroundWindow, GetWindowThreadProcessId, IsIconic, IsWindow,
-    IsWindowVisible,
+    GetClassNameW, GetClientRect, GetWindow, GetWindowDisplayAffinity, GetWindowLongPtrW,
+    GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, GWL_EXSTYLE, GW_HWNDPREV,
+    WDA_NONE, WS_EX_LAYERED, WS_EX_TRANSPARENT,
 };
 
 use crate::fallback_policy::{
-    accept_frame, choose, classify_focus, client_covers_monitor, Focus, Observation, ScreenRect,
-    Source,
+    accept_frame, choose, client_covers_monitor, first_cover, Observation, ScreenRect,
+    StackCover, Source, WindowAbove,
 };
 use crate::{CaptureError, Frame, FrameData, RelativeClock};
 
@@ -36,6 +38,8 @@ use super::{qpc_now_ticks_100ns, DxgiDuplicationCapture, WgcCapture};
 const POLL_INTERVAL: Duration = Duration::from_millis(16);
 const RETRY_INTERVAL: Duration = Duration::from_millis(200);
 const RETRY_BUDGET: Duration = Duration::from_secs(5);
+/// Hidden windows count toward this too. Deeper stacks fail closed.
+const MAX_WINDOWS_ABOVE: usize = 4096;
 
 /// Cloneable live status for the recorder's support diagnostics.
 #[derive(Clone, Default)]
@@ -73,7 +77,7 @@ impl Snapshot {
         Self {
             observation: Observation {
                 available: false,
-                focus: Focus::Covered,
+                covered: false,
                 covers_monitor: false,
                 display_supported: true,
             },
@@ -122,6 +126,7 @@ pub struct FullscreenFallbackCapture {
     retry_at: Instant,
     failures_since: Option<Instant>,
     unsupported_display: Option<HMONITOR>,
+    last_cover: StackCover<isize>,
 }
 
 impl FullscreenFallbackCapture {
@@ -155,6 +160,7 @@ impl FullscreenFallbackCapture {
             retry_at: Instant::now(),
             failures_since: None,
             unsupported_display: None,
+            last_cover: StackCover::Clear,
         })
     }
 
@@ -289,7 +295,37 @@ impl FullscreenFallbackCapture {
         }))
     }
 
-    fn observe(&self) -> Option<Snapshot> {
+    /// Support bundles need to show which window blacked out a recording.
+    fn log_cover_change(&mut self, cover: StackCover<HWND>) {
+        let cover = match cover {
+            StackCover::Clear => StackCover::Clear,
+            StackCover::By(hwnd) => StackCover::By(hwnd.0 as isize),
+            StackCover::Unknown => StackCover::Unknown,
+        };
+        if cover == self.last_cover {
+            return;
+        }
+        self.last_cover = cover;
+        match cover {
+            StackCover::Clear => tracing::info!(event = "fullscreen_capture_uncovered"),
+            StackCover::By(raw) => {
+                let hwnd = HWND(raw as *mut _);
+                let mut process_id = 0;
+                // SAFETY: read-only query; the HWND came from the z-order walk.
+                unsafe { GetWindowThreadProcessId(hwnd, Some(&mut process_id)) };
+                tracing::info!(
+                    event = "fullscreen_capture_covered",
+                    class = %window_class(hwnd),
+                    process_id,
+                );
+            }
+            StackCover::Unknown => {
+                tracing::warn!(event = "fullscreen_capture_covered", reason = "stack_too_deep")
+            }
+        }
+    }
+
+    fn observe(&mut self) -> Option<Snapshot> {
         // SAFETY: all calls below are read-only window/monitor queries on a
         // borrowed HWND. A recycled HWND is rejected by its process id.
         unsafe {
@@ -334,25 +370,24 @@ impl FullscreenFallbackCapture {
                 right: origin.x.saturating_add(width),
                 bottom: origin.y.saturating_add(height),
             };
-            let covers_monitor =
-                client_covers_monitor(client_bounds, screen_rect(info.rcMonitor), monitor_bounds);
-            let foreground = GetForegroundWindow();
-            let mut foreground_process = 0;
-            let foreground_bounds = if foreground.is_invalid() {
-                None
+            let monitor_rect = screen_rect(info.rcMonitor);
+            let covers_monitor = client_covers_monitor(client_bounds, monitor_rect, monitor_bounds);
+            // Only a fullscreen game can be duplicated, so only then does the
+            // stack above it matter.
+            let cover = if covers_monitor {
+                first_cover(
+                    windows_above(self.hwnd, self.process_id),
+                    monitor_rect,
+                    MAX_WINDOWS_ABOVE,
+                )
             } else {
-                GetWindowThreadProcessId(foreground, Some(&mut foreground_process));
-                window_frame_rect(foreground).map(screen_rect)
+                StackCover::Clear
             };
-            let focus = classify_focus(
-                foreground_process == self.process_id,
-                foreground_bounds,
-                screen_rect(info.rcMonitor),
-            );
+            self.log_cover_change(cover);
             Some(Snapshot {
                 observation: Observation {
                     available: width > 0 && height > 0,
-                    focus,
+                    covered: !cover.is_clear(),
                     covers_monitor,
                     display_supported: self.unsupported_display != Some(monitor),
                 },
@@ -360,6 +395,75 @@ impl FullscreenFallbackCapture {
             })
         }
     }
+}
+
+/// Top-level windows stacked above `hwnd`, nearest first. Windows the policy
+/// already rules out (the game's own, hidden, minimized, cloaked) skip the
+/// costlier style, affinity, class and bounds queries.
+fn windows_above(hwnd: HWND, game_process: u32) -> impl Iterator<Item = (HWND, WindowAbove)> {
+    // SAFETY: GetWindow only reads the z-order; stale handles end the walk.
+    let mut next = unsafe { GetWindow(hwnd, GW_HWNDPREV) }.ok();
+    std::iter::from_fn(move || {
+        let current = next?;
+        // SAFETY: as above.
+        next = unsafe { GetWindow(current, GW_HWNDPREV) }.ok();
+        Some((current, describe_window(current, game_process)))
+    })
+}
+
+fn describe_window(hwnd: HWND, game_process: u32) -> WindowAbove {
+    // SAFETY: read-only queries on a window handle from the z-order walk. A
+    // window destroyed mid-walk only makes these calls fail.
+    unsafe {
+        let mut process_id = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut process_id));
+        if process_id == game_process {
+            return WindowAbove {
+                same_process: true,
+                ..WindowAbove::default()
+            };
+        }
+        if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() || is_cloaked(hwnd) {
+            return WindowAbove::default();
+        }
+        let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+        let click_through = ex_style & WS_EX_LAYERED.0 != 0 && ex_style & WS_EX_TRANSPARENT.0 != 0;
+        let mut affinity = WDA_NONE.0;
+        let excluded_from_capture =
+            GetWindowDisplayAffinity(hwnd, &mut affinity).is_ok() && affinity != WDA_NONE.0;
+        let class = window_class(hwnd);
+        WindowAbove {
+            same_process: false,
+            shown: true,
+            click_through,
+            excluded_from_capture,
+            taskbar: class == "Shell_TrayWnd" || class == "Shell_SecondaryTrayWnd",
+            bounds: window_frame_rect(hwnd).map(screen_rect),
+        }
+    }
+}
+
+/// Windows on other virtual desktops, suspended UWP apps and a hidden Game
+/// Bar stay "visible" but are cloaked, so DWM does not draw them.
+unsafe fn is_cloaked(hwnd: HWND) -> bool {
+    let mut cloaked = 0u32;
+    // SAFETY: DWMWA_CLOAKED writes one u32 into the provided buffer.
+    let result = unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED,
+            &mut cloaked as *mut u32 as *mut _,
+            std::mem::size_of::<u32>() as u32,
+        )
+    };
+    result.is_ok() && cloaked != 0
+}
+
+fn window_class(hwnd: HWND) -> String {
+    let mut buffer = [0u16; 64];
+    // SAFETY: GetClassNameW writes at most buffer.len() UTF-16 units.
+    let len = unsafe { GetClassNameW(hwnd, &mut buffer) };
+    String::from_utf16_lossy(&buffer[..usize::try_from(len).unwrap_or(0)])
 }
 
 fn monitor_bounds() -> Option<Vec<ScreenRect>> {
@@ -453,4 +557,51 @@ fn black_texture(
             .map_err(|e| CaptureError::Init(e.to_string()))?;
     }
     black.ok_or_else(|| CaptureError::Init("black texture was not created".into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::core::w;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        FindWindowW, GetDesktopWindow, GW_CHILD, GW_HWNDLAST,
+    };
+
+    /// The shell's own taskbar reappears over an unfocused game and must not
+    /// black out the recording. Needs an interactive desktop.
+    #[test]
+    fn the_taskbar_is_recognised_and_never_covers() {
+        if std::env::var_os("CI").is_some() {
+            return;
+        }
+        // SAFETY: FindWindowW only reads the window list.
+        let Ok(tray) = (unsafe { FindWindowW(w!("Shell_TrayWnd"), None) }) else {
+            eprintln!("SKIP: no taskbar on this desktop");
+            return;
+        };
+        let window = describe_window(tray, 0);
+        assert!(window.shown && window.taskbar, "{window:?}");
+    }
+
+    /// Walking from the bottom of the z-order visits every top-level window,
+    /// hidden ones included. It must end well inside the limit and quickly
+    /// enough to run twice per ~16 ms poll.
+    #[test]
+    fn a_full_z_order_walk_ends_inside_the_limit() {
+        if std::env::var_os("CI").is_some() {
+            return;
+        }
+        // SAFETY: read-only z-order queries.
+        let bottom = unsafe { GetWindow(GetDesktopWindow(), GW_CHILD) }
+            .and_then(|first| unsafe { GetWindow(first, GW_HWNDLAST) });
+        let Ok(bottom) = bottom else {
+            eprintln!("SKIP: no top-level windows");
+            return;
+        };
+        let started = Instant::now();
+        let count = windows_above(bottom, 0).count();
+        let elapsed = started.elapsed();
+        eprintln!("z-order walk: {count} windows in {elapsed:?}");
+        assert!(count < MAX_WINDOWS_ABOVE, "{count} windows");
+    }
 }

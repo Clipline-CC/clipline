@@ -7,17 +7,6 @@ pub(crate) enum Source {
     Waiting,
 }
 
-/// Whether the game's monitor can still be showing only the game.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Focus {
-    /// A window of the game's own process is foreground.
-    Game,
-    /// Another app is foreground on a different monitor.
-    OtherMonitor,
-    /// Another app, or nothing, is foreground on the game's monitor.
-    Covered,
-}
-
 /// Screen-space rectangle, right/bottom exclusive.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ScreenRect {
@@ -64,28 +53,78 @@ pub(crate) fn client_covers_monitor(
         })
 }
 
-/// Process ownership, not the exact HWND: some games focus a sibling window
-/// of the one selected for capture. Another app's window must stay entirely
-/// off the game's monitor, because duplication would record any overlap.
-pub(crate) fn classify_focus(
-    game_process_foreground: bool,
-    foreground_bounds: Option<ScreenRect>,
-    game_monitor: ScreenRect,
-) -> Focus {
-    if game_process_foreground {
-        Focus::Game
-    } else if foreground_bounds.is_some_and(|bounds| !bounds.overlaps(game_monitor)) {
-        Focus::OtherMonitor
-    } else {
-        Focus::Covered
+/// One top-level window stacked above the game. Callers may leave the later
+/// fields at their defaults once `same_process` or `!shown` already rules the
+/// window out, so the costlier queries only run for real candidates.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct WindowAbove {
+    /// Owned by the game's process, e.g. a sibling of the captured window.
+    pub same_process: bool,
+    /// Visible, not minimized, and not cloaked by DWM.
+    pub shown: bool,
+    /// A layered, click-through overlay (WS_EX_LAYERED | WS_EX_TRANSPARENT).
+    pub click_through: bool,
+    /// Display affinity keeps it out of duplication (black or omitted).
+    pub excluded_from_capture: bool,
+    /// The shell taskbar, which reappears over a game that loses focus.
+    pub taskbar: bool,
+    /// Visible DWM bounds; `None` if they could not be read.
+    pub bounds: Option<ScreenRect>,
+}
+
+/// Duplication records the whole monitor, so another app's window stacked
+/// above the game and reaching its monitor would enter the recording. That
+/// includes always-on-top windows and windows shown without taking focus.
+/// Click-through overlays and the taskbar are recorded as they appear.
+/// Unreadable bounds fail closed. Windows 10 draws toasts and system overlays
+/// outside the window list, so they still reach the recording.
+fn window_covers_monitor(window: WindowAbove, monitor: ScreenRect) -> bool {
+    !window.same_process
+        && window.shown
+        && !window.click_through
+        && !window.excluded_from_capture
+        && !window.taskbar
+        && window.bounds.is_none_or(|bounds| bounds.overlaps(monitor))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StackCover<T> {
+    Clear,
+    By(T),
+    /// More windows above the game than the walk allows; fails closed.
+    Unknown,
+}
+
+impl<T> StackCover<T> {
+    pub(crate) fn is_clear(&self) -> bool {
+        matches!(self, Self::Clear)
     }
+}
+
+/// Walk the windows above the game, nearest first, and report the first one
+/// that would enter a duplication of the game's monitor.
+pub(crate) fn first_cover<T>(
+    stack: impl IntoIterator<Item = (T, WindowAbove)>,
+    monitor: ScreenRect,
+    max_windows: usize,
+) -> StackCover<T> {
+    for (index, (id, window)) in stack.into_iter().enumerate() {
+        if index >= max_windows {
+            return StackCover::Unknown;
+        }
+        if window_covers_monitor(window, monitor) {
+            return StackCover::By(id);
+        }
+    }
+    StackCover::Clear
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Observation {
     pub available: bool,
-    pub focus: Focus,
     pub covers_monitor: bool,
+    /// Another app's window above the game reaches the game's monitor.
+    pub covered: bool,
     /// False once Desktop Duplication rejected this monitor as unsupported,
     /// e.g. a rotated display or one driven by another GPU.
     pub display_supported: bool,
@@ -96,7 +135,7 @@ pub(crate) fn choose(observation: Observation) -> Source {
         Source::Waiting
     } else if !observation.covers_monitor || !observation.display_supported {
         Source::Window
-    } else if observation.focus == Focus::Covered {
+    } else if observation.covered {
         Source::Waiting
     } else {
         Source::Display
@@ -123,8 +162,8 @@ mod tests {
     fn windowed() -> Observation {
         Observation {
             available: true,
-            focus: Focus::Game,
             covers_monitor: false,
+            covered: false,
             display_supported: true,
         }
     }
@@ -133,6 +172,33 @@ mod tests {
         Observation {
             covers_monitor: true,
             ..windowed()
+        }
+    }
+
+    const PRIMARY: ScreenRect = ScreenRect {
+        left: 0,
+        top: 0,
+        right: 1920,
+        bottom: 1080,
+    };
+
+    const RIGHT_MONITOR: ScreenRect = ScreenRect {
+        left: 1920,
+        top: 0,
+        right: 3840,
+        bottom: 1080,
+    };
+
+    fn popup() -> WindowAbove {
+        WindowAbove {
+            shown: true,
+            bounds: Some(ScreenRect {
+                left: 1540,
+                top: 900,
+                right: 1900,
+                bottom: 1040,
+            }),
+            ..WindowAbove::default()
         }
     }
 
@@ -145,7 +211,7 @@ mod tests {
         assert_eq!(choose(unsupported), Source::Window);
         assert_eq!(
             choose(Observation {
-                focus: Focus::Covered,
+                covered: true,
                 ..unsupported
             }),
             Source::Window
@@ -154,17 +220,15 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_windows_stay_on_wgc_even_in_the_background() {
+    fn ordinary_windows_stay_on_wgc_even_when_covered() {
         assert_eq!(choose(windowed()), Source::Window);
-        for focus in [Focus::OtherMonitor, Focus::Covered] {
-            assert_eq!(
-                choose(Observation {
-                    focus,
-                    ..windowed()
-                }),
-                Source::Window
-            );
-        }
+        assert_eq!(
+            choose(Observation {
+                covered: true,
+                ..windowed()
+            }),
+            Source::Window
+        );
     }
 
     #[test]
@@ -172,7 +236,7 @@ mod tests {
         assert_eq!(choose(fullscreen()), Source::Display);
         assert_eq!(
             choose(Observation {
-                focus: Focus::Covered,
+                covered: true,
                 ..fullscreen()
             }),
             Source::Waiting
@@ -187,24 +251,6 @@ mod tests {
     }
 
     #[test]
-    fn focus_on_another_monitor_keeps_the_fullscreen_game_recording() {
-        assert_eq!(
-            choose(Observation {
-                focus: Focus::OtherMonitor,
-                ..fullscreen()
-            }),
-            Source::Display
-        );
-    }
-
-    const PRIMARY: ScreenRect = ScreenRect {
-        left: 0,
-        top: 0,
-        right: 1920,
-        bottom: 1080,
-    };
-
-    #[test]
     fn a_client_that_fills_or_overhangs_only_its_monitor_covers_it() {
         let no_enumeration = || -> Option<Vec<ScreenRect>> {
             panic!("an exact match must not enumerate monitors")
@@ -217,18 +263,12 @@ mod tests {
             right: 1922,
             bottom: 1082,
         };
-        let right_monitor = ScreenRect {
-            left: 1920,
-            top: 0,
-            right: 3840,
-            bottom: 1080,
-        };
         assert!(client_covers_monitor(overhang, PRIMARY, || Some(vec![
             PRIMARY
         ])));
         assert!(!client_covers_monitor(overhang, PRIMARY, || Some(vec![
             PRIMARY,
-            right_monitor
+            RIGHT_MONITOR
         ])));
         assert!(!client_covers_monitor(overhang, PRIMARY, || None));
 
@@ -242,30 +282,77 @@ mod tests {
     }
 
     #[test]
-    fn focus_classifies_process_and_foreground_bounds() {
-        let right_monitor = ScreenRect {
-            left: 1920,
-            top: 0,
-            right: 3840,
-            bottom: 1080,
+    fn an_always_on_top_window_over_the_game_covers_it_without_focus() {
+        assert_eq!(first_cover([(7, popup())], PRIMARY, 16), StackCover::By(7));
+    }
+
+    #[test]
+    fn windows_that_duplication_would_not_show_do_not_cover() {
+        let ignored = [
+            WindowAbove {
+                same_process: true,
+                ..popup()
+            },
+            WindowAbove {
+                shown: false,
+                ..popup()
+            },
+            WindowAbove {
+                click_through: true,
+                ..popup()
+            },
+            WindowAbove {
+                excluded_from_capture: true,
+                ..popup()
+            },
+            WindowAbove {
+                taskbar: true,
+                ..popup()
+            },
+        ];
+        assert_eq!(
+            first_cover(ignored.into_iter().enumerate(), PRIMARY, 16),
+            StackCover::Clear
+        );
+    }
+
+    #[test]
+    fn a_focused_app_on_another_monitor_does_not_cover() {
+        let browser = WindowAbove {
+            bounds: Some(RIGHT_MONITOR),
+            ..popup()
         };
-        let straddling = ScreenRect {
-            left: 1800,
-            ..right_monitor
+        let straddling = WindowAbove {
+            bounds: Some(ScreenRect {
+                left: 1800,
+                ..RIGHT_MONITOR
+            }),
+            ..popup()
         };
-        assert_eq!(classify_focus(true, None, PRIMARY), Focus::Game);
-        assert_eq!(classify_focus(true, Some(PRIMARY), PRIMARY), Focus::Game);
         // Touching edges share no pixel; right/bottom are exclusive.
+        assert!(first_cover([(0, browser)], PRIMARY, 16).is_clear());
         assert_eq!(
-            classify_focus(false, Some(right_monitor), PRIMARY),
-            Focus::OtherMonitor
+            first_cover([(1, straddling)], PRIMARY, 16),
+            StackCover::By(1)
         );
+    }
+
+    #[test]
+    fn unreadable_bounds_and_deep_stacks_fail_closed() {
+        let unknown_bounds = WindowAbove {
+            bounds: None,
+            ..popup()
+        };
         assert_eq!(
-            classify_focus(false, Some(straddling), PRIMARY),
-            Focus::Covered
+            first_cover([(3, unknown_bounds)], PRIMARY, 16),
+            StackCover::By(3)
         );
-        assert_eq!(classify_focus(false, Some(PRIMARY), PRIMARY), Focus::Covered);
-        assert_eq!(classify_focus(false, None, PRIMARY), Focus::Covered);
+        let hidden = WindowAbove::default();
+        assert_eq!(
+            first_cover((0..3).map(|id| (id, hidden)), PRIMARY, 2),
+            StackCover::Unknown
+        );
+        assert!(first_cover((0..2).map(|id| (id, hidden)), PRIMARY, 2).is_clear());
     }
 
     #[test]
@@ -282,7 +369,7 @@ mod tests {
             Source::Display,
             fullscreen,
             Observation {
-                focus: Focus::Covered,
+                covered: true,
                 ..fullscreen
             },
             true
