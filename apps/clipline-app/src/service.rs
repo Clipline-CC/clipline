@@ -24,7 +24,7 @@ use clipline_capture::windows::{
     SoftwareMftH264Encoder, WasapiLoopback, WgcCapture,
 };
 use clipline_capture::{
-    even_dimensions, PipelineError, Recorder, RelativeClock, ReplayStorageConfig,
+    even_dimensions, PipelineError, Recorder, RelativeClock, ReplayStorageConfig, VideoFit,
 };
 use clipline_events::{is_review_event, ClipAudioTrack, EventKind, MarkerLog, PlayerSummary};
 use clipline_lol::LeagueQueue;
@@ -301,7 +301,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
     let FrameData::Gpu(tex) = &first.data else {
         return Err("expected a GPU frame".into());
     };
-    let (in_w, in_h) = d3d11::texture_size(tex);
+    let ((in_w, in_h), video_fit) = cap.encoder_layout(d3d11::texture_size(tex));
     let (enc_w, enc_h) = output_dimensions_with_bounds(
         in_w,
         in_h,
@@ -309,7 +309,10 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
         opts.output_resolution_bounds,
     );
 
-    let (encoder, active) = build_encoder(&device, &opts, in_w, in_h, enc_w, enc_h, events)?;
+    let (mut encoder, active) = build_encoder(&device, &opts, in_w, in_h, enc_w, enc_h, events)?;
+    encoder
+        .set_video_fit(video_fit)
+        .map_err(|e| format!("init: {e}"))?;
     let encoder_status = encoder_label(active);
     // `encoder_label` intentionally shows only backend and codec, so an MFT and
     // an FFmpeg path render identically ("AMD AMF · H.264"). Log the API too:

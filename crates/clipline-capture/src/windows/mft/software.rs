@@ -9,6 +9,7 @@ pub struct SoftwareMftH264Encoder {
     device: ID3D11Device,
     converter: CpuVideoConverter,
     crop: Option<CpuCropRect>,
+    fit: VideoFit,
     input_width: u32,
     input_height: u32,
     input_id: u32,
@@ -192,6 +193,7 @@ impl SoftwareMftH264Encoder {
             device: device.clone(),
             converter,
             crop,
+            fit: VideoFit::Stretch,
             input_width: in_w,
             input_height: in_h,
             input_id,
@@ -210,20 +212,26 @@ impl SoftwareMftH264Encoder {
         let bgra = crate::windows::nv12::read_bgra(&self.device, texture)
             .map_err(|e| EncodeError::Backend(format!("BGRA readback: {e}")))?;
         if (bgra.width, bgra.height) != (self.input_width, self.input_height) {
-            self.converter = CpuVideoConverter::new(
-                bgra.width,
-                bgra.height,
-                self.crop,
-                self.cfg.width,
-                self.cfg.height,
-            )
-            .map_err(|e| EncodeError::Backend(format!("CPU nv12 converter resize: {e}")))?;
-            self.input_width = bgra.width;
-            self.input_height = bgra.height;
+            self.rebuild_converter(bgra.width, bgra.height)?;
         }
         self.converter
             .convert(&bgra.bytes, bgra.stride)
             .map_err(|e| EncodeError::Backend(format!("CPU nv12 convert: {e}")))
+    }
+
+    fn rebuild_converter(&mut self, input_width: u32, input_height: u32) -> Result<(), EncodeError> {
+        self.converter = CpuVideoConverter::new_fitted(
+            input_width,
+            input_height,
+            self.crop,
+            self.cfg.width,
+            self.cfg.height,
+            self.fit,
+        )
+        .map_err(|e| EncodeError::Backend(format!("CPU nv12 converter resize: {e}")))?;
+        self.input_width = input_width;
+        self.input_height = input_height;
+        Ok(())
     }
 
     fn input_sample(
@@ -463,6 +471,11 @@ impl Encoder for SoftwareMftH264Encoder {
             sps,
             pps,
         )
+    }
+
+    fn set_video_fit(&mut self, fit: VideoFit) -> Result<(), EncodeError> {
+        self.fit = fit;
+        self.rebuild_converter(self.input_width, self.input_height)
     }
 
     fn finish(&mut self) -> Result<Vec<EncodedPacket>, EncodeError> {

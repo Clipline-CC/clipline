@@ -17,7 +17,7 @@ use windows::Win32::Graphics::Direct3D11::{
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Gdi::{
     ClientToScreen, GetMonitorInfoW, MonitorFromWindow, HMONITOR, MONITORINFO,
-    MONITOR_DEFAULTTONULL,
+    MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetClientRect, GetForegroundWindow, GetWindowThreadProcessId, IsIconic, IsWindow,
@@ -31,7 +31,7 @@ use crate::fallback_policy::{
 use crate::{CaptureError, Frame, FrameData, RelativeClock};
 
 use super::window::window_frame_rect;
-use super::{d3d11, qpc_now_ticks_100ns, DxgiDuplicationCapture, WgcCapture};
+use super::{qpc_now_ticks_100ns, DxgiDuplicationCapture, WgcCapture};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(16);
 const RETRY_INTERVAL: Duration = Duration::from_millis(200);
@@ -110,7 +110,14 @@ pub struct FullscreenFallbackCapture {
     device: ID3D11Device,
     clock: RelativeClock,
     active: Option<ActiveSource>,
-    black: Option<FrameData>,
+    /// The game's monitor size when capture opened. Recording at this size
+    /// and letterboxing the window lets a windowed-to-fullscreen switch keep
+    /// full resolution instead of squeezing the monitor into the window size.
+    canvas: (u32, u32),
+    /// Canvas-sized, so transitions to and from the monitor don't rebuild the
+    /// encoder's video processor, and ready before any source frame so a
+    /// fullscreen game can start recording while another app covers it.
+    black: FrameData,
     status: FullscreenFallbackStatus,
     retry_at: Instant,
     failures_since: Option<Instant>,
@@ -134,13 +141,16 @@ impl FullscreenFallbackCapture {
                 "game window is no longer available".into(),
             ));
         }
+        let canvas = canvas_for_window(hwnd)?;
+        let black = FrameData::Gpu(black_texture(&device, canvas)?);
         Ok(Self {
             hwnd,
             process_id,
             device,
             clock,
             active: None,
-            black: None,
+            canvas,
+            black,
             status: FullscreenFallbackStatus::default(),
             retry_at: Instant::now(),
             failures_since: None,
@@ -150,6 +160,12 @@ impl FullscreenFallbackCapture {
 
     pub fn status(&self) -> FullscreenFallbackStatus {
         self.status.clone()
+    }
+
+    /// The source size to configure the encoder with. Pair it with
+    /// `VideoFit::Contain`, since window frames are smaller than this.
+    pub fn canvas_size(&self) -> (u32, u32) {
+        self.canvas
     }
 
     /// Returns short timeouts so a mode transition is observed within one
@@ -216,9 +232,6 @@ impl FullscreenFallbackCapture {
         }
         match result {
             Ok(Some(frame)) => {
-                if self.black.is_none() {
-                    self.black = Some(FrameData::Gpu(black_texture_like(&self.device, &frame)?));
-                }
                 self.failures_since = None;
                 self.status.set(source);
                 Ok(Some(frame))
@@ -269,13 +282,10 @@ impl FullscreenFallbackCapture {
     fn waiting(&mut self, timeout: Duration) -> Result<Option<Frame>, CaptureError> {
         self.status.set(Source::Waiting);
         std::thread::sleep(timeout.min(POLL_INTERVAL));
-        let Some(data) = self.black.clone() else {
-            return Err(CaptureError::Timeout(timeout));
-        };
         let ticks = qpc_now_ticks_100ns().map_err(|e| CaptureError::DeviceLost(e.to_string()))?;
         Ok(Some(Frame {
             pts_s: self.clock.pts_s(ticks),
-            data,
+            data: self.black.clone(),
         }))
     }
 
@@ -377,14 +387,33 @@ fn screen_rect(rect: RECT) -> ScreenRect {
     }
 }
 
-fn black_texture_like(
-    device: &ID3D11Device,
-    frame: &Frame,
-) -> Result<ID3D11Texture2D, CaptureError> {
-    let FrameData::Gpu(texture) = &frame.data else {
-        return Err(CaptureError::Init("fallback expected a GPU frame".into()));
+/// The game's monitor size in physical pixels (the process is per-monitor
+/// DPI aware). Nearest, not null, so a minimized game still has a canvas.
+fn canvas_for_window(hwnd: HWND) -> Result<(u32, u32), CaptureError> {
+    // SAFETY: read-only monitor queries on a borrowed HWND.
+    let rect = unsafe {
+        let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+            return Err(CaptureError::Init("game monitor is unavailable".into()));
+        }
+        info.rcMonitor
     };
-    let (width, height) = d3d11::texture_size(texture);
+    let width = u32::try_from(rect.right.saturating_sub(rect.left)).unwrap_or(0);
+    let height = u32::try_from(rect.bottom.saturating_sub(rect.top)).unwrap_or(0);
+    if width == 0 || height == 0 {
+        return Err(CaptureError::Init("game monitor has no area".into()));
+    }
+    Ok((width, height))
+}
+
+fn black_texture(
+    device: &ID3D11Device,
+    (width, height): (u32, u32),
+) -> Result<ID3D11Texture2D, CaptureError> {
     let pitch = width
         .checked_mul(4)
         .ok_or_else(|| CaptureError::Init("black frame width overflow".into()))?;

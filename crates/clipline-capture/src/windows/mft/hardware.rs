@@ -450,6 +450,11 @@ impl Encoder for MftH264Encoder {
         )
     }
 
+    fn set_video_fit(&mut self, fit: VideoFit) -> Result<(), EncodeError> {
+        self.converter.set_fit(fit);
+        Ok(())
+    }
+
     fn finish(&mut self) -> Result<Vec<EncodedPacket>, EncodeError> {
         // SAFETY: end-of-stream + drain message pair, then pump until
         // METransformDrainComplete.

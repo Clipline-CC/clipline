@@ -35,6 +35,16 @@ pub(super) enum LiveBackend {
 }
 
 impl LiveBackend {
+    /// Encoder source size and placement. The fullscreen fallback records a
+    /// window and its monitor into one monitor-sized, letterboxed output;
+    /// every other engine keeps the first frame's size and stretch-to-fill.
+    pub(super) fn encoder_layout(&self, first_frame: (u32, u32)) -> ((u32, u32), VideoFit) {
+        match self {
+            Self::FullscreenFallback(cap) => (cap.canvas_size(), VideoFit::Contain),
+            Self::Wgc(_) | Self::Dxgi(_) => (first_frame, VideoFit::Stretch),
+        }
+    }
+
     pub(super) fn diagnostic_label(&self) -> Box<dyn Fn() -> &'static str> {
         match self {
             Self::Wgc(_) => Box::new(|| "windows_graphics_capture"),

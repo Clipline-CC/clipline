@@ -3,9 +3,9 @@ pub mod av1;
 pub mod avsync;
 pub mod clock;
 #[cfg(any(windows, test))]
-mod fallback_policy;
-#[cfg(any(windows, test))]
 mod capture_geometry;
+#[cfg(any(windows, test))]
+mod fallback_policy;
 #[cfg(any(windows, test))]
 mod reopen_resource;
 pub mod cpu_video;
@@ -20,6 +20,7 @@ pub mod pcm;
 pub mod pipeline;
 pub mod probe;
 pub mod traits;
+mod video_layout;
 #[cfg(windows)]
 pub mod windows;
 
@@ -38,6 +39,7 @@ pub use traits::{
     AudioPacket, AudioSource, CaptureEngine, CaptureError, EncodeError, EncodedPacket, Encoder,
     Frame, FrameData,
 };
+pub use video_layout::VideoFit;
 
 pub(crate) fn replay_gop_frames(fps: u32) -> u32 {
     (fps / 2).max(1)
