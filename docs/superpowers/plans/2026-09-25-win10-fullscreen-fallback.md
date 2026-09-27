@@ -22,3 +22,18 @@ load as Default and Fallback respectively.
 - [ ] Stop the previous app, build and launch the updated app for user testing.
 
 Checkboxes stay unticked (repo convention).
+
+## PR #211 review follow-up
+
+- [ ] Report rotated and cross-GPU monitors as `CaptureError::Unsupported`.
+      Automatic retries display/region targets through WGC; the switcher
+      keeps the game on WGC for an Unsupported monitor.
+- [ ] Count any foreground window of the game's process as the game, and
+      allow Desktop Duplication while another app's foreground window stays
+      off the game's monitor.
+- [ ] Treat a client that contains its monitor as fullscreen unless its
+      overhang reaches another monitor.
+- [ ] Record the fallback at its monitor's size with an opt-in letterbox
+      (`VideoFit::Contain`), and create the canvas-sized black frame before
+      the first source frame.
+- [ ] Rename the WGC choice to "Windows Graphics Capture" (`wgc`).

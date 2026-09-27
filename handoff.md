@@ -6,12 +6,12 @@
 
 ## Checkpoint (2026-09-25): Windows 10 fullscreen capture fallback
 
-Settings > Capture now offers Automatic (recommended), Default (Windows 11),
-and Fallback mode. Automatic uses WGC on Windows 11 and Fallback on Windows 10.
-Fallback uses WGC for an ordinary selected game window, Desktop Duplication
-while that exact foreground window's client area fills its monitor, and Desktop
-Duplication for full-display/region targets. Existing `wgc` and
-`desktop_duplication` settings migrate to the new explicit choices.
+Settings > Capture now offers Automatic (recommended), Windows Graphics
+Capture, and Fallback mode. Automatic uses WGC on Windows 11 and Fallback on
+Windows 10. Fallback uses WGC for an ordinary selected game window, Desktop
+Duplication while that window's client area fills its monitor, and Desktop
+Duplication for full-display/region targets. Saved `wgc` stays WGC and saved
+`desktop_duplication` loads as Fallback.
 
 The fullscreen switch releases WGC before opening Desktop Duplication and
 rechecks the window and monitor after frame acquisition. It inserts black
@@ -19,16 +19,36 @@ transition frames so a previous desktop frame is not repeated after focus or
 geometry changes. Both sources share the recording's D3D device and clock.
 Windowed games on Windows 10 still show WGC's yellow border; fullscreen
 Desktop Duplication captures the entire monitor, including overlays, and may
-omit a hardware cursor. A game spanning more than one monitor does not meet
-the fullscreen guard.
+omit a hardware cursor.
+
+PR #211 review follow-ups, all in the same PR:
+- **Unsupported monitors.** Desktop Duplication reports rotated and cross-GPU
+  monitors as `CaptureError::Unsupported`. Automatic on Windows 10 retries such
+  a display/region target with WGC; explicit Fallback mode does not. In the
+  switcher, an Unsupported monitor keeps the game on WGC for the rest of the
+  recording. Other duplication failures keep the 5 s retry budget.
+- **Focus.** Any window of the game's process counts as the game having focus.
+  Another app's foreground window forces black only when its visible DWM bounds
+  overlap the game's monitor, so a second-monitor browser or Discord no longer
+  blanks a fullscreen recording.
+- **Fullscreen guard.** A client that contains its monitor counts as fullscreen,
+  including a few pixels of overhang, unless the overhang reaches another
+  monitor.
+- **Output size.** The fallback records at its monitor's size (taken when
+  capture opens) with the opt-in `VideoFit::Contain` letterbox restored from
+  `380a392`, set through the new `Encoder::set_video_fit`. Every other capture
+  keeps stretch-to-fill. The canvas-sized black frame exists from the start, so
+  a game that is fullscreen but covered at start no longer fails the
+  first-frame wait.
 
 The Windows 10 Radeon 780M mock ran windowed → borderless → windowed and
 windowed → DXGI exclusive → windowed; the live probe observed WGC → black →
 Desktop Duplication → black → WGC in both. The mock now accepts `--no-audio`
-for hosts with no default playback endpoint. Workspace tests and fresh-cache
-warning-denied workspace/all-target Clippy pass. Focus loss and real games
-remain on the user test list; the automated focus probe could not move focus
-from the fullscreen mock in this session. Plan:
+for hosts with no default playback endpoint. The follow-ups are covered by
+neutral tests plus real-GPU tests for the cross-adapter rejection and the GPU
+pillarbox. They have not been live-probed. Real games, focus changes across
+monitors, rotated monitors, and a windowed start followed by fullscreen remain
+on the user test list. Plan:
 `docs/superpowers/plans/2026-09-25-win10-fullscreen-fallback.md`.
 
 ## Checkpoint (2026-09-20): Nightly 1.0.6 published
