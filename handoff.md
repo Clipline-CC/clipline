@@ -27,10 +27,18 @@ PR #211 review follow-ups, all in the same PR:
   a display/region target with WGC; explicit Fallback mode does not. In the
   switcher, an Unsupported monitor keeps the game on WGC for the rest of the
   recording. Other duplication failures keep the 5 s retry budget.
-- **Focus.** Any window of the game's process counts as the game having focus.
-  Another app's foreground window forces black only when its visible DWM bounds
-  overlap the game's monitor, so a second-monitor browser or Discord no longer
-  blanks a fullscreen recording.
+- **Cover guard.** Instead of checking focus, each poll walks the top-level
+  windows stacked above the game (`GW_HWNDPREV`, capped at 4096, deeper fails
+  closed) and forces black when another process's shown window reaches the
+  game's monitor. Ignored: the game's own windows, hidden/minimized/DWM-cloaked
+  windows, click-through layered overlays, display-affinity-excluded windows,
+  and the taskbar. A second-monitor browser no longer blanks the recording;
+  always-on-top and unfocused popups over the game now do. Transitions log
+  `fullscreen_capture_covered` with the covering window's class and pid. On the
+  dev desktop a full walk is 203 windows in 0.57 ms (debug), and only real app
+  windows counted. Windows 10 toasts are not in the `EnumWindows` list at all
+  (verified with a live toast), so notifications and system overlays still
+  reach fullscreen recordings.
 - **Fullscreen guard.** A client that contains its monitor counts as fullscreen,
   including a few pixels of overhang, unless the overhang reaches another
   monitor.

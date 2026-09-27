@@ -37,3 +37,6 @@ Checkboxes stay unticked (repo convention).
       (`VideoFit::Contain`), and create the canvas-sized black frame before
       the first source frame.
 - [ ] Rename the WGC choice to "Windows Graphics Capture" (`wgc`).
+- [ ] Replace the foreground check with a z-order walk: black while another
+      process's shown window above the game reaches its monitor, ignoring
+      hidden, cloaked, click-through, capture-excluded, and taskbar windows.
