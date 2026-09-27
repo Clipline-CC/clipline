@@ -25,7 +25,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::fallback_policy::{
-    accept_frame, choose, classify_focus, Focus, Observation, ScreenRect, Source,
+    accept_frame, choose, classify_focus, client_covers_monitor, Focus, Observation, ScreenRect,
+    Source,
 };
 use crate::{CaptureError, Frame, FrameData, RelativeClock};
 
@@ -317,10 +318,14 @@ impl FullscreenFallbackCapture {
             }
             let width = client.right.saturating_sub(client.left);
             let height = client.bottom.saturating_sub(client.top);
-            let covers_monitor = origin.x == info.rcMonitor.left
-                && origin.y == info.rcMonitor.top
-                && origin.x.saturating_add(width) == info.rcMonitor.right
-                && origin.y.saturating_add(height) == info.rcMonitor.bottom;
+            let client_bounds = ScreenRect {
+                left: origin.x,
+                top: origin.y,
+                right: origin.x.saturating_add(width),
+                bottom: origin.y.saturating_add(height),
+            };
+            let covers_monitor =
+                client_covers_monitor(client_bounds, screen_rect(info.rcMonitor), monitor_bounds);
             let foreground = GetForegroundWindow();
             let mut foreground_process = 0;
             let foreground_bounds = if foreground.is_invalid() {
@@ -345,6 +350,22 @@ impl FullscreenFallbackCapture {
             })
         }
     }
+}
+
+fn monitor_bounds() -> Option<Vec<ScreenRect>> {
+    let displays = super::display::complete_display_handles().ok()?;
+    displays
+        .into_iter()
+        .map(|display| {
+            let info = display.info;
+            Some(ScreenRect {
+                left: info.x,
+                top: info.y,
+                right: info.x.checked_add(i32::try_from(info.width).ok()?)?,
+                bottom: info.y.checked_add(i32::try_from(info.height).ok()?)?,
+            })
+        })
+        .collect()
 }
 
 fn screen_rect(rect: RECT) -> ScreenRect {

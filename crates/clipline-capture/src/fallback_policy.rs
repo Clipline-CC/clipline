@@ -34,6 +34,34 @@ impl ScreenRect {
             && self.top < other.bottom
             && other.top < self.bottom
     }
+
+    fn contains(self, other: Self) -> bool {
+        self.left <= other.left
+            && self.top <= other.top
+            && self.right >= other.right
+            && self.bottom >= other.bottom
+    }
+}
+
+/// Some games size their client a few pixels past the monitor edges, so
+/// containment counts as fullscreen. An overhang that reaches another
+/// monitor does not: duplication would drop the game's content there.
+/// `monitors` is only consulted for an overhang; `None` means enumeration
+/// failed, which fails closed.
+pub(crate) fn client_covers_monitor(
+    client: ScreenRect,
+    monitor: ScreenRect,
+    monitors: impl FnOnce() -> Option<Vec<ScreenRect>>,
+) -> bool {
+    if client == monitor {
+        return true;
+    }
+    client.contains(monitor)
+        && monitors().is_some_and(|monitors| {
+            monitors
+                .iter()
+                .all(|&other| other == monitor || !client.overlaps(other))
+        })
 }
 
 /// Process ownership, not the exact HWND: some games focus a sibling window
@@ -175,6 +203,43 @@ mod tests {
         right: 1920,
         bottom: 1080,
     };
+
+    #[test]
+    fn a_client_that_fills_or_overhangs_only_its_monitor_covers_it() {
+        let no_enumeration = || -> Option<Vec<ScreenRect>> {
+            panic!("an exact match must not enumerate monitors")
+        };
+        assert!(client_covers_monitor(PRIMARY, PRIMARY, no_enumeration));
+
+        let overhang = ScreenRect {
+            left: -2,
+            top: -2,
+            right: 1922,
+            bottom: 1082,
+        };
+        let right_monitor = ScreenRect {
+            left: 1920,
+            top: 0,
+            right: 3840,
+            bottom: 1080,
+        };
+        assert!(client_covers_monitor(overhang, PRIMARY, || Some(vec![
+            PRIMARY
+        ])));
+        assert!(!client_covers_monitor(overhang, PRIMARY, || Some(vec![
+            PRIMARY,
+            right_monitor
+        ])));
+        assert!(!client_covers_monitor(overhang, PRIMARY, || None));
+
+        let short = ScreenRect {
+            bottom: 1079,
+            ..PRIMARY
+        };
+        assert!(!client_covers_monitor(short, PRIMARY, || Some(vec![
+            PRIMARY
+        ])));
+    }
 
     #[test]
     fn focus_classifies_process_and_foreground_bounds() {
