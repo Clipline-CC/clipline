@@ -1499,15 +1499,15 @@ fn service_options_include_capture_backend_choice() {
 fn legacy_capture_backend_values_migrate_to_the_new_choices() {
     assert_eq!(
         serde_json::from_str::<CaptureBackend>(r#""wgc""#).unwrap(),
-        CaptureBackend::Default
+        CaptureBackend::Wgc
     );
     assert_eq!(
         serde_json::from_str::<CaptureBackend>(r#""desktop_duplication""#).unwrap(),
         CaptureBackend::Fallback
     );
     assert_eq!(
-        serde_json::to_string(&CaptureBackend::Default).unwrap(),
-        r#""default""#
+        serde_json::to_string(&CaptureBackend::Wgc).unwrap(),
+        r#""wgc""#
     );
     assert_eq!(
         serde_json::to_string(&CaptureBackend::Fallback).unwrap(),

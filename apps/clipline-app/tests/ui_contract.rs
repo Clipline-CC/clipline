@@ -55,13 +55,13 @@ fn experimental_hybrid_capture_is_withdrawn() {
 }
 
 #[test]
-fn capture_backend_settings_expose_auto_default_and_fullscreen_fallback() {
+fn capture_backend_settings_expose_auto_wgc_and_fullscreen_fallback() {
     let html = index_html();
     let summary = read_ui_js("settings-capture.js");
     assert!(html.contains("<option value=\"auto\">Automatic (recommended)</option>"));
-    assert!(html.contains("<option value=\"default\">Default (Windows 11)</option>"));
+    assert!(html.contains("<option value=\"wgc\">Windows Graphics Capture</option>"));
     assert!(html.contains("<option value=\"fallback\">Fallback mode</option>"));
-    assert!(!html.contains("<option value=\"wgc\">"));
+    assert!(!html.contains("<option value=\"default\">"));
     assert!(!html.contains("<option value=\"desktop_duplication\">"));
     assert!(summary.contains("fullscreen"));
     assert!(summary.contains("Windows 10"));

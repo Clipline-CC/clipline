@@ -6,8 +6,8 @@
 pub enum CaptureBackend {
     #[default]
     Auto,
-    #[cfg_attr(windows, serde(alias = "wgc"))]
-    Default,
+    /// Windows Graphics Capture for every target.
+    Wgc,
     #[cfg_attr(windows, serde(alias = "desktop_duplication"))]
     Fallback,
 }
@@ -29,7 +29,7 @@ impl CapturePlan {
         is_window: bool,
     ) -> Self {
         match backend {
-            CaptureBackend::Default => Self::Wgc,
+            CaptureBackend::Wgc => Self::Wgc,
             CaptureBackend::Auto if is_windows_11_or_later => Self::Wgc,
             CaptureBackend::Auto | CaptureBackend::Fallback if is_window => {
                 Self::FullscreenFallback
@@ -69,7 +69,7 @@ mod tests {
         for is_windows_11 in [false, true] {
             for is_window in [false, true] {
                 assert_eq!(
-                    CapturePlan::for_source(CaptureBackend::Default, is_windows_11, is_window),
+                    CapturePlan::for_source(CaptureBackend::Wgc, is_windows_11, is_window),
                     CapturePlan::Wgc
                 );
                 assert_eq!(

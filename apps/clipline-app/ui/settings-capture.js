@@ -67,17 +67,17 @@ function syncCaptureBackendSummary() {
   const summary = $("backend-summary");
   if (!summary) return;
   switch ($("set-backend").value) {
-    case "default":
+    case "wgc":
       summary.textContent =
         "Uses Windows Graphics Capture for every target. On Windows 10, a yellow border may remain around a game even in fullscreen.";
       break;
     case "fallback":
       summary.textContent =
-        "Uses Windows Graphics Capture for windowed games, then Desktop Duplication when the selected game fills its display and is foreground. Full displays and regions use Desktop Duplication. Fullscreen capture includes overlays; a hardware mouse cursor may be missing.";
+        "Uses Windows Graphics Capture for windowed games, then Desktop Duplication while the selected game fills its display and no other app covers it. Game recordings use the display's size, with black bars around a windowed game. Full displays and regions use Desktop Duplication. Fullscreen capture includes overlays; a hardware mouse cursor may be missing.";
       break;
     default:
       summary.textContent =
-        "Uses the Windows 11 default on Windows 11 and fallback mode on Windows 10. Fullscreen fallback switches to Desktop Duplication so the yellow border disappears.";
+        "Uses Windows Graphics Capture on Windows 11 and fallback mode on Windows 10. Fullscreen fallback switches to Desktop Duplication so the yellow border disappears.";
   }
 }
 
