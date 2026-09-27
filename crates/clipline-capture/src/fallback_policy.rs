@@ -12,12 +12,15 @@ pub(crate) struct Observation {
     pub available: bool,
     pub foreground: bool,
     pub covers_monitor: bool,
+    /// False once Desktop Duplication has kept failing on this monitor, e.g.
+    /// a rotated display or one driven by another GPU.
+    pub display_supported: bool,
 }
 
 pub(crate) fn choose(observation: Observation) -> Source {
     if !observation.available {
         Source::Waiting
-    } else if !observation.covers_monitor {
+    } else if !observation.covers_monitor || !observation.display_supported {
         Source::Window
     } else if observation.foreground {
         Source::Display
@@ -48,7 +51,26 @@ mod tests {
             available: true,
             foreground: true,
             covers_monitor: false,
+            display_supported: true,
         }
+    }
+
+    #[test]
+    fn unsupported_displays_keep_fullscreen_games_on_wgc() {
+        let unsupported = Observation {
+            covers_monitor: true,
+            display_supported: false,
+            ..windowed()
+        };
+        assert_eq!(choose(unsupported), Source::Window);
+        assert_eq!(
+            choose(Observation {
+                foreground: false,
+                ..unsupported
+            }),
+            Source::Window
+        );
+        assert!(accept_frame(Source::Window, unsupported, unsupported, true));
     }
 
     #[test]

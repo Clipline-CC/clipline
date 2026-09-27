@@ -70,6 +70,7 @@ impl Snapshot {
                 available: false,
                 foreground: false,
                 covers_monitor: false,
+                display_supported: true,
             },
             monitor: None,
         }
@@ -108,6 +109,7 @@ pub struct FullscreenFallbackCapture {
     status: FullscreenFallbackStatus,
     retry_at: Instant,
     failures_since: Option<Instant>,
+    unsupported_display: Option<HMONITOR>,
 }
 
 impl FullscreenFallbackCapture {
@@ -137,6 +139,7 @@ impl FullscreenFallbackCapture {
             status: FullscreenFallbackStatus::default(),
             retry_at: Instant::now(),
             failures_since: None,
+            unsupported_display: None,
         })
     }
 
@@ -183,7 +186,7 @@ impl FullscreenFallbackCapture {
             };
             match opened {
                 Ok(active) => self.active = Some(active),
-                Err(error) => return self.recover(error, timeout),
+                Err(error) => return self.recover(error, source, before.monitor, timeout),
             }
         }
 
@@ -220,12 +223,14 @@ impl FullscreenFallbackCapture {
                 self.active = None;
                 self.recover(
                     CaptureError::SourceChanged("capture session closed".into()),
+                    source,
+                    before.monitor,
                     timeout,
                 )
             }
             Err(error) => {
                 self.active = None;
-                self.recover(error, timeout)
+                self.recover(error, source, before.monitor, timeout)
             }
         }
     }
@@ -233,8 +238,20 @@ impl FullscreenFallbackCapture {
     fn recover(
         &mut self,
         error: CaptureError,
+        source: Source,
+        monitor: Option<HMONITOR>,
         timeout: Duration,
     ) -> Result<Option<Frame>, CaptureError> {
+        if source == Source::Display && matches!(error, CaptureError::Unsupported(_)) {
+            // Rotated and cross-GPU monitors never duplicate. Keep recording
+            // the game through WGC rather than ending the session. Transient
+            // failures (mode switches, UAC) take the ordinary retry path.
+            tracing::warn!(event = "desktop_duplication_unavailable", error = %error);
+            self.unsupported_display = monitor;
+            self.failures_since = None;
+            self.retry_at = Instant::now();
+            return self.waiting(timeout);
+        }
         let since = *self.failures_since.get_or_insert_with(Instant::now);
         if since.elapsed() >= RETRY_BUDGET {
             return Err(error);
@@ -305,6 +322,7 @@ impl FullscreenFallbackCapture {
                     available: width > 0 && height > 0,
                     foreground: GetForegroundWindow() == self.hwnd,
                     covers_monitor,
+                    display_supported: self.unsupported_display != Some(monitor),
                 },
                 monitor: Some(monitor),
             })

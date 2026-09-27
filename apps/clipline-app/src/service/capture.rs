@@ -320,19 +320,34 @@ pub(super) fn open_screen_capture(
     );
     match plan {
         crate::capture_policy::CapturePlan::Dxgi => open_dxgi(device, clock, source, events),
+        crate::capture_policy::CapturePlan::DxgiThenWgc => {
+            open_dxgi(device, clock, source, events).or_else(|error| {
+                tracing::warn!(event = "desktop_duplication_unavailable", error = %error);
+                open_wgc_first_frame(device, clock, source, events)
+            })
+        }
         crate::capture_policy::CapturePlan::FullscreenFallback => {
             open_fullscreen_fallback(device, clock, source)
         }
         crate::capture_policy::CapturePlan::Wgc => {
-            let init = |e: &dyn std::fmt::Display| format!("init: {e}");
-            let mut cap = open_wgc(device, clock, source, events)?;
-            let first = cap
-                .next_frame_timeout(FIRST_FRAME_TIMEOUT)
-                .map_err(|e| init(&e))?
-                .ok_or("capture ended before the first frame")?;
-            Ok((LiveBackend::Wgc(cap), first))
+            open_wgc_first_frame(device, clock, source, events)
         }
     }
+}
+
+fn open_wgc_first_frame(
+    device: &ID3D11Device,
+    clock: RelativeClock,
+    source: &CaptureSource,
+    events: &Sender<Event>,
+) -> Result<(LiveBackend, Frame), String> {
+    let init = |e: &dyn std::fmt::Display| format!("init: {e}");
+    let mut cap = open_wgc(device, clock, source, events)?;
+    let first = cap
+        .next_frame_timeout(FIRST_FRAME_TIMEOUT)
+        .map_err(|e| init(&e))?
+        .ok_or("capture ended before the first frame")?;
+    Ok((LiveBackend::Wgc(cap), first))
 }
 
 fn open_fullscreen_fallback(

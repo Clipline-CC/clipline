@@ -287,8 +287,8 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
     let mut player_summary = PlayerSummaryState::default();
     let mut league_queue: Option<LeagueQueue> = None;
     // Build the selected capture engine and pull the first frame, which fixes
-    // the capture size. Explicit Desktop Duplication rejects window sources
-    // and returns failures without switching to WGC.
+    // the capture size. Explicit Fallback mode never retries a display or
+    // region through WGC; Automatic does when Desktop Duplication is rejected.
     let (cap, first) = open_screen_capture(
         &device,
         clock,

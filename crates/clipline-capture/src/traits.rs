@@ -25,6 +25,10 @@ pub enum CaptureError {
     SourceChanged(String),
     #[error("capture init failed: {0}")]
     Init(String),
+    /// The target can never be captured by this API (retrying cannot help),
+    /// e.g. a rotated or cross-GPU monitor for Desktop Duplication.
+    #[error("capture unsupported: {0}")]
+    Unsupported(String),
     #[error("capture device lost: {0}")]
     DeviceLost(String),
     #[error("no frame arrived within {0:?}")]
@@ -222,6 +226,9 @@ mod tests {
         };
         assert!(err.is_timeout());
         assert!(format!("{err}").contains("process loopback activation"));
+        let err = CaptureError::Unsupported("rotated display".into());
+        assert!(format!("{err}").contains("rotated display"));
+        assert!(!err.is_timeout());
     }
 
     #[test]

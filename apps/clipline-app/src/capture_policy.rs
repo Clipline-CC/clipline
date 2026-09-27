@@ -16,6 +16,9 @@ pub enum CaptureBackend {
 pub(crate) enum CapturePlan {
     Wgc,
     Dxgi,
+    /// Automatic prefers the border-free API but still records when Desktop
+    /// Duplication rejects the display, e.g. rotated or on another GPU.
+    DxgiThenWgc,
     FullscreenFallback,
 }
 
@@ -31,7 +34,8 @@ impl CapturePlan {
             CaptureBackend::Auto | CaptureBackend::Fallback if is_window => {
                 Self::FullscreenFallback
             }
-            CaptureBackend::Auto | CaptureBackend::Fallback => Self::Dxgi,
+            CaptureBackend::Auto => Self::DxgiThenWgc,
+            CaptureBackend::Fallback => Self::Dxgi,
         }
     }
 }
@@ -56,7 +60,7 @@ mod tests {
         );
         assert_eq!(
             CapturePlan::for_source(CaptureBackend::Auto, false, false),
-            CapturePlan::Dxgi
+            CapturePlan::DxgiThenWgc
         );
     }
 
