@@ -38,7 +38,15 @@ PR #211 review follow-ups, all in the same PR:
   dev desktop a full walk is 203 windows in 0.57 ms (debug), and only real app
   windows counted. Windows 10 toasts are not in the `EnumWindows` list at all
   (verified with a live toast), so notifications and system overlays still
-  reach fullscreen recordings.
+  reach fullscreen recordings. Click-through overlays are recorded on purpose:
+  always-present transparent layers (tao's 16x16 helpers, NVIDIA's overlay)
+  would otherwise black out every session, and Windows cannot report whether a
+  per-pixel-alpha layer draws anything (Greptile P1, GPT-6-Astra advisor
+  agreed). The guard is best-effort; the Automatic and Fallback settings copy
+  says the display is recorded whole. A cloaked game (another virtual desktop)
+  counts as unavailable, and a `GetWindow` failure mid-walk (checked via
+  `SetLastError`) fails closed instead of ending the walk. Follow-up: a
+  first-use notice for whole-display capture.
 - **Fullscreen guard.** A client that contains its monitor counts as fullscreen,
   including a few pixels of overhang, unless the overhang reaches another
   monitor.
