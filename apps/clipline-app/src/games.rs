@@ -80,14 +80,20 @@ pub(crate) fn detect_active_game_from_windows_with_steam(
     windows: Vec<CapturableWindow>,
     steam: &mut SteamDetectorState,
 ) -> Option<DetectedGame> {
+    // The Steam preference only lasts while the fallback owns the capture;
+    // a built-in or custom game taking over (or detection turning off)
+    // clears it so it cannot resurrect an old Steam window later.
     if !settings.auto_detect {
+        steam.current_app_id = None;
         return None;
     }
     if let Some(game) = detect_built_in_game_from_windows(settings, &windows) {
+        steam.current_app_id = None;
         return Some(game);
     }
     for game in settings.custom_games.iter().filter(|game| game.enabled) {
         if let Some(window) = best_window_for_game(game, &windows) {
+            steam.current_app_id = None;
             return Some(DetectedGame {
                 identity: GameIdentity::custom(game.id.clone()),
                 name: game.name.clone(),
@@ -110,29 +116,33 @@ pub(crate) fn detect_active_game_from_windows_with_steam(
                     .custom_games
                     .iter()
                     .filter(|game| !game.enabled)
-                    .any(|game| disabled_custom_rule_matches_path(game, window))
+                    .any(|game| disabled_custom_rule_owns_window(game, window))
             })
             .collect();
         return detect_steam_game_from_windows(steam_windows, steam);
     }
+    steam.current_app_id = None;
     None
 }
 
-fn disabled_custom_rule_matches_path(
-    game: &CustomGameSettings,
-    window: &CapturableWindow,
-) -> bool {
-    let Some(configured) = game
+/// A disabled rule owns a window its path names, or, for a path-less rule,
+/// its exact exe name. Title substrings are too fuzzy to claim a window: they
+/// could suppress an unrelated Steam game.
+fn disabled_custom_rule_owns_window(game: &CustomGameSettings, window: &CapturableWindow) -> bool {
+    match game
         .process_path
         .as_deref()
         .filter(|path| !path.trim().is_empty())
-    else {
-        return false;
-    };
-    window
-        .exe_path
-        .as_deref()
-        .is_some_and(|actual| path_key(configured) == path_key(actual))
+    {
+        Some(configured) => window
+            .exe_path
+            .as_deref()
+            .is_some_and(|actual| path_key(configured) == path_key(actual)),
+        None => {
+            let exe = game.exe_name.trim();
+            !exe.is_empty() && exe.eq_ignore_ascii_case(window.exe_name.trim())
+        }
+    }
 }
 
 /// Upper bound on Steam manifest rescans while a Steam-rooted window misses
@@ -1221,11 +1231,13 @@ mod tests {
             "a disabled custom rule must keep owning its Steam-path window"
         );
 
-        let fuzzy_exe_only = GameSettings {
+        // A path-less rule naming the exact exe is the user saying "don't
+        // record this"; recording it through the fallback would ignore that.
+        let exe_only = GameSettings {
             custom_games: vec![CustomGameSettings {
-                id: "custom-fuzzy-off".into(),
+                id: "custom-exe-off".into(),
                 enabled: false,
-                exe_name: "Friendslop.exe".into(),
+                exe_name: "friendslop.EXE".into(),
                 process_path: None,
                 window_title: String::new(),
                 ..game()
@@ -1233,8 +1245,25 @@ mod tests {
             ..steam_enabled()
         };
         assert!(
-            detect_with_catalog(&fuzzy_exe_only, windows.clone()).is_some(),
-            "an exe-only disabled rule must not block an unrelated Steam game"
+            detect_with_catalog(&exe_only, windows.clone()).is_none(),
+            "a disabled rule naming the exact exe must keep owning the window"
+        );
+
+        // Title substrings are fuzzy and could name an unrelated game.
+        let title_only = GameSettings {
+            custom_games: vec![CustomGameSettings {
+                id: "custom-title-off".into(),
+                enabled: false,
+                exe_name: String::new(),
+                process_path: None,
+                window_title: "Friend".into(),
+                ..game()
+            }],
+            ..steam_enabled()
+        };
+        assert!(
+            detect_with_catalog(&title_only, windows.clone()).is_some(),
+            "a title-only disabled rule must not block the Steam fallback"
         );
 
         let unrelated = GameSettings {
@@ -1481,5 +1510,52 @@ mod tests {
         // No Steam window at all forgets the preference.
         assert_eq!(detect(Vec::new()), None);
         assert_eq!(detect(vec![first(), second()]).as_deref(), Some("steam-1"));
+    }
+
+    #[test]
+    fn another_game_taking_over_clears_the_steam_preference() {
+        let catalog = crate::game_discovery::SteamLaunchCatalog {
+            apps: vec![
+                crate::game_discovery::SteamLaunchApp::new(
+                    1,
+                    "First",
+                    r"C:\Steam\steamapps\common\First",
+                ),
+                crate::game_discovery::SteamLaunchApp::new(
+                    2,
+                    "Second",
+                    r"C:\Steam\steamapps\common\Second",
+                ),
+            ],
+            loaded_at: std::time::Instant::now(),
+        };
+        let mut steam = super::SteamDetectorState::fixed(catalog);
+        let settings = GameSettings {
+            custom_games: vec![CustomGameSettings {
+                id: "custom-other".into(),
+                exe_name: "Other.exe".into(),
+                process_path: Some(r"C:\Games\Other\Other.exe".into()),
+                window_title: "Other".into(),
+                ..game()
+            }],
+            ..steam_enabled()
+        };
+        let first = || {
+            window(1, "First", "First.exe", Some(r"C:\Steam\steamapps\common\First\First.exe"))
+        };
+        let second = || {
+            window(2, "Second", "Second.exe", Some(r"C:\Steam\steamapps\common\Second\Second.exe"))
+        };
+        let other = || window(3, "Other", "Other.exe", Some(r"C:\Games\Other\Other.exe"));
+        let mut detect = |windows| {
+            super::detect_active_game_from_windows_with_steam(&settings, windows, &mut steam)
+                .map(|game| game.identity.id().to_owned())
+        };
+
+        assert_eq!(detect(vec![first(), second()]).as_deref(), Some("steam-1"));
+        assert_eq!(detect(vec![other(), second(), first()]).as_deref(), Some("custom-other"));
+        // Other closes with Second on top: First must not win on a preference
+        // left over from before the custom game took the capture.
+        assert_eq!(detect(vec![second(), first()]).as_deref(), Some("steam-2"));
     }
 }
