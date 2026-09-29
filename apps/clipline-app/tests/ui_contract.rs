@@ -4858,8 +4858,8 @@ fn steam_launch_detection_wires_settings_checkbox_and_always_add() {
 
     let settings = read_ui_js("settings.js");
     assert!(
-        settings.contains("auto_detect_steam_launches: true"),
-        "default game settings must opt into Steam launch detection"
+        settings.contains("auto_detect_steam_launches: false"),
+        "new installs record the desktop, so Steam launch detection starts off"
     );
     assert!(settings.contains("auto_detect_steam_launches: $(\"set-games-auto-detect-steam\").checked"));
 

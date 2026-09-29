@@ -153,7 +153,7 @@ pub struct GameSettings {
     pub auto_detect: bool,
     #[serde(default = "default_disabled")]
     pub pause_when_no_game: bool,
-    #[serde(default = "default_enabled")]
+    /// See `GameSettingsWire`: a missing value follows `pause_when_no_game`.
     pub auto_detect_steam_launches: bool,
     #[serde(default)]
     pub plugins: BTreeMap<String, GamePluginSettings>,
@@ -167,8 +167,10 @@ struct GameSettingsWire {
     auto_detect: bool,
     #[serde(default = "default_disabled")]
     pause_when_no_game: bool,
-    #[serde(default = "default_enabled")]
-    auto_detect_steam_launches: bool,
+    /// Absent in files saved before the setting existed. It then follows
+    /// games-only mode, so desktop recorders keep their capture target.
+    #[serde(default)]
+    auto_detect_steam_launches: Option<bool>,
     #[serde(default)]
     plugins: BTreeMap<String, GamePluginSettings>,
     #[serde(default, rename = "recording_mode")]
@@ -182,7 +184,8 @@ impl Default for GameSettings {
         Self {
             auto_detect: true,
             pause_when_no_game: false,
-            auto_detect_steam_launches: true,
+            // Follows `pause_when_no_game`, like a settings file without it.
+            auto_detect_steam_launches: false,
             plugins: BTreeMap::new(),
             custom_games: Vec::new(),
         }
@@ -203,7 +206,9 @@ impl<'de> Deserialize<'de> for GameSettings {
         Ok(Self {
             auto_detect: wire.auto_detect,
             pause_when_no_game: wire.pause_when_no_game,
-            auto_detect_steam_launches: wire.auto_detect_steam_launches,
+            auto_detect_steam_launches: wire
+                .auto_detect_steam_launches
+                .unwrap_or(wire.pause_when_no_game),
             plugins: wire.plugins,
             custom_games: wire.custom_games,
         })

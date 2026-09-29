@@ -929,6 +929,15 @@ mod tests {
         }));
     }
 
+    /// Steam launch detection defaults off unless the user records games-only;
+    /// these tests exercise the fallback itself.
+    fn steam_enabled() -> GameSettings {
+        GameSettings {
+            auto_detect_steam_launches: true,
+            ..GameSettings::default()
+        }
+    }
+
     fn steam_catalog() -> crate::game_discovery::SteamLaunchCatalog {
         crate::game_discovery::SteamLaunchCatalog {
             apps: vec![crate::game_discovery::SteamLaunchApp::new(
@@ -952,7 +961,7 @@ mod tests {
     #[test]
     fn unmatched_steam_window_becomes_replays_only_discovered_game() {
         let detected = detect_with_catalog(
-            &GameSettings::default(),
+            &steam_enabled(),
             vec![window(
                 11,
                 "Friendslop",
@@ -975,7 +984,7 @@ mod tests {
     #[test]
     fn built_in_plugin_still_wins_over_steam_path() {
         let detected = detect_with_catalog(
-            &GameSettings::default(),
+            &steam_enabled(),
             vec![
                 window(
                     2,
@@ -1128,7 +1137,7 @@ mod tests {
         ] {
             assert!(
                 detect_with_catalog(
-                    &GameSettings::default(),
+                    &steam_enabled(),
                     vec![window(4, title, exe, Some(path))],
                 )
                 .is_none(),
@@ -1173,7 +1182,7 @@ mod tests {
                 recording_mode: GameRecordingMode::ReplaysOnly,
                 ..game()
             }],
-            ..GameSettings::default()
+            ..steam_enabled()
         };
         let windows = vec![window(
             6,
@@ -1196,7 +1205,7 @@ mod tests {
                 window_title: String::new(),
                 ..game()
             }],
-            ..GameSettings::default()
+            ..steam_enabled()
         };
         assert!(
             detect_with_catalog(&fuzzy_exe_only, windows.clone()).is_some(),
@@ -1212,7 +1221,7 @@ mod tests {
                 window_title: "Other Game".into(),
                 ..game()
             }],
-            ..GameSettings::default()
+            ..steam_enabled()
         };
         assert!(
             detect_with_catalog(&unrelated, windows).is_some(),
@@ -1285,7 +1294,7 @@ mod tests {
         // Unity/Unreal layout: the running exe is nested and named nothing
         // like the install folder. Lookup is install-dir prefix only.
         let detected = detect_with_catalog(
-            &GameSettings::default(),
+            &steam_enabled(),
             vec![window(
                 8,
                 "Friendslop",
@@ -1302,7 +1311,7 @@ mod tests {
     #[test]
     fn longest_title_wins_when_windows_share_one_steam_exe() {
         let detected = detect_with_catalog(
-            &GameSettings::default(),
+            &steam_enabled(),
             vec![
                 window(
                     1,
@@ -1344,7 +1353,7 @@ mod tests {
         let mut steam = super::SteamDetectorState::fixed(catalog);
 
         let detected = super::detect_active_game_from_windows_with_steam(
-            &GameSettings::default(),
+            &steam_enabled(),
             vec![
                 window(
                     1,
@@ -1394,7 +1403,7 @@ mod tests {
         };
         let mut detect = |windows| {
             super::detect_active_game_from_windows_with_steam(
-                &GameSettings::default(),
+                &steam_enabled(),
                 windows,
                 &mut steam,
             )

@@ -27,7 +27,8 @@ fn defaults_match_current_recorder_behavior() {
     assert_eq!(settings.capture_mode, CaptureMode::PrimaryMonitor);
     assert!(settings.games.auto_detect);
     assert!(!settings.games.pause_when_no_game);
-    assert!(settings.games.auto_detect_steam_launches);
+    // Steam launch detection defaults on only for games-only users.
+    assert!(!settings.games.auto_detect_steam_launches);
     assert!(settings.games.plugins.is_empty());
     assert!(settings.games.custom_games.is_empty());
     assert!(settings.audio.output_enabled);
@@ -186,32 +187,41 @@ fn legacy_games_default_no_game_pause_off() {
 }
 
 #[test]
-fn missing_auto_detect_steam_launches_defaults_on() {
-    let settings: GameSettings = serde_json::from_str(
+fn missing_auto_detect_steam_launches_follows_games_only_mode() {
+    // Desktop recorders keep their capture target: a Steam-installed tool
+    // (OBS, Blender, Wallpaper Engine) must not take it over by default.
+    let desktop: GameSettings = serde_json::from_str(
         r#"{
             "auto_detect": true,
             "custom_games": []
         }"#,
     )
     .unwrap();
+    assert!(!desktop.auto_detect_steam_launches);
 
-    assert!(settings.auto_detect_steam_launches);
-    let saved = serde_json::to_value(&settings).unwrap();
+    let games_only: GameSettings = serde_json::from_str(
+        r#"{
+            "auto_detect": true,
+            "pause_when_no_game": true,
+            "custom_games": []
+        }"#,
+    )
+    .unwrap();
+    assert!(games_only.auto_detect_steam_launches);
+    // Once saved, the choice no longer follows games-only mode.
+    let saved = serde_json::to_value(&games_only).unwrap();
     assert_eq!(saved["auto_detect_steam_launches"], true);
 
-    let disabled: GameSettings = serde_json::from_str(
-        r#"{
+    for (pause_when_no_game, explicit) in [(true, false), (false, true)] {
+        let settings: GameSettings = serde_json::from_value(serde_json::json!({
             "auto_detect": true,
-            "auto_detect_steam_launches": false,
+            "pause_when_no_game": pause_when_no_game,
+            "auto_detect_steam_launches": explicit,
             "custom_games": []
-        }"#,
-    )
-    .unwrap();
-    assert!(!disabled.auto_detect_steam_launches);
-    assert_eq!(
-        serde_json::to_value(&disabled).unwrap()["auto_detect_steam_launches"],
-        false
-    );
+        }))
+        .unwrap();
+        assert_eq!(settings.auto_detect_steam_launches, explicit);
+    }
 }
 
 #[test]

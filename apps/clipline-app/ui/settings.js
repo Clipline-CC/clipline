@@ -490,7 +490,7 @@ function defaultGameSettings() {
   return {
     auto_detect: true,
     pause_when_no_game: false,
-    auto_detect_steam_launches: true,
+    auto_detect_steam_launches: false,
     plugins: {},
     custom_games: [],
   };
