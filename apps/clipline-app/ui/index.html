@@ -116,9 +116,9 @@
               <button class="g-chip" data-filter="replay" type="button"><span class="g-dot" style="background:var(--accent)"></span>Replays</button>
               <button class="g-chip" data-filter="session" type="button"><span class="g-dot" style="background:var(--session)"></span>Sessions</button>
               <button class="g-chip" data-filter="trim" type="button"><span class="g-dot" style="background:var(--ok)"></span>Trims</button>
-              <button class="g-chip" data-filter="group" type="button">Groups</button>
               <button class="g-chip" data-filter="favorite" type="button"><span class="g-dot" style="background:var(--favorite)"></span>Favorites</button>
               <span class="g-sep"></span>
+              <button class="g-chip" data-filter="group" type="button">Groups</button>
               <button class="g-chip" data-filter="marked" type="button">Has markers</button>
             </div>
             <div class="gallery-filter-actions">
@@ -176,7 +176,7 @@
             <button id="open-folder" class="icon-button" title="Show this clip in Explorer">
               <svg viewBox="0 0 24 24"><path d="M10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2z"/></svg>
             </button>
-            <button id="copy-clip" class="icon-button" title="Copy shareable clip to clipboard (clips over 5 minutes copy the media file; Shift+click copies the original)">
+            <button id="copy-clip" class="icon-button" title="Copy shareable clip to clipboard (Shift+click copies the original)">
               <svg viewBox="0 0 24 24"><path d="M9 2h6a2 2 0 0 1 2 2h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2a2 2 0 0 1 2-2zm0 3v2h6V5H9zM5 6v14h14V6h-2v3H7V6H5z"/></svg>
             </button>
             <button id="delete-clip" class="icon-button danger" title="Delete source clip from disk">
@@ -430,13 +430,23 @@
                 <span id="update-status" class="hint"></span>
               </div>
             </div>
+            <div class="setting-row" data-settings-key="reopen_window_after_update">
+              <div class="setting-info">
+                <strong>Reopen after updating</strong>
+                <span>Bring the window back once an update finishes installing, instead of restarting to the tray.</span>
+              </div>
+              <label class="check-line">
+                <input id="set-reopen-window-after-update" type="checkbox" />
+                <span>Show the window after an update installs</span>
+              </label>
+            </div>
           </div>
 
           <div class="settings-section" id="settings-panel-capture" data-section="capture" role="tabpanel" aria-labelledby="settings-tab-capture" hidden>
-            <div class="setting-row" data-settings-key="capture_mode capture_region window_title">
+            <div class="setting-row" data-settings-key="capture_mode capture_display_id capture_region window_title">
               <div class="setting-info">
                 <strong>Capture target</strong>
-                <span>What the recorder captures when no custom game is active.</span>
+                <span>Full displays follow resolution changes and include overlapping windows. Choose SET REGION for a rectangle. Used when no custom game is active.</span>
               </div>
               <select id="set-capture">
                 <option value="primary_monitor">loading displays...</option>
@@ -446,13 +456,13 @@
             <div class="setting-row" data-settings-key="capture_backend">
               <div class="setting-info">
                 <strong>Capture backend</strong>
-                <span>How displays and regions are captured.</span>
+                <span>How games, displays, and regions are captured.</span>
               </div>
               <div class="recording-control">
                 <select id="set-backend">
                   <option value="auto">Automatic (recommended)</option>
                   <option value="wgc">Windows Graphics Capture</option>
-                  <option value="desktop_duplication">Desktop Duplication (no Windows 10 border)</option>
+                  <option value="fallback">Fallback mode</option>
                 </select>
                 <span id="backend-summary" class="setting-summary"></span>
               </div>
@@ -495,25 +505,18 @@
                 </div>
               </div>
             </div>
-            <div class="setting-row" data-settings-key="audio.output_enabled audio.output_device_id audio.output_volume audio.split_output_by_process">
+            <div class="setting-row" data-settings-key="audio.output_enabled audio.playback_sources">
               <div class="setting-info">
-                <strong>Audio output</strong>
-                <span>Sound from the selected Windows playback device.</span>
+                <strong>Playback audio</strong>
+                <span>Record each selected Windows playback device as a separate clip track.</span>
               </div>
               <div class="audio-control">
                 <label class="check-line">
                   <input id="set-output-enabled" type="checkbox" />
-                  <span>Record output audio</span>
+                  <span>Record playback audio</span>
                 </label>
-                <label class="check-line">
-                  <input id="set-audio-split-output" type="checkbox" />
-                  <span>Experimental app audio tracks</span>
-                </label>
-                <select id="set-output-device"></select>
-                <div class="volume-line">
-                  <input id="set-output-volume" type="range" min="0" max="2" step="0.05" />
-                  <span id="output-volume-summary" class="setting-summary"></span>
-                </div>
+                <div id="set-playback-sources" class="playback-source-list"></div>
+                <button id="add-playback-source" type="button">Add playback source</button>
               </div>
             </div>
             <div class="setting-row" data-settings-key="audio.mic_enabled audio.mic_device_id audio.mic_volume audio.mic_channels">
@@ -1067,7 +1070,6 @@
               <div><strong>Audio output</strong><span>Sound from the selected Windows playback device.</span></div>
               <div class="first-run-control-stack">
                 <label class="first-run-check"><input id="first-run-output-enabled" type="checkbox" checked />Record output audio</label>
-                <label class="first-run-check"><input id="first-run-split-output" type="checkbox" />Experimental app audio tracks</label>
                 <select id="first-run-output-device" aria-label="Audio output device"><option value="">Default output device</option></select>
                 <div class="first-run-range-line">
                   <input id="first-run-output-volume" aria-label="Audio output volume" type="range" min="0" max="2" step="0.05" value="1" />
@@ -1444,9 +1446,17 @@
   <script src="support-core.js"></script>
   <script src="app-core.js"></script>
   <script src="settings.js"></script>
+  <script src="settings-capture.js"></script>
+  <script src="settings-ffmpeg-games.js"></script>
+  <script src="settings-game-plugins.js"></script>
   <script src="library.js"></script>
+  <script src="library-cards.js"></script>
+  <script src="library-gallery.js"></script>
+  <script src="library-rails.js"></script>
   <script src="cloud.js"></script>
   <script src="review-player.js"></script>
+  <script src="review-clips.js"></script>
+  <script src="review-timeline.js"></script>
   <script src="support.js"></script>
   <script src="first-run.js"></script>
   <script type="module" src="bootstrap.mjs"></script>

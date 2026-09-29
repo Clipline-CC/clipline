@@ -1,7 +1,8 @@
 //! DXGI Desktop Duplication capture (issue #42): a borderless display/region
 //! engine for Windows 10, where WGC's `SetIsBorderRequired(false)` is ignored
-//! and the yellow privacy border remains. Display/region only — window capture
-//! stays on WGC (Desktop Duplication cannot target a single window).
+//! and the yellow privacy border remains. A duplication always captures a
+//! monitor or region. The fullscreen fallback may open that monitor while a
+//! selected game covers it; windowed capture stays on WGC.
 //!
 //! Mirrors `WgcCapture`'s contracts: a caller-provided device (shared with the
 //! encoder — textures don't cross devices) and clock (shared with audio — one
@@ -15,7 +16,6 @@
 
 use std::time::{Duration, Instant};
 
-use windows::core::{Interface, HRESULT};
 use windows::Win32::Foundation::E_ACCESSDENIED;
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D};
 use windows::Win32::Graphics::Dxgi::Common::{
@@ -23,15 +23,17 @@ use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_MODE_ROTATION_UNSPECIFIED,
 };
 use windows::Win32::Graphics::Dxgi::{
-    IDXGIAdapter, IDXGIDevice, IDXGIOutput, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
     DXGI_ERROR_ACCESS_DENIED, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_DEVICE_REMOVED,
     DXGI_ERROR_NOT_CURRENTLY_AVAILABLE, DXGI_ERROR_NOT_FOUND, DXGI_ERROR_SESSION_DISCONNECTED,
     DXGI_ERROR_UNSUPPORTED, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTPUT_DESC,
+    IDXGIAdapter, IDXGIDevice, IDXGIOutput, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
 };
 use windows::Win32::Graphics::Gdi::HMONITOR;
 use windows::Win32::System::Performance::QueryPerformanceFrequency;
+use windows::core::{HRESULT, Interface};
 
-use crate::clock::{qpc_to_ticks_100ns, RelativeClock};
+use crate::clock::{RelativeClock, qpc_to_ticks_100ns};
+use crate::diagnostics::{CaptureDiagnostic, DiagnosticRateLimiter, emit_diagnostic};
 use crate::traits::{CaptureEngine, CaptureError, Frame, FrameData};
 use crate::windows::d3d11;
 use crate::windows::nv12::CropRect;
@@ -72,7 +74,9 @@ pub struct DxgiDuplicationCapture {
     /// Kept so the duplication can be recreated on access loss without
     /// re-enumerating the adapter.
     output: IDXGIOutput1,
-    dupl: IDXGIOutputDuplication,
+    dupl: Option<IDXGIOutputDuplication>,
+    needs_seed: bool,
+    reopen_diagnostics: DiagnosticRateLimiter,
     copy_mode: CopyMode,
     clock: RelativeClock,
     qpc_freq: i64,
@@ -134,7 +138,9 @@ impl DxgiDuplicationCapture {
             device,
             context,
             output,
-            dupl,
+            dupl: Some(dupl),
+            needs_seed: true,
+            reopen_diagnostics: DiagnosticRateLimiter::new(Duration::from_secs(5)),
             copy_mode,
             clock,
             qpc_freq: qpc_freq.max(1),
@@ -184,12 +190,18 @@ impl DxgiDuplicationCapture {
         // Defensive: never hold two frames across an acquire.
         self.release_held_frame();
 
+        if self.dupl.is_none() {
+            self.recreate_duplication();
+            return Ok(AcquireOutcome::RetryImmediately);
+        }
         let timeout_ms = wait.as_millis().min(u32::MAX as u128) as u32;
         let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
         let mut resource: Option<IDXGIResource> = None;
         // SAFETY: dupl is live; out-params are valid for the call's duration.
         let acquired = unsafe {
             self.dupl
+                .as_ref()
+                .expect("duplication opened above")
                 .AcquireNextFrame(timeout_ms, &mut info, &mut resource)
         };
         match acquired {
@@ -204,7 +216,7 @@ impl DxgiDuplicationCapture {
             Err(e) if e.code() == DXGI_ERROR_DEVICE_REMOVED => {
                 return Err(CaptureError::DeviceLost(format!(
                     "DXGI device removed: {e}"
-                )))
+                )));
             }
             Err(e) => return Err(CaptureError::DeviceLost(format!("AcquireNextFrame: {e}"))),
         }
@@ -224,14 +236,6 @@ impl DxgiDuplicationCapture {
         let Some(resource) = resource else {
             return Ok(AcquireOutcome::RetryImmediately);
         };
-        // No new desktop content this acquire (`LastPresentTime`/`AccumulatedFrames`
-        // both zero is a pointer-only or empty update). Skip it once we have a seed
-        // frame so the cadencer reuses the last texture at the target FPS instead of
-        // re-encoding identical frames on every cursor move — the cursor isn't
-        // composited in v1. The first frame is always taken so capture can start.
-        if info.LastPresentTime == 0 && info.AccumulatedFrames == 0 && self.has_emitted() {
-            return Ok(AcquireOutcome::RetryImmediately);
-        }
         // SAFETY: the desktop resource is an ID3D11Texture2D on the shared device.
         let source: ID3D11Texture2D = resource.cast().map_err(dev)?;
         let desc = d3d11::texture_desc(&source);
@@ -247,15 +251,24 @@ impl DxgiDuplicationCapture {
                 y: 0,
                 width: source_w,
                 height: source_h,
-            }
-            .in_frame(source_w, source_h),
-            CopyMode::Region(crop) => crop.in_frame(source_w, source_h),
+            },
+            CopyMode::Region(crop) => crop,
         };
-        // Region no longer fits (e.g. a resolution change mid-recording) — reuse
-        // the last frame instead of emitting a bad crop.
-        let Some(crop) = crop else {
+        // Validate before skipping pointer-only updates. A mode change must not
+        // turn an invalid fixed region into an endless stream of old frames.
+        crate::capture_geometry::validate_fixed_capture_region(
+            source_w,
+            source_h,
+            crop.x,
+            crop.y,
+            crop.width,
+            crop.height,
+        )?;
+        // Pointer-only updates can reuse the last frame once geometry is known
+        // to remain valid. Always take a seed frame when capture starts.
+        if info.LastPresentTime == 0 && info.AccumulatedFrames == 0 && self.has_emitted() {
             return Ok(AcquireOutcome::RetryImmediately);
-        };
+        }
         let copy =
             d3d11::create_bgra_texture(&self.device, crop.width, crop.height).map_err(dev)?;
         d3d11::copy_texture_region(
@@ -268,16 +281,17 @@ impl DxgiDuplicationCapture {
             crop.height,
         );
         let ticks = self.timestamp(info);
+        self.needs_seed = false;
         Ok(AcquireOutcome::Frame(Frame {
             pts_s: self.clock.pts_s(ticks),
             data: FrameData::Gpu(copy),
         }))
     }
 
-    /// Whether at least one frame has been emitted (the seed). Until then,
-    /// no-new-content frames are still taken so capture can start.
+    /// Whether this duplication has emitted its seed. Reopening clears this
+    /// state independently of the monotonic timestamp floor.
     fn has_emitted(&self) -> bool {
-        self.last_ticks_100ns != i64::MIN
+        !self.needs_seed
     }
 
     /// `LastPresentTime` is a raw QPC counter; convert to the shared 100 ns
@@ -296,20 +310,35 @@ impl DxgiDuplicationCapture {
     }
 
     /// Re-run `DuplicateOutput` on the cached output after access loss. A
-    /// failure here (e.g. the secure desktop is still up) is non-fatal: the old
-    /// duplication stays in place and the caller retries on a later tick once
-    /// the OS permits it.
+    /// failure here (e.g. the secure desktop is still up) leaves no duplication;
+    /// the caller retries on a later tick once the OS permits it.
     fn recreate_duplication(&mut self) {
         self.release_held_frame();
-        if let Ok(dupl) = duplicate_output(&self.output, &self.device) {
-            self.dupl = dupl;
+        self.needs_seed = true;
+        // DXGI requires releasing the invalidated duplication BEFORE requesting
+        // its replacement after access loss.
+        // A failed reopen leaves None so later attempts never reuse stale state.
+        let reopened = crate::reopen_resource::reopen_resource(&mut self.dupl, || {
+            // SAFETY: same live output and device used at initialization; the
+            // helper has already released the previous duplication interface.
+            unsafe { self.output.DuplicateOutput(&self.device) }
+        });
+        if let Err(error) = reopened {
+            if let Some(suppressed_since_last) = self.reopen_diagnostics.observe(Instant::now()) {
+                emit_diagnostic(CaptureDiagnostic::DxgiReopenFailed {
+                    hresult: error.code().0,
+                    suppressed_since_last,
+                });
+            }
         }
     }
 
     fn release_held_frame(&mut self) {
         if self.frame_held {
             // SAFETY: a frame was acquired and not yet released.
-            let _ = unsafe { self.dupl.ReleaseFrame() };
+            if let Some(dupl) = &self.dupl {
+                let _ = unsafe { dupl.ReleaseFrame() };
+            }
             self.frame_held = false;
         }
     }
@@ -330,7 +359,7 @@ impl Drop for DxgiDuplicationCapture {
 /// Enumerate the capture device's own adapter outputs and match the target
 /// monitor. If the monitor is not among them, the encoder/capture device lives
 /// on a different GPU (multi-GPU/hybrid) and `DuplicateOutput` would fail — we
-/// catch it here and return `Init` so the app can fall back to WGC.
+/// catch it here and return `Unsupported` so callers can fall back to WGC.
 fn find_output_for_monitor(
     device: &ID3D11Device,
     monitor: HMONITOR,
@@ -350,9 +379,9 @@ fn find_output_for_monitor(
         let output: IDXGIOutput = match unsafe { adapter.EnumOutputs(index) } {
             Ok(output) => output,
             Err(e) if e.code() == DXGI_ERROR_NOT_FOUND => {
-                return Err(init(
+                return Err(CaptureError::Unsupported(
                     "target monitor is not on the capture device's GPU (multi-GPU/hybrid)".into(),
-                ))
+                ));
             }
             Err(e) => return Err(init(format!("EnumOutputs: {e}"))),
         };
@@ -363,7 +392,7 @@ fn find_output_for_monitor(
             if !is_identity_rotation(desc.Rotation) {
                 // AcquireNextFrame hands back an un-rotated surface with the
                 // image rotated within it; v1 doesn't re-rotate, so fall back.
-                return Err(init(
+                return Err(CaptureError::Unsupported(
                     "rotated displays are not supported by the Desktop Duplication backend".into(),
                 ));
             }
@@ -419,6 +448,27 @@ mod tests {
         assert!(
             matches!(result, Err(CaptureError::Init(_))),
             "invalid handle must fail with Init"
+        );
+    }
+
+    /// WARP owns no outputs, so any real monitor is on "another GPU" for it.
+    /// Callers rely on `Unsupported` to stop retrying Desktop Duplication.
+    #[test]
+    fn monitor_on_another_adapter_is_unsupported() {
+        use windows::Win32::Foundation::POINT;
+        use windows::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTOPRIMARY};
+
+        // SAFETY: MonitorFromPoint has no preconditions.
+        let monitor = unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) };
+        if monitor.is_invalid() {
+            eprintln!("SKIP: no monitor attached");
+            return;
+        }
+        let (device, _ctx) = crate::windows::d3d11::create_device_for_tests().expect("device");
+        let result = DxgiDuplicationCapture::for_monitor_on(device, monitor, RelativeClock::new(0));
+        assert!(
+            matches!(result, Err(CaptureError::Unsupported(_))),
+            "cross-adapter monitor must be Unsupported"
         );
     }
 

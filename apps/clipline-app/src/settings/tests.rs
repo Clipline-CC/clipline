@@ -1,7 +1,7 @@
 use super::*;
 use crate::service::{
-    AudioChannelMode, AudioOptions, CaptureRegion, CaptureSource, ReplayStorageOptions,
-    VideoEncoder, DEFAULT_DISK_QUOTA_BYTES,
+    AudioChannelMode, AudioOptions, CaptureBackend, CaptureRegion, CaptureSource,
+    PlaybackSource, ReplayStorageOptions, VideoEncoder, DEFAULT_DISK_QUOTA_BYTES,
 };
 use crate::settings::persistence::sibling_tmp_path;
 use crate::settings::types::ReplayStorageMode;
@@ -11,6 +11,14 @@ use std::path::PathBuf;
 use clipline_lol::LeagueQueueCategory;
 use clipline_test_utils::TestDir;
 use serde_json::Value;
+
+fn playback_source(device_id: Option<&str>, label: &str, volume: f64) -> PlaybackSource {
+    PlaybackSource {
+        device_id: device_id.map(str::to_string),
+        label: label.to_string(),
+        volume,
+    }
+}
 
 #[test]
 fn defaults_match_current_recorder_behavior() {
@@ -23,12 +31,15 @@ fn defaults_match_current_recorder_behavior() {
     assert!(settings.games.plugins.is_empty());
     assert!(settings.games.custom_games.is_empty());
     assert!(settings.audio.output_enabled);
-    assert_eq!(settings.audio.output_device_id, None);
-    assert_eq!(settings.audio.output_volume, 1.0);
-    assert!(!settings.audio.split_output_by_process);
+    assert_eq!(settings.audio.playback_sources, vec![PlaybackSource::default()]);
     let serialized = serde_json::to_value(&settings).unwrap();
     assert_eq!(serialized["games"]["pause_when_no_game"], false);
-    assert_eq!(serialized["audio"]["split_output_by_process"], false);
+    assert!(
+        serialized["audio"]
+            .get("split_output_by_process")
+            .is_none(),
+        "removed experimental settings must not be serialized"
+    );
     assert!(!settings.audio.mic_enabled);
     assert_eq!(settings.audio.mic_device_id, None);
     assert_eq!(settings.audio.mic_volume, 1.0);
@@ -48,6 +59,7 @@ fn defaults_match_current_recorder_behavior() {
     assert!(!settings.open_on_startup);
     assert!(settings.close_to_tray);
     assert!(!settings.minimize_to_tray);
+    assert!(settings.reopen_window_after_update);
     assert_eq!(settings.update_channel, UpdateChannel::install_default());
     assert!(!settings.legacy_timeline_editor);
     assert_eq!(serialized["legacy_timeline_editor"], false);
@@ -254,6 +266,51 @@ fn legacy_settings_default_capture_region() {
     assert!(!settings.minimize_to_tray);
     assert_eq!(settings.update_channel, UpdateChannel::Nightly);
     assert!(settings.validate().is_ok());
+}
+
+#[test]
+fn a_settings_file_predating_the_option_reopens_the_window_after_an_update() {
+    let settings = AppSettings::load_from_object(
+        serde_json::from_str::<Value>(
+            r#"{
+                "capture_mode": "primary_monitor",
+                "window_title": "",
+                "replay_window_s": 60.0,
+                "bitrate_mbps": 12.0,
+                "fps": 60,
+                "disk_quota_gb": 10.0,
+                "hotkey": "F6"
+            }"#,
+        )
+        .unwrap()
+        .as_object()
+        .unwrap(),
+    );
+
+    assert!(settings.reopen_window_after_update);
+}
+
+#[test]
+fn load_preserves_a_tray_only_update_restart_preference() {
+    let settings = AppSettings::load_from_object(
+        serde_json::from_str::<Value>(
+            r#"{
+                "capture_mode": "primary_monitor",
+                "window_title": "",
+                "replay_window_s": 60.0,
+                "bitrate_mbps": 12.0,
+                "fps": 60,
+                "disk_quota_gb": 10.0,
+                "hotkey": "F6",
+                "reopen_window_after_update": false
+            }"#,
+        )
+        .unwrap()
+        .as_object()
+        .unwrap(),
+    );
+
+    assert!(!settings.reopen_window_after_update);
 }
 
 #[test]
@@ -791,7 +848,7 @@ fn legacy_bitrate_migration_uses_output_resolution() {
 fn validation_rejects_out_of_range_audio_volume() {
     let settings = AppSettings {
         audio: AudioSettings {
-            output_volume: 2.1,
+            playback_sources: vec![playback_source(Some("output"), "Output", 2.1)],
             ..AudioSettings::default()
         },
         ..AppSettings::default()
@@ -1203,10 +1260,9 @@ fn load_repairs_invalid_fields_without_resetting_valid_neighbors() {
     assert_eq!(settings.capture_region.height, 16_384);
     assert!(!settings.audio.output_enabled);
     assert_eq!(
-        settings.audio.output_device_id.as_deref(),
-        Some("speaker-id")
+        settings.audio.playback_sources,
+        vec![playback_source(Some("speaker-id"), "Output Audio", 2.0)]
     );
-    assert_eq!(settings.audio.output_volume, 2.0);
     assert!(settings.audio.mic_enabled);
     assert_eq!(settings.audio.mic_device_id, None);
     assert_eq!(settings.audio.mic_volume, 0.0);
@@ -1243,6 +1299,43 @@ fn display_region_settings_round_trip_json() {
     let loaded = AppSettings::load_from(&path).unwrap();
 
     assert_eq!(loaded, settings);
+}
+
+#[test]
+fn selected_full_display_round_trips_without_region_inference() {
+    let dir = TestDir::new("clipline-settings", "full-display-round-trip");
+    let path = dir.path().join("settings.json");
+    let mut value = serde_json::to_value(AppSettings::default()).unwrap();
+    value["capture_mode"] = "display_monitor".into();
+    value["capture_display_id"] = r"\\.\DISPLAY2".into();
+    std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    let loaded = AppSettings::load_from(&path).unwrap();
+    let saved = serde_json::to_value(&loaded).unwrap();
+    assert_eq!(saved["capture_mode"], "display_monitor");
+    assert_eq!(saved["capture_display_id"], r"\\.\DISPLAY2");
+    assert_eq!(saved["capture_region"], value["capture_region"]);
+    loaded.save_to(&path).unwrap();
+    assert_eq!(AppSettings::load_from(&path).unwrap(), loaded);
+    assert_eq!(loaded.to_service_options(None).unwrap().capture_source,
+        CaptureSource::DisplayMonitor(r"\\.\DISPLAY2".into()));
+}
+
+#[test]
+fn selected_full_display_requires_identity_and_ignores_saved_crop_bounds() {
+    let mut settings = AppSettings {
+        capture_mode: CaptureMode::DisplayMonitor,
+        ..AppSettings::default()
+    };
+    for id in [None, Some(String::new()), Some("  ".into())] {
+        settings.capture_display_id = id;
+        assert!(settings.to_service_options(None).err().unwrap().contains("select a display"));
+    }
+    settings.capture_display_id = Some(r"\\.\DISPLAY2".into());
+    settings.capture_region.width = 1;
+    assert_eq!(settings.to_service_options(None).unwrap().capture_source,
+        CaptureSource::DisplayMonitor(r"\\.\DISPLAY2".into()));
+    settings.capture_mode = CaptureMode::DisplayRegion;
+    assert!(settings.to_service_options(None).is_err());
 }
 
 #[test]
@@ -1288,9 +1381,10 @@ fn service_options_include_audio_settings() {
     let settings = AppSettings {
         audio: AudioSettings {
             output_enabled: true,
-            output_device_id: Some("output-id".into()),
-            output_volume: 0.75,
-            split_output_by_process: false,
+            playback_sources: vec![
+                playback_source(Some("game-id"), "Game", 0.75),
+                playback_source(Some("chat-id"), "Chat", 1.25),
+            ],
             mic_enabled: true,
             mic_device_id: Some("mic-id".into()),
             mic_volume: 1.5,
@@ -1302,9 +1396,7 @@ fn service_options_include_audio_settings() {
     let opts = settings.to_service_options(None).unwrap();
 
     assert!(opts.audio.output_enabled);
-    assert_eq!(opts.audio.output_device_id.as_deref(), Some("output-id"));
-    assert_eq!(opts.audio.output_volume, 0.75);
-    assert!(!opts.audio.split_output_by_process);
+    assert_eq!(opts.audio.playback_sources, settings.audio.playback_sources);
     assert!(opts.audio.mic_enabled);
     assert_eq!(opts.audio.mic_device_id.as_deref(), Some("mic-id"));
     assert_eq!(opts.audio.mic_volume, 1.5);
@@ -1312,7 +1404,7 @@ fn service_options_include_audio_settings() {
 }
 
 #[test]
-fn load_audio_split_toggle_from_json() {
+fn load_ignores_removed_audio_split_toggle() {
     let json = r#"{
             "audio": {
                 "split_output_by_process": false
@@ -1325,7 +1417,89 @@ fn load_audio_split_toggle_from_json() {
             .unwrap(),
     );
 
-    assert!(!settings.audio.split_output_by_process);
+    assert!(settings.audio.output_enabled);
+    assert_eq!(settings.audio.playback_sources, vec![PlaybackSource::default()]);
+    let serialized = serde_json::to_value(settings).unwrap();
+    assert!(serialized["audio"].get("split_output_by_process").is_none());
+}
+
+#[test]
+fn new_playback_source_list_is_authoritative_over_legacy_output_fields() {
+    let json = r#"{
+            "audio": {
+                "output_enabled": true,
+                "output_device_id": "legacy-id",
+                "output_volume": 0.25,
+                "playback_sources": []
+            }
+        }"#;
+    let settings = AppSettings::load_from_object(
+        serde_json::from_str::<Value>(json)
+            .unwrap()
+            .as_object()
+            .unwrap(),
+    );
+
+    assert!(settings.audio.playback_sources.is_empty());
+    let serialized = serde_json::to_value(settings).unwrap();
+    assert!(serialized["audio"].get("output_device_id").is_none());
+    assert!(serialized["audio"].get("output_volume").is_none());
+}
+
+#[test]
+fn playback_source_validation_rejects_ambiguous_or_excessive_lists() {
+    let settings_with = |playback_sources| AppSettings {
+        audio: AudioSettings {
+            playback_sources,
+            ..AudioSettings::default()
+        },
+        ..AppSettings::default()
+    };
+
+    assert!(settings_with(vec![
+        playback_source(Some("same"), "Game", 1.0),
+        playback_source(Some("same"), "Chat", 1.0),
+    ])
+    .validate()
+    .is_err());
+    assert!(settings_with(vec![
+        PlaybackSource::default(),
+        playback_source(Some("chat"), "Chat", 1.0),
+    ])
+    .validate()
+    .is_err());
+    assert!(settings_with(
+        (0..16)
+            .map(|index| playback_source(Some(&format!("device-{index}")), "Audio", 1.0))
+            .collect()
+    )
+    .validate()
+    .is_ok());
+    assert!(settings_with(
+        (0..17)
+            .map(|index| playback_source(Some(&format!("device-{index}")), "Audio", 1.0))
+            .collect()
+    )
+    .validate()
+    .is_err());
+}
+
+#[test]
+fn malformed_present_playback_source_list_is_rejected_instead_of_defaulted() {
+    let dir = TestDir::new("clipline-settings", "invalid-playback-sources");
+    let path = dir.path().join("settings.json");
+    std::fs::write(
+        &path,
+        r#"{
+            "audio": {
+                "playback_sources": "not-a-list"
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let error = AppSettings::load_from(&path).unwrap_err();
+    assert!(error.contains("playback source label is invalid"), "{error}");
 }
 
 #[test]
@@ -1343,18 +1517,61 @@ fn service_options_include_video_encoder_choice() {
 #[test]
 fn service_options_include_capture_backend_choice() {
     let settings = AppSettings {
-        capture_backend: CaptureBackend::DesktopDuplication,
+        capture_backend: CaptureBackend::Fallback,
         ..AppSettings::default()
     };
 
     let opts = settings.to_service_options(None).unwrap();
 
-    assert_eq!(opts.capture_backend, CaptureBackend::DesktopDuplication);
+    assert_eq!(opts.capture_backend, CaptureBackend::Fallback);
+}
+
+#[test]
+fn legacy_capture_backend_values_migrate_to_the_new_choices() {
+    assert_eq!(
+        serde_json::from_str::<CaptureBackend>(r#""wgc""#).unwrap(),
+        CaptureBackend::Wgc
+    );
+    assert_eq!(
+        serde_json::from_str::<CaptureBackend>(r#""desktop_duplication""#).unwrap(),
+        CaptureBackend::Fallback
+    );
+    assert_eq!(
+        serde_json::to_string(&CaptureBackend::Wgc).unwrap(),
+        r#""wgc""#
+    );
+    assert_eq!(
+        serde_json::to_string(&CaptureBackend::Fallback).unwrap(),
+        r#""fallback""#
+    );
 }
 
 #[test]
 fn capture_backend_defaults_to_auto() {
     assert_eq!(AppSettings::default().capture_backend, CaptureBackend::Auto);
+}
+
+#[test]
+fn experimental_hybrid_settings_load_as_auto() {
+    let dir = TestDir::new("clipline-settings", "withdraw-experimental-hybrid");
+    let path = dir.path().join("settings.json");
+    std::fs::write(
+        &path,
+        r#"{
+                "capture_mode": "primary_monitor",
+                "capture_backend": "experimental_hybrid",
+                "window_title": "",
+                "replay_window_s": 30.0,
+                "bitrate_mbps": 12.0,
+                "fps": 60
+            }"#,
+    )
+    .unwrap();
+
+    let settings = AppSettings::load_from(&path).unwrap();
+
+    assert_eq!(settings.capture_backend, CaptureBackend::Auto);
+    assert_eq!(settings.fps, 60);
 }
 
 #[test]

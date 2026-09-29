@@ -40,6 +40,7 @@ pub(crate) fn markers_with_inferred_audio_tracks(
             duration_s: 0.0,
             player_summary: None,
             audio_tracks,
+            selected_audio_track_ids: None,
             plays: Vec::new(),
             markers: Vec::new(),
         },
@@ -111,9 +112,42 @@ pub(crate) fn selected_audio_track_indices(
         .collect())
 }
 
+pub(crate) fn effective_audio_track_ids(markers: &ClipMarkers) -> Result<Vec<String>, String> {
+    if let Some(selected) = &markers.selected_audio_track_ids {
+        let _ = selected_audio_track_indices(markers, selected)?;
+        let selected: BTreeSet<&str> = selected.iter().map(String::as_str).collect();
+        return Ok(markers
+            .audio_tracks
+            .iter()
+            .filter(|track| selected.contains(track.id.as_str()))
+            .map(|track| track.id.clone())
+            .collect());
+    }
+
+    let has_mixed_output = markers
+        .audio_tracks
+        .iter()
+        .any(|track| track.id == "output" && track.kind.as_deref() == Some("output"));
+    let has_process_output = markers.audio_tracks.iter().any(|track| {
+        track.kind.as_deref() == Some("process_output") || track.id.starts_with("process:")
+    });
+    Ok(markers
+        .audio_tracks
+        .iter()
+        .filter(|track| {
+            !(has_mixed_output
+                && has_process_output
+                && (track.kind.as_deref() == Some("process_output")
+                    || track.id.starts_with("process:")))
+        })
+        .map(|track| track.id.clone())
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clipline_events::ClipAudioTrack;
     use clipline_mp4::{
         AudioTrackConfig, FragSample, HybridMp4Writer, TrackConfig, VideoTrackConfig,
     };
@@ -128,6 +162,49 @@ mod tests {
         assert_eq!(
             unix_seconds_i64_at(UNIX_EPOCH + std::time::Duration::from_secs(42)),
             42
+        );
+    }
+
+    #[test]
+    fn effective_audio_selection_preserves_legacy_fallback_and_saved_choice() {
+        let mut markers = ClipMarkers {
+            recording_start_s: 0.0,
+            duration_s: 10.0,
+            player_summary: None,
+            audio_tracks: vec![
+                ClipAudioTrack {
+                    id: "output".into(),
+                    track_index: 0,
+                    label: "Output Audio".into(),
+                    kind: Some("output".into()),
+                },
+                ClipAudioTrack {
+                    id: "process:7".into(),
+                    track_index: 1,
+                    label: "Discord".into(),
+                    kind: Some("process_output".into()),
+                },
+                ClipAudioTrack {
+                    id: "microphone".into(),
+                    track_index: 2,
+                    label: "Microphone".into(),
+                    kind: Some("microphone".into()),
+                },
+            ],
+            selected_audio_track_ids: None,
+            plays: Vec::new(),
+            markers: Vec::new(),
+            bookmarks: Vec::new(),
+        };
+
+        assert_eq!(
+            effective_audio_track_ids(&markers).unwrap(),
+            ["output", "microphone"]
+        );
+        markers.selected_audio_track_ids = Some(vec!["process:7".into()]);
+        assert_eq!(
+            effective_audio_track_ids(&markers).unwrap(),
+            ["process:7"]
         );
     }
 

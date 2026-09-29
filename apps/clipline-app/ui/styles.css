@@ -699,6 +699,7 @@
   --marker: #e8b341;
   --session: #b06bf2;
   --rec: #e5484d;
+  --favorite: #ff5c8a;
   --ok: #7ab8ff;
   --mc-info: #aab2c0;
   --btn-primary: #2456c4;
@@ -770,6 +771,7 @@
   --marker: #edc66d;
   --session: var(--marker);
   --rec: #ff5c68;
+  --favorite: #ff5c8a;
   --ok: #62d6c7;
   --mc-info: #b8abc5;
   --btn-primary: #8b4fdb;
@@ -838,6 +840,7 @@
   --accent: #f06aab;
   --accent-hover: #ff8bc2;
   --accent-text: #160c12;
+  --favorite: #c4a7ff;
   --marker: #e7bc5f;
   --session: var(--marker);
   --rec: #ff555f;
@@ -912,6 +915,7 @@
   --marker: #e5b45a;
   --session: var(--marker);
   --rec: #ff555f;
+  --favorite: #ff5c8a;
   --ok: #4dd6bd;
   --mc-info: #a0a0a0;
   --btn-primary: #3f6fd4;
@@ -983,6 +987,7 @@
   --marker: #d9a441;
   --session: var(--marker);
   --rec: #e6555e;
+  --favorite: #ff5c8a;
   --ok: #4fc1ac;
   --mc-info: #a2a8b0;
   --btn-primary: #396ac7;
@@ -1052,6 +1057,7 @@
   --accent: #2f66cf;
   --accent-hover: #2458bb;
   --accent-text: #ffffff;
+  --favorite: #9d174d;
   --marker: #b87416;
   --session: var(--marker);
   --rec: #c83f49;
@@ -2338,6 +2344,27 @@ button.primary.settings-save-glow {
   display: grid;
   gap: 8px;
   min-width: 0;
+}
+
+.playback-source-list {
+  display: grid;
+  gap: 8px;
+}
+
+.playback-source-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(150px, 0.7fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.playback-source-row .volume-line {
+  grid-template-columns: minmax(0, 1fr) 42px;
+}
+
+.playback-source-remove {
+  min-width: 0;
+  padding-inline: 10px;
 }
 
 .folder-control {

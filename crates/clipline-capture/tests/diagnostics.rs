@@ -28,6 +28,7 @@ fn typed_capture_diagnostic_routes_through_installed_handler() {
     .expect("install one capture diagnostic handler");
 
     emit_diagnostic(CaptureDiagnostic::WasapiDataDiscontinuity {
+        source: "output".into(),
         suppressed_since_last: 7,
     });
 
@@ -35,19 +36,20 @@ fn typed_capture_diagnostic_routes_through_installed_handler() {
     assert_eq!(
         events.as_slice(),
         [CaptureDiagnostic::WasapiDataDiscontinuity {
+            source: "output".into(),
             suppressed_since_last: 7,
         }]
     );
     assert_eq!(
         events[0].to_string(),
-        "capture event=wasapi_data_discontinuity suppressed_since_last=7 action=audio_gap_fill_capped"
+        "capture event=wasapi_data_discontinuity source=output suppressed_since_last=7 action=audio_gap_fill_capped"
     );
 }
 
 #[test]
 fn late_audio_reanchor_diagnostic_names_source_delay_and_suppression() {
     let event = CaptureDiagnostic::WasapiLateAudioReanchored {
-        source: "microphone",
+        source: "microphone".into(),
         correction_ms: 37,
         total_correction_ms: 143,
         chunk_ms: 10,

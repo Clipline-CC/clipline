@@ -11,6 +11,7 @@ clipline-mp4 = { path = "../clipline-mp4" }
 thiserror = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
+tracing = "0.1"
 windows-core = "0.62"
 windows = { version = "0.62", features = [
     "Foundation",
@@ -33,9 +34,11 @@ windows = { version = "0.62", features = [
     "Win32_Media_MediaFoundation",
     "Win32_Media_Multimedia",
     "Win32_Security",
+    "Win32_Storage_Xps",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
-    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_LibraryLoader",
+    "Win32_System_JobObjects",
     "Win32_System_Ole",
     "Win32_System_Performance",
     "Win32_System_SystemInformation",
@@ -50,3 +53,7 @@ windows = { version = "0.62", features = [
 
 [dev-dependencies]
 clipline-test-utils = { path = "../clipline-test-utils" }
+
+[[example]]
+name = "dwm_probe"
+test = true

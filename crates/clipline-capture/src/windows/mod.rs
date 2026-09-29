@@ -5,6 +5,7 @@
 pub mod d3d11;
 pub mod display;
 pub mod dxgi_dup;
+pub mod fullscreen_fallback;
 pub mod mft;
 pub mod mft_probe;
 pub mod nv12;
@@ -13,12 +14,28 @@ pub mod wgc;
 pub mod window;
 
 pub use dxgi_dup::DxgiDuplicationCapture;
+pub use fullscreen_fallback::FullscreenFallbackCapture;
 pub use mft::{MftConfig, MftH264Encoder, SoftwareMftH264Encoder};
 pub use wasapi::WasapiLoopback;
 pub use wgc::WgcCapture;
 pub use window::{
     enumerate_capturable_windows, find_window_by_title, window_from_raw_handle, CapturableWindow,
 };
+
+/// WGC's border suppression is available on Windows 11. Windows 10 uses the
+/// fullscreen fallback when the user leaves capture selection on Automatic.
+pub fn is_windows_11_or_later() -> bool {
+    use windows::Wdk::System::SystemServices::RtlGetVersion;
+    use windows::Win32::System::SystemInformation::OSVERSIONINFOW;
+
+    let mut info = OSVERSIONINFOW {
+        dwOSVersionInfoSize: std::mem::size_of::<OSVERSIONINFOW>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: RtlGetVersion only writes the initialized version structure.
+    let status = unsafe { RtlGetVersion(&mut info) };
+    status.0 >= 0 && info.dwMajorVersion >= 10 && info.dwBuildNumber >= 22_000
+}
 
 /// Re-export so downstream crates (the app) can name the shared D3D11 device
 /// type without taking their own pinned `windows` dependency.

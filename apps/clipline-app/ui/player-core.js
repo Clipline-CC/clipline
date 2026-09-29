@@ -282,12 +282,30 @@ const PlayerCore = (() => {
   const outputResolutionOption = (id) =>
     OUTPUT_RESOLUTION_OPTIONS.find((option) => option.id === id) || OUTPUT_RESOLUTION_OPTIONS[0];
 
+  const captureSelectionValue = (settings) => {
+    if (settings && settings.capture_mode === "display_monitor") {
+      return `display:${settings.capture_display_id || ""}`;
+    }
+    return settings && settings.capture_mode === "display_region" ? "display_region" : "primary_monitor";
+  };
+
+  const captureSettingsForSelection = (value, region) => {
+    const selectedDisplay = String(value || "").startsWith("display:");
+    return {
+      capture_mode: selectedDisplay ? "display_monitor" : value === "display_region" ? "display_region" : "primary_monitor",
+      capture_display_id: selectedDisplay ? value.slice("display:".length) : null,
+      capture_region: region,
+    };
+  };
+
   const captureSourceLabel = (settings) => {
     switch (settings && settings.capture_mode) {
       case "window_title":
         return settings.window_title ? `Window: ${settings.window_title}` : "Window";
       case "display_region":
         return "Display region";
+      case "display_monitor":
+        return "Full display";
       default:
         return "Desktop";
     }
@@ -2153,6 +2171,8 @@ const PlayerCore = (() => {
     smoothnessIndexForFps,
     outputResolutionOption,
     captureSourceLabel,
+    captureSelectionValue,
+    captureSettingsForSelection,
     clampTime,
     createLogicalSeekState,
     requestLogicalSeek,

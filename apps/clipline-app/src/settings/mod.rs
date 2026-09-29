@@ -31,11 +31,7 @@ pub mod types;
 pub(crate) mod validation;
 
 pub use cloud::{normalize_cloud_visibility, CloudSettings, CloudUploadRecord};
-#[allow(unused_imports)]
-pub use games::{
-    GamePluginReviewSettings, GamePluginSettings, GameRecordingMode, GameSettings,
-    MatchEventSettings, TimelineMarkerSettings,
-};
+pub use games::{GamePluginReviewSettings, GamePluginSettings, GameRecordingMode, GameSettings};
 pub use hotkey::{is_global_shortcut_hotkey, normalize_hotkey, parse_hotkey};
 pub use league::LeagueModeSettings;
 pub use osu::OsuApiSettings;
@@ -43,11 +39,12 @@ pub use persistence::{
     audio_preview_cache_dir, icon_cache_dir, normalize_media_dir, normalize_replay_cache_dir,
     quota_bytes_from_gb, replay_cache_quota_bytes_from_gb, settings_path, share_export_cache_dir,
 };
-#[allow(unused_imports)]
 pub use types::{
     AdvancedRecordingSettings, AudioSettings, CaptureMode, CaptureRegionSettings,
-    CustomGameSettings, ReplayStorageMode, ReplayStorageSettings, VideoQuality,
+    CustomGameSettings, ReplayStorageSettings, VideoQuality,
 };
+#[cfg(test)]
+pub use types::ReplayStorageMode;
 
 const DEFAULT_REPLAY_CACHE_QUOTA_GB: f64 = 2.0;
 
@@ -69,6 +66,9 @@ pub enum UiTheme {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AppSettings {
     pub capture_mode: CaptureMode,
+    /// Selected full display, independent of the saved fixed region.
+    #[serde(default)]
+    pub capture_display_id: Option<String>,
     #[serde(default)]
     pub capture_backend: CaptureBackend,
     pub window_title: String,
@@ -123,6 +123,12 @@ pub struct AppSettings {
     pub close_to_tray: bool,
     #[serde(default)]
     pub minimize_to_tray: bool,
+    /// Whether the window comes back after an update installs. The installer
+    /// relaunches Clipline with the argv it replaced, so a copy the autostart
+    /// entry started would otherwise return to the tray alone even though
+    /// someone pressed Install and is waiting for it.
+    #[serde(default = "default_enabled")]
+    pub reopen_window_after_update: bool,
     #[serde(default)]
     pub legacy_timeline_editor: bool,
     #[serde(default)]
@@ -155,6 +161,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             capture_mode: CaptureMode::PrimaryMonitor,
+            capture_display_id: None,
             capture_backend: CaptureBackend::Auto,
             window_title: String::new(),
             capture_region: CaptureRegionSettings::default(),
@@ -181,6 +188,7 @@ impl Default for AppSettings {
             open_on_startup: false,
             close_to_tray: true,
             minimize_to_tray: false,
+            reopen_window_after_update: true,
             legacy_timeline_editor: false,
             ui_theme: UiTheme::default(),
             update_channel: UpdateChannel::default(),
@@ -236,6 +244,9 @@ impl AppSettings {
         Ok(ServiceOptions {
             capture_source: match self.capture_mode {
                 CaptureMode::PrimaryMonitor => CaptureSource::PrimaryMonitor,
+                CaptureMode::DisplayMonitor => CaptureSource::DisplayMonitor(
+                    self.capture_display_id.clone().expect("validated display ID"),
+                ),
                 CaptureMode::WindowTitle => {
                     CaptureSource::WindowTitle(self.window_title.trim().to_string())
                 }

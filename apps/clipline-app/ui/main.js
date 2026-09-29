@@ -18,6 +18,7 @@ listen("status", (e) => {
   recorderWaitingForGame = !!s.waiting_for_game;
   recordingRequested = recordingActive || recorderWaitingForGame;
   activeEncoderLabel = s.recording ? String(s.encoder || "") : "";
+  activeCaptureBackend = s.recording ? String(s.capture_backend || "") : "";
   fullSessionRecordingActive = Boolean(s.full_session);
   updateCaptureStatus();
 });
@@ -275,10 +276,10 @@ $("set-capture").addEventListener("change", () => {
 });
 $("set-backend").addEventListener("change", syncCaptureBackendSummary);
 $("set-theme").addEventListener("change", () => applyUiTheme($("set-theme").value));
-for (const id of ["set-output-enabled", "set-audio-split-output", "set-mic-enabled"]) {
+for (const id of ["set-output-enabled", "set-mic-enabled"]) {
   $(id).addEventListener("change", syncAudioFields);
 }
-for (const id of ["set-output-volume", "set-mic-volume"]) {
+for (const id of ["set-mic-volume"]) {
   $(id).addEventListener("input", () => {
     syncRangeProgress($(id));
     syncAudioFields();
@@ -288,6 +289,7 @@ for (const id of ["set-output-volume", "set-mic-volume"]) {
     syncAudioFields();
   });
 }
+$("add-playback-source").addEventListener("click", addPlaybackSource);
 $("test-mic").addEventListener("click", testMic);
 $("add-custom-game").addEventListener("click", showGameWindowPicker);
 $("detect-games").addEventListener("click", showDetectedGamesDialog);

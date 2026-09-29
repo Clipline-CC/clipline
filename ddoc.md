@@ -94,7 +94,7 @@ selection while the packaged Windows icon remains the fixed product mark.
    │ Audio       │─pcm──▶│ └────────────┘  ┌────────▼─────────┐  │
    │ Capture     │       │                  │ Storage Manager  │  │
    │ WASAPI loop │       │                  │ Hybrid/frag MP4  │  │
-   │ +per-app    │       │                  │ Quota safety lock │  │
+   │ +mic        │       │                  │ Quota safety lock │  │
    └────────────┘       │ ┌────────────────────────────────┐  │  │
                         │ │ Event Ingestion Service         │  │  │
                         │ │ ┌──────────┐ ┌──────────────┐   │  │  │
@@ -109,7 +109,7 @@ selection while the packaged Windows icon remains the fixed product mark.
 ```
 
 **Components:**
-- **Capture Engine:** WGC primary (HDR, cross-GPU, no injection); DXGI Desktop Duplication fallback; per-window or per-monitor. Frames stay as GPU textures to avoid CPU round-trips. **Exclusive-fullscreen games cannot be captured per-window without injection** — we recommend borderless fullscreen (OBS's own guidance for anti-cheat titles) and fall back to display capture otherwise, with a clear in-UI warning that display capture records everything on the monitor (notifications, overlays, alt-tabbed apps).
+- **Capture Engine:** Automatic uses WGC on Windows 11. On Windows 10, it uses WGC for an ordinary game window and switches to DXGI Desktop Duplication when that window's client area covers its monitor and no other app's window stacked above it reaches that monitor (best-effort: Windows 10 toasts and system overlays are outside the window list and click-through overlays are exempt, so they still appear); display and region targets use Desktop Duplication, and Automatic retries them with WGC when duplication is unsupported (rotated or cross-GPU monitors). A game whose monitor cannot be duplicated stays on WGC. The Windows Graphics Capture choice forces WGC and Fallback mode forces the Windows 10 route. WGC still shows its yellow border around windowed apps on Windows 10. The fullscreen switch closes WGC before opening Desktop Duplication, checks the window and monitor again after each frame, and emits black during transitions or while another app covers the game's monitor. It records at the monitor's size and letterboxes the windowed game into it; every other capture stretches to the first frame's size. **Exclusive-fullscreen games cannot be captured per-window without injection**: Desktop Duplication captures the whole monitor, including overlays, notifications, and other visible content. A hardware cursor may be absent. Frames stay as GPU textures and share one D3D device and capture clock with the encoder and audio.
 - **Encode Pipeline:** encoder abstraction probing hardware at startup by deterministic priority (H.264 first for compatibility, then backend merit NVENC → AMF → QuickSync → software; HEVC/AV1 remain explicit local-efficiency options). SDR desktop/game captures are normalized from WGC full-range RGB Rec.709 into limited-range NV12 Rec.709 and advertised in encoder/container metadata so players do not guess the wrong range. The LGPL-clean software tier is SVT-AV1 (with Microsoft's software H.264 MFT as the last resort); no GPL x264. CQP/VBR for quality-efficient local recording; CBR for replay-buffer predictability.
 - **Replay Buffer Manager:** segment-based circular buffer of *encoded* video+audio in RAM, with disk-spill option. Keyframe-aligned segments so saved clips start cleanly.
 - **Event Ingestion Service:** optional plugin-backed per-game event sources normalizing into a common event schema; synchronizes game-clock event times to recording timestamps.
@@ -259,7 +259,7 @@ Riot's Vanguard FAQ confirms in-game/LCU APIs "should continue to function" and 
 - **Container: Hybrid MP4** (OBS 30.2+ approach). During recording the file is a fragmented MP4 (resilient against BSOD/power-loss/disk-full because each `moof`/`mdat` fragment is independently decodable); on stop, a fast "soft remux" writes a full `moov` and overwrites the leading placeholder so the file appears as a standard, seekable MP4 — combining MKV-grade crash safety with MP4 compatibility. This defeats the classic MP4 moov-atom "total loss" failure. MKV is offered as an alternative for power users (record-MKV-then-remux is the long-standing safe workflow).
 - **Rate control:** CQP/CRF ~18–22 default for recording quality; CBR for replay-buffer predictability.
 - **Disk management:** configurable media folder, configurable quota, and per-game folders (gpu-screen-recorder demonstrates the save-script pattern). By default Clipline never deletes a non-empty saved or unfinished recording automatically. Before a replay save or full-session write would exceed the quota, recording stops and remains blocked until the user raises the quota, explicitly makes enough space, or enables auto-delete of oldest clips in Settings (which frees space before locking). Auto-delete removes the oldest clips within each kind but drains kinds in order — sessions before replays before trims — and skips favorited clips entirely; a Library clip is favorited from Review's star button, a card's inline star toggle, or the context menu, and the Favorites chip isolates them. A dedicated favorite marker on an imported, otherwise unowned MP4 does not enroll that file in quota management; title/file editing remains the explicit adoption boundary. Default to the system drive and warn about external-drive corruption risks (Outplayed documents that non-C: drives can cause corrupted/disconnected recordings). In-progress full sessions use a `.mp4.recording` suffix, count toward storage usage, and are recovered on the next launch; only zero-byte placeholders may be cleaned automatically.
-- **Audio:** WASAPI loopback for system audio; **per-application loopback** via `ActivateAudioInterfaceAsync` with `VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK` and `AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK` (documented for build 20348+/Win 11; works in practice on updated Win10 2004+ — see Caveats) to capture only the game process tree; separate mic track via WASAPI capture; **multi-track output** (game / mic / system) for editing.
+- **Audio:** WASAPI loopback records an ordered Settings list of up to 16 Windows playback endpoints, each as its own 48 kHz stereo Opus track, followed by the optional microphone track. A lone source may follow the Windows default; lists use explicit endpoint ids. Explicit endpoints never fall back to another device: if absent at startup or invalidated later, their fixed track emits aligned silence and retries the same endpoint. Applying source-list changes restarts the replay buffer rather than changing an active MP4 track layout. Review persists each clip's selected track ids (including explicit mute); trims retain every source track plus that choice, while normal copy/upload/group compilation mix only the effective selection. `Copy original` remains the explicit all-recorded-tracks escape hatch. The withdrawn startup-only per-process experiment is not a supported capture mode, though historical process-track clips remain readable.
 
 ### 11. Clip Editor
 - **Lossless trim:** keyframe-aligned stream copy (instant, no quality loss) for cuts on GOP boundaries; **re-encode only the boundary GOPs** for frame-accurate trims.
@@ -268,8 +268,11 @@ Riot's Vanguard FAQ confirms in-game/LCU APIs "should continue to function" and 
   live in each clip's existing `.clipline.json` sidecar, so the first member creates the group and
   deleting the last member removes it without a second database. Group members stay out of the
   top-level Library: one group card represents them with an asymmetric mosaic of up to four real
-  clip posters. Group cards remain visible whenever any member matches the active kind, marker,
-  game, or text filter. Group names use the same Unicode lowercase key in native and frontend code.
+  clip posters. Group cards participate in the normal Library sort, grouping, and pagination flow,
+  and remain visible whenever any member matches the active kind, marker, game, or text filter.
+  A group with one shared game/session uses that normal bucket; a cross-game/session group appears
+  once under an explicit Multiple games/sessions bucket. Most-markers sorting sums all members.
+  Group names use the same Unicode lowercase key in native and frontend code.
   Local clip and group cards share a primary metadata order of duration, size, then
   relative modified time. Opening a group reuses the normal review player as a sequential playlist and repurposes
   the Match events rail for member posters/titles; rows are mouse-draggable with keyboard Up/Down
@@ -287,10 +290,18 @@ Riot's Vanguard FAQ confirms in-game/LCU APIs "should continue to function" and 
   the authoritative compilation; Delete confirms once before removing the group and its members.
   Right-clicking a rail member opens app-owned Remove from group and Delete actions; either action
   continues an active group review with a surviving neighbor. Export normalizes members to 1080p60 H.264/Opus and concatenates them into a
-  normal editable local `compilation` clip; Upload creates that same compilation and hands it to
-  the existing Clipline Cloud title/description/visibility dialog. Each member's enabled embedded
-  audio streams are normalized and mixed before concatenation, so split Output + Microphone clips
-  keep both sources. Video and audio are padded/trimmed to the same per-member endpoint, and mixed
+  group-owned local compilation artifact. Only the live group's selected fingerprint-matched output
+  stays inside its group; stale, duplicate, legacy, and orphaned outputs remain manageable Library
+  cards. Publication rechecks membership under the clip mutation lock, rejecting output if the
+  group changed during encoding. Reorder or
+  membership removal or member deletion invalidates every generated artifact before changing group
+  state; an active upload or deletion failure blocks that mutation instead of stranding media.
+  Successful mutations also evict deleted artifacts from the frontend cache.
+  Upload creates the current artifact and hands it to the existing Clipline Cloud
+  title/description/visibility dialog.
+  Each member's saved audio selection is normalized and mixed before concatenation; an explicit
+  mute supplies aligned silence. The selected ids participate in the compilation fingerprint, so
+  changing a clip's mix invalidates an older artifact. Video and audio are padded/trimmed to the same per-member endpoint, and mixed
   audio timestamps are rebuilt from sample count, so unequal
   Output/Microphone tails cannot feed untimestamped frames into a concat boundary. The group header
   reuses a compilation only when its persisted, Unicode-lowercased normalized ordered-member
@@ -330,7 +341,7 @@ Riot's Vanguard FAQ confirms in-game/LCU APIs "should continue to function" and 
 
 ### 15. Roadmap / Milestones
 - **M0 (Foundation):** Rust core, WGC capture, NVENC/AMF/QSV encode, Hybrid MP4 writer, Tauri shell, hotkeys, tray.
-- **M1 (MVP):** Replay buffer (RAM+disk), full recording, multi-track audio (system + per-app + mic), library UI, lossless trim editor (incl. the native preview-decode path), settings.
+- **M1 (MVP):** Replay buffer (RAM+disk), full recording, multi-track audio (playback endpoints + mic), library UI, lossless trim editor (incl. the native preview-decode path), settings.
 - **M2 (Differentiator):** League Live Client Data adapter + timeline event markers + auto-clip-on-event option.
 - **M3 (Breadth):** VALORANT kill-feed OCR adapter; optional VAL-MATCH-V1 post-match enrichment (bring-your-own-key + RSO); CS2 GSI log adapter; DXGI fallback hardening; HDR.
 - **M4 (Polish):** OCR/CV generic event detection; GIF/WebM export; montage builder; auto-update; AV1 default.
@@ -356,7 +367,6 @@ Riot's Vanguard FAQ confirms in-game/LCU APIs "should continue to function" and 
 - Widely circulated "zero FPS impact" encoder figures trace to anecdotal, methodology-free blog posts; methodical testing shows ~3–6% capture cost on NVENC and slightly more on AMD. Treat all such figures as directional and re-benchmark on target hardware.
 - Hardware AV1 encode requires recent silicon (RTX 40 / RX 7000 / Intel Arc, plus Meteor Lake+ iGPUs and RDNA 3 APUs) — probe encoder capabilities at runtime rather than gating on GPU model; older hardware falls back to HEVC/H.264.
 - Codec patent licensing for H.264/HEVC is a legal question independent of FFmpeg's license; relying on GPU/OS-provided encoders typically conveys the license, but confirm for redistribution.
-- Per-application audio loopback is *documented* for Windows 10 build 20348+ / Windows 11, but in practice works on fully updated Windows 10 2004+ (19041+) — OBS 28+'s Application Audio Capture relies on exactly this API there. Treat Win10 support as undocumented/best-effort and fall back to full-system loopback on failure. The process-loopback path's `GetMixFormat`/`IsFormatSupported` return `E_NOTIMPL`, so a fixed capture format (e.g., 48 kHz/16-bit stereo) must be assumed.
 - Medal's and Powder's "AI" detection details are partly self-reported marketing; our OCR/CV plans should be validated empirically rather than assumed equivalent.
 - WGC draws a yellow capture border that is only suppressible (`GraphicsCaptureSession.IsBorderRequired`) on Windows 10 build 20348+/Windows 11; older builds will show it — a visible difference from ShadowPlay worth documenting up front.
 - Exclusive-fullscreen titles force display capture (no per-window WGC without injection); borderless fullscreen is the recommended mode, matching OBS's anti-cheat guidance.

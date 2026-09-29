@@ -1,0 +1,17 @@
+# Integrated Groups Review Follow-up
+
+**Goal:** Keep generated group media recoverable and make integrated group cards obey every existing
+Library grouping and sort control.
+
+The compilation-visibility step was superseded by
+`2026-08-30-group-owned-compilations.md`: generated output is internal and group mutations delete it.
+
+- [ ] Add failing UI contracts for exposing stale/orphaned compilations, deriving deterministic
+      group game/session metadata, and counting member markers for Most markers sorting.
+- [ ] Hide only the exact current compilation selected by a live group's fingerprint; render stale,
+      duplicate, legacy, and orphaned generated outputs as ordinary Compilation cards.
+- [ ] Project homogeneous groups into their shared game/session bucket and heterogeneous groups
+      into explicit Multiple games/sessions buckets, preserving one-card pagination.
+- [ ] Sum member marker counts when sorting integrated group cards by Most markers.
+- [ ] Run focused contracts, workspace tests, and warning-denied Clippy; update the design/handoff,
+      push the PR, and resolve the review threads.

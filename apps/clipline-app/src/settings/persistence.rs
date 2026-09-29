@@ -150,6 +150,7 @@ impl AppSettings {
         let mut settings = Self {
             capture_mode: deserialize_field(object, "capture_mode")
                 .unwrap_or_else(|| defaults.capture_mode.clone()),
+            capture_display_id: optional_string_field(object, "capture_display_id").flatten(),
             capture_backend: deserialize_field(object, "capture_backend")
                 .unwrap_or(defaults.capture_backend),
             window_title: string_field(object, "window_title")
@@ -208,6 +209,8 @@ impl AppSettings {
             close_to_tray: bool_field(object, "close_to_tray").unwrap_or(defaults.close_to_tray),
             minimize_to_tray: bool_field(object, "minimize_to_tray")
                 .unwrap_or(defaults.minimize_to_tray),
+            reopen_window_after_update: bool_field(object, "reopen_window_after_update")
+                .unwrap_or(defaults.reopen_window_after_update),
             legacy_timeline_editor: bool_field(object, "legacy_timeline_editor")
                 .unwrap_or(defaults.legacy_timeline_editor),
             ui_theme: deserialize_field(object, "ui_theme").unwrap_or(defaults.ui_theme),
@@ -533,33 +536,44 @@ pub fn normalize_replay_cache_dir(raw: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-pub fn replay_cache_quota_bytes_from_gb(gb: f64) -> Result<u64, String> {
+fn gib_to_bytes(
+    gb: f64,
+    min_gb: f64,
+    too_small_msg: &str,
+    too_large_msg: &str,
+) -> Result<u64, String> {
     const GIB_BYTES: f64 = 1024.0 * 1024.0 * 1024.0;
 
-    if !gb.is_finite() || gb < 0.25 {
-        return Err("replay cache quota must be at least 0.25 GiB".into());
+    if !gb.is_finite() || gb < min_gb {
+        return Err(too_small_msg.into());
     }
     let bytes = gb * GIB_BYTES;
     if bytes > u64::MAX as f64 {
-        return Err("replay cache quota is too large".into());
+        return Err(too_large_msg.into());
     }
     Ok(bytes.round() as u64)
 }
 
-pub fn quota_bytes_from_gb(gb: f64) -> Result<Option<u64>, String> {
-    const GIB_BYTES: f64 = 1024.0 * 1024.0 * 1024.0;
+pub fn replay_cache_quota_bytes_from_gb(gb: f64) -> Result<u64, String> {
+    gib_to_bytes(
+        gb,
+        0.25,
+        "replay cache quota must be at least 0.25 GiB",
+        "replay cache quota is too large",
+    )
+}
 
-    if !gb.is_finite() || gb < 0.0 {
-        return Err("disk quota must be a non-negative finite number".into());
-    }
+pub fn quota_bytes_from_gb(gb: f64) -> Result<Option<u64>, String> {
     if gb == 0.0 {
         return Ok(None);
     }
-    let bytes = gb * GIB_BYTES;
-    if bytes > u64::MAX as f64 {
-        return Err("disk quota is too large".into());
-    }
-    Ok(Some(bytes.round() as u64))
+    gib_to_bytes(
+        gb,
+        0.0,
+        "disk quota must be a non-negative finite number",
+        "disk quota is too large",
+    )
+    .map(Some)
 }
 
 fn write_file_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {

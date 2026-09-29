@@ -21,6 +21,8 @@ fn main() {
 mod app;
 #[cfg(windows)]
 mod bounded_http;
+#[cfg(any(windows, test))]
+mod capture_policy;
 #[cfg(windows)]
 mod cloud;
 #[cfg(windows)]
@@ -28,7 +30,7 @@ mod cloud_upload;
 #[cfg(windows)]
 mod credential_transaction;
 #[cfg(windows)]
-#[allow(dead_code)] // B1/B2 matrix+verifier; commands live in ffmpeg_install
+#[allow(dead_code)] // matrix+verifier backing ffmpeg_install commands + service capability identity
 mod ffmpeg_runtime;
 #[cfg(windows)]
 mod ffmpeg_install;
