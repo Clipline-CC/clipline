@@ -4887,6 +4887,11 @@ fn steam_launch_detection_wires_settings_checkbox_and_always_add() {
     assert!(!main.contains("refreshCustomGamesFromBackend"));
     assert!(!settings.contains("refreshCustomGamesFromBackend"));
 
+    // The status and the checkbox follow the master auto-detect switch.
+    let games = read_ui_js("settings-ffmpeg-games.js");
+    assert!(games.contains("$(\"set-games-auto-detect-steam\").disabled = !detectionEnabled;"));
+    assert!(games.contains("if (steamEnabled) waitingFor.push(\"new Steam games\");"));
+
     assert!(
         settings.contains("function mergeSavedCustomGame"),
         "settings.js must merge an Always add rule without replacing the draft"
