@@ -4869,26 +4869,31 @@ fn steam_launch_detection_wires_settings_checkbox_and_always_add() {
         "discovered_steam",
         "invoke(\"add_discovered_steam_game\"",
         "setDeckStatusAction(\"Always add\"",
-        "discoveredSteamToastKeys",
-        "processId: event.process_id",
-        "exeName: event.exe_name",
-        "target: {",
-        "refreshCustomGamesFromBackend()",
+        "discoveredSteamOfferedAppIds",
+        "const target = { appId, processId: event.process_id };",
+        "event.steam_app_id",
+        "invoke(\"add_discovered_steam_game\", { target })",
+        "mergeSavedCustomGame(added)",
         "clearDiscoveredSteamOffer()",
+        // Clearing must not remove another feature's deck action.
+        "deckStatusActionHandler === offer.handler",
     ] {
         assert!(
             main.contains(required),
             "game detection UI is missing required wiring {required}"
         );
     }
+    // Reloading saved custom games would discard unsaved Settings edits.
+    assert!(!main.contains("refreshCustomGamesFromBackend"));
+    assert!(!settings.contains("refreshCustomGamesFromBackend"));
 
     assert!(
-        settings.contains("refreshCustomGamesFromBackend"),
-        "settings.js must expose refreshCustomGamesFromBackend"
+        settings.contains("function mergeSavedCustomGame"),
+        "settings.js must merge an Always add rule without replacing the draft"
     );
     assert!(
         settings.contains("settingsIndicatorBaseline"),
-        "settings.js must update baseline when refreshing custom games"
+        "settings.js must update the dirty baseline when merging custom games"
     );
 }
 

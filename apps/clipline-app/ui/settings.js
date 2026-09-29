@@ -298,29 +298,24 @@ function fillSettings(s) {
   resetSettingsBaselineFromForm();
 }
 
-async function refreshCustomGamesFromBackend() {
-  const settings = await invoke("get_settings");
-  const games = (settings?.games?.custom_games || []).map(normalizeCustomGame);
-  customGames = games;
-  const savedGames = games.map((game) => ({ ...game }));
-  if (currentSettings) {
-    currentSettings = {
-      ...currentSettings,
-      games: { ...currentSettings.games, custom_games: savedGames.map((game) => ({ ...game })) },
+// "Always add" saves one rule on the backend. Merge just that rule into the
+// saved baseline, the draft and the live list so unsaved Settings edits
+// survive, and the new rule alone does not mark Settings dirty.
+function mergeSavedCustomGame(saved) {
+  const game = normalizeCustomGame(saved);
+  const withGame = (games) =>
+    (games || []).some((existing) => existing.id === game.id)
+      ? games
+      : [...(games || []), { ...game }];
+  const withGameInSettings = (snapshot) =>
+    snapshot && {
+      ...snapshot,
+      games: { ...snapshot.games, custom_games: withGame(snapshot.games?.custom_games) },
     };
-  }
-  if (settingsDraft) {
-    settingsDraft = {
-      ...settingsDraft,
-      games: { ...settingsDraft.games, custom_games: savedGames.map((game) => ({ ...game })) },
-    };
-  }
-  if (settingsIndicatorBaseline) {
-    settingsIndicatorBaseline = {
-      ...settingsIndicatorBaseline,
-      games: { ...settingsIndicatorBaseline.games, custom_games: savedGames.map((game) => ({ ...game })) },
-    };
-  }
+  customGames = withGame(customGames);
+  currentSettings = withGameInSettings(currentSettings);
+  settingsDraft = withGameInSettings(settingsDraft);
+  settingsIndicatorBaseline = withGameInSettings(settingsIndicatorBaseline);
   renderCustomGames();
   syncSettingsDirtyState();
 }

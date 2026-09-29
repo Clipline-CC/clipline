@@ -104,42 +104,33 @@ listen("ffmpeg-install", (event) => {
   applyFfmpegInstallSnapshot(event.payload);
 });
 
-var discoveredSteamToastKeys = new Set();
+var discoveredSteamOfferedAppIds = new Set();
 var discoveredSteamOffer = null;
 
+// Clear the offer's deck status only while the offer still owns it; another
+// feature (an export's "Open clip", say) may have replaced it since.
 function clearDiscoveredSteamOffer() {
   const offer = discoveredSteamOffer;
   discoveredSteamOffer = null;
-  if (!offer) return;
-  if ($("deck-status").textContent === offer.status) setDeckStatus("");
-  else setDeckStatusAction("", null);
+  if (offer && deckStatusActionHandler === offer.handler) setDeckStatus("");
 }
 
-// First `discovered_steam` event for a game in this UI session: show the
-// recording toast plus a one-shot Always add action. Rule building stays on
-// the backend command; the frontend never reconstructs it from exe_name.
+// First detection of each discovered Steam app in this UI session: show the
+// recording toast plus a one-shot Always add action. Offers are keyed by
+// Steam app id, since unrelated games can share an exe name. Rule building
+// stays on the backend command; the frontend never reconstructs it.
 function maybeOfferDiscoveredSteamAlwaysAdd(event) {
-  if (!event?.active || !event.discovered_steam) {
-    clearDiscoveredSteamOffer();
-    return;
-  }
-  const key = String(event.exe_name || event.name || "").toLowerCase();
-  if (!key || discoveredSteamToastKeys.has(key)) return;
-  discoveredSteamToastKeys.add(key);
+  const appId = event?.active && event.discovered_steam ? event.steam_app_id : null;
+  if (discoveredSteamOffer && discoveredSteamOffer.appId !== appId) clearDiscoveredSteamOffer();
+  if (appId == null || discoveredSteamOfferedAppIds.has(appId)) return;
+  discoveredSteamOfferedAppIds.add(appId);
   const name = event.name || event.exe_name || "Steam game";
-  const status = "Recording " + name;
-  discoveredSteamOffer = { key, status };
-  setDeckStatus(status);
-  setDeckStatusAction("Always add", async () => {
+  const target = { appId, processId: event.process_id };
+  const handler = async () => {
     discoveredSteamOffer = null;
     try {
-      const added = await invoke("add_discovered_steam_game", {
-        target: {
-          processId: event.process_id,
-          exeName: event.exe_name,
-        },
-      });
-      await refreshCustomGamesFromBackend();
+      const added = await invoke("add_discovered_steam_game", { target });
+      if (added) mergeSavedCustomGame(added);
       setNotice(
         added ? "Added " + name + " to Custom games" : name + " is already a custom game",
         { transient: true }
@@ -147,7 +138,10 @@ function maybeOfferDiscoveredSteamAlwaysAdd(event) {
     } catch (error) {
       $("error").textContent = String(error);
     }
-  });
+  };
+  discoveredSteamOffer = { appId, handler };
+  setDeckStatus("Recording " + name);
+  setDeckStatusAction("Always add", handler);
 }
 
 listen("encoders-changed", (event) => {
@@ -158,9 +152,6 @@ listen("encoders-changed", (event) => {
 });
 
 listen("game-detection", (e) => {
-  if (!e.payload?.active || !e.payload?.discovered_steam) {
-    clearDiscoveredSteamOffer();
-  }
   activeDetectedGame = e.payload || null;
   if (activeDetectedGame?.active) {
     if (captureForegroundWork()) loadGamePlugins();
