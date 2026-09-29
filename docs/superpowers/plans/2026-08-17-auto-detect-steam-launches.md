@@ -88,3 +88,21 @@ Do **not** put `exe_path` on the event. Always-add reconstructs the custom game 
 
 Epic/GOG/Xbox catalogs, fullscreen-any-app, exclusive fullscreen, background library scanning, auto-writing Custom games, Detect Games running-window restore, a second toast framework, exe-inference on the detector catalog (nice later, not required for this story).
 
+
+## Takeover follow-up (2026-09-28)
+
+- [ ] Merge `develop` and move the `app.rs`, `library.rs` and `game_discovery` test
+      changes into the split submodules.
+- [ ] Failing test: Always add persists the rule without sending `Stop` or dropping
+      the recorder sender; duplicates and failed saves leave live state unchanged.
+- [ ] UI: merge only the returned rule into the Settings draft and baselines; key
+      offers by `steam_app_id`; clear only an offer-owned deck action.
+- [ ] Failing test: the captured Steam app stays detected across z-order changes.
+- [ ] Failing test: a missing `auto_detect_steam_launches` follows
+      `pause_when_no_game`; new installs default off.
+- [ ] Failing tests: new misses rescan on the base interval; a library outside the
+      scanned roots counts as a miss.
+- [ ] The live-scan test self-skips without Steam; the checkbox feeds the status and
+      follows master auto-detect.
+
+Checkboxes stay unticked (repo convention).
