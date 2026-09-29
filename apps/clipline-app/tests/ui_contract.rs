@@ -4873,7 +4873,7 @@ fn steam_launch_detection_wires_settings_checkbox_and_always_add() {
         "const target = { appId, processId: event.process_id };",
         "event.steam_app_id",
         "invoke(\"add_discovered_steam_game\", { target })",
-        "mergeSavedCustomGame(added)",
+        "if (saved) mergeSavedCustomGame(saved);",
         "clearDiscoveredSteamOffer()",
         // Clearing must not remove another feature's deck action.
         "deckStatusActionHandler === offer.handler",
@@ -4886,6 +4886,18 @@ fn steam_launch_detection_wires_settings_checkbox_and_always_add() {
     // Reloading saved custom games would discard unsaved Settings edits.
     assert!(!main.contains("refreshCustomGamesFromBackend"));
     assert!(!settings.contains("refreshCustomGamesFromBackend"));
+
+    // A full Save and Always add never interleave: Save builds its custom
+    // games list only after an in-flight add has merged its rule.
+    for required in [
+        "function queueSettingsWrite(write)",
+        "await queueSettingsWrite(async () => {\n        const saved = await invoke(\"add_discovered_steam_game\", { target });",
+        "await queueSettingsWrite(async () => {\n      fillSettings(await invoke(\"save_settings\", { settings: syncSettingsDraftFromForm() }));",
+        // Turning games-only on also turns Steam launch detection on.
+        "if ($(\"set-games-pause-when-empty\").checked) $(\"set-games-auto-detect-steam\").checked = true;",
+    ] {
+        assert!(main.contains(required), "main.js is missing {required}");
+    }
 
     // The status and the checkbox follow the master auto-detect switch.
     let games = read_ui_js("settings-ffmpeg-games.js");

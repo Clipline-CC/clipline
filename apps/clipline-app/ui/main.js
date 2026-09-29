@@ -104,6 +104,17 @@ listen("ffmpeg-install", (event) => {
   applyFfmpegInstallSnapshot(event.payload);
 });
 
+// Settings writes run one at a time. A full Save sends the whole custom
+// games list, so it must not be built before an "Always add" lands (or it
+// would overwrite the new rule), and Always add must not race a Save.
+var settingsWriteQueue = Promise.resolve();
+
+function queueSettingsWrite(write) {
+  const run = settingsWriteQueue.then(write, write);
+  settingsWriteQueue = run.catch(() => {});
+  return run;
+}
+
 var discoveredSteamOfferedAppIds = new Set();
 var discoveredSteamOffer = null;
 
@@ -129,8 +140,11 @@ function maybeOfferDiscoveredSteamAlwaysAdd(event) {
   const handler = async () => {
     discoveredSteamOffer = null;
     try {
-      const added = await invoke("add_discovered_steam_game", { target });
-      if (added) mergeSavedCustomGame(added);
+      const added = await queueSettingsWrite(async () => {
+        const saved = await invoke("add_discovered_steam_game", { target });
+        if (saved) mergeSavedCustomGame(saved);
+        return saved;
+      });
       setNotice(
         added ? "Added " + name + " to Custom games" : name + " is already a custom game",
         { transient: true }
@@ -329,6 +343,12 @@ $("cloud-host-url").addEventListener("input", syncCloudHttpWarning);
 $("cloud-host-url").addEventListener("change", syncCloudHttpWarning);
 $("cloud-connect").addEventListener("click", connectCloud);
 $("cloud-disconnect").addEventListener("click", disconnectCloud);
+// Games-only recorders get Steam launch detection by default (see the
+// settings loader). Turning games-only on here does the same; the checkbox
+// stays visible in the form, so the user can clear it before saving.
+$("set-games-pause-when-empty").addEventListener("change", () => {
+  if ($("set-games-pause-when-empty").checked) $("set-games-auto-detect-steam").checked = true;
+});
 for (const id of ["set-games-auto-detect", "set-games-auto-detect-steam", "set-games-pause-when-empty"]) {
   $(id).addEventListener("change", updateGameDetectionStatus);
 }
@@ -474,8 +494,11 @@ $("settings-save").addEventListener("click", async () => {
     return;
   }
   try {
-    const saved = await invoke("save_settings", { settings: syncSettingsDraftFromForm() });
-    fillSettings(saved);
+    // Build the payload inside the queue so it includes any rule an
+    // in-flight "Always add" is merging.
+    await queueSettingsWrite(async () => {
+      fillSettings(await invoke("save_settings", { settings: syncSettingsDraftFromForm() }));
+    });
     $("settings-status").textContent = "saved";
     await refresh();
   } catch (e) {
