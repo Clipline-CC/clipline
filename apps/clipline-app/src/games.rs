@@ -149,6 +149,10 @@ pub(crate) struct SteamDetectorState {
     catalog: Option<crate::game_discovery::SteamLaunchCatalog>,
     live: bool,
     refresh_wait: Duration,
+    /// The Steam app matched on the previous tick. It keeps the capture while
+    /// it still has a window, so alt-tabbing between two Steam apps does
+    /// not flip detection (and restart the recorder) on every z-order change.
+    current_app_id: Option<u32>,
 }
 
 impl SteamDetectorState {
@@ -157,6 +161,7 @@ impl SteamDetectorState {
             catalog: None,
             live: true,
             refresh_wait: STEAM_CATALOG_REFRESH_INTERVAL,
+            current_app_id: None,
         }
     }
 
@@ -166,6 +171,7 @@ impl SteamDetectorState {
             catalog: Some(catalog),
             live: false,
             refresh_wait: STEAM_CATALOG_REFRESH_INTERVAL,
+            current_app_id: None,
         }
     }
 
@@ -210,6 +216,7 @@ fn detect_steam_game_from_windows(
         })
         .collect();
     if candidates.is_empty() {
+        steam.current_app_id = None;
         return None;
     }
     for plugin in game_plugins::all() {
@@ -223,28 +230,36 @@ fn detect_steam_game_from_windows(
     if has_unmatched_steam_candidate(steam.catalog_mut(), &candidates) {
         maybe_refresh_steam_catalog(steam, &candidates);
     }
-    let (app, window) = find_best_steam_match(steam.catalog_mut(), &candidates)?;
-
-    let name = if app.name.trim().is_empty() {
-        window
-            .exe_name
-            .trim()
-            .strip_suffix(".exe")
-            .unwrap_or(window.exe_name.trim())
-            .to_owned()
-    } else {
-        app.name.clone()
-    };
-    Some(DetectedGame {
-        identity: GameIdentity::discovered_steam(app.app_id),
-        name,
-        hwnd: window.handle,
-        window_title: window.title.clone(),
-        process_id: window.process_id,
-        exe_name: window.exe_name.clone(),
-        exe_path: window.exe_path.clone(),
-        recording_mode: GameRecordingMode::ReplaysOnly,
-    })
+    let preferred = steam.current_app_id;
+    let detected = find_best_steam_match(steam.catalog_mut(), &candidates, preferred).map(
+        |(app, window)| {
+            let name = if app.name.trim().is_empty() {
+                window
+                    .exe_name
+                    .trim()
+                    .strip_suffix(".exe")
+                    .unwrap_or(window.exe_name.trim())
+                    .to_owned()
+            } else {
+                app.name.clone()
+            };
+            (
+                app.app_id,
+                DetectedGame {
+                    identity: GameIdentity::discovered_steam(app.app_id),
+                    name,
+                    hwnd: window.handle,
+                    window_title: window.title.clone(),
+                    process_id: window.process_id,
+                    exe_name: window.exe_name.clone(),
+                    exe_path: window.exe_path.clone(),
+                    recording_mode: GameRecordingMode::ReplaysOnly,
+                },
+            )
+        },
+    );
+    steam.current_app_id = detected.as_ref().map(|(app_id, _)| *app_id);
+    detected.map(|(_, game)| game)
 }
 
 /// Refresh only on a Steam-rooted miss so a browser or Explorer window can
@@ -302,26 +317,27 @@ fn next_refresh_wait(current: Duration, changed: bool) -> Duration {
 fn find_best_steam_match<'a>(
     catalog: &'a crate::game_discovery::SteamLaunchCatalog,
     candidates: &'a [CapturableWindow],
+    preferred_app_id: Option<u32>,
 ) -> Option<(&'a crate::game_discovery::SteamLaunchApp, &'a CapturableWindow)> {
-    // Window order defines candidate priority across different games.
-    // The first Steam app matched in window order wins.
-    let best_app = candidates.iter().find_map(|window| {
-        let path = window.exe_path.as_deref()?;
-        catalog.find_by_exe_path(path)
-    })?;
+    let matched: Vec<_> = candidates
+        .iter()
+        .filter_map(|window| Some((catalog.find_by_exe_path(window.exe_path.as_deref()?)?, window)))
+        .collect();
+    // The app already being captured wins while it has a window. Otherwise
+    // window (z-order) order picks among different games.
+    let best_app = matched
+        .iter()
+        .find(|(app, _)| Some(app.app_id) == preferred_app_id)
+        .or_else(|| matched.first())?
+        .0;
 
     // Several windows can share one Steam app (game + splash/launcher);
     // the longest title among windows for this app is the actual gameplay window.
-    let best_window = candidates
+    let best_window = matched
         .iter()
-        .filter(|window| {
-            window
-                .exe_path
-                .as_deref()
-                .and_then(|path| catalog.find_by_exe_path(path))
-                .is_some_and(|app| app.app_id == best_app.app_id)
-        })
-        .max_by_key(|window| window.title.len())?;
+        .filter(|(app, _)| app.app_id == best_app.app_id)
+        .max_by_key(|(_, window)| window.title.len())?
+        .1;
 
     Some((best_app, best_window))
 }
@@ -1344,5 +1360,50 @@ mod tests {
 
         assert_eq!(detected.identity.id(), "steam-1");
         assert_eq!(detected.hwnd, 1);
+    }
+
+    #[test]
+    fn the_captured_steam_game_stays_detected_across_z_order_changes() {
+        let catalog = crate::game_discovery::SteamLaunchCatalog {
+            apps: vec![
+                crate::game_discovery::SteamLaunchApp::new(
+                    1,
+                    "First",
+                    r"C:\Steam\steamapps\common\First",
+                ),
+                crate::game_discovery::SteamLaunchApp::new(
+                    2,
+                    "Second",
+                    r"C:\Steam\steamapps\common\Second",
+                ),
+            ],
+            common_roots: vec![std::path::PathBuf::from(r"C:\Steam\steamapps\common")],
+            loaded_at: std::time::Instant::now(),
+        };
+        let mut steam = super::SteamDetectorState::fixed(catalog);
+        let first = || {
+            window(1, "First", "First.exe", Some(r"C:\Steam\steamapps\common\First\First.exe"))
+        };
+        let second = || {
+            window(2, "Second", "Second.exe", Some(r"C:\Steam\steamapps\common\Second\Second.exe"))
+        };
+        let mut detect = |windows| {
+            super::detect_active_game_from_windows_with_steam(
+                &GameSettings::default(),
+                windows,
+                &mut steam,
+            )
+            .map(|game| game.identity.id().to_owned())
+        };
+
+        assert_eq!(detect(vec![first(), second()]).as_deref(), Some("steam-1"));
+        // Alt-tab raises Second above First: the capture must not move.
+        assert_eq!(detect(vec![second(), first()]).as_deref(), Some("steam-1"));
+        // First closes: Second takes over and then keeps the capture.
+        assert_eq!(detect(vec![second()]).as_deref(), Some("steam-2"));
+        assert_eq!(detect(vec![first(), second()]).as_deref(), Some("steam-2"));
+        // No Steam window at all forgets the preference.
+        assert_eq!(detect(Vec::new()), None);
+        assert_eq!(detect(vec![first(), second()]).as_deref(), Some("steam-1"));
     }
 }
