@@ -666,9 +666,6 @@ impl SteamLaunchApp {
 #[derive(Debug, Clone)]
 pub(crate) struct SteamLaunchCatalog {
     pub(crate) apps: Vec<SteamLaunchApp>,
-    /// Every discovered `steamapps\\common` root; used to tell a
-    /// Steam-rooted miss (refresh candidate) from an unrelated window.
-    pub(crate) common_roots: Vec<PathBuf>,
     pub(crate) loaded_at: std::time::Instant,
 }
 
@@ -679,14 +676,12 @@ impl SteamLaunchCatalog {
 
     pub(crate) fn scan_from_roots(roots: &[PathBuf]) -> Self {
         let mut apps = Vec::new();
-        let mut common_roots = Vec::new();
         for root in roots {
             let Ok(libraries) = steam_libraries_from_root(root) else {
                 continue;
             };
             for library in libraries {
                 let steamapps_dir = library.join("steamapps");
-                add_unique_path(&mut common_roots, steamapps_dir.join("common"));
                 for manifest in read_steam_manifests(&steamapps_dir) {
                     let install_dir = steamapps_dir
                         .join("common")
@@ -701,7 +696,6 @@ impl SteamLaunchCatalog {
         }
         Self {
             apps,
-            common_roots,
             loaded_at: std::time::Instant::now(),
         }
     }
@@ -712,14 +706,6 @@ impl SteamLaunchCatalog {
         self.apps
             .iter()
             .find(|app| is_path_within_normalized(&normalized, &app.normalized_install_dir))
-    }
-
-    pub(crate) fn is_steam_rooted(&self, exe_path: &str) -> bool {
-        let normalized = normalize_path_string(exe_path);
-        self.common_roots.iter().any(|root| {
-            let parent = normalize_path_string(&root.to_string_lossy());
-            is_path_within_normalized(&normalized, &parent)
-        })
     }
 }
 

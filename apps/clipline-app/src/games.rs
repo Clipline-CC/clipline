@@ -153,6 +153,8 @@ pub(crate) struct SteamDetectorState {
     /// it still has a window, so alt-tabbing between two Steam apps does
     /// not flip detection (and restart the recorder) on every z-order change.
     current_app_id: Option<u32>,
+    /// `path_key`s left unmatched by the last rescan; see `refresh_wait_for`.
+    unmatched_at_last_refresh: Vec<String>,
 }
 
 impl SteamDetectorState {
@@ -162,6 +164,7 @@ impl SteamDetectorState {
             live: true,
             refresh_wait: STEAM_CATALOG_REFRESH_INTERVAL,
             current_app_id: None,
+            unmatched_at_last_refresh: Vec::new(),
         }
     }
 
@@ -172,6 +175,7 @@ impl SteamDetectorState {
             live: false,
             refresh_wait: STEAM_CATALOG_REFRESH_INTERVAL,
             current_app_id: None,
+            unmatched_at_last_refresh: Vec::new(),
         }
     }
 
@@ -181,7 +185,6 @@ impl SteamDetectorState {
         }
         self.catalog.get_or_insert_with(|| crate::game_discovery::SteamLaunchCatalog {
             apps: Vec::new(),
-            common_roots: Vec::new(),
             loaded_at: std::time::Instant::now(),
         })
     }
@@ -227,9 +230,7 @@ fn detect_steam_game_from_windows(
     }
     candidates.retain(|window| !crate::game_discovery::is_noise_window(window));
 
-    if has_unmatched_steam_candidate(steam.catalog_mut(), &candidates) {
-        maybe_refresh_steam_catalog(steam, &candidates);
-    }
+    maybe_refresh_steam_catalog(steam, &candidates);
     let preferred = steam.current_app_id;
     let detected = find_best_steam_match(steam.catalog_mut(), &candidates, preferred).map(
         |(app, window)| {
@@ -262,20 +263,46 @@ fn detect_steam_game_from_windows(
     detected.map(|(_, game)| game)
 }
 
-/// Refresh only on a Steam-rooted miss so a browser or Explorer window can
-/// never trigger a manifest scan, and at most once per `refresh_wait`. The
-/// wait doubles after each refresh that finds no new manifest, so a
-/// permanently unmatched Steam-rooted window cannot force a rescan every
-/// 30 s forever. A Steam library added after the first scan stays unnoticed
-/// until restart; rescan on a timer if that ever matters.
-fn has_unmatched_steam_candidate(
+/// Exe paths (as `path_key`s) of Steam-path windows no catalog app claims.
+/// Candidates already passed the `steamapps\common` gate, so a browser or
+/// Explorer window can never trigger a manifest scan. The catalog's own
+/// roots are deliberately not required: a library added (or Steam
+/// installed) after the first scan is exactly the case a rescan must find.
+fn unmatched_steam_paths(
     catalog: &crate::game_discovery::SteamLaunchCatalog,
     candidates: &[CapturableWindow],
-) -> bool {
-    candidates.iter().any(|window| {
-        window.exe_path.as_deref().is_some_and(|path| {
-            catalog.is_steam_rooted(path) && catalog.find_by_exe_path(path).is_none()
-        })
+) -> Vec<String> {
+    let mut paths: Vec<String> = candidates
+        .iter()
+        .filter_map(|window| window.exe_path.as_deref())
+        .filter(|path| catalog.find_by_exe_path(path).is_none())
+        .map(path_key)
+        .collect();
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+/// How old the catalog must be before a rescan, or `None` with nothing to
+/// find. The doubling backoff only throttles misses already seen at the
+/// last rescan (a redistributable or tool with no manifest); any new
+/// unmatched window, such as a freshly installed game, uses the base
+/// interval again.
+fn refresh_wait_for(
+    unmatched: &[String],
+    unmatched_at_last_refresh: &[String],
+    backoff: Duration,
+) -> Option<Duration> {
+    if unmatched.is_empty() {
+        return None;
+    }
+    let new_miss = unmatched
+        .iter()
+        .any(|path| !unmatched_at_last_refresh.contains(path));
+    Some(if new_miss {
+        STEAM_CATALOG_REFRESH_INTERVAL
+    } else {
+        backoff
     })
 }
 
@@ -283,15 +310,15 @@ fn maybe_refresh_steam_catalog(
     steam: &mut SteamDetectorState,
     candidates: &[CapturableWindow],
 ) {
-    if !steam.live {
-        return;
-    }
-    let wait = steam.refresh_wait;
-    let due = {
+    let (unmatched, age) = {
         let catalog = steam.catalog_mut();
-        catalog.loaded_at.elapsed() >= wait && has_unmatched_steam_candidate(catalog, candidates)
+        (unmatched_steam_paths(catalog, candidates), catalog.loaded_at.elapsed())
     };
-    if !due {
+    let Some(wait) = refresh_wait_for(&unmatched, &steam.unmatched_at_last_refresh, steam.refresh_wait)
+    else {
+        return;
+    };
+    if !steam.live || age < wait {
         return;
     }
     let refreshed = crate::game_discovery::SteamLaunchCatalog::scan();
@@ -305,6 +332,7 @@ fn maybe_refresh_steam_catalog(
         changed
     };
     steam.refresh_wait = next_refresh_wait(wait, changed);
+    steam.unmatched_at_last_refresh = unmatched;
 }
 
 fn next_refresh_wait(current: Duration, changed: bool) -> Duration {
@@ -945,7 +973,6 @@ mod tests {
                 "Friendslop",
                 r"C:\Steam\steamapps\common\Friendslop",
             )],
-            common_roots: vec![std::path::PathBuf::from(r"C:\Steam\steamapps\common")],
             loaded_at: std::time::Instant::now(),
         }
     }
@@ -1026,7 +1053,6 @@ mod tests {
                 "League of Legends",
                 r"C:\Steam\steamapps\common\League of Legends",
             )],
-            common_roots: vec![std::path::PathBuf::from(r"C:\Steam\steamapps\common")],
             loaded_at: std::time::Instant::now(),
         };
         let mut steam = super::SteamDetectorState::fixed(catalog);
@@ -1056,7 +1082,6 @@ mod tests {
                 "League of Legends",
                 r"C:\Steam\steamapps\common\League of Legends",
             )],
-            common_roots: vec![std::path::PathBuf::from(r"C:\Steam\steamapps\common")],
             loaded_at: std::time::Instant::now(),
         };
         let mut steam = super::SteamDetectorState::fixed(catalog);
@@ -1264,7 +1289,45 @@ mod tests {
             ),
         ];
 
-        assert!(has_unmatched_steam_candidate(&catalog, &candidates));
+        assert_eq!(
+            unmatched_steam_paths(&catalog, &candidates),
+            [path_key(r"C:\Steam\steamapps\common\NewGame\NewGame.exe")]
+        );
+    }
+
+    #[test]
+    fn a_library_outside_the_scanned_roots_still_counts_as_a_miss() {
+        // Added after the first scan (or Steam installed later): its root is
+        // not in the catalog yet, which is exactly why it needs a rescan.
+        let candidates = vec![window(
+            3,
+            "New Game",
+            "NewGame.exe",
+            Some(r"D:\SteamLibrary\steamapps\common\NewGame\NewGame.exe"),
+        )];
+
+        assert_eq!(unmatched_steam_paths(&steam_catalog(), &candidates).len(), 1);
+    }
+
+    #[test]
+    fn a_newly_unmatched_window_skips_the_backoff_for_old_misses() {
+        let tool = path_key(r"C:\Steam\steamapps\common\Redist\setup.exe");
+        let game = path_key(r"C:\Steam\steamapps\common\NewGame\NewGame.exe");
+        let backed_off = STEAM_CATALOG_REFRESH_MAX_BACKOFF;
+
+        let tool_only = std::slice::from_ref(&tool);
+
+        assert_eq!(refresh_wait_for(&[], tool_only, backed_off), None);
+        assert_eq!(
+            refresh_wait_for(tool_only, tool_only, backed_off),
+            Some(backed_off),
+            "the same unmatched tool keeps its backoff"
+        );
+        assert_eq!(
+            refresh_wait_for(&[tool.clone(), game], tool_only, backed_off),
+            Some(STEAM_CATALOG_REFRESH_INTERVAL),
+            "a newly launched game is rescanned on the base interval"
+        );
     }
 
     #[test]
@@ -1282,9 +1345,10 @@ mod tests {
         }
         let mut state = SteamDetectorState::live();
         assert!(state.catalog.is_none(), "construction stays lazy");
-        let catalog = state.catalog_mut();
-        assert!(
-            !catalog.common_roots.is_empty() || !catalog.apps.is_empty(),
+        let live_apps = state.catalog_mut().apps.len();
+        assert_eq!(
+            live_apps,
+            crate::game_discovery::SteamLaunchCatalog::scan().apps.len(),
             "live init must populate the catalog via scan(), not an empty stub"
         );
     }
@@ -1347,7 +1411,6 @@ mod tests {
                     r"C:\Steam\steamapps\common\Second",
                 ),
             ],
-            common_roots: vec![std::path::PathBuf::from(r"C:\Steam\steamapps\common")],
             loaded_at: std::time::Instant::now(),
         };
         let mut steam = super::SteamDetectorState::fixed(catalog);
@@ -1391,7 +1454,6 @@ mod tests {
                     r"C:\Steam\steamapps\common\Second",
                 ),
             ],
-            common_roots: vec![std::path::PathBuf::from(r"C:\Steam\steamapps\common")],
             loaded_at: std::time::Instant::now(),
         };
         let mut steam = super::SteamDetectorState::fixed(catalog);

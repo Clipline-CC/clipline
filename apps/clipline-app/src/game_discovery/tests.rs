@@ -541,13 +541,4 @@ fn steam_launch_catalog_is_manifest_only_and_matches_nested_executables() {
         app.install_dir,
         steam_root.join("steamapps/common/Friendslop")
     );
-    assert!(catalog.is_steam_rooted(
-        &steam_root
-            .join("steamapps/common/OtherGame/OtherGame.exe")
-            .to_string_lossy()
-    ));
-    assert!(!catalog.is_steam_rooted(
-        &dir.path().join("Elsewhere/Game.exe").to_string_lossy()
-    ));
 }
-
