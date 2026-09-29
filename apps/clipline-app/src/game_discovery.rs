@@ -406,7 +406,7 @@ pub(crate) fn is_noise_window(window: &CapturableWindow) -> bool {
         || title.contains("updater")
 }
 
-fn steam_install_roots() -> Result<Vec<PathBuf>, String> {
+pub(crate) fn steam_install_roots() -> Result<Vec<PathBuf>, String> {
     let mut roots = Vec::new();
     if let Some(path) = query_reg_sz(r"HKCU\Software\Valve\Steam", "SteamPath") {
         add_unique_path(&mut roots, PathBuf::from(path.replace('/', "\\")));

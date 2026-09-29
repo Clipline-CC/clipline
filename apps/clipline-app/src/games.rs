@@ -1260,10 +1260,15 @@ mod tests {
 
     #[test]
     fn live_steam_catalog_initializes_from_a_real_scan() {
-        if std::env::var_os("CI").is_some() {
-            // Device test: proves the live init path scans this machine's
-            // Steam instead of installing the empty stub that broke the
-            // refresh gate. CI runners have no Steam install to observe.
+        // Device test: proves the live init path scans this machine's Steam
+        // instead of installing the empty stub that broke the refresh gate.
+        // CI runners and many dev machines have no Steam install to observe.
+        if std::env::var_os("CI").is_some()
+            || crate::game_discovery::steam_install_roots()
+                .unwrap_or_default()
+                .is_empty()
+        {
+            eprintln!("SKIP: no Steam install on this machine");
             return;
         }
         let mut state = SteamDetectorState::live();
