@@ -12,7 +12,8 @@ unanswered bot findings. It now merges `develop`: the `app.rs`, `library.rs` and
 found ten issues; the fixes:
 
 - **Default:** `auto_detect_steam_launches` follows `pause_when_no_game` when absent
-  from settings, and is off for new installs. Any Steam-installed app counts as a
+  from settings, is off for new installs, and is checked when the user turns
+  games-only on in Settings. Any Steam-installed app counts as a
   game, so on by default it replaced desktop recorders' capture with tools like OBS.
 - **Always add** saves through `RuntimeState::add_custom_game_with` (like the cloud
   and osu! updates), not `save_settings`, so it no longer restarts the recorder and
