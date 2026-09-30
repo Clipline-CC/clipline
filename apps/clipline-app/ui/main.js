@@ -927,13 +927,13 @@ document.addEventListener("keydown", (ev) => {
     case "next-edit": jumpEdit(1); break;
     case "prev-edit": jumpEdit(-1); break;
     case "zoom":
-      if (simpleTrimMode) zoomAtPlayhead(intent.factor);
+      if (timelineZoomEnabled()) zoomAtPlayhead(intent.factor);
       break;
     case "zoom-fit":
-      if (simpleTrimMode) zoomFit();
+      if (timelineZoomEnabled()) zoomFit();
       break;
     case "zoom-selection":
-      if (simpleTrimMode) zoomToSelection();
+      if (timelineZoomEnabled()) zoomToSelection();
       break;
     case "toggle-fullscreen": toggleReviewFullscreen(); break;
     case "close": closeReview(); break;

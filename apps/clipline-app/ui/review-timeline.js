@@ -136,6 +136,12 @@ function applyTimelineEditorPreference() {
   paintTimeline();
 }
 
+// Zoom and pan follow Clip mode, except in group review: that mode has no
+// Clip toggle, so its timeline always zooms (scroll, +/-, \).
+function timelineZoomEnabled() {
+  return simpleTrimMode || Boolean(activeGroup());
+}
+
 function setSimpleTrimMode(active) {
   if (activeGroup()) {
     simpleTrimMode = false;
@@ -738,7 +744,7 @@ const ZOOM_SENSITIVITY = 0.0015;
 function onTimelineWheel(ev) {
   const dur = clipDuration();
   if (!currentClip || !(dur > 0)) return;
-  if (!simpleTrimMode) return;
+  if (!timelineZoomEnabled()) return;
   ev.preventDefault();
   noteViewActivity();
   const rect = $("timeline").getBoundingClientRect();

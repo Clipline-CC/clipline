@@ -1493,6 +1493,11 @@ fn review_player_owns_all_controls() {
         assert!(!main_js().contains(removed), "the UI still references {removed}");
     }
     assert!(!styles_css().contains("legacy-timeline") && !styles_css().contains("#overview"));
+    assert!(!html.contains("navigator"), "the shortcuts guide must not mention the navigator");
+    // Group review has no Clip toggle, so its timeline must still zoom.
+    assert!(main_js().contains("return simpleTrimMode || Boolean(activeGroup());"));
+    assert!(main_js().contains("if (!timelineZoomEnabled()) return;"));
+    assert!(main_js().contains("if (timelineZoomEnabled()) zoomAtPlayhead(intent.factor);"));
     assert!(
         main_js().contains("requestWindowClose")
             && main_js().contains("confirmQuit")
