@@ -206,6 +206,30 @@ fn capture_diagnostics_and_snapshot_names_match_production_behavior() {
 }
 
 #[test]
+fn updater_keys_are_confined_to_artifact_only_protected_signing() {
+    let root = workspace_root();
+    let benchmark = fs::read_to_string(root.join(".github/workflows/windows-nightly-benchmark.yml")).unwrap();
+    let workload = fs::read_to_string(root.join(".github/workflows/_windows-nightly-benchmark-job.yml")).unwrap();
+    assert!(!benchmark.contains("secrets: inherit"));
+    assert!(!workload.contains("secrets.TAURI_SIGNING"));
+    assert!(workload.contains("signer generate"));
+    for channel in ["nightly", "stable"] {
+        let workflow = fs::read_to_string(root.join(format!(".github/workflows/{channel}.yml"))).unwrap();
+        let build = workflow.split_once("\n  sign:").expect("separate signing job").0;
+        assert!(!build.contains("TAURI_SIGNING_PRIVATE_KEY"));
+        assert!(build.contains("tauri.unsigned.conf.json"));
+        assert!(workflow.contains("uses: ./.github/workflows/_sign-release.yml"));
+    }
+    let signer = fs::read_to_string(root.join(".github/workflows/_sign-release.yml")).unwrap();
+    assert!(signer.contains("environment: release-signing"));
+    assert!(signer.contains("runs-on: windows-latest"));
+    assert!(!signer.contains("actions/checkout@"));
+    assert!(!signer.contains("cargo install"));
+    assert!(!signer.contains("cargo tauri build"));
+    assert!(signer.contains("b6844470bcbf1da6e5dbf01990ae317d4d7969171628bb8badbdbff2e3d06d23"));
+}
+
+#[test]
 fn dependency_and_ci_supply_chain_is_reviewable_and_audited() {
     let root = workspace_root();
     let workflows = root.join(".github/workflows");
@@ -222,7 +246,7 @@ fn dependency_and_ci_supply_chain_is_reviewable_and_audited() {
         let workflow = fs::read_to_string(&path).expect("read workflow");
         saw_rustsec |= workflow.contains("rustsec/audit-check@");
         for line in workflow.lines() {
-            let Some(spec) = line.trim().strip_prefix("- uses:") else {
+            let Some(spec) = line.trim().trim_start_matches("- ").strip_prefix("uses:") else {
                 continue;
             };
             let spec = spec.trim();
@@ -801,7 +825,7 @@ fn nightly_tags_publish_both_verified_updater_variants_transactionally() {
         "scripts\\stage-ffmpeg-resource.ps1",
         "cargo tauri build --config tauri.standalone.conf.json",
         "scripts\\prepare-nightly-assets.ps1",
-        "TAURI_SIGNING_PRIVATE_KEY",
+        "uses: ./.github/workflows/_sign-release.yml",
         "nightly-staging-",
         "gh release edit",
         "--tag nightly",
@@ -823,7 +847,7 @@ fn nightly_tags_publish_both_verified_updater_variants_transactionally() {
     );
 
     let regular_build = workflow
-        .find("cargo tauri build\n")
+        .find("cargo tauri build --config tauri.unsigned.conf.json\n")
         .expect("regular Tauri build");
     let ffmpeg_stage = workflow
         .find("scripts\\stage-ffmpeg-resource.ps1")
@@ -892,7 +916,7 @@ fn windows_nightly_benchmark_keeps_release_work_identical_and_reviewable() {
         "scripts\\stage-ffmpeg-resource.ps1",
         "scripts\\verify-ffmpeg-resource.ps1",
         "scripts\\prepare-nightly-assets.ps1",
-        "TAURI_SIGNING_PRIVATE_KEY",
+        "signer generate",
         "Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4",
         "mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba",
         "compression = 'zlib'",
@@ -1034,7 +1058,7 @@ fn stable_tags_publish_both_verified_updater_variants_transactionally() {
         "cargo tauri build --config tauri.standalone.conf.json",
         "scripts\\prepare-nightly-assets.ps1",
         "-Channel Stable",
-        "TAURI_SIGNING_PRIVATE_KEY",
+        "uses: ./.github/workflows/_sign-release.yml",
         "origin/main",
         "gh release create",
         "gh release edit",
@@ -1061,7 +1085,7 @@ fn stable_tags_publish_both_verified_updater_variants_transactionally() {
     );
 
     let regular_build = workflow
-        .find("cargo tauri build\n")
+        .find("cargo tauri build --config tauri.unsigned.conf.json\n")
         .expect("regular Tauri build");
     let ffmpeg_stage = workflow
         .find("scripts\\stage-ffmpeg-resource.ps1")

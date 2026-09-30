@@ -4,18 +4,18 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 pub const NIGHTLY_UPDATE_ENDPOINT: &str =
-    "https://github.com/dain98/clipline/releases/download/nightly/latest.json";
+    "https://github.com/Clipline-CC/clipline/releases/download/nightly/latest.json";
 pub const STABLE_UPDATE_ENDPOINT: &str =
-    "https://github.com/dain98/clipline/releases/latest/download/latest.json";
+    "https://github.com/Clipline-CC/clipline/releases/latest/download/latest.json";
 
 // Standalone builds bundle a fixed WebView2 runtime instead of installing the
 // Evergreen runtime system-wide. They must update into the standalone
 // installer: the regular one would run the WebView2 bootstrapper on a machine
 // whose owner chose not to have WebView2 installed.
 pub const NIGHTLY_STANDALONE_UPDATE_ENDPOINT: &str =
-    "https://github.com/dain98/clipline/releases/download/nightly/latest-standalone.json";
+    "https://github.com/Clipline-CC/clipline/releases/download/nightly/latest-standalone.json";
 pub const STABLE_STANDALONE_UPDATE_ENDPOINT: &str =
-    "https://github.com/dain98/clipline/releases/latest/download/latest-standalone.json";
+    "https://github.com/Clipline-CC/clipline/releases/latest/download/latest-standalone.json";
 
 /// Official human-readable changelog for both channels. The update dialog
 /// links here instead of inlining a truncated notes preview.
@@ -177,7 +177,7 @@ mod tests {
     fn stable_channel_points_at_github_latest_endpoint() {
         assert_eq!(
             UpdateChannel::Stable.endpoint(false),
-            "https://github.com/dain98/clipline/releases/latest/download/latest.json"
+            "https://github.com/Clipline-CC/clipline/releases/latest/download/latest.json"
         );
     }
 
@@ -185,7 +185,7 @@ mod tests {
     fn nightly_channel_points_at_fixed_github_prerelease_endpoint() {
         assert_eq!(
             UpdateChannel::Nightly.endpoint(false),
-            "https://github.com/dain98/clipline/releases/download/nightly/latest.json"
+            "https://github.com/Clipline-CC/clipline/releases/download/nightly/latest.json"
         );
     }
 
@@ -193,11 +193,11 @@ mod tests {
     fn standalone_installs_update_from_the_standalone_manifest() {
         assert_eq!(
             UpdateChannel::Nightly.endpoint(true),
-            "https://github.com/dain98/clipline/releases/download/nightly/latest-standalone.json"
+            "https://github.com/Clipline-CC/clipline/releases/download/nightly/latest-standalone.json"
         );
         assert_eq!(
             UpdateChannel::Stable.endpoint(true),
-            "https://github.com/dain98/clipline/releases/latest/download/latest-standalone.json"
+            "https://github.com/Clipline-CC/clipline/releases/latest/download/latest-standalone.json"
         );
     }
 

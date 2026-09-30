@@ -16,7 +16,7 @@ discarded as startup transients.
 The enabled channel is Nightly:
 
 ```text
-https://github.com/dain98/clipline/releases/download/nightly/latest.json
+https://github.com/Clipline-CC/clipline/releases/download/nightly/latest.json
 ```
 
 Each nightly ships two installer variants built from the same commit:
@@ -48,11 +48,13 @@ When the user asks for a new Nightly, carry out this entire sequence:
 5. Run `scripts/verify-webview2-runtime.ps1`, `cargo test --workspace`, and
    `cargo clippy --workspace --all-targets -- -D warnings`. Confirm the release-only diff contains
    no accidental product changes.
-6. Commit and push the release metadata to `develop`. Do not tag a feature branch or a commit that
-   is not yet contained in remote `develop`.
+6. Commit and push the release metadata on a branch, open a PR into `develop`, and merge after
+   Ubuntu and Windows CI passes. Do not tag a feature branch or a commit that is not yet contained
+   in remote `develop`.
 7. Create and push the immutable `nightly-v<version>` tag at that exact release commit.
-8. Watch the **Nightly Release** GitHub Action until it finishes. Do not manually replace the
-   rolling `nightly` tag or upload assets while the action is running.
+8. Watch the **Nightly Release** GitHub Action, review the unsigned artifacts, and approve its
+   `release-signing` environment gate. Do not manually replace the rolling `nightly` tag or
+   upload assets while the action is running.
 9. Confirm `gh release view nightly` targets the release commit and exposes exactly seven assets.
    The action already redownloads and hashes every public asset; treat a failed verification as a
    failed release even if GitHub shows a prerelease.
@@ -79,12 +81,14 @@ git push origin "nightly-v$version"
 Cargo.lock, and Tauri, tags outside `develop`, and version regressions. It runs workspace tests and
 Clippy, bakes the Nightly update-channel default into both installers
 (`CLIPLINE_DEFAULT_UPDATE_CHANNEL=nightly`), builds and preserves the regular installer, downloads
-and verifies the hash-pinned WebView2 and FFmpeg inputs, builds and re-signs the renamed standalone
-installer, and generates both updater manifests plus release notes. All seven assets are uploaded to a draft staging
+and verifies the hash-pinned WebView2 and FFmpeg inputs, and builds the standalone
+installer with updater artifacts disabled. A separate GitHub-hosted, artifact-only job in the
+`release-signing` environment uses the hash-pinned Tauri signer to sign both installers and fill
+their updater manifests, after the environment reviewer approves. All seven assets are uploaded to a draft staging
 release before the action replaces the rolling `nightly` release. The published assets are then
 downloaded again and compared byte-for-byte with the staged build.
 
-The workflow needs only the existing `TAURI_SIGNING_PRIVATE_KEY` repository secret; the key has no
+The workflow needs `TAURI_SIGNING_PRIVATE_KEY` only as a `release-signing` environment secret; the key has no
 password, so `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` may remain unset. The version tag remains as an
 immutable audit marker while the separate `nightly` tag continues moving for installed clients.
 
@@ -114,17 +118,12 @@ For that build only: stage with `scripts/stage-ffmpeg-resource.ps1`, then run
 The regular `tauri.conf.json` no longer runs `beforeBundleCommand` verify-ffmpeg.
 The active tag-triggered GitHub Actions workflow performs this ordering automatically.
 
-Two environment traps cost time on 0.1.42 and are worth expecting:
+CI runs on PRs and pushes to both release branches. `develop` requires a PR and passing
+`test (ubuntu-latest)` / `test (windows-latest)` checks. Both branches reject force-pushes and
+deletion; only the maintainer can create version tags, and existing version tags are immutable.
 
-- `ci.yml` triggers only on `push` to `main` and on `pull_request`, so the
-  version-bump commit pushed to `develop` gets **no** CI checks at all
-  (`gh api .../check-runs` returns `total_count: 0`). Do not read that as green.
-  Verify the release commit locally and confirm its code is identical to the
-  last CI-green merge commit — `git diff <merge> <release>` should show only
-  version strings and docs — then say so explicitly in the release notes.
-- If `beforeBundleCommand` fails with `Get-FileHash` not recognized, run
-  `cargo tauri build` from bash rather than pwsh. The verification script itself
-  is fine; do not edit or bypass it to work around the shell.
+If `beforeBundleCommand` fails with `Get-FileHash` not recognized, run `cargo tauri build`
+from bash rather than pwsh. Do not bypass the verification script to work around the shell.
 
 After publishing, verify what is actually downloadable rather than what was
 staged: fetch each asset from its public URL, confirm the bytes match the staged
@@ -142,7 +141,9 @@ The matching private key was generated locally at:
 .local-secrets/clipline-updater.key
 ```
 
-Add the private key contents to the repository secret:
+Add the private key contents to the `release-signing` environment secret, then remove the
+repository-level secret. Environment access is limited to versioned release tags and requires
+the maintainer's approval. Benchmark jobs generate throwaway keys and receive no signing secrets:
 
 ```text
 TAURI_SIGNING_PRIVATE_KEY
@@ -155,12 +156,23 @@ If this private key is lost, future update bundles cannot be signed for
 currently installed builds. Generate a new key only when you are ready to rotate
 the public key in the app.
 
+### Rotation after the benchmark exposure
+
+The original key was exposed to third-party benchmark runners. Treat rotation as pending until
+both Stable and Nightly clients can reach an old-key-signed bridge release. Generate a new key
+outside CI; ship its public key in that bridge, while signing the bridge installers with the old
+key. Keep the bridge manifests available on both channels long enough for existing clients to
+upgrade. Then replace the protected environment's key and sign subsequent releases with the new
+key. Clients that missed the bridge need a separately retained old-key-signed bridge manifest
+or a manual installer; replacing the rolling manifest immediately would strand those clients.
+Do not overwrite the current key or public key during a routine hardening change.
+
 ## Stable
 
 The enabled Stable endpoint is GitHub's latest non-prerelease:
 
 ```text
-https://github.com/dain98/clipline/releases/latest/download/latest.json
+https://github.com/Clipline-CC/clipline/releases/latest/download/latest.json
 ```
 
 Standalone installs use `latest-standalone.json` at the same latest URL. Settings → General →
@@ -187,11 +199,12 @@ When the user asks for a new Stable, carry out this entire sequence:
    metadata as for Nightly.
 4. Run `scripts/verify-webview2-runtime.ps1`, `cargo test --workspace`, and
    `cargo clippy --workspace --all-targets -- -D warnings`.
-5. Commit and push the release metadata to `develop`, then fast-forward `main` again. Do not tag a
-   commit that is not yet contained in remote `main`.
+5. Commit and push release metadata on a branch, merge its PR into `develop` after Ubuntu and
+   Windows CI passes, then fast-forward `main` again. Do not tag a commit that is not yet
+   contained in remote `main`.
 6. Create and push the immutable `v<version>` tag at that exact `main` commit.
-7. Watch the **Stable Release** GitHub Action until it finishes. Do not upload assets while the
-   action is running.
+7. Watch the **Stable Release** GitHub Action, review the unsigned artifacts, and approve its
+   `release-signing` environment gate. Do not upload assets while the action is running.
 8. Confirm `gh release view v<version>` is a published non-prerelease targeting the release commit,
    is GitHub's latest release, and exposes exactly seven assets. Confirm
    `/releases/latest/download/latest.json` matches the staged manifest.

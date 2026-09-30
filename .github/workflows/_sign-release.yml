@@ -1,0 +1,83 @@
+name: Sign verified release artifacts
+
+on:
+  workflow_call:
+    inputs:
+      channel:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  sign:
+    runs-on: windows-latest
+    environment: release-signing
+    env:
+      RELEASE_CHANNEL: ${{ inputs.channel }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: clipline-${{ inputs.channel }}-unsigned-${{ github.sha }}
+          path: dist
+
+      - name: Validate unsigned release and install pinned signer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RELEASE_CHANNEL -cnotin @('nightly', 'stable')) { throw 'Invalid release channel.' }
+          $prefix = if ($env:RELEASE_CHANNEL -eq 'nightly') { 'nightly-v' } else { 'v' }
+          if ($env:GITHUB_REF_NAME -cnotmatch "^${prefix}(\d+\.\d+\.\d+)$") { throw 'Invalid release tag.' }
+          $version = $Matches[1]
+          $names = @("Clipline_${version}_x64-setup.exe", "Clipline_${version}_x64-standalone-setup.exe")
+          $expected = @($names) + @('latest.json', 'latest-standalone.json', "release-notes-$version.md")
+          $actual = @(Get-ChildItem -LiteralPath dist -Force -Recurse)
+          if ($actual.Count -ne 5 -or @($actual | Where-Object { $_.PSIsContainer -or $_.Length -eq 0 }).Count -ne 0 -or
+              @(Compare-Object $expected @($actual.Name)).Count -ne 0) { throw 'Unexpected unsigned release assets.' }
+          $assetTag = if ($env:RELEASE_CHANNEL -eq 'nightly') { 'nightly' } else { $env:GITHUB_REF_NAME }
+          for ($i = 0; $i -lt 2; $i++) {
+            $manifestName = @('latest.json', 'latest-standalone.json')[$i]
+            $manifest = Get-Content -LiteralPath "dist/$manifestName" -Raw | ConvertFrom-Json
+            $url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$assetTag/$($names[$i])"
+            if ($manifest.version -cne $version -or $manifest.platforms.'windows-x86_64'.url -cne $url -or
+                $manifest.platforms.'windows-x86_64'.signature -cne '') { throw 'Unsigned manifest mismatch.' }
+          }
+          $archive = Join-Path $env:RUNNER_TEMP 'cargo-tauri.zip'
+          Invoke-WebRequest -UseBasicParsing -Uri 'https://github.com/tauri-apps/tauri/releases/download/tauri-cli-v2.11.2/cargo-tauri-x86_64-pc-windows-msvc.zip' -OutFile $archive
+          if ((Get-Item -LiteralPath $archive).Length -ne 7414116 -or
+              (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+              'b6844470bcbf1da6e5dbf01990ae317d4d7969171628bb8badbdbff2e3d06d23') { throw 'Pinned signer mismatch.' }
+          $destination = Join-Path $env:RUNNER_TEMP 'signer'
+          Expand-Archive -LiteralPath $archive -DestinationPath $destination
+          $signer = @(Get-ChildItem -LiteralPath $destination -Recurse -Filter cargo-tauri.exe -File)
+          if ($signer.Count -ne 1) { throw 'Expected one pinned signer.' }
+          "RELEASE_SIGNER=$($signer[0].FullName)" >> $env:GITHUB_ENV
+
+      - name: Sign installers and fill updater signatures
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) { throw 'Protected signing key is missing.' }
+          foreach ($manifestName in @('latest.json', 'latest-standalone.json')) {
+            $path = "dist/$manifestName"
+            $manifest = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+            $installer = "dist/$([Uri]::UnescapeDataString(([Uri]$manifest.platforms.'windows-x86_64'.url).Segments[-1]))"
+            & $env:RELEASE_SIGNER signer sign -p $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD $installer
+            if ($LASTEXITCODE -ne 0) { throw 'Installer signing failed.' }
+            $manifest.platforms.'windows-x86_64'.signature = (Get-Content -LiteralPath "$installer.sig" -Raw).Trim()
+            if ([string]::IsNullOrWhiteSpace($manifest.platforms.'windows-x86_64'.signature)) { throw 'Empty updater signature.' }
+            $manifest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $path -Encoding utf8NoBOM
+          }
+          if (@(Get-ChildItem -LiteralPath dist -File).Count -ne 7) { throw 'Expected seven signed assets.' }
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: clipline-${{ inputs.channel }}-${{ github.sha }}
+          path: dist/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14

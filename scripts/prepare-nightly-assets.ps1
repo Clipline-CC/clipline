@@ -6,7 +6,8 @@ param(
     [ValidateSet('Nightly', 'Stable')]
     [string]$Channel = 'Nightly',
     [switch]$ValidateOnly,
-    [string]$Repository = 'dain98/clipline',
+    [switch]$Unsigned,
+    [string]$Repository = 'Clipline-CC/clipline',
     [string]$ReleaseDirectory = 'dist',
     [string]$NotesPath,
     [datetime]$PublishedAt = [datetime]::UtcNow
@@ -62,7 +63,9 @@ $regularName = "Clipline_${version}_x64-setup.exe"
 $standaloneName = "Clipline_${version}_x64-standalone-setup.exe"
 $regularPath = Join-Path $releaseRoot $regularName
 $standalonePath = Join-Path $releaseRoot $standaloneName
-foreach ($path in @($regularPath, "$regularPath.sig", $standalonePath, "$standalonePath.sig")) {
+$requiredPaths = @($regularPath, $standalonePath)
+if (-not $Unsigned) { $requiredPaths += @("$regularPath.sig", "$standalonePath.sig") }
+foreach ($path in $requiredPaths) {
     $file = Get-Item -LiteralPath $path -Force -ErrorAction Stop
     if ($file.PSIsContainer -or $file.Length -eq 0) {
         throw "$Channel asset must be a non-empty file: $path."
@@ -96,7 +99,9 @@ function Write-UpdaterManifest {
         [string]$OutputName
     )
 
-    $signature = (Get-Content -LiteralPath (Join-Path $releaseRoot "$InstallerName.sig") -Raw).Trim()
+    $signature = if ($Unsigned) { '' } else {
+        (Get-Content -LiteralPath (Join-Path $releaseRoot "$InstallerName.sig") -Raw).Trim()
+    }
     $manifest = [ordered]@{
         version = $version
         notes = $notes
@@ -129,8 +134,9 @@ $expected = @(
     $notesName
 )
 $actual = @(Get-ChildItem -LiteralPath $releaseRoot -File | ForEach-Object Name)
+if ($Unsigned) { $expected = @($expected | Where-Object { -not $_.EndsWith('.sig') }) }
 $difference = @(Compare-Object $expected $actual)
 if ($difference.Count -ne 0) {
-    throw "$Channel release directory must contain exactly seven expected assets: $($difference | Out-String)"
+    throw "$Channel release directory must contain exactly the expected assets: $($difference | Out-String)"
 }
-Write-Host "Prepared seven $Channel $version assets in $releaseRoot."
+Write-Host "Prepared $($expected.Count) $Channel $version assets in $releaseRoot."
