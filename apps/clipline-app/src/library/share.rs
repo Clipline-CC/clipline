@@ -362,8 +362,7 @@ pub(crate) fn run_export_ffmpeg(
 ) -> Result<ShareFfmpegOutput, String> {
     const MAX_STDERR_BYTES: usize = 128 * 1024;
 
-    let mut child = command
-        .spawn()
+    let mut child = clipline_capture::ffmpeg::spawn_verified(command)
         .map_err(|error| format!("spawn ffmpeg {label}: {error}"))?;
     let Some(stderr) = child.stderr.take() else {
         let _ = child.kill();
@@ -502,12 +501,12 @@ pub(crate) fn extract_audio_sidecars_with_ffmpeg(
         .ok_or_else(|| "ffmpeg is not available for audio sidecar extraction".to_string())?;
     let mut cmd = Command::new(ffmpeg);
     suppress_console(&mut cmd);
-    let output = cmd
-        .args(ffmpeg_audio_sidecar_args(source, outputs))
+    cmd.args(ffmpeg_audio_sidecar_args(source, outputs))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
+        .stderr(Stdio::piped());
+    let output = clipline_capture::ffmpeg::spawn_verified(&mut cmd)
+        .and_then(|child| child.wait_with_output())
         .map_err(|e| format!("spawn ffmpeg audio sidecar extraction: {e}"))?;
     if !output.status.success() {
         cleanup_audio_sidecar_temps(outputs);

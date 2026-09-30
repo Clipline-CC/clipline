@@ -104,6 +104,12 @@ fn group_capabilities(mut pairs: Vec<(EncoderBackend, Codec)>) -> Vec<EncoderCap
 }
 
 static BUNDLED_FFMPEG: OnceLock<PathBuf> = OnceLock::new();
+static CANDIDATE_CHECK: OnceLock<fn(&Path) -> bool> = OnceLock::new();
+
+/// The desktop shell checks runtime integrity before discovery executes candidates.
+pub fn set_candidate_check(check: fn(&Path) -> bool) {
+    let _ = CANDIDATE_CHECK.set(check);
+}
 
 /// Register the packaged ffmpeg resource path discovered by the desktop shell.
 /// The explicit environment override remains first so developers and users can
@@ -174,7 +180,37 @@ pub fn search_paths() -> Vec<PathBuf> {
 /// `-version` with success. `None` means the FFmpeg encoder tier is simply
 /// unavailable (CI, or a machine without the bundle) — never an error.
 pub fn locate() -> Option<PathBuf> {
-    search_paths().into_iter().find(|path| runs(path))
+    select_candidate(search_paths(), candidate_allowed, runs)
+}
+
+fn candidate_allowed(path: &Path) -> bool {
+    (!cfg!(windows) || path.is_absolute())
+        && CANDIDATE_CHECK.get().is_none_or(|check| check(path))
+}
+
+/// Recheck cached executable paths immediately before launching a child.
+pub fn spawn_verified(command: &mut Command) -> io::Result<Child> {
+    if !candidate_allowed(Path::new(command.get_program())) {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "FFmpeg runtime failed integrity verification"));
+    }
+    command.spawn()
+}
+
+fn select_candidate(paths: Vec<PathBuf>, allowed: impl Fn(&Path) -> bool, probe: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    paths.into_iter().find(|path| allowed(path) && probe(path))
+}
+
+#[cfg(test)]
+#[test]
+fn security_scan_rejected_ffmpeg_candidates_are_never_executed() {
+    let probes = std::cell::RefCell::new(Vec::new());
+    let found = select_candidate(vec!["rejected".into(), "verified".into()],
+        |path| path == Path::new("verified"),
+        |path| { probes.borrow_mut().push(path.to_path_buf()); true });
+    assert_eq!(found, Some("verified".into()));
+    assert_eq!(*probes.borrow(), vec![PathBuf::from("verified")]);
+    #[cfg(windows)]
+    assert_eq!(spawn_verified(&mut Command::new("ffmpeg.exe")).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
 }
 
 /// All probe subprocesses must finish well within this; a wedged ffmpeg is
@@ -243,7 +279,7 @@ fn run_bounded_with_timeout(
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     suppress_console(cmd);
-    let mut child = cmd.spawn().ok()?;
+    let mut child = spawn_verified(cmd).ok()?;
     let Some(stdout) = child.stdout.take() else {
         let _ = child.kill();
         let _ = child.wait();

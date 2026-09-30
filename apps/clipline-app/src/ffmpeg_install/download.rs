@@ -105,6 +105,7 @@ pub(super) fn download_ffmpeg_archive(
 
     // Blocking reqwest client with redirects for GitHub release assets.
     let client = reqwest::blocking::Client::builder()
+        .https_only(true)
         .connect_timeout(std::time::Duration::from_secs(10))
         .timeout(std::time::Duration::from_secs(30 * 60))
         .redirect(reqwest::redirect::Policy::limited(10))
