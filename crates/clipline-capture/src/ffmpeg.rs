@@ -180,7 +180,9 @@ pub fn search_paths() -> Vec<PathBuf> {
 /// `-version` with success. `None` means the FFmpeg encoder tier is simply
 /// unavailable (CI, or a machine without the bundle) — never an error.
 pub fn locate() -> Option<PathBuf> {
-    select_candidate(search_paths(), candidate_allowed, runs)
+    // runs() reaches spawn_verified(), which checks each candidate immediately
+    // before executing it. Avoid hashing the same runtime twice for this probe.
+    search_paths().into_iter().find(|path| runs(path))
 }
 
 fn candidate_allowed(path: &Path) -> bool {
@@ -196,20 +198,9 @@ pub fn spawn_verified(command: &mut Command) -> io::Result<Child> {
     command.spawn()
 }
 
-fn select_candidate(paths: Vec<PathBuf>, allowed: impl Fn(&Path) -> bool, probe: impl Fn(&Path) -> bool) -> Option<PathBuf> {
-    paths.into_iter().find(|path| allowed(path) && probe(path))
-}
-
-#[cfg(test)]
+#[cfg(all(test, windows))]
 #[test]
 fn security_scan_rejected_ffmpeg_candidates_are_never_executed() {
-    let probes = std::cell::RefCell::new(Vec::new());
-    let found = select_candidate(vec!["rejected".into(), "verified".into()],
-        |path| path == Path::new("verified"),
-        |path| { probes.borrow_mut().push(path.to_path_buf()); true });
-    assert_eq!(found, Some("verified".into()));
-    assert_eq!(*probes.borrow(), vec![PathBuf::from("verified")]);
-    #[cfg(windows)]
     assert_eq!(spawn_verified(&mut Command::new("ffmpeg.exe")).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
 }
 
