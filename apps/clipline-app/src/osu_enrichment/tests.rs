@@ -116,6 +116,41 @@ fn discovers_pending_records_under_media_root_for_retry() {
 }
 
 #[test]
+fn discovers_pending_records_beneath_a_local_root_alias() {
+    let dir = TestDir::new("clipline-osu", "pending-root-alias");
+    let target = dir.path().join("target");
+    let alias = dir.path().join("alias");
+    std::fs::create_dir(&target).unwrap();
+    #[cfg(windows)]
+    {
+        let output = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(&alias).arg(&target).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&target, &alias).unwrap();
+    let media_root = alias.join("media");
+    let session = media_root.join("session");
+    write_session_game(&session, crate::game_plugins::OSU_ID, "osu!");
+    let clip = session.join("session.mp4");
+    std::fs::write(&clip, b"mp4").unwrap();
+    write_pending_for_saved_clip(&OsuSavedClip {
+        path: clip.clone(), seconds: 30.0, full_session: true,
+        recording_start_unix: Some(100), recording_end_unix: Some(130),
+        title_events: Vec::new(),
+    }).unwrap();
+    let pending = discover_pending(&media_root).unwrap();
+    // Remove the alias itself before the temporary directory's recursive cleanup.
+    #[cfg(windows)]
+    std::fs::remove_dir(&alias).unwrap();
+    #[cfg(unix)]
+    std::fs::remove_file(&alias).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].clip_path(), target.join("media/session/session.mp4").canonicalize().unwrap());
+}
+
+#[test]
 fn discovery_rejects_a_serialized_clip_path_outside_the_media_root() {
     let dir = TestDir::new("clipline-osu", "pending-path-escape");
     let media_root = dir.path().join("media");

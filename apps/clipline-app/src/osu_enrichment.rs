@@ -291,16 +291,19 @@ pub fn write_pending_for_saved_clip(saved: &OsuSavedClip) -> Result<Option<PathB
 }
 
 pub fn discover_pending(media_root: &Path) -> Result<Vec<DiscoveredPendingEnrichment>, String> {
+    crate::settings::persistence::require_local_path(media_root)?;
     if path_is_link_or_reparse(media_root)? {
         return Err(format!(
             "refusing linked/reparse osu! enrichment media root {media_root:?}"
         ));
     }
+    let configured_media_root = media_root;
     let media_root = media_root
         .canonicalize()
         .map_err(|e| format!("canonicalize osu! enrichment media root {media_root:?}: {e}"))?;
+    crate::settings::persistence::require_local_path(&media_root)?;
     let mut out = Vec::new();
-    discover_pending_in_dir(&media_root, &media_root, &mut out)?;
+    discover_pending_in_dir(configured_media_root, &media_root, &media_root, &mut out)?;
     for entry in std::fs::read_dir(&media_root).map_err(|e| e.to_string())? {
         let Ok(entry) = entry else { continue };
         let path = entry.path();
@@ -309,7 +312,7 @@ pub fn discover_pending(media_root: &Path) -> Result<Vec<DiscoveredPendingEnrich
             Err(_) => continue,
         };
         if metadata.is_dir() && !metadata_is_link_or_reparse(&metadata) {
-            discover_pending_in_dir(&media_root, &path, &mut out)?;
+            discover_pending_in_dir(configured_media_root, &media_root, &path, &mut out)?;
         }
     }
     out.sort_by(|a, b| {
@@ -597,6 +600,7 @@ fn parse_osu_title_play(title: &str) -> Option<TitlePlayInfo> {
 }
 
 fn discover_pending_in_dir(
+    configured_media_root: &Path,
     media_root: &Path,
     dir: &Path,
     out: &mut Vec<DiscoveredPendingEnrichment>,
@@ -617,7 +621,7 @@ fn discover_pending_in_dir(
         else {
             continue;
         };
-        match discover_pending_file(media_root, &path, stem) {
+        match discover_pending_file(configured_media_root, media_root, &path, stem) {
             Ok(job) => out.push(job),
             Err(error) => match quarantine_pending_file(&path) {
                 Ok(_quarantine) => tracing::warn!(
@@ -636,6 +640,7 @@ fn discover_pending_in_dir(
 }
 
 fn discover_pending_file(
+    configured_media_root: &Path,
     media_root: &Path,
     path: &Path,
     stem: &str,
@@ -682,11 +687,16 @@ fn discover_pending_file(
     }
     let record: OsuPendingEnrichment = crate::util::read_json_sidecar(path)?
         .ok_or_else(|| format!("pending osu! enrichment disappeared: {path:?}"))?;
-    crate::settings::persistence::require_local_path(Path::new(&record.clip_path))?;
-    if !crate::settings::validation::same_or_nested_path(Path::new(&record.clip_path), media_root) {
+    let record_path = Path::new(&record.clip_path);
+    crate::settings::persistence::require_local_path(record_path)?;
+    // Keep the trusted configured spelling: canonicalization expands Windows 8.3 aliases.
+    if (!crate::settings::validation::same_or_nested_path(record_path, configured_media_root)
+        && !crate::settings::validation::same_or_nested_path(record_path, media_root))
+        || record_path.components().any(|component| matches!(component, std::path::Component::ParentDir))
+    {
         return Err("serialized osu! enrichment clip path is outside the media root".into());
     }
-    let serialized_clip = Path::new(&record.clip_path).canonicalize().map_err(|e| {
+    let serialized_clip = record_path.canonicalize().map_err(|e| {
         format!(
             "canonicalize serialized osu! enrichment clip path {:?}: {e}",
             record.clip_path
