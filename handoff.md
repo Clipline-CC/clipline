@@ -29,6 +29,13 @@ could neither see it nor decline a game. `feat/steam-game-prompt` replaces it:
   channel is Nightly (dev builds included), from `frontend_ready`'s `build`.
   SVG elements have no reflecting `hidden` property — use `toggleAttribute`.
 
+- **Legacy timeline editor removed** (same branch): the `legacy_timeline_editor`
+  setting, the nav row (whole-clip overview navigator, zoom buttons, snap toggle),
+  the `S` snap shortcut and `PlayerCore.setViewEdge`. Snapping stays always on
+  (Alt bypasses); keyboard zoom works in Clip mode. Old settings files with the
+  key still load and drop it on the next save. The `.deck.simple-timeline` class
+  is gone; trim-mode CSS keys on `.deck:not(.simple-trim-active)`.
+
 Not yet verified against a live Steam launch on this branch; unit tests cover the
 prompt state machine and the dialog was checked visually via CDP.
 
