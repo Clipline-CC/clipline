@@ -222,6 +222,7 @@ pub(crate) fn frontend_ready<R: Runtime>(
     FrontendReadyResponse {
         warnings: startup_warnings.snapshot(),
         window_lifecycle: window_lifecycle.snapshot(),
+        build: super::lifecycle::BuildInfo::current(),
     }
 }
 

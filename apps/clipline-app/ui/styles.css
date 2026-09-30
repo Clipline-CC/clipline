@@ -1764,6 +1764,25 @@ label span { white-space: nowrap; }
 
 .rail-spacer { flex: 1 1 0; }
 
+.rail-build {
+  display: grid;
+  justify-items: center;
+  gap: 3px;
+  width: 52px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+.rail-build[hidden],
+.rail-build svg[hidden] { display: none; }
+.rail-build svg {
+  width: 13px;
+  height: 13px;
+  fill: currentColor;
+}
+
 .rail-profile {
   display: grid;
   justify-items: center;

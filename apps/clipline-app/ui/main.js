@@ -1035,6 +1035,15 @@ function applyWindowLifecycleSnapshot(snapshot) {
   }
 }
 
+function applyBuildInfo(build) {
+  if (!build || !build.version) return;
+  $("rail-build-version").textContent = "v" + build.version;
+  // SVG elements have no reflecting `hidden` property; set the attribute.
+  $("rail-build-nightly").toggleAttribute("hidden", !build.nightly);
+  $("rail-build").title = (build.nightly ? "Nightly " : "") + "v" + build.version;
+  $("rail-build").hidden = false;
+}
+
 async function reportFrontendReady() {
   try {
     await windowLifecycleListenerReady;
@@ -1044,6 +1053,7 @@ async function reportFrontendReady() {
       $("error").textContent = warnings.join(" ");
     }
     applyWindowLifecycleSnapshot(response && response.window_lifecycle);
+    applyBuildInfo(response && response.build);
   } catch (e) {
     console.warn("frontend_ready failed:", e);
   }

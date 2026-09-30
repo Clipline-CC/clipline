@@ -6664,3 +6664,22 @@ fn favorites_are_guarded_across_review_gallery_and_context_menu() {
         "cloud/game-play menus must hide the favorite action; main.js must wire the toggle"
     );
 }
+
+#[test]
+fn rail_shows_the_build_version_with_a_nightly_moon_above_the_profile() {
+    let html = index_html();
+    let build = html.find("id=\"rail-build\"").expect("rail build badge");
+    let profile = html.find("id=\"rail-profile\"").expect("rail profile");
+    assert!(build < profile, "the build badge sits above the profile icon");
+    assert!(html.contains("id=\"rail-build-nightly\""));
+    assert!(html.contains("id=\"rail-build-version\""));
+
+    let main = main_js();
+    for required in [
+        "applyBuildInfo(response && response.build);",
+        "$(\"rail-build-version\").textContent = \"v\" + build.version;",
+        "$(\"rail-build-nightly\").toggleAttribute(\"hidden\", !build.nightly);",
+    ] {
+        assert!(main.contains(required), "main.js is missing {required}");
+    }
+}
