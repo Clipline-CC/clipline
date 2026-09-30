@@ -10,7 +10,7 @@ updater public key is unchanged.
 | Write access can publish signed updates | Protected `release-signing` environment with maintainer approval and version-tag policies; moved the existing private key there and deleted the repository secret. Branches reject deletion/force-push; develop requires PR/Ubuntu/Windows checks. Only the maintainer can create version tags; version tags cannot move or be deleted. Enabled secret scanning and push protection. |
 | Replay larger than quota deletes clips for no benefit | Both quota-reclamation paths return before deletion when the requested write exceeds the whole quota. Equality still permits reclamation. |
 | Renderer chooses arbitrary replay-cache directory | Independent native-picker authorization for media and replay-cache paths, consumed only on successful settings commit. Validation covers saved disk paths even in memory mode; resetting to the default remains available. |
-| UNC paths contact a host before containment checks | Reject UNC/device paths before normalization or clip/group/enrichment resolution. Clip access checks configured or canonical root containment before resolving the requested file. |
+| UNC paths contact a host before containment checks | Reject UNC/device paths before normalization or clip/group/enrichment resolution. Access checks configured or canonical root containment before resolving the requested file, retaining trusted local aliases such as Windows short paths. |
 | Imported audio selection creates ownership | Marker sidecars no longer prove ownership. Imported audio selections remain readable but do not make the original eligible for quota/uninstall deletion. Trim exports always write explicit ownership metadata. Linked ownership proofs are refused. |
 | Aggregate MP4 allocation and track amplification | Cap movie-wide samples at 4 million and tracks at 64 before expanding tables; bound repeated HEVC parameter arrays and reject empty parameter NALs. |
 | Quadratic edit-list scanning and unlimited box walks | Advance a monotonic sample cursor; cap file-header traversal at 4096 and per-container/sample-entry walks at 65,536. Native finalized recordings contain only three top-level boxes regardless of duration. |
@@ -46,8 +46,10 @@ Regression checks cover media preservation, imported ownership, parser budgets, 
 writes, picker isolation, network paths, navigation, upload bounds/redaction, process reuse, and
 prototype names. `scripts/tests/test-release-signing.ps1` runs both actual workflow script bodies
 with throwaway keys; local independent minisign verification checked all four manifest signatures.
-Actionlint and PowerShell parsing validate the workflows. Workspace tests and warning-denied
-Clippy are required before delivery, with Ubuntu and Windows CI afterward.
+Actionlint and PowerShell parsing validate the workflows. All 1620 workspace tests pass
+(two intentional ignores), along with fresh-cache warning-denied Clippy. The live app rejects
+unpicked replay-cache paths, UNC paths and external navigation. Platform CI and dependency
+security checks are tracked on [PR #216](https://github.com/Clipline-CC/clipline/pull/216).
 
 Marker-only legacy clips with arbitrary filenames are conservatively retained as unmanaged;
 explicit title/file edits adopt them. Malformed journals are preserved, but their automatic rollback

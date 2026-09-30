@@ -32,13 +32,18 @@ The Cloud SDK redaction fix is isolated from the existing dirty local Cloud chec
 `c974427e6cb9a8dffeb66b7f78179937a8e2723f`. Its tests and warning-denied Clippy pass;
 serde wire formats remain unchanged.
 
-Local validation: workspace tests pass (1619 tests, two intentional ignores), followed
-by the final memory sampler regressions; fresh-cache warning-denied workspace Clippy
+Local validation: workspace tests pass (1620 tests, two intentional ignores);
+fresh-cache warning-denied workspace Clippy
 passes. Actionlint and 39 workflow PowerShell bodies pass. Both actual signing script
 bodies pass with throwaway Nightly/Stable assets, and independent minisign verification
 checks all four manifest signatures. Evidence remains in ignored `target/security-*`
-and `target/signing-test-*` paths. Ubuntu/Windows PR CI and an app launch check complete
-delivery verification.
+and `target/signing-test-*` paths. The patched app loaded and recreated its UI successfully;
+live IPC checks rejected an unpicked replay-cache path and a UNC path without changing
+settings, and refused external navigation. Evidence: `target/security-app-smoke-result.json`.
+[PR #216](https://github.com/Clipline-CC/clipline/pull/216) tracks Ubuntu/Windows CI and
+RustSec. The first Windows run caught a configured-root alias regression in pending osu!
+enrichment discovery; the fix retains the trusted configured spelling before canonical
+identity checks, with a regression that failed before the fix and now passes.
 
 ## Checkpoint (2026-09-30): Nightly 1.0.8 published
 
