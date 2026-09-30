@@ -575,12 +575,15 @@
             <div class="setting-row" data-settings-key="games.auto_detect_steam_launches">
               <div class="setting-info">
                 <strong>Steam launches</strong>
-                <span>Detect newly launched games installed under Steam even before you add them as custom games. Any app installed through Steam counts, including tools.</span>
+                <span>When a Steam game that isn't in your games list opens, Clipline asks whether to add it. Nothing records until you choose Add. Any app installed through Steam counts, including tools.</span>
               </div>
-              <label class="check-line">
-                <input id="set-games-auto-detect-steam" type="checkbox" />
-                <span>Auto-detect newly launched Steam games</span>
-              </label>
+              <div class="steam-launch-controls">
+                <label class="check-line">
+                  <input id="set-games-auto-detect-steam" type="checkbox" />
+                  <span>Ask about newly launched Steam games</span>
+                </label>
+                <div id="ignored-steam-games" class="ignored-steam-games" hidden></div>
+              </div>
             </div>
             <div class="setting-row" data-settings-key="games.plugins">
               <div class="setting-info">
@@ -1266,6 +1269,22 @@
     <div class="confirm-actions">
       <button id="elevation-restart" class="primary">Restart as Administrator</button>
       <button id="elevation-cancel">Not Now</button>
+    </div>
+  </dialog>
+
+  <dialog id="steam-game-prompt-dialog" aria-labelledby="steam-game-prompt-title">
+    <div class="confirm-body">
+      <strong id="steam-game-prompt-title">New Steam game detected</strong>
+      <span><strong id="steam-game-prompt-name">This Steam game</strong> isn't in your games list yet. Add it to record replays while you play.</span>
+      <span class="hint">Ignored games stay listed in Settings, under Games.</span>
+    </div>
+    <label class="check-line steam-game-prompt-never">
+      <input id="steam-game-prompt-never" type="checkbox" />
+      <span>Never ask again</span>
+    </label>
+    <div class="confirm-actions">
+      <button id="steam-game-prompt-add" class="primary">Add</button>
+      <button id="steam-game-prompt-ignore">Ignore</button>
     </div>
   </dialog>
 

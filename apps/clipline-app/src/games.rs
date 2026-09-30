@@ -119,7 +119,7 @@ pub(crate) fn detect_active_game_from_windows_with_steam(
                     .any(|game| disabled_custom_rule_owns_window(game, window))
             })
             .collect();
-        return detect_steam_game_from_windows(steam_windows, steam);
+        return detect_steam_game_from_windows(steam_windows, steam, settings);
     }
     steam.current_app_id = None;
     None
@@ -213,6 +213,7 @@ fn steam_detector_state() -> std::sync::MutexGuard<'static, Option<SteamDetector
 fn detect_steam_game_from_windows(
     windows: Vec<CapturableWindow>,
     steam: &mut SteamDetectorState,
+    settings: &GameSettings,
 ) -> Option<DetectedGame> {
     // Cheap gate before touching the catalog: a Steam install path always
     // contains `steamapps\common`, so non-Steam ticks stay off the disk.
@@ -242,7 +243,7 @@ fn detect_steam_game_from_windows(
 
     maybe_refresh_steam_catalog(steam, &candidates);
     let preferred = steam.current_app_id;
-    let detected = find_best_steam_match(steam.catalog_mut(), &candidates, preferred).map(
+    let detected = find_best_steam_match(steam.catalog_mut(), &candidates, preferred, settings).map(
         |(app, window)| {
             let name = if app.name.trim().is_empty() {
                 window
@@ -356,10 +357,14 @@ fn find_best_steam_match<'a>(
     catalog: &'a crate::game_discovery::SteamLaunchCatalog,
     candidates: &'a [CapturableWindow],
     preferred_app_id: Option<u32>,
+    settings: &GameSettings,
 ) -> Option<(&'a crate::game_discovery::SteamLaunchApp, &'a CapturableWindow)> {
+    // "Never ask again" apps drop out here, so they neither prompt nor hide
+    // another Steam game behind them.
     let matched: Vec<_> = candidates
         .iter()
         .filter_map(|window| Some((catalog.find_by_exe_path(window.exe_path.as_deref()?)?, window)))
+        .filter(|(app, _)| !settings.steam_app_ignored(app.app_id))
         .collect();
     // The app already being captured wins while it has a window. Otherwise
     // window (z-order) order picks among different games.
@@ -704,6 +709,7 @@ mod tests {
             auto_detect: true,
             pause_when_no_game: false,
             auto_detect_steam_launches: false,
+            ignored_steam_games: Vec::new(),
             plugins: settings_with_all_plugins_disabled().plugins,
             custom_games: Vec::new(),
         }));
@@ -711,6 +717,7 @@ mod tests {
             auto_detect: true,
             pause_when_no_game: false,
             auto_detect_steam_launches: false,
+            ignored_steam_games: Vec::new(),
             plugins: settings_with_all_plugins_disabled().plugins,
             custom_games: vec![CustomGameSettings {
                 enabled: false,
@@ -896,6 +903,7 @@ mod tests {
             auto_detect: true,
             pause_when_no_game: false,
             auto_detect_steam_launches: false,
+            ignored_steam_games: Vec::new(),
             plugins: settings_with_league(false, GameRecordingMode::FullSession).plugins,
             custom_games: vec![game()],
         };
@@ -1019,6 +1027,51 @@ mod tests {
     }
 
     #[test]
+    fn never_ask_again_steam_app_is_skipped_for_the_next_steam_game() {
+        let mut settings = steam_enabled();
+        settings.ignored_steam_games = vec![crate::settings::IgnoredSteamGame {
+            app_id: 427520,
+            name: "Friendslop".into(),
+        }];
+        let mut catalog = steam_catalog();
+        catalog.apps.push(crate::game_discovery::SteamLaunchApp::new(
+            646570,
+            "Slay the Spire",
+            r"C:\Steam\steamapps\common\SlayTheSpire",
+        ));
+        let mut steam = super::SteamDetectorState::fixed(catalog);
+        let friendslop = window(
+            11,
+            "Friendslop",
+            "Friendslop.exe",
+            Some(r"C:\Steam\steamapps\common\Friendslop\Friendslop.exe"),
+        );
+
+        assert!(super::detect_active_game_from_windows_with_steam(
+            &settings,
+            vec![friendslop.clone()],
+            &mut steam,
+        )
+        .is_none());
+
+        let detected = super::detect_active_game_from_windows_with_steam(
+            &settings,
+            vec![
+                friendslop,
+                window(
+                    12,
+                    "Slay the Spire",
+                    "javaw.exe",
+                    Some(r"C:\Steam\steamapps\common\SlayTheSpire\jre\bin\javaw.exe"),
+                ),
+            ],
+            &mut steam,
+        )
+        .expect("the next Steam game is still detected");
+        assert_eq!(detected.identity.id(), "steam-646570");
+    }
+
+    #[test]
     fn built_in_plugin_still_wins_over_steam_path() {
         let detected = detect_with_catalog(
             &steam_enabled(),
@@ -1054,6 +1107,7 @@ mod tests {
             auto_detect: true,
             pause_when_no_game: false,
             auto_detect_steam_launches: true,
+            ignored_steam_games: Vec::new(),
             plugins: settings_with_league(false, GameRecordingMode::FullSession).plugins,
             custom_games: Vec::new(),
         };
@@ -1192,6 +1246,7 @@ mod tests {
 
         let setting_off = GameSettings {
             auto_detect_steam_launches: false,
+            ignored_steam_games: Vec::new(),
             ..GameSettings::default()
         };
         assert!(detect_with_catalog(&setting_off, windows.clone()).is_none());

@@ -7,7 +7,6 @@ use tauri_plugin_autostart::ManagerExt;
 
 
 use crate::game_discovery::DetectedGameCandidate;
-use crate::games::DetectedGame;
 use crate::game_plugins::GamePluginInfo;
 use crate::games::GameWindowInfo;
 use crate::service::{self};
@@ -288,113 +287,6 @@ pub(crate) fn list_game_plugins() -> Vec<GamePluginInfo> {
     crate::games::game_plugin_catalog()
 }
 
-/// The discovered Steam launch the "Always add" offer was shown for. The
-/// frontend never sends an executable path; the rule is rebuilt from the live
-/// `DetectedGame`, and the app id keeps a stale offer from adding a different
-/// game that now shares the window or process.
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct DiscoveredSteamTarget {
-    pub(crate) app_id: u32,
-    pub(crate) process_id: u32,
-}
-
-pub(crate) fn discovered_steam_target_matches(
-    active: &DetectedGame,
-    target: &DiscoveredSteamTarget,
-) -> bool {
-    matches!(
-        active.identity,
-        crate::game_identity::GameIdentity::DiscoveredSteam { app_id, .. }
-            if app_id == target.app_id
-    ) && active.process_id == target.process_id
-}
-
-pub(crate) fn custom_game_from_discovered_steam(
-    game: &DetectedGame,
-) -> Result<CustomGameSettings, String> {
-    let crate::game_identity::GameIdentity::DiscoveredSteam { app_id, .. } = &game.identity else {
-        return Err("the detected game is not a discovered Steam launch".into());
-    };
-    let exe_path = game
-        .exe_path
-        .clone()
-        .filter(|path| !path.trim().is_empty())
-        .ok_or("the detected Steam window has no executable path")?;
-    Ok(CustomGameSettings {
-        id: format!("custom-steam-{app_id}"),
-        // Sessions recorded before the add carry the discovered identity.
-        legacy_ids: vec![format!("steam-{app_id}")],
-        name: game.name.clone(),
-        enabled: true,
-        exe_name: game.exe_name.clone(),
-        process_path: Some(exe_path),
-        window_title: game.window_title.clone(),
-        recording_mode: game.recording_mode,
-        icon: None,
-    })
-}
-
-/// Append `game` unless a rule already targets the same executable, then run
-/// the normal custom-game normalization so ids and dedupe match manual adds.
-/// Steam ids (`custom-steam-<u32>`, plus a short suffix) stay far below the
-/// custom id length limit.
-pub(crate) fn insert_discovered_custom_game(
-    games: &mut crate::settings::GameSettings,
-    mut game: CustomGameSettings,
-) -> Option<CustomGameSettings> {
-    let path_key = crate::games::path_key(game.process_path.as_deref().unwrap_or_default());
-    let covered = games.custom_games.iter().any(|existing| {
-        existing
-            .process_path
-            .as_deref()
-            .is_some_and(|path| crate::games::path_key(path) == path_key)
-            || (existing.process_path.is_none()
-                && !existing.exe_name.trim().is_empty()
-                && existing.exe_name.eq_ignore_ascii_case(&game.exe_name))
-    });
-    if covered {
-        return None;
-    }
-    let base = game.id.clone();
-    let mut suffix = 2;
-    while games.custom_games.iter().any(|existing| existing.id == game.id) {
-        game.id = format!("{base}-{suffix}");
-        suffix += 1;
-    }
-    let id = game.id.clone();
-    games.custom_games.push(game);
-    games.normalize();
-    games.custom_games.iter().find(|existing| existing.id == id).cloned()
-}
-
-/// Persist the currently discovered Steam launch as a custom game. Returns
-/// the saved rule so the Settings page can merge it into its draft, or `None`
-/// when an existing rule already covers the game.
-#[tauri::command(async)]
-pub(crate) fn add_discovered_steam_game(
-    state: tauri::State<RuntimeState>,
-    target: DiscoveredSteamTarget,
-) -> Result<Option<CustomGameSettings>, String> {
-    let mut game = {
-        let inner = state.0.lock().map_err(|_| "runtime state lock poisoned")?;
-        let active = inner
-            .active_game
-            .as_ref()
-            .ok_or("no game is currently detected")?;
-        if !discovered_steam_target_matches(active, &target) {
-            return Err("the discovered Steam game is no longer active".into());
-        }
-        custom_game_from_discovered_steam(active)?
-    };
-    // Icon extraction reads the executable; keep it outside the runtime lock.
-    game.icon = game
-        .process_path
-        .as_deref()
-        .and_then(crate::game_icon::extract_exe_icon_data_url);
-    state.add_custom_game_with(game, AppSettings::save)
-}
-
 /// The frontend reports which codecs WebView2 can decode (canPlayType) so
 /// Automatic selection never records a clip the review player can't show.
 /// Takes effect on the next recorder (re)start.
@@ -453,54 +345,5 @@ mod tests {
     fn release_build_autostart_policy_honors_user_choice() {
         assert!(saved_autostart_preference_for_build(true, false, false));
         assert!(!saved_autostart_preference_for_build(false, true, false));
-    }
-
-    fn target(app_id: u32, process_id: u32) -> DiscoveredSteamTarget {
-        DiscoveredSteamTarget { app_id, process_id }
-    }
-
-    #[test]
-    fn always_add_target_requires_the_same_live_steam_app_and_process() {
-        let active = crate::app::discovered_steam_game(42);
-
-        assert!(discovered_steam_target_matches(&active, &target(427520, 42)));
-        assert!(!discovered_steam_target_matches(&active, &target(427520, 43)));
-        assert!(!discovered_steam_target_matches(&active, &target(1, 42)));
-        assert!(!discovered_steam_target_matches(
-            &crate::app::detected_game("custom", "Friendslop", 42),
-            &target(427520, 42),
-        ));
-    }
-
-    #[test]
-    fn always_add_builds_a_linked_rule_and_dedupes_by_path() {
-        let game =
-            custom_game_from_discovered_steam(&crate::app::discovered_steam_game(42)).unwrap();
-        assert_eq!(game.id, "custom-steam-427520");
-        assert_eq!(game.legacy_ids, ["steam-427520"]);
-        assert!(game.icon.is_none(), "icon extraction happens after the runtime lock");
-
-        let mut games = crate::settings::GameSettings::default();
-        assert_eq!(insert_discovered_custom_game(&mut games, game.clone()), Some(game.clone()));
-        assert_eq!(insert_discovered_custom_game(&mut games, game), None);
-        assert_eq!(games.custom_games.len(), 1);
-    }
-
-    #[test]
-    fn always_add_suffixes_an_id_taken_by_another_game() {
-        let game =
-            custom_game_from_discovered_steam(&crate::app::discovered_steam_game(42)).unwrap();
-        let mut games = crate::settings::GameSettings::default();
-        games.custom_games.push(CustomGameSettings {
-            process_path: Some(r"C:\Games\Elsewhere\Other.exe".into()),
-            exe_name: "Other.exe".into(),
-            name: "Other".into(),
-            ..game.clone()
-        });
-
-        let added = insert_discovered_custom_game(&mut games, game).unwrap();
-
-        assert_eq!(added.id, "custom-steam-427520-2");
-        assert_eq!(games.custom_games.len(), 2);
     }
 }

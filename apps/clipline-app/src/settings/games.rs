@@ -159,6 +159,18 @@ pub struct GameSettings {
     pub plugins: BTreeMap<String, GamePluginSettings>,
     #[serde(default)]
     pub custom_games: Vec<CustomGameSettings>,
+    /// Steam apps whose add prompt the user dismissed with "Never ask
+    /// again". Backend-owned: only the prompt and the Settings list edit it.
+    #[serde(default)]
+    pub ignored_steam_games: Vec<IgnoredSteamGame>,
+}
+
+/// Detection keys on `app_id`; the name only labels the Settings list.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IgnoredSteamGame {
+    pub app_id: u32,
+    #[serde(default)]
+    pub name: String,
 }
 
 #[derive(Deserialize)]
@@ -177,6 +189,8 @@ struct GameSettingsWire {
     legacy_recording_mode: Option<GameRecordingMode>,
     #[serde(default)]
     custom_games: Vec<CustomGameSettings>,
+    #[serde(default)]
+    ignored_steam_games: Vec<IgnoredSteamGame>,
 }
 
 impl Default for GameSettings {
@@ -188,6 +202,7 @@ impl Default for GameSettings {
             auto_detect_steam_launches: false,
             plugins: BTreeMap::new(),
             custom_games: Vec::new(),
+            ignored_steam_games: Vec::new(),
         }
     }
 }
@@ -211,6 +226,7 @@ impl<'de> Deserialize<'de> for GameSettings {
                 .unwrap_or(wire.pause_when_no_game),
             plugins: wire.plugins,
             custom_games: wire.custom_games,
+            ignored_steam_games: wire.ignored_steam_games,
         })
     }
 }
@@ -246,6 +262,15 @@ impl GameSettings {
             }
         }
         dedupe_custom_games(&mut self.custom_games);
+        let mut seen = HashSet::new();
+        self.ignored_steam_games.retain(|game| seen.insert(game.app_id));
+        for game in &mut self.ignored_steam_games {
+            game.name = game.name.trim().to_owned();
+        }
+    }
+
+    pub fn steam_app_ignored(&self, app_id: u32) -> bool {
+        self.ignored_steam_games.iter().any(|game| game.app_id == app_id)
     }
 }
 

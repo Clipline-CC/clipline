@@ -4844,7 +4844,7 @@ fn games_ui_wires_detection_commands() {
 }
 
 #[test]
-fn steam_launch_detection_wires_settings_checkbox_and_always_add() {
+fn steam_launch_detection_wires_settings_checkbox_and_prompt() {
     let html = index_html();
     for required in [
         "id=\"set-games-auto-detect-steam\"",
@@ -4866,32 +4866,45 @@ fn steam_launch_detection_wires_settings_checkbox_and_always_add() {
     let main = main_js();
     for required in [
         "\"set-games-auto-detect-steam\"",
-        "discovered_steam",
-        "invoke(\"add_discovered_steam_game\"",
-        "setDeckStatusAction(\"Always add\"",
-        "discoveredSteamOfferedAppIds",
-        "const target = { appId, processId: event.process_id };",
-        "event.steam_app_id",
-        "invoke(\"add_discovered_steam_game\", { target })",
+        // Unlisted Steam launches ask first: Add / Ignore / Never ask again.
+        "listen(\"steam-game-prompt\"",
+        "invoke(\"steam_game_prompt\")",
+        "const target = { appId: prompt.appId, processId: prompt.processId };",
+        "invoke(\"add_prompted_steam_game\", { target })",
+        "invoke(\"ignore_prompted_steam_game\", { target, neverAskAgain })",
         "if (saved) mergeSavedCustomGame(saved);",
-        "clearDiscoveredSteamOffer()",
-        // Clearing must not remove another feature's deck action.
-        "deckStatusActionHandler === offer.handler",
+        "$(\"steam-game-prompt-dialog\").addEventListener(\"cancel\"",
     ] {
         assert!(
             main.contains(required),
             "game detection UI is missing required wiring {required}"
         );
     }
+    for removed in ["Always add", "discovered_steam", "add_discovered_steam_game"] {
+        assert!(!main.contains(removed), "main.js still references {removed}");
+    }
+    for required in [
+        "<dialog id=\"steam-game-prompt-dialog\"",
+        "id=\"steam-game-prompt-add\"",
+        "id=\"steam-game-prompt-ignore\"",
+        "id=\"steam-game-prompt-never\"",
+        "<span>Never ask again</span>",
+        "id=\"ignored-steam-games\"",
+    ] {
+        assert!(html.contains(required), "index.html is missing {required}");
+    }
+    let never = html.find("id=\"steam-game-prompt-never\"").unwrap();
+    let add = html.find("id=\"steam-game-prompt-add\"").unwrap();
+    assert!(never < add, "the Never ask again checkbox sits above the buttons");
     // Reloading saved custom games would discard unsaved Settings edits.
     assert!(!main.contains("refreshCustomGamesFromBackend"));
     assert!(!settings.contains("refreshCustomGamesFromBackend"));
 
-    // A full Save and Always add never interleave: Save builds its custom
+    // A full Save and a Steam prompt Add never interleave: Save builds its custom
     // games list only after an in-flight add has merged its rule.
     for required in [
         "function queueSettingsWrite(write)",
-        "await queueSettingsWrite(async () => {\n        const saved = await invoke(\"add_discovered_steam_game\", { target });",
+        "await queueSettingsWrite(async () => {\n        const saved = await invoke(\"add_prompted_steam_game\", { target });",
         "await queueSettingsWrite(async () => {\n      fillSettings(await invoke(\"save_settings\", { settings: syncSettingsDraftFromForm() }));",
         // Turning games-only on also turns Steam launch detection on.
         "if ($(\"set-games-pause-when-empty\").checked) $(\"set-games-auto-detect-steam\").checked = true;",
@@ -4906,8 +4919,10 @@ fn steam_launch_detection_wires_settings_checkbox_and_always_add() {
 
     assert!(
         settings.contains("function mergeSavedCustomGame"),
-        "settings.js must merge an Always add rule without replacing the draft"
+        "settings.js must merge a prompted Steam game's rule without replacing the draft"
     );
+    assert!(settings.contains("function applyIgnoredSteamGames"));
+    assert!(games.contains("invoke(\"unignore_steam_game\", { appId: game.app_id })"));
     assert!(
         settings.contains("settingsIndicatorBaseline"),
         "settings.js must update the dirty baseline when merging custom games"

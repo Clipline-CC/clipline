@@ -31,7 +31,9 @@ pub mod types;
 pub(crate) mod validation;
 
 pub use cloud::{normalize_cloud_visibility, CloudSettings, CloudUploadRecord};
-pub use games::{GamePluginReviewSettings, GamePluginSettings, GameRecordingMode, GameSettings};
+pub use games::{
+    GamePluginReviewSettings, GamePluginSettings, GameRecordingMode, GameSettings, IgnoredSteamGame,
+};
 pub use hotkey::{is_global_shortcut_hotkey, normalize_hotkey, parse_hotkey};
 pub use league::LeagueModeSettings;
 pub use osu::OsuApiSettings;

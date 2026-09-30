@@ -167,6 +167,7 @@ pub(crate) fn preserve_backend_owned_settings_fields(settings: &mut AppSettings,
     settings.cloud.credential_cleanup_targets = backend.cloud.credential_cleanup_targets.clone();
     settings.cloud.uploads = backend.cloud.uploads.clone();
     settings.osu = backend.osu.clone();
+    settings.games.ignored_steam_games = backend.games.ignored_steam_games.clone();
 }
 
 pub(crate) fn game_recording_mode_changed(
@@ -193,9 +194,9 @@ pub(crate) fn active_game_still_configured(settings: &AppSettings, active: Optio
             .custom_games
             .iter()
             .any(|game| game.enabled && game.id == *id),
-        crate::game_identity::GameIdentity::DiscoveredSteam { .. } => {
-            settings.games.auto_detect_steam_launches
-        }
+        // An unlisted Steam launch only prompts (`plan_steam_prompt`); it
+        // records once the user adds it as a custom game.
+        crate::game_identity::GameIdentity::DiscoveredSteam { .. } => false,
     }
 }
 

@@ -709,6 +709,7 @@ fn supported_game_review_settings_default_to_current_enhanced_view() {
             auto_detect: true,
             pause_when_no_game: false,
             auto_detect_steam_launches: false,
+            ignored_steam_games: Vec::new(),
             plugins: BTreeMap::from([(
                 "league_of_legends".into(),
                 GamePluginSettings {
@@ -1708,6 +1709,7 @@ fn settings_round_trip_json() {
             auto_detect: true,
             pause_when_no_game: false,
             auto_detect_steam_launches: false,
+            ignored_steam_games: Vec::new(),
             plugins: BTreeMap::from([(
                 "league_of_legends".into(),
                 GamePluginSettings {
@@ -1744,6 +1746,7 @@ fn validation_rejects_custom_game_without_match_identity() {
             auto_detect: true,
             pause_when_no_game: false,
             auto_detect_steam_launches: false,
+            ignored_steam_games: Vec::new(),
             plugins: BTreeMap::new(),
             custom_games: vec![CustomGameSettings {
                 id: "custom-empty".into(),

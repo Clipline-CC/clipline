@@ -3900,6 +3900,7 @@ button.primary.settings-save-glow {
 #quit-dialog,
 #update-dialog,
 #elevation-dialog,
+#steam-game-prompt-dialog,
 #upload-dialog,
 #group-picker-dialog,
 #storage-quota-dialog,
@@ -3916,6 +3917,7 @@ button.primary.settings-save-glow {
 #quit-dialog::backdrop,
 #update-dialog::backdrop,
 #elevation-dialog::backdrop,
+#steam-game-prompt-dialog::backdrop,
 #upload-dialog::backdrop,
 #group-picker-dialog::backdrop,
 #storage-quota-dialog::backdrop,
@@ -3923,6 +3925,19 @@ button.primary.settings-save-glow {
 
 #storage-quota-dialog { width: min(500px, calc(100vw - 32px)); }
 .storage-quota-actions { flex-wrap: wrap; }
+#steam-game-prompt-name { font-size: inherit; }
+.steam-game-prompt-never { padding: 0 18px 14px; }
+
+.steam-launch-controls { display: grid; gap: 10px; }
+.ignored-steam-games { display: grid; gap: 6px; }
+.ignored-steam-games[hidden] { display: none; }
+.ignored-steam-game {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12.5px;
+}
 
 #detected-games-dialog,
 #game-window-picker-dialog {

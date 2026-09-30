@@ -105,8 +105,8 @@ listen("ffmpeg-install", (event) => {
 });
 
 // Settings writes run one at a time. A full Save sends the whole custom
-// games list, so it must not be built before an "Always add" lands (or it
-// would overwrite the new rule), and Always add must not race a Save.
+// games list, so it must not be built before a prompted Steam game's Add
+// lands (or it would overwrite the new rule), and Add must not race a Save.
 var settingsWriteQueue = Promise.resolve();
 
 function queueSettingsWrite(write) {
@@ -115,33 +115,40 @@ function queueSettingsWrite(write) {
   return run;
 }
 
-var discoveredSteamOfferedAppIds = new Set();
-var discoveredSteamOffer = null;
+// Unlisted Steam game prompt. The backend holds the pending launch and
+// rebuilds the rule itself; the dialog only answers for app + process ids.
+var steamGamePrompt = null;
 
-// Clear the offer's deck status only while the offer still owns it; another
-// feature (an export's "Open clip", say) may have replaced it since.
-function clearDiscoveredSteamOffer() {
-  const offer = discoveredSteamOffer;
-  discoveredSteamOffer = null;
-  if (offer && deckStatusActionHandler === offer.handler) setDeckStatus("");
+function showSteamGamePrompt(prompt) {
+  const dialog = $("steam-game-prompt-dialog");
+  steamGamePrompt = prompt && prompt.appId != null ? prompt : null;
+  setSteamGamePromptBusy(false);
+  if (!steamGamePrompt) {
+    if (dialog.open) dialog.close();
+    return;
+  }
+  $("steam-game-prompt-name").textContent = steamGamePrompt.name || "This Steam game";
+  $("steam-game-prompt-never").checked = false;
+  if (!dialog.open) dialog.showModal();
 }
 
-// First detection of each discovered Steam app in this UI session: show the
-// recording toast plus a one-shot Always add action. Offers are keyed by
-// Steam app id, since unrelated games can share an exe name. Rule building
-// stays on the backend command; the frontend never reconstructs it.
-function maybeOfferDiscoveredSteamAlwaysAdd(event) {
-  const appId = event?.active && event.discovered_steam ? event.steam_app_id : null;
-  if (discoveredSteamOffer && discoveredSteamOffer.appId !== appId) clearDiscoveredSteamOffer();
-  if (appId == null || discoveredSteamOfferedAppIds.has(appId)) return;
-  discoveredSteamOfferedAppIds.add(appId);
-  const name = event.name || event.exe_name || "Steam game";
-  const target = { appId, processId: event.process_id };
-  const handler = async () => {
-    discoveredSteamOffer = null;
-    try {
+function setSteamGamePromptBusy(busy) {
+  for (const id of ["steam-game-prompt-add", "steam-game-prompt-ignore", "steam-game-prompt-never"]) {
+    $(id).disabled = busy;
+  }
+}
+
+async function answerSteamGamePrompt(add) {
+  const prompt = steamGamePrompt;
+  if (!prompt || $("steam-game-prompt-add").disabled) return;
+  const target = { appId: prompt.appId, processId: prompt.processId };
+  const neverAskAgain = $("steam-game-prompt-never").checked;
+  const name = prompt.name || "Steam game";
+  setSteamGamePromptBusy(true);
+  try {
+    if (add) {
       const added = await queueSettingsWrite(async () => {
-        const saved = await invoke("add_discovered_steam_game", { target });
+        const saved = await invoke("add_prompted_steam_game", { target });
         if (saved) mergeSavedCustomGame(saved);
         return saved;
       });
@@ -149,14 +156,30 @@ function maybeOfferDiscoveredSteamAlwaysAdd(event) {
         added ? "Added " + name + " to Custom games" : name + " is already a custom game",
         { transient: true }
       );
-    } catch (error) {
-      $("error").textContent = String(error);
+    } else {
+      applyIgnoredSteamGames(await invoke("ignore_prompted_steam_game", { target, neverAskAgain }));
     }
-  };
-  discoveredSteamOffer = { appId, handler };
-  setDeckStatus("Recording " + name);
-  setDeckStatusAction("Always add", handler);
+  } catch (error) {
+    $("error").textContent = String(error);
+  }
+  if (steamGamePrompt === prompt) showSteamGamePrompt(null);
 }
+
+$("steam-game-prompt-add").addEventListener("click", () => answerSteamGamePrompt(true));
+$("steam-game-prompt-ignore").addEventListener("click", () => answerSteamGamePrompt(false));
+// Escape answers Ignore so the backend never keeps a prompt nobody sees.
+$("steam-game-prompt-dialog").addEventListener("cancel", (ev) => {
+  ev.preventDefault();
+  answerSteamGamePrompt(false);
+});
+// A window rebuilt from the tray asks for a prompt that opened while it was gone.
+listen("steam-game-prompt", (event) => showSteamGamePrompt(event.payload)).then(async () => {
+  try {
+    showSteamGamePrompt(await invoke("steam_game_prompt"));
+  } catch (error) {
+    console.warn("steam game prompt query failed:", error);
+  }
+});
 
 listen("encoders-changed", (event) => {
   videoEncoders = Array.isArray(event.payload) ? event.payload : [];
@@ -174,7 +197,6 @@ listen("game-detection", (e) => {
   updateCaptureStatus();
   updateGameDetectionStatus();
   maybeWarnElevatedGame(activeDetectedGame);
-  maybeOfferDiscoveredSteamAlwaysAdd(activeDetectedGame);
 });
 
 listen("cloud-upload-progress", (e) => {
@@ -495,7 +517,7 @@ $("settings-save").addEventListener("click", async () => {
   }
   try {
     // Build the payload inside the queue so it includes any rule an
-    // in-flight "Always add" is merging.
+    // in-flight Steam prompt Add is merging.
     await queueSettingsWrite(async () => {
       fillSettings(await invoke("save_settings", { settings: syncSettingsDraftFromForm() }));
     });

@@ -334,6 +334,40 @@ function renderDetectedGames() {
   }
 }
 
+// Steam games the prompt was told "Never ask again". Ask Again applies at
+// once through the backend, like the prompt itself; it is not a draft edit.
+function renderIgnoredSteamGames() {
+  const root = $("ignored-steam-games");
+  const ignored = currentSettings?.games?.ignored_steam_games || [];
+  root.replaceChildren();
+  root.hidden = !ignored.length;
+  if (!ignored.length) return;
+  const title = document.createElement("span");
+  title.className = "hint";
+  title.textContent = "Never asked about:";
+  root.appendChild(title);
+  for (const game of ignored) {
+    const row = document.createElement("div");
+    row.className = "ignored-steam-game";
+    const name = document.createElement("span");
+    name.textContent = game.name || `Steam app ${game.app_id}`;
+    const askAgain = document.createElement("button");
+    askAgain.type = "button";
+    askAgain.textContent = "Ask Again";
+    askAgain.addEventListener("click", async () => {
+      askAgain.disabled = true;
+      try {
+        applyIgnoredSteamGames(await invoke("unignore_steam_game", { appId: game.app_id }));
+      } catch (error) {
+        askAgain.disabled = false;
+        $("error").textContent = String(error);
+      }
+    });
+    row.append(name, askAgain);
+    root.appendChild(row);
+  }
+}
+
 function renderCustomGames() {
   const root = $("custom-games");
   root.replaceChildren();

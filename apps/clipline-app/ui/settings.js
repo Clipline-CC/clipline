@@ -290,6 +290,7 @@ function fillSettings(s) {
   syncReplayStorageFields();
   renderGamePlugins();
   renderCustomGames();
+  renderIgnoredSteamGames();
   updateGameDetectionStatus();
   updateCaptureStatus();
   syncUploadClipButton();
@@ -298,7 +299,7 @@ function fillSettings(s) {
   resetSettingsBaselineFromForm();
 }
 
-// "Always add" saves one rule on the backend. Merge just that rule into the
+// A Steam prompt's Add saves one rule on the backend. Merge just that rule into the
 // saved baseline, the draft and the live list so unsaved Settings edits
 // survive, and the new rule alone does not mark Settings dirty.
 function mergeSavedCustomGame(saved) {
@@ -318,6 +319,17 @@ function mergeSavedCustomGame(saved) {
   settingsIndicatorBaseline = withGameInSettings(settingsIndicatorBaseline);
   renderCustomGames();
   syncSettingsDirtyState();
+}
+
+// The ignore list is backend-owned (Save never sends it), so the prompt and
+// the Settings list patch every snapshot directly.
+function applyIgnoredSteamGames(ignored) {
+  const list = Array.isArray(ignored) ? ignored : [];
+  const withList = (snapshot) =>
+    snapshot && { ...snapshot, games: { ...snapshot.games, ignored_steam_games: list } };
+  currentSettings = withList(currentSettings);
+  settingsDraft = withList(settingsDraft);
+  renderIgnoredSteamGames();
 }
 
 function readSettings() {
@@ -493,6 +505,7 @@ function defaultGameSettings() {
     auto_detect_steam_launches: false,
     plugins: {},
     custom_games: [],
+    ignored_steam_games: [],
   };
 }
 

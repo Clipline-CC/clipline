@@ -40,6 +40,10 @@ pub(crate) struct RuntimeInner {
     pub(crate) league_gate: Option<LeagueGateVerdict>,
     /// Pending queue lookup result; drained by `tick_league_gate`.
     pub(crate) league_gate_rx: Option<Receiver<Option<LeagueQueue>>>,
+    /// Unlisted Steam launch waiting for Add or Ignore; see `steam_prompt`.
+    pub(crate) steam_prompt: Option<DetectedGame>,
+    /// `(app_id, process_id)` launches the user ignored for this launch.
+    pub(crate) skipped_steam_launches: Vec<(u32, u32)>,
 }
 
 impl RuntimeState {
@@ -70,6 +74,8 @@ impl RuntimeState {
             quota_blocked: None,
             league_gate: None,
             league_gate_rx: None,
+            steam_prompt: None,
+            skipped_steam_launches: Vec::new(),
         };
         if let Some(tx) = tx {
             Self::install_recording_sender(&mut inner, tx);
@@ -642,6 +648,8 @@ mod tests {
             quota_blocked: None,
             league_gate: None,
             league_gate_rx: None,
+            steam_prompt: None,
+            skipped_steam_launches: Vec::new(),
         };
 
         let opts = RuntimeState::options(&inner).unwrap();
@@ -695,6 +703,8 @@ mod tests {
             quota_blocked: None,
             league_gate: None,
             league_gate_rx: None,
+            steam_prompt: None,
+            skipped_steam_launches: Vec::new(),
         };
 
         let opts = RuntimeState::options(&inner).unwrap();

@@ -236,6 +236,8 @@ mod tests {
             quota_blocked: None,
             league_gate: None,
             league_gate_rx: None,
+            steam_prompt: None,
+            skipped_steam_launches: Vec::new(),
         };
 
         let prepared = RuntimeState::prepare_service_restart(&mut inner).unwrap();
@@ -268,6 +270,8 @@ mod tests {
             quota_blocked: None,
             league_gate: None,
             league_gate_rx: None,
+            steam_prompt: None,
+            skipped_steam_launches: Vec::new(),
         };
 
         let prepared = RuntimeState::prepare_service_restart(&mut inner).unwrap();
@@ -527,6 +531,8 @@ mod tests {
             quota_blocked: None,
             league_gate: None,
             league_gate_rx: None,
+            steam_prompt: None,
+            skipped_steam_launches: Vec::new(),
         };
 
         let err = match RuntimeState::prepare_service_restart(&mut inner) {
@@ -564,6 +570,8 @@ mod tests {
             quota_blocked: None,
             league_gate: None,
             league_gate_rx: None,
+            steam_prompt: None,
+            skipped_steam_launches: Vec::new(),
         };
 
         let prepared = RuntimeState::prepare_service_restart(&mut inner).unwrap();
@@ -711,6 +719,8 @@ mod tests {
             quota_blocked: None,
             league_gate: None,
             league_gate_rx: None,
+            steam_prompt: None,
+            skipped_steam_launches: Vec::new(),
         };
 
         let err = match RuntimeState::prepare_service_restart(&mut inner) {
@@ -745,6 +755,8 @@ mod tests {
             quota_blocked: None,
             league_gate: None,
             league_gate_rx: None,
+            steam_prompt: None,
+            skipped_steam_launches: Vec::new(),
         };
 
         assert!(RuntimeState::prepare_service_restart(&mut inner).is_err());
