@@ -4,6 +4,28 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-09-30): Nightly 1.0.8 published
+
+PR #215 (Steam launch prompt, rail build badge, legacy timeline editor removal,
+Greptile fixes) merged to develop as `3bd74868`; its head `bfc38345` passed Ubuntu
+and Windows CI and Greptile's re-review (5/5, no findings). Release commit
+`43bcf7063b0d86fc353623fd78dcb266baebbbd6` is on develop and tagged
+`nightly-v1.0.8`. [Nightly Release run 36678794566](https://github.com/Clipline-CC/clipline/actions/runs/36678794566)
+passed tests, Clippy, both installer builds, signing, manifests, promotion and
+public byte verification. The rolling [Nightly release](https://github.com/Clipline-CC/clipline/releases/tag/nightly)
+and rolling tag target the release commit with exactly seven 1.0.8 assets; both
+public updater manifests report 1.0.8. An independent download matched every
+asset size/SHA-256, and both manifest signatures verified the installers under
+the committed updater key. Regular installer: 10,250,155 bytes; standalone:
+284,787,108 bytes.
+
+WebView2 stays at 154.0.4258.48 (still Microsoft's newest Fixed Version; review
+dated 2026-09-30, due 2026-10-30). Before tagging: both runtime preflights,
+workspace tests on fresh app/capture artifacts, and warning-denied Clippy passed;
+the standalone-config harness played H.264/Opus, HEVC and AV1 through ended on the
+fixed runtime with probes matching playback. Evidence:
+`target/nightly-1.0.8-smoke/` and `target/nightly-1.0.8-verification/`.
+
 ## Checkpoint (2026-09-30): Steam launches ask first; rail build badge
 
 Testing 1.0.7 showed the Steam fallback recorded unlisted games silently, and the
