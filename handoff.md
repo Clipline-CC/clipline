@@ -4,6 +4,43 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-09-30): Nightly 1.0.7 published
+
+PR #211's Windows 10 fullscreen capture fallback and PR #183's Steam launch
+detection shipped together. Both merged feature heads passed Ubuntu and Windows
+CI; the latest develop merge matched PR #183's CI-green tree. The release-only
+diff contains version metadata, reviewed runtime pins and the release plan.
+Develop pushes do not trigger PR CI; local gates and the tag-triggered release
+gates passed rather than treating absent develop checks as green.
+
+Release commit `98ecb022db3db716ec1f244f9213b9479c0201ee` is on develop and tagged
+`nightly-v1.0.7`. [Nightly Release run 36670119290](https://github.com/Clipline-CC/clipline/actions/runs/36670119290)
+passed workspace tests, warning-denied Clippy, both installer builds, signing,
+updater manifests, transactional promotion and public byte verification. The
+rolling [Nightly release](https://github.com/Clipline-CC/clipline/releases/tag/nightly)
+and rolling tag target that exact release commit and expose exactly seven 1.0.7
+assets. Both anonymous updater manifest URLs report 1.0.7. Independent downloads
+matched every GitHub asset size/SHA-256, and the signatures embedded in both
+manifests verified the downloaded installers under the committed updater key.
+Regular installer: 10,234,773 bytes; standalone: 284,741,728 bytes.
+
+Standalone WebView2 is now 154.0.4258.48, reviewed September 30 through October
+30. Its exact CAB is 307,904,013 bytes with SHA-256
+`e2356456a8f02e606a731cd7646a604ed3676a9e392bd867b0207a8c3dc2d4f4`; the
+staged executable has a valid Microsoft signature. Both local runtime payload
+preflights, workspace tests after cleaning changed-crate artifacts, and
+warning-denied workspace Clippy passed. A standalone-config debug check used
+the fixed-runtime executable and played H.264/Opus, HEVC and AV1 through ended
+with 60 frames each; the product's HEVC/AV1 probes returned `probably`, matching
+playback. The temporary harness remained under ignored `target/` paths. The
+normal app was rebuilt, opened and logged frontend readiness successfully.
+
+Evidence: `target/nightly-1.0.7-smoke/` and
+`target/nightly-1.0.7-verification/` (public downloads, hashes, signature check,
+workflow logs and detailed GitHub release notes). The release workflow missed
+the main-scoped Rust cache; tests compiled in 5m 07s, regular release compilation
+in 5m 37s, and standalone compilation in 1m 46s before installer packaging.
+
 ## Checkpoint (2026-09-28): PR #183 Steam launch detection taken over
 
 PR #183 (`noble-unicorn`) had sat since early September with conflicts and five
