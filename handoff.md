@@ -25,6 +25,13 @@ could neither see it nor decline a game. `feat/steam-game-prompt` replaces it:
   apps in `find_best_steam_match`.
 - The prompt filter re-checks live settings, so a detector tick that started
   before Add/Ignore landed cannot reopen it.
+- Prompt state is `RuntimeInner::steam_prompt: SteamPromptState`. Every event and
+  the `steam_game_prompt` query carry `{ revision, prompt }`; the frontend drops
+  snapshots older than the last one it applied, so late events and the boot query
+  never close a newer dialog. Add/Ignore only clear their own target. Session
+  skips are passed into `games::detect_active_game` so an ignored launch cannot
+  hide another Steam game. A failed Add/Ignore re-queries and keeps the dialog
+  open with the error inside it (Greptile review on PR #215).
 - Rail badge above the profile: `v<version>` plus a moon when the baked build
   channel is Nightly (dev builds included), from `frontend_ready`'s `build`.
   SVG elements have no reflecting `hidden` property — use `toggleAttribute`.

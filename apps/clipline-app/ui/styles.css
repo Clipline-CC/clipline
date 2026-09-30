@@ -3946,6 +3946,8 @@ button.primary.settings-save-glow {
 .storage-quota-actions { flex-wrap: wrap; }
 #steam-game-prompt-name { font-size: inherit; }
 .steam-game-prompt-never { padding: 0 18px 14px; }
+.steam-game-prompt-error { color: var(--danger); font-size: 12px; }
+.steam-game-prompt-error[hidden] { display: none; }
 
 .steam-launch-controls { display: grid; gap: 10px; }
 .ignored-steam-games { display: grid; gap: 6px; }

@@ -4852,6 +4852,12 @@ fn steam_launch_detection_wires_settings_checkbox_and_prompt() {
         // Unlisted Steam launches ask first: Add / Ignore / Never ask again.
         "listen(\"steam-game-prompt\"",
         "invoke(\"steam_game_prompt\")",
+        // Stale snapshots (late events, the boot query) never win.
+        "if (snapshot.revision < steamGamePromptRevision) return;",
+        "listen(\"steam-game-prompt\", (event) => applySteamGamePromptSnapshot(event.payload))",
+        // A failed Add/Ignore re-syncs instead of hiding a pending prompt.
+        "applySteamGamePromptSnapshot(await invoke(\"steam_game_prompt\"));",
+        "$(\"steam-game-prompt-error\").hidden = false;",
         "const target = { appId: prompt.appId, processId: prompt.processId };",
         "invoke(\"add_prompted_steam_game\", { target })",
         "invoke(\"ignore_prompted_steam_game\", { target, neverAskAgain })",

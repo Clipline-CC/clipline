@@ -557,8 +557,7 @@ mod tests {
             quota_blocked: None,
             league_gate: None,
             league_gate_rx: None,
-            steam_prompt: None,
-            skipped_steam_launches: Vec::new(),
+            steam_prompt: Default::default(),
         };
 
         let (_, restart) = RuntimeState::prepare_manual_session_stop(&mut inner).unwrap();
@@ -590,8 +589,7 @@ mod tests {
             quota_blocked: None,
             league_gate: None,
             league_gate_rx: None,
-            steam_prompt: None,
-            skipped_steam_launches: Vec::new(),
+            steam_prompt: Default::default(),
         };
         let osu = DetectedGame {
             identity: crate::game_identity::GameIdentity::built_in_plugin(

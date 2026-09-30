@@ -56,10 +56,51 @@ impl SteamPromptTarget {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum SteamPromptChange {
-    Opened(SteamGamePrompt),
-    Closed,
+/// The pending prompt as the frontend sees it. `revision` rises on every
+/// change, so a late event or a boot-time query answered before a newer
+/// change can never close or replace the newer dialog.
+#[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SteamPromptSnapshot {
+    pub(crate) revision: u64,
+    pub(crate) prompt: Option<SteamGamePrompt>,
+}
+
+/// Runtime-owned prompt state; lives on `RuntimeInner::steam_prompt`.
+#[derive(Default)]
+pub(crate) struct SteamPromptState {
+    pending: Option<DetectedGame>,
+    revision: u64,
+    /// `(app_id, process_id)` launches ignored for this launch only. The
+    /// detector drops them from Steam candidate selection.
+    skipped_launches: Vec<(u32, u32)>,
+}
+
+impl SteamPromptState {
+    /// Replace the pending game. Title or window changes of the same launch
+    /// keep the revision; a different launch (or none) bumps it.
+    fn set_pending(&mut self, next: Option<DetectedGame>) -> bool {
+        let changed = prompt_key(self.pending.as_ref()) != prompt_key(next.as_ref());
+        self.pending = next;
+        if changed {
+            self.revision += 1;
+        }
+        changed
+    }
+
+    /// Clear the prompt only if it is still `target`'s; a newer launch that
+    /// opened meanwhile stays pending.
+    fn resolve(&mut self, target: SteamPromptTarget) {
+        if self.pending.as_ref().is_some_and(|game| target.matches(game)) {
+            self.set_pending(None);
+        }
+    }
+
+    fn snapshot(&self) -> SteamPromptSnapshot {
+        SteamPromptSnapshot {
+            revision: self.revision,
+            prompt: self.pending.as_ref().and_then(SteamGamePrompt::from_game),
+        }
+    }
 }
 
 /// A custom rule already targets this executable (its exact path, or a
@@ -89,7 +130,8 @@ fn prompt_allowed(inner: &RuntimeInner, game: &DetectedGame) -> bool {
         && games.auto_detect_steam_launches
         && !games.steam_app_ignored(prompt.app_id)
         && !inner
-            .skipped_steam_launches
+            .steam_prompt
+            .skipped_launches
             .contains(&(prompt.app_id, prompt.process_id))
         && !custom_rule_covers(games, game.exe_path.as_deref(), &game.exe_name)
 }
@@ -147,12 +189,12 @@ pub(crate) fn insert_prompted_custom_game(
 
 impl RuntimeState {
     /// Pull an unlisted Steam launch out of `detected` so it never records,
-    /// and track it as the pending prompt. Returns the change to announce;
-    /// title or window changes of the same launch are not a change.
+    /// and track it as the pending prompt. Returns the snapshot to announce
+    /// when the prompt changed.
     pub(crate) fn take_steam_prompt(
         inner: &mut RuntimeInner,
         detected: &mut Option<DetectedGame>,
-    ) -> Option<SteamPromptChange> {
+    ) -> Option<SteamPromptSnapshot> {
         let candidate = if detected
             .as_ref()
             .is_some_and(|game| matches!(game.identity, GameIdentity::DiscoveredSteam { .. }))
@@ -161,22 +203,24 @@ impl RuntimeState {
         } else {
             None
         };
-        let changed = prompt_key(inner.steam_prompt.as_ref()) != prompt_key(candidate.as_ref());
-        inner.steam_prompt = candidate;
-        if !changed {
-            return None;
-        }
-        Some(
-            match inner.steam_prompt.as_ref().and_then(SteamGamePrompt::from_game) {
-                Some(prompt) => SteamPromptChange::Opened(prompt),
-                None => SteamPromptChange::Closed,
-            },
-        )
+        inner
+            .steam_prompt
+            .set_pending(candidate)
+            .then(|| inner.steam_prompt.snapshot())
     }
 
-    pub(crate) fn steam_prompt(&self) -> Option<SteamGamePrompt> {
-        let inner = self.0.lock().ok()?;
-        inner.steam_prompt.as_ref().and_then(SteamGamePrompt::from_game)
+    pub(crate) fn steam_prompt_snapshot(&self) -> SteamPromptSnapshot {
+        match self.0.lock() {
+            Ok(inner) => inner.steam_prompt.snapshot(),
+            Err(_) => SteamPromptSnapshot { revision: 0, prompt: None },
+        }
+    }
+
+    pub(crate) fn skipped_steam_launches(&self) -> Vec<(u32, u32)> {
+        self.0
+            .lock()
+            .map(|inner| inner.steam_prompt.skipped_launches.clone())
+            .unwrap_or_default()
     }
 
     fn pending_prompt_game(
@@ -185,6 +229,7 @@ impl RuntimeState {
     ) -> Result<DetectedGame, String> {
         inner
             .steam_prompt
+            .pending
             .as_ref()
             .filter(|game| target.matches(game))
             .cloned()
@@ -217,9 +262,7 @@ impl RuntimeState {
         }
         let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
         inner.settings.games.custom_games = next.games.custom_games;
-        if inner.steam_prompt.as_ref().is_some_and(|game| target.matches(game)) {
-            inner.steam_prompt = None;
-        }
+        inner.steam_prompt.resolve(target);
         Ok(added)
     }
 
@@ -250,17 +293,15 @@ impl RuntimeState {
         if never_ask_again {
             inner.settings.games.ignored_steam_games = next.games.ignored_steam_games;
         } else {
+            let skipped = &mut inner.steam_prompt.skipped_launches;
             let launch = (target.app_id, target.process_id);
-            if !inner.skipped_steam_launches.contains(&launch) {
-                inner.skipped_steam_launches.push(launch);
+            if !skipped.contains(&launch) {
+                skipped.push(launch);
             }
-            let overflow = inner
-                .skipped_steam_launches
-                .len()
-                .saturating_sub(MAX_SKIPPED_STEAM_LAUNCHES);
-            inner.skipped_steam_launches.drain(..overflow);
+            let overflow = skipped.len().saturating_sub(MAX_SKIPPED_STEAM_LAUNCHES);
+            skipped.drain(..overflow);
         }
-        inner.steam_prompt = None;
+        inner.steam_prompt.resolve(target);
         Ok(inner.settings.games.ignored_steam_games.clone())
     }
 
@@ -285,29 +326,25 @@ impl RuntimeState {
 /// Announce a prompt change. A new prompt also brings Clipline forward;
 /// the frontend re-reads `steam_game_prompt` on boot, so a window rebuilt
 /// from the tray still shows it.
-pub(crate) fn announce_steam_prompt<R: Runtime>(app: &AppHandle<R>, change: SteamPromptChange) {
-    let payload = match change {
-        SteamPromptChange::Opened(prompt) => {
-            log_diagnostic(format!(
-                "steam game prompt: app_id={} name={:?}",
-                prompt.app_id, prompt.name
-            ));
-            let handle = app.clone();
-            let _ = app.run_on_main_thread(move || {
-                if let Err(error) = open_main_window(&handle) {
-                    log_diagnostic(format!("steam game prompt open failed: {error}"));
-                }
-            });
-            Some(prompt)
-        }
-        SteamPromptChange::Closed => None,
-    };
-    let _ = app.emit(STEAM_GAME_PROMPT_EVENT, payload);
+pub(crate) fn announce_steam_prompt<R: Runtime>(app: &AppHandle<R>, snapshot: SteamPromptSnapshot) {
+    if let Some(prompt) = &snapshot.prompt {
+        log_diagnostic(format!(
+            "steam game prompt: app_id={} name={:?}",
+            prompt.app_id, prompt.name
+        ));
+        let handle = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            if let Err(error) = open_main_window(&handle) {
+                log_diagnostic(format!("steam game prompt open failed: {error}"));
+            }
+        });
+    }
+    let _ = app.emit(STEAM_GAME_PROMPT_EVENT, snapshot);
 }
 
 #[tauri::command]
-pub(crate) fn steam_game_prompt(state: tauri::State<RuntimeState>) -> Option<SteamGamePrompt> {
-    state.steam_prompt()
+pub(crate) fn steam_game_prompt(state: tauri::State<RuntimeState>) -> SteamPromptSnapshot {
+    state.steam_prompt_snapshot()
 }
 
 #[tauri::command(async)]
@@ -321,7 +358,7 @@ pub(crate) fn add_prompted_steam_game<R: Runtime>(
         crate::game_icon::extract_exe_icon_data_url,
         AppSettings::save,
     )?;
-    let _ = app.emit(STEAM_GAME_PROMPT_EVENT, None::<SteamGamePrompt>);
+    let _ = app.emit(STEAM_GAME_PROMPT_EVENT, state.steam_prompt_snapshot());
     Ok(added)
 }
 
@@ -333,7 +370,7 @@ pub(crate) fn ignore_prompted_steam_game<R: Runtime>(
     never_ask_again: bool,
 ) -> Result<Vec<IgnoredSteamGame>, String> {
     let ignored = state.ignore_prompted_steam_game_with(target, never_ask_again, AppSettings::save)?;
-    let _ = app.emit(STEAM_GAME_PROMPT_EVENT, None::<SteamGamePrompt>);
+    let _ = app.emit(STEAM_GAME_PROMPT_EVENT, state.steam_prompt_snapshot());
     Ok(ignored)
 }
 
@@ -369,15 +406,16 @@ mod tests {
         }
     }
 
-    /// One detector tick: the prompt change plus what reached detection.
+    /// One detector tick: the announced prompt (outer `None` = no change)
+    /// plus what reached detection.
     fn tick(
         state: &RuntimeState,
         game: Option<DetectedGame>,
-    ) -> (Option<SteamPromptChange>, Option<DetectedGame>) {
+    ) -> (Option<Option<SteamGamePrompt>>, Option<DetectedGame>) {
         let mut detected = game;
         let mut inner = state.0.lock().unwrap();
         let change = RuntimeState::take_steam_prompt(&mut inner, &mut detected);
-        (change, detected)
+        (change.map(|snapshot| snapshot.prompt), detected)
     }
 
     #[test]
@@ -385,16 +423,16 @@ mod tests {
         let state = RuntimeState::new(steam_settings(), None);
 
         let (change, detected) = tick(&state, Some(discovered_steam_game(42)));
-        assert_eq!(change, Some(SteamPromptChange::Opened(prompt(42))));
+        assert_eq!(change, Some(Some(prompt(42))));
         assert!(detected.is_none(), "a pending Steam game must not record");
-        assert_eq!(state.steam_prompt(), Some(prompt(42)));
+        assert_eq!(state.steam_prompt_snapshot().prompt, Some(prompt(42)));
 
         let mut retitled = discovered_steam_game(42);
         retitled.window_title = "Friendslop - Level 2".into();
         assert_eq!(tick(&state, Some(retitled)).0, None);
 
-        assert_eq!(tick(&state, None).0, Some(SteamPromptChange::Closed));
-        assert_eq!(state.steam_prompt(), None);
+        assert_eq!(tick(&state, None).0, Some(None));
+        assert_eq!(state.steam_prompt_snapshot().prompt, None);
     }
 
     #[test]
@@ -404,7 +442,7 @@ mod tests {
 
         let custom = crate::app::detected_game("custom-other", "Other", 7);
         let (change, detected) = tick(&state, Some(custom.clone()));
-        assert_eq!(change, Some(SteamPromptChange::Closed));
+        assert_eq!(change, Some(None));
         assert_eq!(detected, Some(custom));
     }
 
@@ -437,7 +475,7 @@ mod tests {
         );
         assert_eq!(saved.unwrap(), vec![added.clone()]);
         assert_eq!(state.settings().games.custom_games, vec![added]);
-        assert_eq!(state.steam_prompt(), None);
+        assert_eq!(state.steam_prompt_snapshot().prompt, None);
 
         // A detector tick that began before the add must not reopen it.
         let (change, detected) = tick(&state, Some(discovered_steam_game(42)));
@@ -454,7 +492,7 @@ mod tests {
             .add_prompted_steam_game_with(target(43), |_| None, |_| panic!("must not save"))
             .unwrap_err();
         assert!(error.contains("no longer waiting"));
-        assert_eq!(state.steam_prompt(), Some(prompt(42)));
+        assert_eq!(state.steam_prompt_snapshot().prompt, Some(prompt(42)));
     }
 
     #[test]
@@ -467,7 +505,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(error, "disk full");
         assert!(state.settings().games.custom_games.is_empty());
-        assert_eq!(state.steam_prompt(), Some(prompt(42)));
+        assert_eq!(state.steam_prompt_snapshot().prompt, Some(prompt(42)));
     }
 
     #[test]
@@ -496,14 +534,14 @@ mod tests {
             .ignore_prompted_steam_game_with(target(42), false, |_| panic!("nothing persists"))
             .unwrap();
         assert!(ignored.is_empty());
-        assert_eq!(state.steam_prompt(), None);
+        assert_eq!(state.steam_prompt_snapshot().prompt, None);
 
         let (change, detected) = tick(&state, Some(discovered_steam_game(42)));
         assert_eq!(change, None, "the same launch stays ignored");
         assert!(detected.is_none());
 
         let (change, _) = tick(&state, Some(discovered_steam_game(43)));
-        assert_eq!(change, Some(SteamPromptChange::Opened(prompt(43))), "a relaunch asks again");
+        assert_eq!(change, Some(Some(prompt(43))), "a relaunch asks again");
     }
 
     #[test]
@@ -527,8 +565,49 @@ mod tests {
         assert!(ignored.is_empty());
         assert_eq!(
             tick(&state, Some(discovered_steam_game(43))).0,
-            Some(SteamPromptChange::Opened(prompt(43)))
+            Some(Some(prompt(43)))
         );
+    }
+
+    #[test]
+    fn revision_rises_on_every_change_so_stale_snapshots_lose() {
+        let state = RuntimeState::new(steam_settings(), None);
+        let start = state.steam_prompt_snapshot().revision;
+        tick(&state, Some(discovered_steam_game(42)));
+        let opened = state.steam_prompt_snapshot().revision;
+        assert!(opened > start);
+
+        let mut retitled = discovered_steam_game(42);
+        retitled.window_title = "Friendslop - Level 2".into();
+        tick(&state, Some(retitled));
+        assert_eq!(state.steam_prompt_snapshot().revision, opened, "same launch, same revision");
+
+        state
+            .ignore_prompted_steam_game_with(target(42), false, |_| Ok(()))
+            .unwrap();
+        assert!(state.steam_prompt_snapshot().revision > opened);
+    }
+
+    #[test]
+    fn a_decision_for_an_old_launch_never_clears_a_newer_prompt() {
+        let state = RuntimeState::new(steam_settings(), None);
+        tick(&state, Some(discovered_steam_game(42)));
+        let old = target(42);
+        // The detector moves on to a relaunch before the old answer lands.
+        tick(&state, Some(discovered_steam_game(43)));
+
+        assert!(state.ignore_prompted_steam_game_with(old, false, |_| Ok(())).is_err());
+        assert_eq!(state.steam_prompt_snapshot().prompt, Some(prompt(43)));
+    }
+
+    #[test]
+    fn launches_ignored_once_reach_the_detector() {
+        let state = RuntimeState::new(steam_settings(), None);
+        tick(&state, Some(discovered_steam_game(42)));
+        state
+            .ignore_prompted_steam_game_with(target(42), false, |_| Ok(()))
+            .unwrap();
+        assert_eq!(state.skipped_steam_launches(), vec![(427520, 42)]);
     }
 
     #[test]
@@ -539,7 +618,7 @@ mod tests {
 
         assert_eq!(
             tick(&state, Some(discovered_steam_game(42))).0,
-            Some(SteamPromptChange::Closed)
+            Some(None)
         );
     }
 

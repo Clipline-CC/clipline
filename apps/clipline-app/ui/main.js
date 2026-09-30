@@ -118,17 +118,37 @@ function queueSettingsWrite(write) {
 // Unlisted Steam game prompt. The backend holds the pending launch and
 // rebuilds the rule itself; the dialog only answers for app + process ids.
 var steamGamePrompt = null;
+var steamGamePromptRevision = -1;
+
+// Snapshots carry a backend revision that rises on every change, so an older
+// one (a late event, or the boot query racing a new prompt) never overrides
+// a newer dialog state.
+function applySteamGamePromptSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot.revision !== "number") return;
+  if (snapshot.revision < steamGamePromptRevision) return;
+  steamGamePromptRevision = snapshot.revision;
+  showSteamGamePrompt(snapshot.prompt || null);
+}
+
+function sameSteamLaunch(a, b) {
+  return Boolean(a && b && a.appId === b.appId && a.processId === b.processId);
+}
 
 function showSteamGamePrompt(prompt) {
   const dialog = $("steam-game-prompt-dialog");
-  steamGamePrompt = prompt && prompt.appId != null ? prompt : null;
+  const next = prompt && prompt.appId != null ? prompt : null;
+  const sameLaunch = sameSteamLaunch(next, steamGamePrompt);
+  steamGamePrompt = next;
   setSteamGamePromptBusy(false);
-  if (!steamGamePrompt) {
+  if (!next) {
     if (dialog.open) dialog.close();
     return;
   }
-  $("steam-game-prompt-name").textContent = steamGamePrompt.name || "This Steam game";
-  $("steam-game-prompt-never").checked = false;
+  $("steam-game-prompt-name").textContent = next.name || "This Steam game";
+  if (!sameLaunch) {
+    $("steam-game-prompt-never").checked = false;
+    $("steam-game-prompt-error").hidden = true;
+  }
   if (!dialog.open) dialog.showModal();
 }
 
@@ -145,6 +165,8 @@ async function answerSteamGamePrompt(add) {
   const neverAskAgain = $("steam-game-prompt-never").checked;
   const name = prompt.name || "Steam game";
   setSteamGamePromptBusy(true);
+  $("steam-game-prompt-error").hidden = true;
+  let failure = null;
   try {
     if (add) {
       const added = await queueSettingsWrite(async () => {
@@ -160,9 +182,24 @@ async function answerSteamGamePrompt(add) {
       applyIgnoredSteamGames(await invoke("ignore_prompted_steam_game", { target, neverAskAgain }));
     }
   } catch (error) {
-    $("error").textContent = String(error);
+    failure = String(error);
   }
-  if (steamGamePrompt === prompt) showSteamGamePrompt(null);
+  // Re-sync with the backend either way: success closes the dialog, while a
+  // failed save leaves the same launch pending so the user can retry.
+  try {
+    applySteamGamePromptSnapshot(await invoke("steam_game_prompt"));
+  } catch (error) {
+    console.warn("steam game prompt query failed:", error);
+    if (!failure && sameSteamLaunch(steamGamePrompt, prompt)) showSteamGamePrompt(null);
+  }
+  if (!failure) return;
+  if (sameSteamLaunch(steamGamePrompt, prompt)) {
+    setSteamGamePromptBusy(false);
+    $("steam-game-prompt-error").textContent = failure;
+    $("steam-game-prompt-error").hidden = false;
+  } else {
+    $("error").textContent = failure;
+  }
 }
 
 $("steam-game-prompt-add").addEventListener("click", () => answerSteamGamePrompt(true));
@@ -173,9 +210,9 @@ $("steam-game-prompt-dialog").addEventListener("cancel", (ev) => {
   answerSteamGamePrompt(false);
 });
 // A window rebuilt from the tray asks for a prompt that opened while it was gone.
-listen("steam-game-prompt", (event) => showSteamGamePrompt(event.payload)).then(async () => {
+listen("steam-game-prompt", (event) => applySteamGamePromptSnapshot(event.payload)).then(async () => {
   try {
-    showSteamGamePrompt(await invoke("steam_game_prompt"));
+    applySteamGamePromptSnapshot(await invoke("steam_game_prompt"));
   } catch (error) {
     console.warn("steam game prompt query failed:", error);
   }
