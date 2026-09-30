@@ -613,7 +613,9 @@ function releaseBackgroundSettingsUi() {
 
 function updateGameDetectionStatus() {
   const detectionEnabled = $("set-games-auto-detect").checked;
+  const steamEnabled = detectionEnabled && $("set-games-auto-detect-steam").checked;
   $("set-games-pause-when-empty").disabled = !detectionEnabled;
+  $("set-games-auto-detect-steam").disabled = !detectionEnabled;
   if (activeDetectedGame && activeDetectedGame.active) {
     $("game-detection-status").textContent =
       `Active: ${activeDetectedGame.name} · ${activeDetectedGame.window_title}`;
@@ -622,10 +624,12 @@ function updateGameDetectionStatus() {
       $("game-detection-status").textContent = "Game detection is off.";
       return;
     }
-    const enabledPlugins = gamePlugins.filter((plugin) => gamePluginSetting(plugin).enabled);
-    if (enabledPlugins.length) {
-      const names = enabledPlugins.map((plugin) => plugin.name).join(", ");
-      $("game-detection-status").textContent = `Waiting for: ${names}.`;
+    const waitingFor = gamePlugins
+      .filter((plugin) => gamePluginSetting(plugin).enabled)
+      .map((plugin) => plugin.name);
+    if (steamEnabled) waitingFor.push("new Steam games");
+    if (waitingFor.length) {
+      $("game-detection-status").textContent = `Waiting for: ${waitingFor.join(", ")}.`;
     } else if (customGames.length) {
       $("game-detection-status").textContent = "No saved custom game is active.";
     } else {

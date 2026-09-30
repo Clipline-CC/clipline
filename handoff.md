@@ -4,6 +4,35 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-09-28): PR #183 Steam launch detection taken over
+
+PR #183 (`noble-unicorn`) had sat since early September with conflicts and five
+unanswered bot findings. It now merges `develop`: the `app.rs`, `library.rs` and
+`game_discovery` test changes moved into the split submodules. The takeover review
+found ten issues; the fixes:
+
+- **Default:** `auto_detect_steam_launches` follows `pause_when_no_game` when absent
+  from settings, is off for new installs, and is checked when the user turns
+  games-only on in Settings. Any Steam-installed app counts as a
+  game, so on by default it replaced desktop recorders' capture with tools like OBS.
+- **Always add** saves through `RuntimeState::add_custom_game_with` (like the cloud
+  and osu! updates), not `save_settings`, so it no longer restarts the recorder and
+  wipes the replay buffer. The UI merges only the returned rule, keeping unsaved
+  Settings edits. Offers are keyed by `steam_app_id` (new on `game-detection`), and
+  clearing an offer no longer removes another feature's deck action.
+- **Sticky detection:** the Steam app being captured keeps the capture while its
+  window is open; z-order only breaks ties. Alt-tabbing between two Steam apps used
+  to restart the recorder on every switch.
+- **Rescans:** any unmatched `steamapps\common` window counts, so libraries added
+  later are found; the 10-minute backoff only applies to misses already seen at the
+  last rescan. `common_roots` and `is_steam_rooted` are gone.
+- The live-scan test self-skips without a Steam install; the Steam checkbox feeds
+  the detection status and is disabled while master auto-detect is off.
+
+`97b94f0` (apt mirror redirect in `ci.yml`) is unrelated and rides along from the
+original PR. This machine has no Steam install, so Steam detection itself is not
+live-tested here. Plan: `docs/superpowers/plans/2026-08-17-auto-detect-steam-launches.md`.
+
 ## Checkpoint (2026-09-25): Windows 10 fullscreen capture fallback
 
 Settings > Capture now offers Automatic (recommended), Windows Graphics
@@ -1175,6 +1204,24 @@ written back only if the removal failed and the file is still absent, so a fresh
 concurrent save is never clobbered and no `.clipline-removing-*` debris is created. Library
 listing does not sweep — it is a read path. The media root, Screenshots, and other non-session
 trees are left alone.
+
+## Checkpoint (2026-08-18): Auto-detect newly launched Steam games
+
+Plan: `docs/superpowers/plans/2026-08-17-auto-detect-steam-launches.md`.
+
+The 500 ms detector now falls back to Steam installs: after enabled built-ins and enabled
+custom games miss, a visible titled window whose `exe_path` lives under a cached
+`steamapps\\common\\...` install dir starts a `replays_only` session under the
+session-only identity `steam-{appid}` (never a `custom-` id). `GameIdentity::DiscoveredSteam`
+stays configured while both auto-detect flags are on, so it survives detector ticks without
+being written to Custom games; the `game-detection` event grew a `discovered_steam: bool`
+(no exe_path on the event). The toast `Recording {name}` + `Always add` action persists a
+normal custom game through the new `add_discovered_steam_game` command (live
+`DetectedGame` rebuild + existing save/dedupe; already-added is a no-op). The manifest-only
+`SteamLaunchCatalog` reuses the Detect Games VDF/manifest readers without exe inference and
+refreshes at most every 30 s on a Steam-rooted miss only. Built-ins (even disabled plugins,
+via the plugin-window skip) and enabled custom games still win. Setting default on;
+exclusive fullscreen and other stores remain out of scope.
 
 ## Checkpoint (2026-08-17): Stable 1.0.2
 

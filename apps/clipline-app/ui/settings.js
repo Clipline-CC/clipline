@@ -234,6 +234,7 @@ function fillSettings(s) {
   renderCaptureTargetSelect();
   $("set-games-auto-detect").checked = !!games.auto_detect;
   $("set-games-pause-when-empty").checked = !!games.pause_when_no_game;
+  $("set-games-auto-detect-steam").checked = !!games.auto_detect_steam_launches;
   $("set-output-enabled").checked = !!audio.output_enabled;
   $("set-mic-enabled").checked = !!audio.mic_enabled;
   $("set-mic-volume").value = String(Number.isFinite(audio.mic_volume) ? audio.mic_volume : 1);
@@ -297,6 +298,28 @@ function fillSettings(s) {
   resetSettingsBaselineFromForm();
 }
 
+// "Always add" saves one rule on the backend. Merge just that rule into the
+// saved baseline, the draft and the live list so unsaved Settings edits
+// survive, and the new rule alone does not mark Settings dirty.
+function mergeSavedCustomGame(saved) {
+  const game = normalizeCustomGame(saved);
+  const withGame = (games) =>
+    (games || []).some((existing) => existing.id === game.id)
+      ? games
+      : [...(games || []), { ...game }];
+  const withGameInSettings = (snapshot) =>
+    snapshot && {
+      ...snapshot,
+      games: { ...snapshot.games, custom_games: withGame(snapshot.games?.custom_games) },
+    };
+  customGames = withGame(customGames);
+  currentSettings = withGameInSettings(currentSettings);
+  settingsDraft = withGameInSettings(settingsDraft);
+  settingsIndicatorBaseline = withGameInSettings(settingsIndicatorBaseline);
+  renderCustomGames();
+  syncSettingsDirtyState();
+}
+
 function readSettings() {
   const replay = Number($("set-replay").value);
   const capture = selectedCaptureSettings();
@@ -316,6 +339,7 @@ function readSettings() {
     games: {
       auto_detect: $("set-games-auto-detect").checked,
       pause_when_no_game: $("set-games-pause-when-empty").checked,
+      auto_detect_steam_launches: $("set-games-auto-detect-steam").checked,
       plugins: readGamePluginSettings(),
       custom_games: customGames.map((game) => ({ ...game })),
     },
@@ -466,6 +490,7 @@ function defaultGameSettings() {
   return {
     auto_detect: true,
     pause_when_no_game: false,
+    auto_detect_steam_launches: false,
     plugins: {},
     custom_games: [],
   };

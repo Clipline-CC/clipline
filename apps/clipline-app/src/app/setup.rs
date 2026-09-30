@@ -202,6 +202,7 @@ pub fn run() {
             commands::list_game_plugins,
             commands::list_game_windows,
             commands::detect_installed_games,
+            commands::add_discovered_steam_game,
             commands::extract_window_icon,
             webview::memory_status,
             webview::frontend_ready,

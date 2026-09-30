@@ -495,3 +495,50 @@ fn still_dedupes_existing_custom_game_by_exe_when_existing_path_is_missing() {
 
     assert!(candidates.is_empty());
 }
+
+#[test]
+fn rejects_manifest_install_directories_that_escape_or_claim_common_root() {
+    for install_dir in ["", ".", "..", r"Parent\Child", "Parent/Child"] {
+        let input = format!(
+            r#""AppState" {{ "appid" "1" "name" "Bad" "installdir" "{install_dir}" }}"#
+        );
+        let parsed = parse_vdf(&input).expect("manifest parses");
+        assert!(
+            steam_app_from_manifest(&parsed).is_none(),
+            "invalid installdir {install_dir:?} must be rejected"
+        );
+    }
+}
+
+#[test]
+fn steam_launch_catalog_is_manifest_only_and_matches_nested_executables() {
+    let dir = TestDir::new("clipline-game-discovery", "launch-catalog");
+    let steam_root = dir.path().join("Steam");
+    std::fs::create_dir_all(steam_root.join("steamapps/common/Friendslop")).unwrap();
+    std::fs::write(
+        steam_root.join("steamapps/libraryfolders.vdf"),
+        format!(
+            r#""libraryfolders" {{ "0" {{ "path" "{}" }} }}"#,
+            vdf_path(&steam_root)
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        steam_root.join("steamapps/appmanifest_427520.acf"),
+        r#""AppState" { "appid" "427520" "name" "Friendslop" "installdir" "Friendslop" }"#,
+    )
+    .unwrap();
+    // No .exe files exist on disk: the detector catalog never infers them.
+
+    let catalog = SteamLaunchCatalog::scan_from_roots(std::slice::from_ref(&steam_root));
+    let exe = steam_root.join("steamapps/common/Friendslop/Friendslop/Binaries/Win64/FriendslopGame.exe");
+    let app = catalog
+        .find_by_exe_path(&exe.to_string_lossy())
+        .expect("install-dir prefix should match a nested executable");
+    assert_eq!(app.app_id, 427520);
+    assert_eq!(app.name, "Friendslop");
+    assert_eq!(
+        app.install_dir,
+        steam_root.join("steamapps/common/Friendslop")
+    );
+}

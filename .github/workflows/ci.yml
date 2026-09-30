@@ -44,6 +44,11 @@ jobs:
         if: runner.os == 'Linux'
         timeout-minutes: 5
         run: |
+          # Some GitHub runners cannot reach azure.archive.ubuntu.com; the
+          # primary archive mirror works on all of them. Redirect before
+          # update so a dead regional mirror cannot eat the 5-minute cap.
+          sudo sed -i 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' \
+            /etc/apt/apt-mirrors.txt /etc/apt/sources.list /etc/apt/sources.list.d/* 2>/dev/null || true
           sudo DEBIAN_FRONTEND=noninteractive apt-get update -y
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ffmpeg
 

@@ -104,6 +104,60 @@ listen("ffmpeg-install", (event) => {
   applyFfmpegInstallSnapshot(event.payload);
 });
 
+// Settings writes run one at a time. A full Save sends the whole custom
+// games list, so it must not be built before an "Always add" lands (or it
+// would overwrite the new rule), and Always add must not race a Save.
+var settingsWriteQueue = Promise.resolve();
+
+function queueSettingsWrite(write) {
+  const run = settingsWriteQueue.then(write, write);
+  settingsWriteQueue = run.catch(() => {});
+  return run;
+}
+
+var discoveredSteamOfferedAppIds = new Set();
+var discoveredSteamOffer = null;
+
+// Clear the offer's deck status only while the offer still owns it; another
+// feature (an export's "Open clip", say) may have replaced it since.
+function clearDiscoveredSteamOffer() {
+  const offer = discoveredSteamOffer;
+  discoveredSteamOffer = null;
+  if (offer && deckStatusActionHandler === offer.handler) setDeckStatus("");
+}
+
+// First detection of each discovered Steam app in this UI session: show the
+// recording toast plus a one-shot Always add action. Offers are keyed by
+// Steam app id, since unrelated games can share an exe name. Rule building
+// stays on the backend command; the frontend never reconstructs it.
+function maybeOfferDiscoveredSteamAlwaysAdd(event) {
+  const appId = event?.active && event.discovered_steam ? event.steam_app_id : null;
+  if (discoveredSteamOffer && discoveredSteamOffer.appId !== appId) clearDiscoveredSteamOffer();
+  if (appId == null || discoveredSteamOfferedAppIds.has(appId)) return;
+  discoveredSteamOfferedAppIds.add(appId);
+  const name = event.name || event.exe_name || "Steam game";
+  const target = { appId, processId: event.process_id };
+  const handler = async () => {
+    discoveredSteamOffer = null;
+    try {
+      const added = await queueSettingsWrite(async () => {
+        const saved = await invoke("add_discovered_steam_game", { target });
+        if (saved) mergeSavedCustomGame(saved);
+        return saved;
+      });
+      setNotice(
+        added ? "Added " + name + " to Custom games" : name + " is already a custom game",
+        { transient: true }
+      );
+    } catch (error) {
+      $("error").textContent = String(error);
+    }
+  };
+  discoveredSteamOffer = { appId, handler };
+  setDeckStatus("Recording " + name);
+  setDeckStatusAction("Always add", handler);
+}
+
 listen("encoders-changed", (event) => {
   videoEncoders = Array.isArray(event.payload) ? event.payload : [];
   videoEncodersLoaded = true;
@@ -120,6 +174,7 @@ listen("game-detection", (e) => {
   updateCaptureStatus();
   updateGameDetectionStatus();
   maybeWarnElevatedGame(activeDetectedGame);
+  maybeOfferDiscoveredSteamAlwaysAdd(activeDetectedGame);
 });
 
 listen("cloud-upload-progress", (e) => {
@@ -288,7 +343,13 @@ $("cloud-host-url").addEventListener("input", syncCloudHttpWarning);
 $("cloud-host-url").addEventListener("change", syncCloudHttpWarning);
 $("cloud-connect").addEventListener("click", connectCloud);
 $("cloud-disconnect").addEventListener("click", disconnectCloud);
-for (const id of ["set-games-auto-detect", "set-games-pause-when-empty"]) {
+// Games-only recorders get Steam launch detection by default (see the
+// settings loader). Turning games-only on here does the same; the checkbox
+// stays visible in the form, so the user can clear it before saving.
+$("set-games-pause-when-empty").addEventListener("change", () => {
+  if ($("set-games-pause-when-empty").checked) $("set-games-auto-detect-steam").checked = true;
+});
+for (const id of ["set-games-auto-detect", "set-games-auto-detect-steam", "set-games-pause-when-empty"]) {
   $(id).addEventListener("change", updateGameDetectionStatus);
 }
 for (const id of [
@@ -433,8 +494,11 @@ $("settings-save").addEventListener("click", async () => {
     return;
   }
   try {
-    const saved = await invoke("save_settings", { settings: syncSettingsDraftFromForm() });
-    fillSettings(saved);
+    // Build the payload inside the queue so it includes any rule an
+    // in-flight "Always add" is merging.
+    await queueSettingsWrite(async () => {
+      fillSettings(await invoke("save_settings", { settings: syncSettingsDraftFromForm() }));
+    });
     $("settings-status").textContent = "saved";
     await refresh();
   } catch (e) {

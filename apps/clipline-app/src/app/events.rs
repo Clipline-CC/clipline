@@ -21,6 +21,9 @@ pub(crate) struct GameDetectionEvent {
     pub(crate) exe_name: Option<String>,
     pub(crate) recording_mode: Option<GameRecordingMode>,
     pub(crate) elevated_hotkeys_blocked: bool,
+    pub(crate) discovered_steam: bool,
+    /// Keys the "Always add" offer to the Steam app, not a shared exe name.
+    pub(crate) steam_app_id: Option<u32>,
 }
 
 impl GameDetectionEvent {
@@ -61,6 +64,12 @@ impl GameDetectionEvent {
                     process_instance_id(game.process_id)
                         .unwrap_or_else(|_| format!("{}:window:{}", game.process_id, game.hwnd))
                 });
+                let steam_app_id = match game.identity {
+                    crate::game_identity::GameIdentity::DiscoveredSteam { app_id, .. } => {
+                        Some(app_id)
+                    }
+                    _ => None,
+                };
                 Self {
                     active: true,
                     name: Some(game.name.clone()),
@@ -70,6 +79,8 @@ impl GameDetectionEvent {
                     exe_name: Some(game.exe_name.clone()),
                     recording_mode: Some(game.recording_mode),
                     elevated_hotkeys_blocked,
+                    discovered_steam: steam_app_id.is_some(),
+                    steam_app_id,
                 }
             }
             None => Self {
@@ -81,6 +92,8 @@ impl GameDetectionEvent {
                 exe_name: None,
                 recording_mode: None,
                 elevated_hotkeys_blocked: false,
+                discovered_steam: false,
+                steam_app_id: None,
             },
         }
     }

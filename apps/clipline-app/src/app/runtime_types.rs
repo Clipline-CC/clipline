@@ -193,6 +193,9 @@ pub(crate) fn active_game_still_configured(settings: &AppSettings, active: Optio
             .custom_games
             .iter()
             .any(|game| game.enabled && game.id == *id),
+        crate::game_identity::GameIdentity::DiscoveredSteam { .. } => {
+            settings.games.auto_detect_steam_launches
+        }
     }
 }
 
@@ -207,6 +210,20 @@ pub(crate) fn detected_game(id: &str, name: &str, hwnd: isize) -> DetectedGame {
         exe_name: format!("{name}.exe"),
         exe_path: None,
         recording_mode: GameRecordingMode::FullSession,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn discovered_steam_game(hwnd: isize) -> DetectedGame {
+    DetectedGame {
+        identity: crate::game_identity::GameIdentity::discovered_steam(427520),
+        name: "Friendslop".into(),
+        hwnd,
+        window_title: "Friendslop".into(),
+        process_id: hwnd as u32,
+        exe_name: "Friendslop.exe".into(),
+        exe_path: Some(r"C:\Steam\steamapps\common\Friendslop\Friendslop.exe".into()),
+        recording_mode: GameRecordingMode::ReplaysOnly,
     }
 }
 

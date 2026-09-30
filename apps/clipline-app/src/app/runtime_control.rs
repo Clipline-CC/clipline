@@ -242,6 +242,36 @@ impl RuntimeState {
         Ok(inner.settings.clone())
     }
 
+    /// Persist one new custom game without the full settings transaction.
+    /// That transaction restarts the recorder, which would discard the replay
+    /// buffer of the game being played when "Always add" is clicked. Only the
+    /// custom games list changes; the next detector tick matches the same
+    /// window through the new rule without a restart
+    /// (`same_discovered_steam_custom_capture`). `None` means an existing rule
+    /// already covers the game.
+    pub(crate) fn add_custom_game_with(
+        &self,
+        game: crate::settings::CustomGameSettings,
+        save: impl FnOnce(&AppSettings) -> Result<(), String>,
+    ) -> Result<Option<crate::settings::CustomGameSettings>, String> {
+        let _save_guard = CLOUD_SETTINGS_SAVE_LOCK
+            .lock()
+            .map_err(|_| "settings save lock poisoned")?;
+        let mut next = self
+            .0
+            .lock()
+            .map_err(|_| "runtime state lock poisoned")?
+            .settings
+            .clone();
+        let Some(added) = super::commands::insert_discovered_custom_game(&mut next.games, game) else {
+            return Ok(None);
+        };
+        save(&next)?;
+        let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
+        inner.settings.games.custom_games = next.games.custom_games;
+        Ok(Some(added))
+    }
+
     pub(crate) fn lock_cloud_settings_save() -> Result<MutexGuard<'static, ()>, String> {
         CLOUD_SETTINGS_SAVE_LOCK
             .lock()
@@ -706,5 +736,75 @@ mod tests {
             },
         );
         assert!(!active_game_still_configured(&settings, Some(&active)));
+    }
+
+    #[test]
+    fn discovered_steam_game_stays_configured_only_while_both_flags_are_on() {
+        let mut settings = AppSettings::default();
+        settings.games.auto_detect_steam_launches = true;
+        let game = crate::app::discovered_steam_game(42);
+        assert!(active_game_still_configured(&settings, Some(&game)));
+
+        settings.games.auto_detect_steam_launches = false;
+        assert!(!active_game_still_configured(&settings, Some(&game)));
+
+        settings.games.auto_detect_steam_launches = true;
+        settings.games.auto_detect = false;
+        assert!(!active_game_still_configured(&settings, Some(&game)));
+    }
+
+    fn discovered_rule() -> crate::settings::CustomGameSettings {
+        super::super::commands::custom_game_from_discovered_steam(
+            &crate::app::discovered_steam_game(42),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn always_add_saves_the_rule_without_restarting_the_recorder() {
+        let (tx, rx) = mpsc::channel();
+        let state = RuntimeState::with_sender(tx, AppSettings::default(), None);
+        state.0.lock().unwrap().active_game = Some(crate::app::discovered_steam_game(42));
+        let mut saved = None;
+
+        let added = state
+            .add_custom_game_with(discovered_rule(), |next| {
+                saved = Some(next.games.custom_games.clone());
+                Ok(())
+            })
+            .unwrap()
+            .expect("new rule");
+
+        assert_eq!(added.id, "custom-steam-427520");
+        assert_eq!(saved.unwrap(), vec![added.clone()]);
+        let inner = state.0.lock().unwrap();
+        assert_eq!(inner.settings.games.custom_games, vec![added]);
+        assert!(inner.tx.is_some(), "the running recorder keeps its sender");
+        assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)), "no Stop was sent");
+    }
+
+    #[test]
+    fn always_add_skips_a_game_an_existing_rule_covers() {
+        let state = RuntimeState::new(AppSettings::default(), None);
+        state.add_custom_game_with(discovered_rule(), |_| Ok(())).unwrap();
+
+        let again = state
+            .add_custom_game_with(discovered_rule(), |_| panic!("nothing new to save"))
+            .unwrap();
+
+        assert!(again.is_none());
+        assert_eq!(state.settings().games.custom_games.len(), 1);
+    }
+
+    #[test]
+    fn failed_always_add_save_leaves_live_state_unchanged() {
+        let state = RuntimeState::new(AppSettings::default(), None);
+
+        let error = state
+            .add_custom_game_with(discovered_rule(), |_| Err("disk full".into()))
+            .unwrap_err();
+
+        assert_eq!(error, "disk full");
+        assert!(state.settings().games.custom_games.is_empty());
     }
 }

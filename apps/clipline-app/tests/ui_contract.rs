@@ -4844,6 +4844,99 @@ fn games_ui_wires_detection_commands() {
 }
 
 #[test]
+fn steam_launch_detection_wires_settings_checkbox_and_always_add() {
+    let html = index_html();
+    for required in [
+        "id=\"set-games-auto-detect-steam\"",
+        "data-settings-key=\"games.auto_detect_steam_launches\"",
+    ] {
+        assert!(
+            html.contains(required),
+            "games settings are missing required control {required}"
+        );
+    }
+
+    let settings = read_ui_js("settings.js");
+    assert!(
+        settings.contains("auto_detect_steam_launches: false"),
+        "new installs record the desktop, so Steam launch detection starts off"
+    );
+    assert!(settings.contains("auto_detect_steam_launches: $(\"set-games-auto-detect-steam\").checked"));
+
+    let main = main_js();
+    for required in [
+        "\"set-games-auto-detect-steam\"",
+        "discovered_steam",
+        "invoke(\"add_discovered_steam_game\"",
+        "setDeckStatusAction(\"Always add\"",
+        "discoveredSteamOfferedAppIds",
+        "const target = { appId, processId: event.process_id };",
+        "event.steam_app_id",
+        "invoke(\"add_discovered_steam_game\", { target })",
+        "if (saved) mergeSavedCustomGame(saved);",
+        "clearDiscoveredSteamOffer()",
+        // Clearing must not remove another feature's deck action.
+        "deckStatusActionHandler === offer.handler",
+    ] {
+        assert!(
+            main.contains(required),
+            "game detection UI is missing required wiring {required}"
+        );
+    }
+    // Reloading saved custom games would discard unsaved Settings edits.
+    assert!(!main.contains("refreshCustomGamesFromBackend"));
+    assert!(!settings.contains("refreshCustomGamesFromBackend"));
+
+    // A full Save and Always add never interleave: Save builds its custom
+    // games list only after an in-flight add has merged its rule.
+    for required in [
+        "function queueSettingsWrite(write)",
+        "await queueSettingsWrite(async () => {\n        const saved = await invoke(\"add_discovered_steam_game\", { target });",
+        "await queueSettingsWrite(async () => {\n      fillSettings(await invoke(\"save_settings\", { settings: syncSettingsDraftFromForm() }));",
+        // Turning games-only on also turns Steam launch detection on.
+        "if ($(\"set-games-pause-when-empty\").checked) $(\"set-games-auto-detect-steam\").checked = true;",
+    ] {
+        assert!(main.contains(required), "main.js is missing {required}");
+    }
+
+    // The status and the checkbox follow the master auto-detect switch.
+    let games = read_ui_js("settings-ffmpeg-games.js");
+    assert!(games.contains("$(\"set-games-auto-detect-steam\").disabled = !detectionEnabled;"));
+    assert!(games.contains("if (steamEnabled) waitingFor.push(\"new Steam games\");"));
+
+    assert!(
+        settings.contains("function mergeSavedCustomGame"),
+        "settings.js must merge an Always add rule without replacing the draft"
+    );
+    assert!(
+        settings.contains("settingsIndicatorBaseline"),
+        "settings.js must update the dirty baseline when merging custom games"
+    );
+}
+
+#[test]
+fn settings_html_never_repeats_an_element_id() {
+    let html = index_html();
+    let mut ids: Vec<&str> = Vec::new();
+    let mut rest = html.as_str();
+    while let Some(start) = rest.find("id=\"") {
+        rest = &rest[start + 4..];
+        let end = rest.find('"').expect("unterminated id attribute");
+        ids.push(&rest[..end]);
+        rest = &rest[end..];
+    }
+    assert!(!ids.is_empty(), "id scan must find elements");
+    let mut sorted = ids.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(
+        ids.len(),
+        sorted.len(),
+        "duplicate element ids in index.html"
+    );
+}
+
+#[test]
 fn deck_status_success_toasts_auto_clear() {
     let js = main_js();
 

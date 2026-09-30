@@ -45,6 +45,8 @@ pub(crate) use runtime_types::{CommittedRuntimeRestart, LEAGUE_GATE_SKIP_NOTICE,
 pub(crate) use runtime_types::detected_built_in_game;
 #[cfg(test)]
 pub(crate) use runtime_types::detected_game;
+#[cfg(test)]
+pub(crate) use runtime_types::discovered_steam_game;
 pub(crate) use league_gate::{automatic_start_allowed, league_gate_allows, league_gate_applies, spawn_gate_lookup};
 #[cfg(test)]
 pub(crate) use league_gate::same_game_window;

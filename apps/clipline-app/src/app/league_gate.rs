@@ -78,11 +78,34 @@ pub(crate) fn gate_queue_for_exe(exe_path: Option<&str>) -> Option<LeagueQueue> 
 
 pub(crate) fn same_game_window(current: Option<&DetectedGame>, next: Option<&DetectedGame>) -> bool {    match (current, next) {
         (Some(current), Some(next)) => {
-            current.identity == next.identity && current.hwnd == next.hwnd
+            current.hwnd == next.hwnd
+                && (current.identity == next.identity
+                    || same_discovered_steam_custom_capture(current, next))
         }
         (None, None) => true,
         _ => false,
     }
+}
+
+/// "Always add" turns a discovered Steam launch into a custom rule for the
+/// same process and window. That identity change is not a new capture target.
+pub(crate) fn same_discovered_steam_custom_capture(
+    current: &DetectedGame,
+    next: &DetectedGame,
+) -> bool {
+    use crate::game_identity::GameIdentity::{Custom, DiscoveredSteam};
+    let discovered_custom_pair = matches!(
+        (&current.identity, &next.identity),
+        (DiscoveredSteam { .. }, Custom(_)) | (Custom(_), DiscoveredSteam { .. })
+    );
+    discovered_custom_pair
+        && current.process_id == next.process_id
+        && current.exe_name.eq_ignore_ascii_case(&next.exe_name)
+        && current
+            .exe_path
+            .as_deref()
+            .zip(next.exe_path.as_deref())
+            .is_some_and(|(left, right)| crate::games::path_key(left) == crate::games::path_key(right))
 }
 
 impl RuntimeState {
@@ -725,5 +748,98 @@ mod tests {
             Ok(None) => {}
             other => panic!("missing lockfile must resolve to unknown: {other:?}"),
         }
+    }
+
+    fn steam_settings(games_only: bool) -> crate::settings::AppSettings {
+        let mut settings = crate::settings::AppSettings::default();
+        settings.games.pause_when_no_game = games_only;
+        settings.games.auto_detect_steam_launches = true;
+        settings
+    }
+
+    #[test]
+    fn discovered_steam_to_custom_transition_keeps_the_same_capture() {
+        let current = crate::app::discovered_steam_game(42);
+        let mut next = current.clone();
+        next.identity = crate::game_identity::GameIdentity::custom("custom-steam-427520");
+
+        assert!(same_game_window(Some(&current), Some(&next)));
+        assert!(!same_game_window(
+            Some(&current),
+            Some(&detected_game("custom-other", "Friendslop", 42))
+        ));
+    }
+
+    #[test]
+    fn discovered_to_custom_re_detection_does_not_restart_and_updates_the_ui() {
+        let mut settings = steam_settings(false);
+        settings.games.custom_games.push(crate::settings::CustomGameSettings {
+            id: "custom-steam-427520".into(),
+            name: "Friendslop".into(),
+            exe_name: "Friendslop.exe".into(),
+            process_path: Some(r"C:\Steam\steamapps\common\Friendslop\Friendslop.exe".into()),
+            window_title: "Friendslop".into(),
+            enabled: true,
+            legacy_ids: Vec::new(),
+            recording_mode: crate::settings::GameRecordingMode::ReplaysOnly,
+            icon: None,
+        });
+        let state = RuntimeState::new(settings, None);
+        let mut inner = state.0.lock().unwrap();
+        inner.recording_desired = true;
+        let discovered = crate::app::discovered_steam_game(42);
+        RuntimeState::plan_detection_transition(&mut inner, Some(discovered.clone()), None)
+            .unwrap();
+        let mut custom = discovered;
+        custom.identity = crate::game_identity::GameIdentity::custom("custom-steam-427520");
+
+        let (prepared, emit, _) =
+            RuntimeState::plan_detection_transition(&mut inner, Some(custom.clone()), None)
+                .unwrap();
+        assert!(prepared.is_none());
+        assert!(emit);
+        assert_eq!(inner.active_game, Some(custom), "the live rule owns the capture now");
+    }
+
+    #[test]
+    fn games_only_capture_follows_discovered_steam_window_lifecycle() {
+        let (tx, _rx) = mpsc::channel();
+        let state = RuntimeState::with_sender(tx, steam_settings(true), None);
+        let mut inner = state.0.lock().unwrap();
+        inner.recording_desired = true;
+
+        let waiting = RuntimeState::prepare_service_restart(&mut inner).unwrap();
+        assert!(waiting.waiting_for_game, "games-only must wait before a game appears");
+        assert!(waiting.replacement.is_none());
+
+        let game = crate::app::discovered_steam_game(41);
+        let (prepared, emit, event) =
+            RuntimeState::plan_detection_transition(&mut inner, Some(game.clone()), None).unwrap();
+        assert!(emit);
+        assert!(event.discovered_steam);
+        assert_eq!(event.steam_app_id, Some(427520));
+        let (options, _) = prepared
+            .expect("detection always prepares a restart")
+            .replacement
+            .expect("discovered Steam game must start window capture");
+        assert!(matches!(
+            options.capture_source,
+            crate::service::CaptureSource::WindowHandle { hwnd: 41, .. }
+        ));
+        assert_eq!(options.recording_mode, crate::service::RecordingMode::ReplaysOnly);
+
+        let (prepared, emit, event) =
+            RuntimeState::plan_detection_transition(&mut inner, Some(game), None).unwrap();
+        assert!(!emit, "same-window re-detect must not re-emit");
+        assert!(event.discovered_steam);
+        assert!(prepared.is_none());
+
+        let (prepared, _, event) =
+            RuntimeState::plan_detection_transition(&mut inner, None, None).unwrap();
+        assert!(!event.discovered_steam);
+        assert_eq!(event.steam_app_id, None);
+        let prepared = prepared.expect("game exit must prepare a restart");
+        assert!(prepared.waiting_for_game, "games-only must return to waiting");
+        assert!(prepared.replacement.is_none());
     }
 }
