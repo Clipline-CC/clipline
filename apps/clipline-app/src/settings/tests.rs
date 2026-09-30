@@ -62,8 +62,7 @@ fn defaults_match_current_recorder_behavior() {
     assert!(!settings.minimize_to_tray);
     assert!(settings.reopen_window_after_update);
     assert_eq!(settings.update_channel, UpdateChannel::install_default());
-    assert!(!settings.legacy_timeline_editor);
-    assert_eq!(serialized["legacy_timeline_editor"], false);
+    assert!(serialized.get("legacy_timeline_editor").is_none());
 }
 
 #[test]
@@ -324,7 +323,7 @@ fn load_preserves_a_tray_only_update_restart_preference() {
 }
 
 #[test]
-fn load_preserves_legacy_timeline_editor_preference() {
+fn load_drops_the_removed_legacy_timeline_editor_preference() {
     let settings = AppSettings::load_from_object(
         serde_json::from_str::<Value>(
             r#"{
@@ -344,7 +343,8 @@ fn load_preserves_legacy_timeline_editor_preference() {
         .unwrap(),
     );
 
-    assert!(settings.legacy_timeline_editor);
+    let saved = serde_json::to_value(&settings).unwrap();
+    assert!(saved.get("legacy_timeline_editor").is_none());
 }
 
 #[test]

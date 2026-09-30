@@ -132,8 +132,6 @@ pub struct AppSettings {
     #[serde(default = "default_enabled")]
     pub reopen_window_after_update: bool,
     #[serde(default)]
-    pub legacy_timeline_editor: bool,
-    #[serde(default)]
     pub ui_theme: UiTheme,
     #[serde(default)]
     pub update_channel: UpdateChannel,
@@ -191,7 +189,6 @@ impl Default for AppSettings {
             close_to_tray: true,
             minimize_to_tray: false,
             reopen_window_after_update: true,
-            legacy_timeline_editor: false,
             ui_theme: UiTheme::default(),
             update_channel: UpdateChannel::default(),
             cloud: CloudSettings::default(),

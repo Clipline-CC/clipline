@@ -572,8 +572,7 @@ video.addEventListener("loadedmetadata", () => {
       ? groupReviewMeta(group, video.duration)
       : `${fmtDur(video.duration)} · ${fmtMegabytes(currentClip.size_mb)} · ${PlayerCore.clipFileLabel(currentClip)}`;
     setTrim(0, video.duration);
-    // Duration is now exact: rebuild the whole-clip navigator and re-render.
-    renderOverviewMarkers();
+    // Duration is now exact: re-render the view.
     applyView({ start: zoomStart, span: zoomSpan });
   }
 });
@@ -678,13 +677,6 @@ document.querySelectorAll("[data-game-plugin-settings-tab]").forEach((tab) => {
 });
 
 $("trim-mode-toggle").addEventListener("click", () => setSimpleTrimMode(!simpleTrimMode));
-$("zoom-in").addEventListener("click", () => zoomAtPlayhead(0.5));
-$("zoom-out").addEventListener("click", () => zoomAtPlayhead(2));
-// Plain click frames the trim selection (the editing default); Shift-click fits
-// the whole clip — mirroring \ and Shift+\.
-$("zoom-fit").addEventListener("click", (ev) => (ev.shiftKey ? zoomFit() : zoomToSelection()));
-$("snap-toggle").addEventListener("click", toggleSnap);
-
 // Keyboard shortcuts guide — the corner "K" keycap opens it; click the X or the
 // backdrop (or press Esc, which the modal dialog handles) to close.
 $("keys-close").addEventListener("click", () => $("keys-dialog").close());
@@ -830,14 +822,6 @@ document
   .addEventListener("wheel", onTimelineWheel, { passive: false });
 $("ruler").addEventListener("wheel", onTimelineWheel, { passive: false });
 
-// Navigator (whole-clip minimap): drag the box to pan, its grips to zoom.
-$("overview").addEventListener("pointerdown", onOverviewPointerDown);
-$("overview").addEventListener("pointermove", moveOverviewDrag);
-$("overview").addEventListener("pointerup", endOverviewDrag);
-$("overview").addEventListener("pointercancel", endOverviewDrag);
-$("overview").addEventListener("lostpointercapture", endOverviewDrag);
-$("overview").addEventListener("wheel", onOverviewWheel, { passive: false });
-
 stage.addEventListener("pointermove", noteActivity);
 stage.addEventListener("pointerdown", noteActivity);
 stage.addEventListener("pointerleave", () => {
@@ -894,11 +878,11 @@ document.addEventListener("keydown", (ev) => {
     case "seek-to": seekTo(intent.seconds); break;
     case "seek-to-end": seekTo(clipDuration()); break;
     case "set-in":
-      if (!legacyTimelineEnabled() && !simpleTrimMode) setSimpleTrimMode(true);
+      if (!simpleTrimMode) setSimpleTrimMode(true);
       setTrim(video.currentTime || 0, trimEnd);
       break;
     case "set-out":
-      if (!legacyTimelineEnabled() && !simpleTrimMode) setSimpleTrimMode(true);
+      if (!simpleTrimMode) setSimpleTrimMode(true);
       setTrim(trimStart, video.currentTime || 0);
       break;
     case "next-marker": jumpMarker(1); break;
@@ -906,16 +890,13 @@ document.addEventListener("keydown", (ev) => {
     case "next-edit": jumpEdit(1); break;
     case "prev-edit": jumpEdit(-1); break;
     case "zoom":
-      if (legacyTimelineEnabled() || simpleTrimMode) zoomAtPlayhead(intent.factor);
+      if (simpleTrimMode) zoomAtPlayhead(intent.factor);
       break;
     case "zoom-fit":
-      if (legacyTimelineEnabled() || simpleTrimMode) zoomFit();
+      if (simpleTrimMode) zoomFit();
       break;
     case "zoom-selection":
-      if (legacyTimelineEnabled() || simpleTrimMode) zoomToSelection();
-      break;
-    case "toggle-snap":
-      if (legacyTimelineEnabled()) toggleSnap();
+      if (simpleTrimMode) zoomToSelection();
       break;
     case "toggle-fullscreen": toggleReviewFullscreen(); break;
     case "close": closeReview(); break;

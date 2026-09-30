@@ -477,23 +477,6 @@ const PlayerCore = (() => {
       duration
     );
 
-  // Drag one edge of the window to a clip time, leaving the other edge fixed —
-  // the navigator's resize grips. Honors the min span and clamps to the clip.
-  const setViewEdge = (viewStart, viewSpan, duration, edge, timeAtEdge, minSpan = MIN_VIEW_SPAN_S) => {
-    if (!(duration > 0)) return { start: 0, span: 0 };
-    const cur = clampView(viewStart, viewSpan, duration);
-    const floor = Math.min(minSpan, duration);
-    const t = clampTime(timeAtEdge, duration);
-    if (edge === "left") {
-      const right = cur.start + cur.span; // fixed
-      const start = Math.min(t, right - floor);
-      return clampView(start, right - start, duration);
-    }
-    const left = cur.start; // fixed
-    const end = Math.max(t, left + floor);
-    return clampView(left, end - left, duration);
-  };
-
   // A window that frames [startS, endS] with padding on each side, floored to the
   // min span and clamped to the clip — the "zoom to selection" target.
   const viewForRange = (startS, endS, duration, paddingFrac = 0.05, minSpan = MIN_VIEW_SPAN_S) => {
@@ -1660,7 +1643,7 @@ const PlayerCore = (() => {
   // Bookmarks are user-placed, so they deliberately skip the game-review
   // filters above: they must show on clips with no detected game and must not
   // disappear because someone turned a game's marker categories off. Shaping
-  // them like markers lets the pins, overview ticks, marker count, prev/next
+  // them like markers lets the pins, marker count, prev/next
   // navigation and drag snapping treat them as one list.
   const isBookmarkMarker = (marker) =>
     Boolean(marker) && marker.kind === BOOKMARK_KIND;
@@ -1825,8 +1808,6 @@ const PlayerCore = (() => {
         return { kind: "prev-edit" };
       case "ArrowDown":
         return { kind: "next-edit" };
-      case "KeyS":
-        return { kind: "toggle-snap" };
       case "KeyF":
         return { kind: "toggle-fullscreen" };
       case "Escape":
@@ -2189,7 +2170,6 @@ const PlayerCore = (() => {
     clampView,
     zoomView,
     panView,
-    setViewEdge,
     viewForRange,
     followView,
     snapTime,

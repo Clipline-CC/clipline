@@ -4900,106 +4900,6 @@ button.primary.settings-save-glow {
 }
 .ruler .lab.first { transform: none; }
 
-/* ---- timeline navigator (whole-clip minimap + zoom/snap controls) ---- */
-.nav-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-}
-/* The minimap always shows the whole clip; the window box marks what the track
-   above is zoomed into, so the trim handles/markers are never lost off-screen. */
-#overview {
-  position: relative;
-  flex: 1 1 auto;
-  min-width: 0;
-  height: 26px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--shade-f);
-  overflow: hidden;
-  cursor: pointer;
-  touch-action: none;
-}
-#overview-trim {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  width: 0;
-  background: rgba(var(--accent-rgb), 0.16);
-  border-left: 1px solid rgba(var(--accent-rgb), 0.5);
-  border-right: 1px solid rgba(var(--accent-rgb), 0.5);
-  pointer-events: none;
-}
-#overview-markers {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-}
-.ov-marker {
-  position: absolute;
-  top: 4px;
-  bottom: 4px;
-  width: 2px;
-  margin-left: -1px;
-  background: var(--mc, var(--text-soft));
-  opacity: 0.85;
-}
-#overview-playhead {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  width: 2px;
-  margin-left: -1px;
-  background: var(--text-max);
-  box-shadow: 0 0 5px rgba(var(--bright-rgb), 0.55);
-  pointer-events: none;
-  z-index: 3;
-}
-#overview-window {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  width: 100%;
-  box-sizing: border-box;
-  border: 1px solid var(--accent);
-  border-radius: 4px;
-  background: rgba(var(--accent-rgb), 0.14);
-  cursor: grab;
-  z-index: 2;
-}
-#overview-window.grabbing { cursor: grabbing; }
-.ov-grip {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 8px;
-  cursor: ew-resize;
-}
-#overview-window-l { left: -4px; }
-#overview-window-r { right: -4px; }
-
-.timeline-tools {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex: none;
-}
-.timeline-tools button {
-  width: 30px;
-  height: 26px;
-  min-width: 0;
-  padding: 6px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text);
-}
-.timeline-tools button:hover { background: var(--hover); }
-.timeline-tools button svg { display: block; width: 100%; height: 100%; }
 .timeline-footer-row {
   display: flex;
   align-items: flex-start;
@@ -5048,34 +4948,21 @@ button.primary.settings-save-glow {
   flex: 0 0 auto;
   fill: currentColor;
 }
-#snap-toggle.active {
-  color: var(--accent);
-  border-color: var(--accent);
-  background: rgba(var(--accent-rgb), 0.12);
-}
 #trim-mode-toggle.active {
   color: var(--accent-text);
   border-color: var(--accent);
   background: var(--accent);
 }
-.deck.simple-timeline .nav-row { display: none; }
-.deck.simple-timeline #overview,
-.deck.simple-timeline #zoom-out,
-.deck.simple-timeline #zoom-fit,
-.deck.simple-timeline #zoom-in,
-.deck.simple-timeline #snap-toggle {
-  display: none;
-}
-.deck.simple-timeline:not(.simple-trim-active) #dim-in,
-.deck.simple-timeline:not(.simple-trim-active) #dim-out,
-.deck.simple-timeline:not(.simple-trim-active) #handle-in,
-.deck.simple-timeline:not(.simple-trim-active) #handle-out,
-.deck.simple-timeline:not(.simple-trim-active) #trim-band,
-.deck.simple-timeline:not(.simple-trim-active) #export-clip,
-.deck.simple-timeline:not(.simple-trim-active) .trim-readout {
+.deck:not(.simple-trim-active) #dim-in,
+.deck:not(.simple-trim-active) #dim-out,
+.deck:not(.simple-trim-active) #handle-in,
+.deck:not(.simple-trim-active) #handle-out,
+.deck:not(.simple-trim-active) #trim-band,
+.deck:not(.simple-trim-active) #export-clip,
+.deck:not(.simple-trim-active) .trim-readout {
   display: none !important;
 }
-.deck.simple-timeline:not(.simple-trim-active) #clip-export-row {
+.deck:not(.simple-trim-active) #clip-export-row {
   display: none !important;
 }
 #clip-export-row[hidden] { display: none; }
@@ -5083,11 +4970,7 @@ button.primary.settings-save-glow {
 .review-viewer.group-review #dim-out,
 .review-viewer.group-review #handle-in,
 .review-viewer.group-review #handle-out,
-.review-viewer.group-review #trim-band,
-.review-viewer.group-review #overview-trim { display: none !important; }
-.deck.legacy-timeline .nav-row {
-  display: flex;
-}
+.review-viewer.group-review #trim-band { display: none !important; }
 .audio-track-panel {
   flex: 1 1 auto;
   min-width: 0;

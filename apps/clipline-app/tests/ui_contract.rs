@@ -1266,13 +1266,6 @@ fn review_player_owns_all_controls() {
         "id=\"keys-close\"",
         "id=\"delete-clip\"",
         "id=\"ruler\"",
-        "id=\"overview\"",
-        "id=\"overview-trim\"",
-        "id=\"overview-markers\"",
-        "id=\"overview-playhead\"",
-        "id=\"overview-window\"",
-        "id=\"overview-window-l\"",
-        "id=\"overview-window-r\"",
         "id=\"game-event-rail\"",
         "id=\"game-event-rail-title\"",
         "id=\"game-event-rail-summary\"",
@@ -1280,10 +1273,6 @@ fn review_player_owns_all_controls() {
         "id=\"game-event-list\"",
         "id=\"game-metadata-panel\"",
         "id=\"game-metadata-fields\"",
-        "id=\"zoom-out\"",
-        "id=\"zoom-fit\"",
-        "id=\"zoom-in\"",
-        "id=\"snap-toggle\"",
         "id=\"trim-mode-toggle\"",
         "id=\"audio-track-panel\"",
         "id=\"audio-track-summary\"",
@@ -1324,7 +1313,6 @@ fn review_player_owns_all_controls() {
         "id=\"set-open-on-startup\"",
         "id=\"set-close-to-tray\"",
         "id=\"set-minimize-to-tray\"",
-        "id=\"set-legacy-timeline-editor\"",
         "id=\"set-update-channel\"",
         "id=\"set-reopen-window-after-update\"",
         "id=\"check-updates\"",
@@ -1465,14 +1453,12 @@ fn review_player_owns_all_controls() {
     assert!(
         html.contains("Close to Tray")
             && html.contains("Minimize to Tray")
-            && html.contains("Legacy timeline editor")
             && html.contains("Updates")
             && html.contains("value=\"stable\"")
             && !html.contains("value=\"stable\" disabled")
             && !html.contains("Stable (coming soon)")
             && main_js().contains("close_to_tray")
             && main_js().contains("minimize_to_tray")
-            && main_js().contains("legacy_timeline_editor")
             && main_js().contains("update_channel")
             && main_js().contains("check_for_updates")
             && main_js().contains("channel: $(\"set-update-channel\").value")
@@ -1490,11 +1476,23 @@ fn review_player_owns_all_controls() {
         main_js().contains("function setSimpleTrimMode(active)")
             && main_js().contains("function applyTimelineEditorPreference()")
             && main_js().contains("quickTrimRange(")
-            && styles_css().contains(".deck.simple-timeline")
-            && styles_css().contains("#trim-mode-toggle.active")
-            && styles_css().contains(".deck.legacy-timeline"),
-        "review timeline must default to simple trim mode while preserving the legacy editor mode"
+            && styles_css().contains("#trim-mode-toggle.active"),
+        "review timeline must use the simple trim mode"
     );
+    // The legacy timeline editor (navigator, zoom buttons, snap toggle) is gone.
+    for removed in [
+        "set-legacy-timeline-editor",
+        "id=\"overview\"",
+        "id=\"snap-toggle\"",
+        "id=\"zoom-in\"",
+        "class=\"nav-row\"",
+    ] {
+        assert!(!html.contains(removed), "index.html still contains {removed}");
+    }
+    for removed in ["legacy_timeline_editor", "legacyTimelineEnabled", "toggleSnap", "overviewDrag"] {
+        assert!(!main_js().contains(removed), "the UI still references {removed}");
+    }
+    assert!(!styles_css().contains("legacy-timeline") && !styles_css().contains("#overview"));
     assert!(
         main_js().contains("requestWindowClose")
             && main_js().contains("confirmQuit")
@@ -2003,10 +2001,6 @@ fn review_player_owns_all_controls() {
         "id=\"rail-settings\"",
         "id=\"delete-clip\"",
         "id=\"export-clip\"",
-        "id=\"zoom-out\"",
-        "id=\"zoom-fit\"",
-        "id=\"zoom-in\"",
-        "id=\"snap-toggle\"",
     ] {
         let start = html.find(id).expect("transport button exists");
         let body_end = html[start..]
@@ -3418,7 +3412,6 @@ fn timeline_and_media_events_render_the_logical_playhead() {
     let review = review_js();
     let main = read_ui_js("main.js");
     assert!(js_function_body(&review, "paintTimeline").contains("reviewPlayheadTime()"));
-    assert!(js_function_body(&review, "paintOverview").contains("reviewPlayheadTime()"));
     assert!(js_function_body(&review, "seekBy").contains("reviewSeekState.targetTime"));
     assert!(main.contains("const current = reviewPlayheadTime();"));
 }
@@ -3752,7 +3745,7 @@ fn settings_tabs_preserve_unsaved_draft_until_save() {
 }
 
 #[test]
-fn timeline_navigator_and_zoom_controls_are_wired() {
+fn timeline_view_and_trim_controls_are_wired() {
     let html = index_html();
     let js = main_js();
     let css = styles_css();
@@ -3820,25 +3813,19 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
         "event markers must live on the timeline band above the attached time ruler"
     );
 
-    let overview = html.find("id=\"overview\"").expect("overview");
     assert!(
-        ruler < overview && overview < timeline_footer_row && timeline_footer_row < export_row,
-        "the navigator minimap and below-timeline actions must sit above the export row"
+        timeline_footer_row < export_row,
+        "the below-timeline actions must sit above the export row"
     );
 
-    // Central view setter + paint/rebuild split keep the navigator in sync, and
-    // every view change routes through the pure helpers.
+    // Every view change routes through the central setter and the pure helpers.
     for required in [
         "function applyView",
-        "function paintOverview",
-        "function renderOverviewMarkers",
         "function maybeFollow",
-        "onOverviewPointerDown",
         "function zoomAtPlayhead",
         "function zoomToSelection",
         "zoomView(",
         "panView(",
-        "setViewEdge(",
         "followView(",
         "snapTime(",
     ] {
@@ -3848,11 +3835,7 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
         );
     }
 
-    // Navigator window, markers, and snap feedback need styles.
-    assert!(
-        css.contains("#overview-window") && css.contains(".ov-marker") && css.contains(".snapped"),
-        "navigator window, marker ticks, and snap feedback must be styled"
-    );
+    assert!(css.contains(".snapped"), "snap feedback must be styled");
     let metadata_panel_rule = css_rule_body(&css, ".game-metadata-panel");
     let metadata_fields_rule = css_rule_body(&css, ".game-metadata-fields");
     let timeline_footer_row_rule = css_rule_body(&css, ".timeline-footer-row");
@@ -3939,8 +3922,8 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
         .and_then(|rest| rest.split("function setSimpleTrimMode").next())
         .expect("timeline preference function");
     assert!(
-        timeline_preference.contains("$(\"trim-action-panel\").hidden = legacy || group;"),
-        "legacy timeline and group playlist modes should hide the below-timeline scissors strip"
+        timeline_preference.contains("$(\"trim-action-panel\").hidden = group;"),
+        "group playlist mode should hide the below-timeline scissors strip"
     );
     assert!(
         timeline_preference.contains("$(\"trim-mode-label\")")
@@ -3951,8 +3934,8 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
         "the scissors toggle must read Close in clip mode and Clip when idle"
     );
     assert!(
-        css.contains(".deck.simple-timeline:not(.simple-trim-active) #export-clip")
-            && css.contains(".deck.simple-timeline:not(.simple-trim-active) .trim-readout"),
+        css.contains(".deck:not(.simple-trim-active) #export-clip")
+            && css.contains(".deck:not(.simple-trim-active) .trim-readout"),
         "the export clip action must remain scoped to the deck trim-mode state"
     );
     assert!(

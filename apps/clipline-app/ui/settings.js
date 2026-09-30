@@ -275,7 +275,6 @@ function fillSettings(s) {
   $("set-open-on-startup").checked = !!s.open_on_startup;
   $("set-close-to-tray").checked = s.close_to_tray !== false;
   $("set-minimize-to-tray").checked = !!s.minimize_to_tray;
-  $("set-legacy-timeline-editor").checked = !!s.legacy_timeline_editor;
   $("set-theme").value = s.ui_theme || "booth";
   applyUiTheme(s.ui_theme);
   $("set-update-channel").value = s.update_channel || "nightly";
@@ -389,7 +388,6 @@ function readSettings() {
     open_on_startup: $("set-open-on-startup").checked,
     close_to_tray: $("set-close-to-tray").checked,
     minimize_to_tray: $("set-minimize-to-tray").checked,
-    legacy_timeline_editor: $("set-legacy-timeline-editor").checked,
     ui_theme: $("set-theme").value,
     update_channel: $("set-update-channel").value,
     reopen_window_after_update: $("set-reopen-window-after-update").checked,
@@ -697,7 +695,6 @@ function gamePluginSummary(plugin, settings = gamePluginSetting(plugin)) {
 function refreshReviewForSettingsChange() {
   if (clipsCache.length) renderClips();
   if (!currentClip) return;
-  if (typeof renderOverviewMarkers === "function") renderOverviewMarkers();
   if (typeof renderMarkers === "function") renderMarkers();
   renderGameEventRail(currentClip);
   renderGamePlayRail(currentClip);

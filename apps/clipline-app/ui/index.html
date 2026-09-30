@@ -272,7 +272,7 @@
         <div class="deck">
           <div class="timeline-stack">
             <div class="timeline-main">
-              <div id="timeline" title="Click to seek · drag the selection to slide · drag the edges to trim · scroll to zoom">
+              <div id="timeline" title="Click to seek · press Clip to create a clip">
                 <div id="dim-in" class="dim"></div>
                 <div id="dim-out" class="dim"></div>
                 <div id="trim-band" title="Drag to slide the whole selection"></div>
@@ -286,31 +286,6 @@
             <div id="ruler" class="ruler"></div>
           </div>
 
-          <div class="nav-row">
-            <div id="overview" title="Whole clip · drag or scroll to pan · drag the box edges to zoom">
-              <div id="overview-trim"></div>
-              <div id="overview-markers"></div>
-              <div id="overview-playhead"></div>
-              <div id="overview-window">
-                <span id="overview-window-l" class="ov-grip"></span>
-                <span id="overview-window-r" class="ov-grip"></span>
-              </div>
-            </div>
-            <div class="timeline-tools">
-              <button id="zoom-out" title="Zoom out (-)">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14"/></svg>
-              </button>
-              <button id="zoom-fit" title="Fit trim (\) · Shift-click or Shift+\ fits the whole clip">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7v10M19 7v10"/><path d="M9 12h6M9 12l2.5-2.5M9 12l2.5 2.5M15 12l-2.5-2.5M15 12l-2.5 2.5"/></svg>
-              </button>
-              <button id="zoom-in" title="Zoom in (+)">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
-              </button>
-              <button id="snap-toggle" class="active" title="Snapping (S) · hold Alt to bypass">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4v8a5 5 0 0 0 10 0V4"/><path d="M5 4h4M15 4h4"/></svg>
-              </button>
-            </div>
-          </div>
           <div class="timeline-footer-row">
             <details id="audio-track-panel" class="audio-track-panel" hidden>
               <summary>
@@ -393,16 +368,6 @@
               <label class="check-line">
                 <input id="set-minimize-to-tray" type="checkbox" />
                 <span>Send Minimize to the system tray</span>
-              </label>
-            </div>
-            <div class="setting-row" data-settings-key="legacy_timeline_editor">
-              <div class="setting-info">
-                <strong>Legacy timeline editor</strong>
-                <span>Use the zoom navigator, snap toggle, and always-visible trim handles.</span>
-              </div>
-              <label class="check-line">
-                <input id="set-legacy-timeline-editor" type="checkbox" />
-                <span>Use legacy timeline editor</span>
               </label>
             </div>
             <div class="setting-row" data-settings-key="ui_theme">
@@ -1430,7 +1395,6 @@
           <div><dt><kbd>+</kbd> <kbd>&minus;</kbd></dt><dd>Zoom in / out</dd></div>
           <div><dt><kbd>\</kbd></dt><dd>Fit trim selection</dd></div>
           <div><dt><kbd>&#8679;</kbd>+<kbd>\</kbd></dt><dd>Fit whole clip</dd></div>
-          <div><dt><kbd>S</kbd></dt><dd>Toggle snapping (<kbd>Alt</kbd> bypass)</dd></div>
           <div><dt>Scroll</dt><dd>Zoom · <kbd>&#8679;</kbd> pans · navigator scroll pans</dd></div>
         </dl>
       </section>

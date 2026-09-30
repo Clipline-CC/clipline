@@ -211,8 +211,6 @@ impl AppSettings {
                 .unwrap_or(defaults.minimize_to_tray),
             reopen_window_after_update: bool_field(object, "reopen_window_after_update")
                 .unwrap_or(defaults.reopen_window_after_update),
-            legacy_timeline_editor: bool_field(object, "legacy_timeline_editor")
-                .unwrap_or(defaults.legacy_timeline_editor),
             ui_theme: deserialize_field(object, "ui_theme").unwrap_or(defaults.ui_theme),
             update_channel: deserialize_field(object, "update_channel")
                 .map(normalize_channel)
