@@ -479,6 +479,7 @@ pub fn normalize_media_dir(raw: &str) -> Result<PathBuf, String> {
         return Err("media folder is required".into());
     }
     let path = PathBuf::from(trimmed);
+    require_local_path(&path)?;
     if !path.is_absolute() {
         return Err("media folder must be an absolute path".into());
     }
@@ -502,7 +503,7 @@ fn validate_media_scope_root(path: &Path) -> Result<(), String> {
         let Some(root) = std::env::var_os(variable).map(PathBuf::from) else {
             continue;
         };
-        if !root.is_absolute() {
+        if require_local_path(&root).is_err() {
             continue;
         }
         let root = root.canonicalize().unwrap_or(root);
@@ -528,10 +529,44 @@ pub fn normalize_replay_cache_dir(raw: &str) -> Result<PathBuf, String> {
         return Err("replay cache folder is required".into());
     }
     let path = PathBuf::from(trimmed);
+    require_local_path(&path)?;
     if !path.is_absolute() {
         return Err("replay cache folder must be an absolute path".into());
     }
     Ok(path)
+}
+
+/// Reject UNC and device paths before any filesystem operation can contact a host.
+pub(crate) fn require_local_path(path: &Path) -> Result<(), String> {
+    if !path.is_absolute() || path.as_os_str().to_string_lossy().contains('\0') {
+        return Err("path must be an absolute local filesystem path".into());
+    }
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    if normalized.starts_with("//") {
+        let bytes = normalized.as_bytes();
+        let local_verbatim_disk = bytes.len() >= 7 && &bytes[..4] == b"//?/"
+            && bytes[4].is_ascii_alphabetic() && &bytes[5..7] == b":/";
+        if !local_verbatim_disk {
+            return Err("network and device paths are not supported for local media".into());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn security_scan_network_paths_are_rejected_without_resolution() {
+    for raw in [r"\\attacker\share\clip.mp4", r"\\?\UNC\attacker\share", "//attacker/share", r"\\.\device"] {
+        assert!(require_local_path(Path::new(raw)).is_err());
+        assert!(normalize_media_dir(raw).is_err());
+        assert!(normalize_replay_cache_dir(raw).is_err());
+    }
+    for raw in [r"C:\Media", r"\\?\C:\Media", "/tmp/media"] {
+        if Path::new(raw).is_absolute() {
+            assert!(require_local_path(Path::new(raw)).is_ok());
+        }
+    }
+    assert!(require_local_path(Path::new("relative/media")).is_err());
 }
 
 fn gib_to_bytes(

@@ -23,6 +23,12 @@ pub(crate) struct MicMonitorEvent {
 #[derive(Default)]
 pub(crate) struct NativeMediaFolderAuthorization(pub(crate) Mutex<Option<PathBuf>>);
 
+#[derive(Default)]
+pub(crate) struct NativeStorageFolderAuthorizations {
+    pub(crate) media: NativeMediaFolderAuthorization,
+    pub(crate) replay_cache: NativeMediaFolderAuthorization,
+}
+
 impl NativeMediaFolderAuthorization {
     pub(crate) fn authorize(&self, path: PathBuf) {
         if let Ok(mut pending) = self.0.lock() {
@@ -44,7 +50,7 @@ impl NativeMediaFolderAuthorization {
         {
             Ok(())
         } else {
-            Err("choose a new media folder with the native folder picker first".into())
+            Err("choose a new storage folder with the native folder picker first".into())
         }
     }
 
@@ -361,6 +367,19 @@ mod tests {
 
         state.transition(WindowLifecycleMode::Taskbar);
         assert!(ensure_foreground_microphone_test(&state).is_err());
+    }
+
+    #[test]
+    fn security_scan_storage_picker_authorizations_are_independent() {
+        let tokens = NativeStorageFolderAuthorizations::default();
+        let old = PathBuf::from("/old");
+        let selected = PathBuf::from("/selected");
+        tokens.media.authorize(selected.clone());
+        assert!(tokens.replay_cache.validate_change(&old, &selected).is_err());
+        tokens.replay_cache.authorize(selected.clone());
+        assert!(tokens.replay_cache.validate_change(&old, &selected).is_ok());
+        tokens.replay_cache.commit(&selected);
+        assert!(tokens.replay_cache.validate_change(&old, &selected).is_err());
     }
 
     #[test]

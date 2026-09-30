@@ -58,7 +58,7 @@ pub(crate) use commands::{AudioDeviceLists, autostart_should_mutate_for_current_
 pub(crate) use settings_txn::run_before_releasing_settings_save_lock;
 pub(crate) use hotkeys::{effective_global_hotkeys, global_hotkeys, parse_global_hotkey, resume_hotkeys_after_ui_gone, save_hotkey_label, sync_global_hotkeys};
 pub(crate) use updates::spawn_update_poller;
-pub(crate) use media::{MicTestState, NativeMediaFolderAuthorization, display_media_folder_path};
+pub(crate) use media::{MicTestState, NativeStorageFolderAuthorizations, display_media_folder_path};
 pub(crate) use events::{GameDetectionEvent, pump_events, should_log_window_event, should_reconcile_native_window_event};
 pub(crate) use webview::{StartupWarnings, arm_frontend_ready_watchdog, is_app_window_label, probe_webview_after_reveal, result_debug, webview2_runtime_diagnostic, webview_labels};
 pub(crate) use setup::{FirstRunState, MAIN_WINDOW_LABEL, TrayItems, WEBVIEW_READY_TIMEOUT, WEBVIEW_REPAIR_NOTICE_SHOWN, WINDOW_LIFECYCLE_EVENT};
