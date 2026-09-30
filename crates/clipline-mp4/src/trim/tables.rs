@@ -8,10 +8,9 @@ use super::model::{SampleRecord, TrimError};
 /// this rejects corrupt or hostile declarations before allocation.
 const MAX_FINALIZED_MOOV_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Upper bound for per-track sample metadata. At 60 FPS this still permits
-/// more than 18 hours of video while preventing tiny hostile tables from
-/// expanding into multi-gigabyte allocations.
-const MAX_PARSED_SAMPLES: usize = 4_000_000;
+/// Movie-wide sample budget, also enforced on individual expanded tables.
+pub(crate) const MAX_PARSED_SAMPLES: usize = 4_000_000;
+const MAX_TOP_LEVEL_BOXES: usize = 4096;
 
 pub(crate) fn parse_sample_table(
     input: &[u8],
@@ -256,7 +255,12 @@ pub(crate) fn find_box_between(
     end: usize,
     fourcc: &[u8; 4],
 ) -> Result<Option<BoxInfo>, TrimError> {
+    let mut inspected = 0;
     while offset + 8 <= end {
+        if inspected == crate::walker::MAX_BOXES_PER_CONTAINER {
+            return Err(TrimError::Unsupported("sample-entry box limit exceeded".into()));
+        }
+        inspected += 1;
         let b = read_box_at(input, offset, end)?;
         let next = box_end(&b)?;
         if &b.fourcc == fourcc {
@@ -306,7 +310,12 @@ pub(crate) fn read_finalized_moov_bytes<R: Read + Seek>(reader: &mut R) -> Resul
     reader.seek(SeekFrom::Start(0))?;
 
     let mut offset = 0_u64;
+    let mut inspected = 0_usize;
     while offset < file_len {
+        if inspected == MAX_TOP_LEVEL_BOXES {
+            return Err(TrimError::Unsupported("top-level box limit exceeded".into()));
+        }
+        inspected += 1;
         let top = read_top_level_box(reader, offset, file_len)?;
         if &top.fourcc == b"moov" {
             return read_box_bytes(reader, &top);
@@ -538,6 +547,26 @@ mod tests {
     use super::*;
     use crate::walker::{find, walk};
     use std::io::{Cursor, Read, Seek, SeekFrom};
+
+    #[test]
+    fn security_scan_sample_entry_box_search_has_a_budget() {
+        let free = crate::boxes::mp4_box(*b"free", Vec::new());
+        let config = crate::boxes::mp4_box(*b"avcC", Vec::new());
+        let mut exact = free.repeat(crate::walker::MAX_BOXES_PER_CONTAINER - 1);
+        exact.extend_from_slice(&config);
+        assert!(find_box_between(&exact, 0, exact.len(), b"avcC").unwrap().is_some());
+        let mut excessive = free.repeat(crate::walker::MAX_BOXES_PER_CONTAINER);
+        excessive.extend_from_slice(&config);
+        assert!(find_box_between(&excessive, 0, excessive.len(), b"avcC").unwrap_err().to_string().contains("box limit"));
+    }
+
+    #[test]
+    fn security_scan_moov_reader_bounds_box_work() {
+        let bytes = crate::boxes::mp4_box(*b"free", Vec::new()).repeat(MAX_TOP_LEVEL_BOXES + 1);
+        let mut reader = TrackingCursor::new(bytes, 0..0);
+        assert!(read_finalized_moov_bytes(&mut reader).unwrap_err().to_string().contains("top-level box limit"));
+        assert!(reader.bytes_read <= MAX_TOP_LEVEL_BOXES * 8);
+    }
 
         struct TrackingCursor {
             inner: Cursor<Vec<u8>>,

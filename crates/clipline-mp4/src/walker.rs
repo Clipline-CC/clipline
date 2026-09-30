@@ -1,5 +1,7 @@
 use crate::box_header::{decode_box_header, uses_large_size};
 
+pub(crate) const MAX_BOXES_PER_CONTAINER: usize = 65_536;
+
 /// One parsed box header. Offsets are absolute within the parsed buffer.
 #[derive(Debug, Clone)]
 pub struct BoxInfo {
@@ -87,6 +89,9 @@ fn walk_range(buf: &[u8], mut pos: u64, end: u64) -> Vec<BoxInfo> {
         let Ok(decoded) = decode_box_header(size32, large_size, pos, end) else {
             break;
         };
+        if out.len() == MAX_BOXES_PER_CONTAINER {
+            return Vec::new();
+        }
         out.push(BoxInfo {
             fourcc,
             offset: pos,
@@ -102,6 +107,17 @@ fn walk_range(buf: &[u8], mut pos: u64, end: u64) -> Vec<BoxInfo> {
 mod tests {
     use super::*;
     use crate::boxes::mp4_box;
+
+    #[test]
+    fn security_scan_buffered_box_walk_has_a_budget() {
+        let mut bytes = mp4_box(*b"free", Vec::new()).repeat(MAX_BOXES_PER_CONTAINER);
+        assert_eq!(walk(&bytes).len(), MAX_BOXES_PER_CONTAINER);
+        bytes.extend_from_slice(&[0; 7]);
+        assert_eq!(walk(&bytes).len(), MAX_BOXES_PER_CONTAINER);
+        bytes.truncate(MAX_BOXES_PER_CONTAINER * 8);
+        bytes.extend(mp4_box(*b"free", Vec::new()));
+        assert!(walk(&bytes).is_empty());
+    }
 
     #[test]
     fn walks_top_level_boxes() {

@@ -7,10 +7,34 @@ use super::model::{
     rescale_ticks,
 };
 use super::tables::{
+    MAX_PARSED_SAMPLES,
     box_end, child, find_box_between, fourcc_str, parse_sample_table, read_box_at,
     read_finalized_moov_bytes, read_fourcc_bounded, read_slice, read_u16, read_u16_bounded,
     read_u32_bounded, read_u64_bounded, require_child, validate_table_entries,
 };
+
+const MAX_PARSED_TRACKS: usize = 64;
+
+fn validate_track_count(children: &[BoxInfo]) -> Result<(), TrimError> {
+    if children.iter().filter(|b| &b.fourcc == b"trak").count() > MAX_PARSED_TRACKS {
+        return Err(TrimError::Unsupported("movie track count exceeds limit".into()));
+    }
+    Ok(())
+}
+
+fn validate_movie_sample_budget(input: &[u8], children: &[BoxInfo]) -> Result<(), TrimError> {
+    let mut total = 0_usize;
+    for trak in children.iter().filter(|b| &b.fourcc == b"trak") {
+        let mdia = require_child(input, trak, b"mdia")?;
+        let minf = require_child(input, &mdia, b"minf")?;
+        let stbl = require_child(input, &minf, b"stbl")?;
+        let stsz = require_child(input, &stbl, b"stsz")?;
+        let count = read_u32_bounded(input, stsz.payload_offset as usize + 8, box_end(&stsz)?, "stsz")? as usize;
+        total = total.checked_add(count).filter(|&n| n <= MAX_PARSED_SAMPLES)
+            .ok_or_else(|| TrimError::Corrupt("movie sample count exceeds limit".into()))?;
+    }
+    Ok(())
+}
 
 pub(crate) fn media_track_counts_reader<R: Read + Seek>(
     reader: &mut R,
@@ -25,6 +49,7 @@ pub(crate) fn finalized_movie_track_counts(input: &[u8]) -> Result<MediaTrackCou
         .ok_or_else(|| TrimError::Unsupported("missing finalized moov".into()))?
         .clone();
     let moov_children = children(input, &moov);
+    validate_track_count(&moov_children)?;
     if find(&moov_children, b"mvex").is_some() {
         return Err(TrimError::Unsupported(
             "fragmented/unfinalized files are not trim-ready".into(),
@@ -50,6 +75,7 @@ pub(crate) fn finalized_movie_video_codecs(input: &[u8]) -> Result<Vec<MediaVide
         .ok_or_else(|| TrimError::Unsupported("missing finalized moov".into()))?
         .clone();
     let moov_children = children(input, &moov);
+    validate_track_count(&moov_children)?;
     if find(&moov_children, b"mvex").is_some() {
         return Err(TrimError::Unsupported(
             "fragmented/unfinalized files are not trim-ready".into(),
@@ -80,6 +106,7 @@ fn parse_movie_with_source_len(input: &[u8], source_len: usize) -> Result<Parsed
         .ok_or_else(|| TrimError::Unsupported("missing finalized moov".into()))?
         .clone();
     let moov_children = children(input, &moov);
+    validate_track_count(&moov_children)?;
     if find(&moov_children, b"mvex").is_some() {
         return Err(TrimError::Unsupported(
             "fragmented/unfinalized files are not trim-ready".into(),
@@ -89,6 +116,7 @@ fn parse_movie_with_source_len(input: &[u8], source_len: usize) -> Result<Parsed
         .ok_or_else(|| TrimError::Unsupported("missing mvhd".into()))?;
     let movie_timescale = parse_header_timescale(input, mvhd, "mvhd")?;
 
+    validate_movie_sample_budget(input, &moov_children)?;
     let tracks: Vec<ParsedTrack> = moov_children
         .iter()
         .filter(|b| &b.fourcc == b"trak")
@@ -157,6 +185,7 @@ fn apply_track_edit_list(
     let mut presentation_cursor_movie = 0_u64;
     let mut previous_media_end = 0_u64;
     let mut saw_media = false;
+    let mut sample_cursor = 0_usize;
     for edit in edits {
         let presentation_start =
             rescale_ticks(presentation_cursor_movie, movie_timescale, track_timescale)?;
@@ -173,7 +202,7 @@ fn apply_track_edit_list(
                 "overlapping or backward edit-list media ranges".into(),
             ));
         }
-        let first = samples
+        let first = sample_cursor + samples[sample_cursor..]
             .iter()
             .position(|sample| sample.start_ticks == media_start)
             .ok_or_else(|| {
@@ -215,6 +244,7 @@ fn apply_track_edit_list(
             ));
         }
         saw_media = true;
+        sample_cursor = first + copied;
     }
     if output.is_empty() {
         return Err(TrimError::Unsupported(
@@ -474,15 +504,22 @@ fn parse_hvcc(input: &[u8], hvcc: &BoxInfo) -> Result<HevcParamSets, TrimError> 
         pos += 1;
         let num_nalus = read_u16_bounded(input, pos, end, "hvcC")?;
         pos += 2;
+        let existing = match nal_type { 32 => vps.len(), 33 => sps.len(), 34 => pps.len(), _ => 0 };
+        if existing + usize::from(num_nalus) > usize::from(u16::MAX) {
+            return Err(TrimError::Unsupported("hvcC parameter-set count exceeds limit".into()));
+        }
         for _ in 0..num_nalus {
             let len = read_u16_bounded(input, pos, end, "hvcC")? as usize;
             pos += 2;
-            let data = read_slice(input, pos, len, end)?.to_vec();
+            if len == 0 {
+                return Err(TrimError::Corrupt("empty hvcC NAL unit".into()));
+            }
+            let data = read_slice(input, pos, len, end)?;
             pos += len;
             match nal_type {
-                32 => vps.push(data),
-                33 => sps.push(data),
-                34 => pps.push(data),
+                32 => vps.push(data.to_vec()),
+                33 => sps.push(data.to_vec()),
+                34 => pps.push(data.to_vec()),
                 _ => {}
             }
         }
@@ -515,6 +552,56 @@ mod tests {
     use super::*;
     use crate::HybridMp4Writer;
     use std::io::Cursor;
+
+    #[test]
+    fn security_scan_hevc_parameter_sets_have_a_combined_budget() {
+        let config = |extra: u16, empty: bool| {
+            let mut payload = vec![0; 23];
+            payload[22] = 4;
+            for (nal_type, count) in [(32_u8, u16::MAX), (32, extra), (33, 1), (34, 1)] {
+                payload.push(nal_type);
+                payload.extend_from_slice(&count.to_be_bytes());
+                for _ in 0..count {
+                    payload.extend_from_slice(&(u16::from(!empty)).to_be_bytes());
+                    if !empty { payload.push(1); }
+                }
+            }
+            crate::boxes::mp4_box(*b"hvcC", payload)
+        };
+        let exact = config(0, false);
+        assert_eq!(parse_hvcc(&exact, &walk(&exact)[0]).unwrap().0.len(), usize::from(u16::MAX));
+        let excessive = config(1, false);
+        assert!(parse_hvcc(&excessive, &walk(&excessive)[0]).unwrap_err().to_string().contains("count exceeds"));
+        let empty = config(0, true);
+        assert!(parse_hvcc(&empty, &walk(&empty)[0]).unwrap_err().to_string().contains("empty hvcC"));
+    }
+
+    #[test]
+    fn security_scan_movie_budget_rejects_compressed_sample_amplification() {
+        use crate::boxes::mp4_box;
+        let mut stsz = vec![0; 4];
+        stsz.extend_from_slice(&1_u32.to_be_bytes());
+        stsz.extend_from_slice(&2_000_001_u32.to_be_bytes());
+        let trak = mp4_box(*b"trak", mp4_box(*b"mdia", mp4_box(*b"minf", mp4_box(*b"stbl", mp4_box(*b"stsz", stsz)))));
+        let bytes = mp4_box(*b"moov", trak.repeat(2));
+        let top = walk(&bytes);
+        let kids = children(&bytes, &top[0]);
+        assert!(validate_movie_sample_budget(&bytes, &kids).unwrap_err().to_string().contains("movie sample count"));
+        assert!(validate_movie_sample_budget(&bytes, &kids[..1]).is_ok());
+        let mut mvhd = vec![0; 20];
+        mvhd[12..16].copy_from_slice(&1000_u32.to_be_bytes());
+        let bytes = mp4_box(*b"moov", [mp4_box(*b"mvhd", mvhd), trak.repeat(2)].concat());
+        assert!(parse_movie(&bytes).err().unwrap().to_string().contains("movie sample count"));
+    }
+
+    #[test]
+    fn security_scan_movie_metadata_rejects_excessive_tracks() {
+        use crate::boxes::mp4_box;
+        let bytes = mp4_box(*b"moov", mp4_box(*b"trak", Vec::new()).repeat(MAX_PARSED_TRACKS + 1));
+        assert!(finalized_movie_track_counts(&bytes).unwrap_err().to_string().contains("track count"));
+        assert!(finalized_movie_video_codecs(&bytes).unwrap_err().to_string().contains("track count"));
+        assert!(parse_movie(&bytes).err().unwrap().to_string().contains("track count"));
+    }
 
         #[test]
         fn rejects_unfinalized_or_missing_sample_tables() {
