@@ -4,6 +4,42 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-09-30): Security scan remediation
+
+`fix/security-scan-2026-09-30` addresses the supplied release, IPC, media/data-loss,
+parser, transport, subprocess, and UI findings. The per-finding ledger and practical
+limits are in [docs/security-scan-remediation.md](docs/security-scan-remediation.md).
+The usual unticked plan was committed before implementation. No release is published.
+
+The production signing key is now only an environment secret in `release-signing`;
+the repository secret is deleted. That environment requires dain98's approval,
+disallows admin bypass, and permits only versioned release tags. GitHub-hosted
+artifact-only signing uses a pinned CLI, with no source checkout/build/cache.
+Benchmarks receive no secrets and smoke-test their generated throwaway key.
+Both release branches refuse deletion/force-push; develop requires a PR and green
+Ubuntu/Windows checks. Version-tag creation is maintainer-only and tags are immutable.
+Secret scanning and push protection are enabled. The release runbook now uses a
+metadata PR and an explicit signing approval.
+
+The exposed updater key still needs an old-key-signed bridge release for both channels
+before rotation. Its public key is unchanged, preserving installed-client trust.
+Organization 2FA enforcement remains pending until `zipknicks` enables 2FA, as requested.
+Merge this branch before another release because the old workflows no longer have
+a repository signing secret.
+
+The Cloud SDK redaction fix is isolated from the existing dirty local Cloud checkout:
+[Cloud PR #67](https://github.com/Clipline-CC/clipline-cloud/pull/67), pinned at
+`c974427e6cb9a8dffeb66b7f78179937a8e2723f`. Its tests and warning-denied Clippy pass;
+serde wire formats remain unchanged.
+
+Local validation: workspace tests pass (1619 tests, two intentional ignores), followed
+by the final memory sampler regressions; fresh-cache warning-denied workspace Clippy
+passes. Actionlint and 39 workflow PowerShell bodies pass. Both actual signing script
+bodies pass with throwaway Nightly/Stable assets, and independent minisign verification
+checks all four manifest signatures. Evidence remains in ignored `target/security-*`
+and `target/signing-test-*` paths. Ubuntu/Windows PR CI and an app launch check complete
+delivery verification.
+
 ## Checkpoint (2026-09-30): Nightly 1.0.8 published
 
 PR #215 (Steam launch prompt, rail build badge, legacy timeline editor removal,
