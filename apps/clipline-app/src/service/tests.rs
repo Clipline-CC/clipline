@@ -66,6 +66,20 @@ fn clips_dir_resolved_with_probe(
     }
 
     #[test]
+    fn security_scan_impossible_replay_reservation_preserves_library() {
+        let dir = clipline_test_utils::TestDir::new("clipline-service", "oversized-replay");
+        let clip = dir.path().join("owned.mp4");
+        std::fs::write(&clip, [0; 40]).unwrap();
+        clipline_storage::ensure_clip_owned(&clip).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        assert!(storage_quota_full_event(&tx, dir.path(), Some(100), 101, true).is_some());
+        assert!(clip.exists());
+        assert!(rx.try_recv().is_err());
+        assert!(storage_quota_full_event(&tx, dir.path(), Some(100), 100, true).is_none());
+        assert!(!clip.exists());
+    }
+
+    #[test]
     fn auto_delete_makes_room_before_emitting_quota_full() {
         let dir = clipline_test_utils::TestDir::new("clipline-service", "quota-auto-delete");
         let old = dir.path().join("old.mp4");
@@ -1201,6 +1215,21 @@ fn clips_dir_resolved_with_probe(
             std::fs::read(already_marked.with_extension("clipline.json")).unwrap(),
             b"{}"
         );
+    }
+
+    #[test]
+    fn security_scan_failed_replay_save_only_removes_its_own_file() {
+        let dir = TestDir::new("clipline-service", "save-collision");
+        let rec = Recorder::new(MockCapture::new(1, 30), MockEncoder::new(30, 30), usize::MAX);
+        let existing = dir.path().join("existing.mp4");
+        std::fs::write(&existing, b"foreign recording").unwrap();
+        assert!(save(&rec, &existing, 1.0, None, None).is_err());
+        assert_eq!(std::fs::read(&existing).unwrap(), b"foreign recording");
+        assert!(!existing.with_extension("clipline.json").exists());
+        let ours = dir.path().join("ours.mp4");
+        assert!(save(&rec, &ours, 1.0, None, None).is_err());
+        assert!(!ours.exists());
+        assert!(!ours.with_extension("clipline.json").exists());
     }
 
     #[test]

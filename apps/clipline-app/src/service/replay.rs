@@ -53,8 +53,10 @@ pub(super) fn make_room_for_quota(
     let Some(quota) = quota_bytes else {
         return storage_status_or_warn(clips_dir, None).map(|status| (status, 0));
     };
+    let Some(target) = quota.checked_sub(required_bytes) else {
+        return storage_status_or_warn(clips_dir, quota_bytes).map(|status| (status, 0));
+    };
     let before_bytes = storage_status_or_warn(clips_dir, quota_bytes).map(|status| status.total_bytes);
-    let target = quota.saturating_sub(required_bytes);
     let mut deleted_clips = match crate::gc::enforce_quota_with_clip_policy(
         clips_dir,
         Some(target),

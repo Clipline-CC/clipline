@@ -270,7 +270,7 @@ fn status_counts_unmarked_legacy_clipline_filenames() {
 fn status_counts_clips_inside_session_folders() {
     let dir = TestDir::new("clipline-storage", "session-status");
     write_owned(&dir, "legacy.mp4", 10);
-    dir.write("2026-06-12 14-30/clip.mp4", 7);
+    write_owned(&dir, "2026-06-12 14-30/clip.mp4", 7);
     dir.write("2026-06-12 14-30/clip.markers.json", 3);
 
     let status = storage_status(dir.path(), Some(100)).unwrap();

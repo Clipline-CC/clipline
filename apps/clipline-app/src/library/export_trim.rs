@@ -80,12 +80,11 @@ pub(crate) fn export_clip_file(
     };
     let sidecars = (|| {
         if let Some(markers) = &exported_markers {
-            let json = serde_json::to_string_pretty(markers).map_err(|e| e.to_string())?;
+            let json = util::serialize_json_sidecar(markers)?;
             std::fs::write(target.with_extension("markers.json"), json)
                 .map_err(|e| e.to_string())?;
         }
-        if group.is_some() {
-            write_clip_metadata(
+        write_clip_metadata(
                 &target,
                 &ClipMetadata {
                     title,
@@ -94,8 +93,7 @@ pub(crate) fn export_clip_file(
                     source_group: None,
                     source_group_fingerprint: None,
                 },
-            )?;
-        }
+        )?;
         Ok::<(), String>(())
     })();
     if let Err(error) = sidecars {
@@ -203,7 +201,7 @@ pub(crate) fn export_markers_for_range(
 ) -> Result<Option<ClipMarkers>, String> {
     let Some(mut markers) = util::markers_with_inferred_audio_tracks(
         source,
-        util::read_markers_raw(source),
+        util::read_markers_checked(source)?,
     ) else {
         return Ok(None);
     };
@@ -300,6 +298,25 @@ mod tests {
     use super::*;
     use clipline_test_utils::TestDir;
     use clipline_events::{ClipAudioTrack, ClipMarkers, EventKind, PlayerSummary};
+
+    #[test]
+    fn security_scan_ungrouped_exports_are_managed_and_imports_are_preserved() {
+        let dir = TestDir::new("clipline-library", "trim-ownership");
+        let source = dir.path().join("import.mp4");
+        std::fs::write(&source, super::super::test_support::two_real_opus_audio_mp4()).unwrap();
+        for title in [None, Some("Highlight".to_string())] {
+            let exported = export_clip_file(source.clone(), 0.0, 0.5, title, true, None, dir.path()).unwrap();
+            let path = Path::new(&exported.path);
+            assert!(clipline_storage::is_clip_owned(path));
+            assert_eq!(read_clip_metadata(path).unwrap().kind.as_deref(), Some("trim"));
+            assert!(clipline_storage::storage_status(dir.path(), Some(0)).unwrap().total_bytes > 0);
+            clipline_storage::delete_all_managed_media(dir.path()).unwrap();
+            assert!(!path.exists());
+            assert!(!path.with_extension("markers.json").exists());
+            assert!(!clip_metadata_path(path).exists());
+            assert!(source.exists());
+        }
+    }
         #[test]
         fn crop_markers_rebases_times_and_recording_start() {
             let markers = ClipMarkers {

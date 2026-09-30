@@ -635,6 +635,9 @@ fn windows_uninstaller_runs_cleanup_helper_only_for_interactive_removal() {
             && !hooks.contains("RMDir /r \"$INSTDIR\""),
         "the uninstaller must not remove shared WebView2 or recursively wipe the install/cache root"
     );
+    for folder in ["ffmpeg", "ffmpeg-staging", "cloud-cache", "support-staging", "EBWebView"] {
+        assert!(!hooks.contains(&format!("RMDir /r \"$INSTDIR\\{folder}\"")));
+    }
 
     let main = main_rs();
     let cleanup = main
@@ -6159,9 +6162,9 @@ fn groups_are_created_from_trim_and_managed_in_the_library() {
         .and_then(|rest| rest.split("fn export_markers_for_range").next())
         .expect("export_clip_file body");
     assert!(
-        export_clip_file.contains("if group.is_some() {")
-            && !export_clip_file.contains("if title.is_some() || group.is_some()"),
-        "non-group titled exports must retain legacy kind/sidecar behavior"
+        export_clip_file.contains("write_clip_metadata(")
+            && !export_clip_file.contains("if group.is_some() {"),
+        "all authored trim exports must carry ownership metadata"
     );
     assert!(
         js_function_body(&js, "eventRailPolicy").contains("activeGroupName")

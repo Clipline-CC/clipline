@@ -44,7 +44,7 @@ pub(crate) fn rename_clip_title(
     if !source.is_file() {
         return Err("clip no longer exists".into());
     }
-    let mut metadata = read_clip_metadata(&source).unwrap_or_default();
+    let mut metadata = read_clip_metadata_checked(&source)?.unwrap_or_default();
     let kind = clip_kind_from_metadata(&source, &metadata).to_string();
     metadata.title = Some(title.clone());
     metadata.kind = Some(kind.clone());
@@ -87,11 +87,9 @@ impl PreparedOsuSidecarMove {
         if target.exists() && !target_is_source {
             return Err("an osu! enrichment sidecar with that name already exists".into());
         }
-        let bytes = std::fs::read(&source)
-            .map_err(|error| format!("read osu! enrichment sidecar {source:?}: {error}"))?;
-        let mut pending: crate::osu_enrichment::OsuPendingEnrichment =
-            serde_json::from_slice(&bytes)
-                .map_err(|error| format!("parse osu! enrichment sidecar {source:?}: {error}"))?;
+        let mut pending: crate::osu_enrichment::OsuPendingEnrichment = util::read_json_sidecar(&source)
+            .map_err(|error| format!("read osu! enrichment sidecar: {error}"))?
+            .ok_or_else(|| "osu! enrichment sidecar disappeared".to_string())?;
         pending.clip_path = target_clip.display().to_string();
         let staged = target.with_extension("osu-enrichment.rename.tmp");
         let backup = source.with_extension("osu-enrichment.rename.backup");
@@ -105,8 +103,7 @@ impl PreparedOsuSidecarMove {
                 "backup osu! enrichment path already exists: {backup:?}"
             ));
         }
-        let json = serde_json::to_vec_pretty(&pending)
-            .map_err(|error| format!("serialize osu! enrichment sidecar: {error}"))?;
+        let json = util::serialize_json_sidecar(&pending)?;
         std::fs::write(&staged, json)
             .map_err(|error| format!("stage osu! enrichment sidecar {staged:?}: {error}"))?;
         Ok(Some(Self {
@@ -161,7 +158,7 @@ pub(crate) fn rename_clip_files(
     let target = parent.join(&target_name);
     let source_metadata = clip_metadata_path(&source);
     let target_metadata = clip_metadata_path(&target);
-    let metadata = read_clip_metadata(&source).unwrap_or_default();
+    let metadata = read_clip_metadata_checked(&source)?.unwrap_or_default();
     let title = clip_title_from_metadata(&metadata);
     let kind = clip_kind_from_metadata(&source, &metadata).to_string();
 
@@ -191,6 +188,7 @@ pub(crate) fn rename_clip_files(
         return Err("a favorite marker with that name already exists".into());
     }
 
+    let mut target_metadata_value = read_clip_metadata_checked(&target)?.unwrap_or(metadata);
     let pending_osu_move = PreparedOsuSidecarMove::stage(&source, &target)?;
 
     if source != target {
@@ -242,7 +240,6 @@ pub(crate) fn rename_clip_files(
         }
     }
 
-    let mut target_metadata_value = read_clip_metadata(&target).unwrap_or(metadata);
     target_metadata_value.title = title.clone();
     target_metadata_value.kind = Some(kind.clone());
     if let Err(error) = write_clip_metadata(&target, &target_metadata_value) {
@@ -778,7 +775,7 @@ mod tests {
             assert!(!names.iter().any(|name| name.contains(".rename.")));
         }
         #[test]
-        fn rename_clip_file_rolls_back_when_final_metadata_write_fails() {
+        fn rename_clip_file_preserves_source_when_target_metadata_is_unreadable() {
             let dir = TestDir::new("clipline-library", "rename-file-metadata-rollback");
             let root = dir.path().join("media");
             let source = root.join("session_123.mp4");

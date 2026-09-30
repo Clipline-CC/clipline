@@ -235,8 +235,7 @@ fn write_json_atomically<T: Serialize>(
     value: &T,
     context: &str,
 ) -> Result<(), String> {
-    let bytes =
-        serde_json::to_vec_pretty(value).map_err(|e| format!("serialize {context}: {e}"))?;
+    let bytes = crate::util::serialize_json_sidecar(value)?;
     let mut temp = OwnedSidecarTemp::create(target)?;
     let file = temp.file.as_mut().expect("new sidecar temp owns its file");
     file.write_all(&bytes)
@@ -384,7 +383,7 @@ fn write_plays_sidecar(
     plays: Vec<ClipPlay>,
 ) -> Result<(), String> {
     let _guard = crate::gc::lock_clip_mutations();
-    let mut markers = crate::util::read_markers_raw(clip_path).unwrap_or(ClipMarkers {
+    let mut markers = crate::util::read_markers_checked(clip_path)?.unwrap_or(ClipMarkers {
         bookmarks: Vec::new(),
         recording_start_s: 0.0,
         duration_s: pending.clip_duration_s,
@@ -681,10 +680,12 @@ fn discover_pending_file(
             "expected MP4 {clip_path:?} is outside the allowed media-root depth"
         ));
     }
-    let json = std::fs::read_to_string(path)
-        .map_err(|e| format!("read pending osu! enrichment {path:?}: {e}"))?;
-    let record: OsuPendingEnrichment = serde_json::from_str(&json)
-        .map_err(|e| format!("parse pending osu! enrichment {path:?}: {e}"))?;
+    let record: OsuPendingEnrichment = crate::util::read_json_sidecar(path)?
+        .ok_or_else(|| format!("pending osu! enrichment disappeared: {path:?}"))?;
+    crate::settings::persistence::require_local_path(Path::new(&record.clip_path))?;
+    if !crate::settings::validation::same_or_nested_path(Path::new(&record.clip_path), media_root) {
+        return Err("serialized osu! enrichment clip path is outside the media root".into());
+    }
     let serialized_clip = Path::new(&record.clip_path).canonicalize().map_err(|e| {
         format!(
             "canonicalize serialized osu! enrichment clip path {:?}: {e}",
@@ -755,8 +756,7 @@ fn clip_session_is_osu(path: &Path) -> bool {
 }
 
 fn session_game_id(session_dir: &Path) -> Option<String> {
-    let json = std::fs::read_to_string(session_dir.join(SESSION_META_FILE)).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&json).ok()?;
+    let value: serde_json::Value = crate::util::read_json_sidecar(&session_dir.join(SESSION_META_FILE)).ok()??;
     value.get("id")?.as_str().map(str::to_string)
 }
 

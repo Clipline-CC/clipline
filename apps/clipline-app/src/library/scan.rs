@@ -80,9 +80,8 @@ pub(crate) fn push_clips_from(
     clips: &mut Vec<ClipInfo>,
 ) -> Result<(), String> {
     // One game tag per session folder, shared by every clip inside it.
-    let session_game: Option<ClipGame> = std::fs::read_to_string(dir.join("clipline-session.json"))
-        .ok()
-        .and_then(|json| serde_json::from_str::<ClipGame>(&json).ok());
+    let session_game: Option<ClipGame> = util::read_json_sidecar(&dir.join("clipline-session.json"))
+        .ok().flatten();
     for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
         let Ok(entry) = entry else { continue };
         let path = entry.path();
