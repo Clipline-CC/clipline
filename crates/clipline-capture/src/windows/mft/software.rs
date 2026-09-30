@@ -398,6 +398,10 @@ impl SoftwareMftH264Encoder {
             buffer
                 .Lock(&mut ptr, None, Some(&mut len))
                 .map_err(backend)?;
+            if ptr.is_null() {
+                let _ = buffer.Unlock();
+                return Err(EncodeError::Backend("MFT returned a null output buffer".into()));
+            }
             let bytes = std::slice::from_raw_parts(ptr, len as usize).to_vec();
             buffer.Unlock().map_err(backend)?;
             bytes
