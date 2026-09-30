@@ -275,7 +275,7 @@ mod tests {
     async fn direct_s3_chunked_upload_presigns_puts_acks_and_completes() {
         let bytes = b"abcdef";
         let cloud = MockServer::start();
-        let s3 = MockServer::start();
+        let s3 = &cloud;
         mount_discovery(&cloud, true);
         mount_chunked_create(
             &cloud,
@@ -292,10 +292,10 @@ mod tests {
             bytes.len() as u64,
             vec![1, 2],
         );
-        let presign1 = mount_presign(&cloud, &s3, "u1", 1, 3, "/s3-part-1", "abc");
-        let presign2 = mount_presign(&cloud, &s3, "u1", 2, 3, "/s3-part-2", "def");
-        let put1 = mount_s3_put(&s3, "/s3-part-1", "abc", "\"etag-1\"", 200);
-        let put2 = mount_s3_put(&s3, "/s3-part-2", "def", "\"etag-2\"", 200);
+        let presign1 = mount_presign(&cloud, s3, "u1", 1, 3, "/s3-part-1", "abc");
+        let presign2 = mount_presign(&cloud, s3, "u1", 2, 3, "/s3-part-2", "def");
+        let put1 = mount_s3_put(s3, "/s3-part-1", "abc", "\"etag-1\"", 200);
+        let put2 = mount_s3_put(s3, "/s3-part-2", "def", "\"etag-2\"", 200);
         let ack1 = mount_ack(&cloud, "u1", 1, "\"etag-1\"", "abc", 200);
         let ack2 = mount_ack(&cloud, "u1", 2, "\"etag-2\"", "def", 200);
         let complete = mount_complete(&cloud, "u1", "c1", bytes.len() as u64);
@@ -322,7 +322,7 @@ mod tests {
     async fn direct_s3_put_expiry_requests_fresh_presign_for_same_part() {
         let bytes = b"abc";
         let cloud = MockServer::start();
-        let s3 = MockServer::start();
+        let s3 = &cloud;
         mount_discovery(&cloud, true);
         mount_chunked_create(
             &cloud,
@@ -332,8 +332,8 @@ mod tests {
             Some("/api/v1/uploads/u1/parts/{part_number}/direct-ack"),
         );
         mount_progress(&cloud, "u1", "c1", "uploading", bytes.len() as u64, vec![1]);
-        let presign = mount_presign(&cloud, &s3, "u1", 1, 3, "/expired-part-1", "abc");
-        let expired_put = mount_s3_put(&s3, "/expired-part-1", "abc", "\"expired\"", 403);
+        let presign = mount_presign(&cloud, s3, "u1", 1, 3, "/expired-part-1", "abc");
+        let expired_put = mount_s3_put(s3, "/expired-part-1", "abc", "\"expired\"", 403);
 
         let client = test_client(&cloud);
         let error = upload_mp4_bytes_with_progress(
@@ -361,7 +361,7 @@ mod tests {
     async fn missing_direct_s3_etag_fails_with_retryable_upload_guidance() {
         let bytes = b"abc";
         let cloud = MockServer::start();
-        let s3 = MockServer::start();
+        let s3 = &cloud;
         mount_discovery(&cloud, true);
         mount_chunked_create(
             &cloud,
@@ -371,7 +371,7 @@ mod tests {
             Some("/api/v1/uploads/u1/parts/{part_number}/direct-ack"),
         );
         mount_progress(&cloud, "u1", "c1", "uploading", bytes.len() as u64, vec![1]);
-        mount_presign(&cloud, &s3, "u1", 1, 3, "/s3-part-1", "abc");
+        mount_presign(&cloud, s3, "u1", 1, 3, "/s3-part-1", "abc");
         s3.mock(|when, then| {
             when.method(PUT).path("/s3-part-1").body("abc");
             then.status(200);
@@ -401,7 +401,7 @@ mod tests {
     async fn direct_s3_ack_conflict_surfaces_clear_retry_guidance() {
         let bytes = b"abc";
         let cloud = MockServer::start();
-        let s3 = MockServer::start();
+        let s3 = &cloud;
         mount_discovery(&cloud, true);
         mount_chunked_create(
             &cloud,
@@ -411,8 +411,8 @@ mod tests {
             Some("/api/v1/uploads/u1/parts/{part_number}/direct-ack"),
         );
         mount_progress(&cloud, "u1", "c1", "uploading", bytes.len() as u64, vec![1]);
-        mount_presign(&cloud, &s3, "u1", 1, 3, "/s3-part-1", "abc");
-        mount_s3_put(&s3, "/s3-part-1", "abc", "\"etag-1\"", 200);
+        mount_presign(&cloud, s3, "u1", 1, 3, "/s3-part-1", "abc");
+        mount_s3_put(s3, "/s3-part-1", "abc", "\"etag-1\"", 200);
         mount_ack(&cloud, "u1", 1, "\"etag-1\"", "abc", 409);
 
         let client = test_client(&cloud);
@@ -469,7 +469,7 @@ mod tests {
     async fn direct_s3_provider_failure_restarts_with_proxy_upload() {
         let bytes = b"abcdef";
         let cloud = MockServer::start();
-        let s3 = MockServer::start();
+        let s3 = &cloud;
         mount_discovery(&cloud, true);
         let create = cloud.mock(|when, then| {
             when.method(POST)
@@ -494,8 +494,8 @@ mod tests {
             bytes.len() as u64,
             vec![1, 2],
         );
-        mount_presign(&cloud, &s3, "u1", 1, 3, "/provider-fail", "abc");
-        let failed_put = mount_s3_put(&s3, "/provider-fail", "abc", "\"bad\"", 400);
+        mount_presign(&cloud, s3, "u1", 1, 3, "/provider-fail", "abc");
+        let failed_put = mount_s3_put(s3, "/provider-fail", "abc", "\"bad\"", 400);
         let proxy_part1 = mount_proxy_part(&cloud, "u1", 1, "abc");
         let proxy_part2 = mount_proxy_part(&cloud, "u1", 2, "def");
         let complete = mount_complete(&cloud, "u1", "c1", bytes.len() as u64);

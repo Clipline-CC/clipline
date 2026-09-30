@@ -1,6 +1,55 @@
 //! Direct-to-S3 multipart upload path.
 use super::*;
 
+fn validate_object_upload_url(base: &reqwest::Url, raw: &str) -> Result<reqwest::Url, DirectPutError> {
+    let url = reqwest::Url::parse(raw).map_err(|_| DirectPutError::Fallback("invalid object upload URL".into()))?;
+    if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some()
+        || !matches!(url.scheme(), "https" | "http")
+        || (url.origin() != base.origin() && url.scheme() != "https")
+    {
+        return Err(DirectPutError::Fallback("object URL violates cloud transport policy".into()));
+    }
+    Ok(url)
+}
+
+fn public_object_address(address: std::net::IpAddr) -> bool {
+    match address {
+        std::net::IpAddr::V4(ip) => {
+            let [a, b, _, _] = ip.octets();
+            !ip.is_private() && !ip.is_loopback() && !ip.is_link_local()
+                && !ip.is_unspecified() && !ip.is_multicast() && !ip.is_broadcast()
+                && !ip.is_documentation() && a != 0 && a < 224
+                && !(a == 100 && (64..=127).contains(&b))
+                && !(a == 198 && (18..=19).contains(&b))
+        }
+        std::net::IpAddr::V6(ip) => ip.to_ipv4().map(|ip| public_object_address(ip.into())).unwrap_or_else(|| {
+            let segments = ip.segments();
+            (segments[0] & 0xe000) == 0x2000
+                && !(segments[0] == 0x2001 && (segments[1] < 0x0200 || segments[1] == 0x0db8))
+                && segments[0] != 0x2002 && segments[0] != 0x3fff
+        }),
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn security_scan_object_transport_preserves_consent_and_rejects_private_destinations() {
+    let base: reqwest::Url = "https://cloud.example/".parse().unwrap();
+    assert!(validate_object_upload_url(&base, "https://objects.example/part?signature=secret").is_ok());
+    for raw in ["http://objects.example/part", "http://127.0.0.1:80/", "https://user:secret@objects.example/", "file:///part"] {
+        assert!(validate_object_upload_url(&base, raw).is_err());
+    }
+    let local: reqwest::Url = "http://127.0.0.1:8080/".parse().unwrap();
+    assert!(validate_object_upload_url(&local, "http://127.0.0.1:8080/part").is_ok());
+    assert!(validate_object_upload_url(&local, "http://127.0.0.1:8081/part").is_err());
+    for address in ["127.0.0.1", "10.0.0.1", "192.168.0.1", "169.254.169.254", "100.64.0.1", "::1", "::ffff:127.0.0.1", "fc00::1", "fe80::1", "2001:db8::1"] {
+        assert!(!public_object_address(address.parse().unwrap()), "{address}");
+    }
+    for address in ["8.8.8.8", "2606:4700:4700::1111"] {
+        assert!(public_object_address(address.parse().unwrap()));
+    }
+}
+
 pub(crate) async fn upload_chunked_direct<F>(
     transport: UploadTransport<'_>,
     upload: &CreateUploadResponse,
@@ -66,7 +115,7 @@ pub(crate) async fn upload_direct_part(
         .await?;
         validate_presign(upload, part_number, part.slice.length, &presign)?;
 
-        match put_presigned_part(transport.object_http, &presign, path, part.slice).await {
+        match put_presigned_part(transport.client, transport.object_http, &presign, path, part.slice).await {
             Ok(etag) => {
                 let ack = DirectPartUploadAckRequest {
                     size_bytes: part.slice.length,
@@ -171,16 +220,37 @@ pub(crate) fn validate_presign(
 }
 
 pub(crate) async fn put_presigned_part(
+    client: &CloudClient,
     http: &reqwest::Client,
     presign: &DirectPartUploadUrlResponse,
     path: &Path,
     slice: FileSlice,
 ) -> Result<String, DirectPutError> {
+    let url = validate_object_upload_url(client.base_url(), &presign.url)?;
+    let pinned_http;
+    let http = if url.origin() == client.base_url().origin() {
+        http
+    } else {
+        let host = url.host_str().ok_or_else(|| DirectPutError::Fallback("object URL has no host".into()))?;
+        let addresses = tokio::time::timeout(Duration::from_secs(5),
+            tokio::net::lookup_host((host, url.port_or_known_default().unwrap_or(443))))
+            .await.map_err(|_| DirectPutError::Fallback("object host resolution timed out".into()))?
+            .map_err(|_| DirectPutError::Fallback("object host resolution failed".into()))?
+            .collect::<Vec<_>>();
+        if addresses.is_empty() || addresses.iter().any(|addr| !public_object_address(addr.ip())) {
+            return Err(DirectPutError::Fallback("object URL must resolve to public addresses".into()));
+        }
+        // Pin the validated DNS answer and bypass proxies to prevent rebinding into the LAN.
+        pinned_http = crate::bounded_http::object_stream_client_builder()
+            .resolve_to_addrs(host, &addresses).build()
+            .map_err(|_| DirectPutError::Fallback("could not create object transport".into()))?;
+        &pinned_http
+    };
     let body = part_request_body(path, slice)
         .await
         .map_err(DirectPutError::Terminal)?;
     let mut request = http
-        .put(&presign.url)
+        .put(url)
         .header(header::CONTENT_LENGTH, slice.length)
         .body(body);
     for header in &presign.headers {

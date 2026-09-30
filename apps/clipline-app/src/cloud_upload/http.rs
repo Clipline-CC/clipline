@@ -5,9 +5,9 @@ pub(crate) fn upload_url(client: &CloudClient, template: &str, part_number: u16)
     let path = template.replace("{part_number}", &part_number.to_string());
     let url = reqwest::Url::parse(&path).or_else(|_| client.base_url().join(&path))?;
     if url.origin() != client.base_url().origin() {
-        return Err(CloudApiError::InvalidUpload(format!(
-            "authenticated upload URL must use the configured cloud origin: {url}"
-        )));
+        return Err(CloudApiError::InvalidUpload(
+            "authenticated upload URL must use the configured cloud origin".into(),
+        ));
     }
     if !url.username().is_empty() || url.password().is_some() {
         return Err(CloudApiError::InvalidUpload(
@@ -155,6 +155,8 @@ mod tests {
             0,
         )
         .is_err());
+        let error = upload_url(&client, &format!("{}/object?signature=SECRET", other.base_url()), 0).unwrap_err();
+        assert!(!error.to_string().contains("SECRET"));
     }
 
     #[test]

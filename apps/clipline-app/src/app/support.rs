@@ -75,7 +75,7 @@ impl Default for FrontendRate {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub(super) struct PreparedBugReport {
     token: String,
     submission_id: Uuid,

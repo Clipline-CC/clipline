@@ -1,7 +1,7 @@
 //! Shared Cloud request/response types and small cross-module value types.
 use super::*;
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct CloudConnectRequest {
     pub host_url: String,
     pub username: String,

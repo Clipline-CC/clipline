@@ -81,7 +81,7 @@ fn blank_secret_save_without_existing_secret_keeps_settings_unchanged() {
         Some("Clipline osu!:61835:3426414"),
         None,
     )
-    .expect_err("missing stored secret should be actionable");
+    .err().expect("missing stored secret should be actionable");
 
     assert!(error.contains("client secret"));
 }

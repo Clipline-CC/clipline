@@ -44,13 +44,15 @@ pub(crate) fn authenticated_stream_client() -> Result<&'static reqwest::Client, 
 
 pub(crate) fn object_stream_client() -> Result<&'static reqwest::Client, String> {
     cached_client(&OBJECT_STREAM_CLIENT, || {
-        reqwest::Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .read_timeout(STREAM_READ_TIMEOUT)
-            .redirect(reqwest::redirect::Policy::none())
+        object_stream_client_builder()
             .build()
             .map_err(|error| format!("build bounded object HTTP stream client: {error}"))
     })
+}
+
+pub(crate) fn object_stream_client_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder().connect_timeout(CONNECT_TIMEOUT)
+        .read_timeout(STREAM_READ_TIMEOUT).redirect(reqwest::redirect::Policy::none()).no_proxy()
 }
 
 fn cached_client(
