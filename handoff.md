@@ -4,6 +4,34 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-09-30): Steam launches ask first; rail build badge
+
+Testing 1.0.7 showed the Steam fallback recorded unlisted games silently, and the
+"Always add" offer lived in the player footer (hidden in Library view), so users
+could neither see it nor decline a game. `feat/steam-game-prompt` replaces it:
+
+- **Pending prompt, not capture:** `RuntimeState::take_steam_prompt` (new
+  `app/steam_prompt.rs`) pulls a `DiscoveredSteam` detection out before
+  `plan_detection_transition`, so it never becomes `active_game`. A new prompt
+  emits `steam-game-prompt` and calls `open_main_window` on the main thread; the
+  frontend also queries `steam_game_prompt` on boot for tray-rebuilt windows.
+- **Add** (`add_prompted_steam_game`) saves an enabled custom rule from the pending
+  game; the next tick detects it as `Custom` and starts capture normally.
+  `same_discovered_steam_custom_capture` and `add_custom_game_with` are gone.
+- **Ignore** (`ignore_prompted_steam_game`) skips `(app_id, process_id)` for the
+  session, or with "Never ask again" persists `games.ignored_steam_games`
+  (backend-owned via `preserve_backend_owned_settings_fields`; Settings > Games
+  lists them with Ask Again → `unignore_steam_game`). Detection filters ignored
+  apps in `find_best_steam_match`.
+- The prompt filter re-checks live settings, so a detector tick that started
+  before Add/Ignore landed cannot reopen it.
+- Rail badge above the profile: `v<version>` plus a moon when the baked build
+  channel is Nightly (dev builds included), from `frontend_ready`'s `build`.
+  SVG elements have no reflecting `hidden` property — use `toggleAttribute`.
+
+Not yet verified against a live Steam launch on this branch; unit tests cover the
+prompt state machine and the dialog was checked visually via CDP.
+
 ## Checkpoint (2026-09-30): Nightly 1.0.7 published
 
 PR #211's Windows 10 fullscreen capture fallback and PR #183's Steam launch
