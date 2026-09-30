@@ -1734,7 +1734,7 @@ const PlayerCore = (() => {
   // Groups and the clips inside them sort newest-first.
   const sessionGroups = (clips) => {
     const order = [];
-    const byLabel = {};
+    const byLabel = Object.create(null);
     for (const c of clips) {
       const label = c.session ? c.session : "Earlier";
       if (!byLabel[label]) {
