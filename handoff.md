@@ -44,9 +44,15 @@ settings, and refused external navigation. Evidence: `target/security-app-smoke-
 RustSec. The first Windows run caught a configured-root alias regression in pending osu!
 enrichment discovery; the fix retains the trusted configured spelling before canonical
 identity checks, with a regression that failed before the fix and now passes.
-Automated review also reproduced a leased-compilation reorder failure. Compilation
-invalidation now happens before journal commit, so failures restore the prior member
-order. FFmpeg discovery no longer hashes twice for its version probe; each launch
+Automated review reproduced both a leased-compilation rejection and a late commit
+failure that deleted compilation bytes before restoring the prior order. Group mutations
+preflight every compilation upload identity before deletion or metadata writes. Reorder
+commits the journal before best-effort cleanup; a rejected reorder preserves compilation
+bytes and sidecars, while cleanup failures retain the committed order. Same-order cleanup
+uses the same success contract. Retained stale exports remain ordinary Library items;
+the existing fingerprint check excludes them from current-group Copy/Upload. Windows
+regressions exercise a later hard-link lease, the actual final rename failure, an external
+sharing hold, and cleanup retry. FFmpeg discovery no longer hashes twice for its version probe; each launch
 still verifies its executable/DLL tree. A local continuity signature independently
 verified the existing private key against the unchanged updater public key.
 
