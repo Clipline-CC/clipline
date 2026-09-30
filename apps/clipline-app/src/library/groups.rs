@@ -320,6 +320,7 @@ pub(crate) fn persist_group_order(root: &Path, members: &[GroupMember]) -> Resul
 }
 
 pub(crate) fn persist_group_order_unlocked(root: &Path, members: &[GroupMember]) -> Result<(), String> {
+    let Some(member) = members.first() else { return Ok(()) };
     let mut updates = Vec::new();
     for member in members {
         let metadata_path = clip_metadata_path(&member.path);
@@ -333,7 +334,7 @@ pub(crate) fn persist_group_order_unlocked(root: &Path, members: &[GroupMember])
         updates.push((member.path.clone(), previous, next));
     }
     if updates.is_empty() {
-        return Ok(());
+        return remove_group_compilations_unlocked(root, &member.group.name);
     }
     let previous = updates
         .iter()
@@ -341,22 +342,22 @@ pub(crate) fn persist_group_order_unlocked(root: &Path, members: &[GroupMember])
         .collect::<Vec<_>>();
     write_group_order_journal(root, &previous)?;
 
-    for (path, _, next) in &updates {
-        if let Err(error) = write_clip_metadata(path, next) {
-            return match recover_group_order_transaction_unlocked(root) {
-                Ok(()) => Err(error),
-                Err(rollback) => Err(format!("{error}; rollback group order: {rollback}")),
-            };
-        }
-    }
     let journal_path = group_order_journal_path(root);
     let committed_path = group_order_committed_path(root);
-    if let Err(error) = crate::windows::replace_file(&journal_path, &committed_path) {
+    let result = (|| {
+        for (path, _, next) in &updates {
+            write_clip_metadata(path, next)?;
+        }
+        // Invalidate derived output before committing, so a sharing/lease failure
+        // rolls the member order back through the existing recovery journal.
+        remove_group_compilations_unlocked(root, &member.group.name)?;
+        crate::windows::replace_file(&journal_path, &committed_path)
+            .map_err(|error| format!("finish group reorder: {error}"))
+    })();
+    if let Err(error) = result {
         return match recover_group_order_transaction_unlocked(root) {
-            Ok(()) => Err(format!("finish group reorder: {error}")),
-            Err(rollback) => Err(format!(
-                "finish group reorder: {error}; rollback group order: {rollback}"
-            )),
+            Ok(()) => Err(error),
+            Err(rollback) => Err(format!("{error}; rollback group order: {rollback}")),
         };
     }
     let _ = std::fs::remove_file(committed_path);
@@ -394,7 +395,6 @@ fn reorder_group_file(
     recover_group_order_transaction_unlocked(root)?;
     let members = reordered_members(group_members_unrecovered(root, name)?, ordered_paths)?;
     persist_group_order_unlocked(root, &members)?;
-    remove_group_compilations_unlocked(root, name)?;
     Ok(members
         .into_iter()
         .map(|member| GroupOrderUpdate {
@@ -856,6 +856,17 @@ mod tests {
         )
         .unwrap();
 
+        #[cfg(windows)]
+        {
+            let lease = crate::cloud_upload::UploadSourceLease::acquire(&compilation).unwrap();
+            assert!(reorder_group_file(dir.path(), "Highlights", &[b.clone(), a.clone()])
+                .err().unwrap().contains("uploading"));
+            assert_eq!(read_clip_metadata(&a).unwrap().group.unwrap().order, 0);
+            assert_eq!(read_clip_metadata(&b).unwrap().group.unwrap().order, 1);
+            assert_eq!(std::fs::read(&compilation).unwrap(), b"compilation");
+            assert!(!group_order_journal_path(dir.path()).exists());
+            drop(lease);
+        }
         reorder_group_file(dir.path(), "Highlights", &[b.clone(), a.clone()]).unwrap();
 
         assert!(!compilation.exists());

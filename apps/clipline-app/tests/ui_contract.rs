@@ -6125,7 +6125,7 @@ fn groups_are_created_from_trim_and_managed_in_the_library() {
         "pub async fn export_group",
         "pub async fn reorder_group",
         "pub async fn remove_from_group",
-        "remove_group_compilations_unlocked(root, name)?",
+        "remove_group_compilations_unlocked(",
     ] {
         assert!(groups.contains(required), "group commands must include `{required}`");
     }
