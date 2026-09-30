@@ -44,6 +44,11 @@ settings, and refused external navigation. Evidence: `target/security-app-smoke-
 RustSec. The first Windows run caught a configured-root alias regression in pending osu!
 enrichment discovery; the fix retains the trusted configured spelling before canonical
 identity checks, with a regression that failed before the fix and now passes.
+Automated review also reproduced a leased-compilation reorder failure. Compilation
+invalidation now happens before journal commit, so failures restore the prior member
+order. FFmpeg discovery no longer hashes twice for its version probe; each launch
+still verifies its executable/DLL tree. A local continuity signature independently
+verified the existing private key against the unchanged updater public key.
 
 ## Checkpoint (2026-09-30): Nightly 1.0.8 published
 
