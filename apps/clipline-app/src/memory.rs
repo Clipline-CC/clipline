@@ -16,7 +16,7 @@ use windows_sys::Win32::System::ProcessStatus::{
 use windows_sys::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentProcessId, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-    PROCESS_VM_READ,
+    PROCESS_QUERY_INFORMATION,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -45,7 +45,7 @@ fn memory_status_from_parts(root: u64, children: impl IntoIterator<Item = u64>) 
 
 const MEMORY_SAMPLE_CACHE_TTL: Duration = Duration::from_secs(1);
 const MEMORY_QUERY_ACCESS: u32 = PROCESS_QUERY_LIMITED_INFORMATION;
-const LEGACY_MEMORY_QUERY_ACCESS: u32 = PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ;
+const LEGACY_MEMORY_QUERY_ACCESS: u32 = PROCESS_QUERY_INFORMATION;
 
 struct CachedMemorySample {
     completed_at: Instant,
@@ -104,19 +104,25 @@ pub fn current_process_tree_memory() -> Result<MemoryStatus, String> {
     // the sampler's cache TTL still covers a single snapshot.
     let children = child_process_ids(current_pid)?
         .into_iter()
-        .filter_map(|pid| query_process_private_working_set_for_pid(pid).ok());
+        .filter(|process| process.name != "conhost.exe")
+        .filter_map(|process| query_process_private_working_set_for_pid(process.pid, process.creation_time).ok());
 
     Ok(memory_status_from_parts(root, children))
 }
 
-fn child_process_ids(root_pid: u32) -> Result<Vec<u32>, String> {
+fn child_process_ids(root_pid: u32) -> Result<Vec<ProcessEntry>, String> {
     Ok(child_process_ids_from_entries(
         root_pid,
-        &process_snapshot()?,
+        crate::windows::process_creation_time(root_pid)?,
+        &process_snapshot(root_pid)?,
     ))
 }
 
-fn process_snapshot() -> Result<Vec<ProcessEntry>, String> {
+fn process_snapshot(root_pid: u32) -> Result<Vec<ProcessEntry>, String> {
+    let time = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| format!("memory snapshot clock: {error}"))?;
+    let latest_creation_time = u64::try_from(time.as_nanos() / 100 + 116_444_736_000_000_000)
+        .map_err(|error| format!("memory snapshot clock: {error}"))?;
     let snapshot = Snapshot::new()?;
     let mut entry = PROCESSENTRY32W {
         dwSize: size_of::<PROCESSENTRY32W>() as u32,
@@ -130,14 +136,21 @@ fn process_snapshot() -> Result<Vec<ProcessEntry>, String> {
             pid: entry.th32ProcessID,
             parent_pid: entry.th32ParentProcessID,
             name: process_name(&entry),
+            creation_time: 0,
         });
         ok = unsafe { Process32NextW(snapshot.handle, &mut entry) };
     }
 
-    Ok(processes)
+    // Only open snapshot descendants, not every unrelated process on the machine.
+    Ok(child_process_ids_from_entries(root_pid, 0, &processes).into_iter().filter_map(|mut process| {
+        let created = crate::windows::process_creation_time(process.pid).ok()?;
+        if created > latest_creation_time { return None; }
+        process.creation_time = created;
+        Some(process)
+    }).collect())
 }
 
-fn child_process_ids_from_entries(root_pid: u32, entries: &[ProcessEntry]) -> Vec<u32> {
+fn child_process_ids_from_entries(root_pid: u32, root_creation_time: u64, entries: &[ProcessEntry]) -> Vec<ProcessEntry> {
     let mut children: HashMap<u32, Vec<ProcessEntry>> = HashMap::new();
     for entry in entries {
         children
@@ -148,16 +161,15 @@ fn child_process_ids_from_entries(root_pid: u32, entries: &[ProcessEntry]) -> Ve
 
     let mut out = Vec::new();
     let mut seen = HashSet::from([root_pid]);
-    let mut stack = children.remove(&root_pid).unwrap_or_default();
-    while let Some(process) = stack.pop() {
-        if !seen.insert(process.pid) {
+    let mut stack = children.remove(&root_pid).unwrap_or_default().into_iter()
+        .map(|process| (process, root_creation_time)).collect::<Vec<_>>();
+    while let Some((process, parent_creation_time)) = stack.pop() {
+        if process.creation_time < parent_creation_time || !seen.insert(process.pid) {
             continue;
         }
-        if process.name != "conhost.exe" {
-            out.push(process.pid);
-        }
+        out.push(process.clone());
         if let Some(grandchildren) = children.remove(&process.pid) {
-            stack.extend(grandchildren);
+            stack.extend(grandchildren.into_iter().map(|child| (child, process.creation_time)));
         }
     }
     out
@@ -168,6 +180,7 @@ struct ProcessEntry {
     pid: u32,
     parent_pid: u32,
     name: String,
+    creation_time: u64,
 }
 
 fn process_name(entry: &PROCESSENTRY32W) -> String {
@@ -179,16 +192,25 @@ fn process_name_from_wide(name: &[u16]) -> String {
     String::from_utf16_lossy(&name[..len]).to_ascii_lowercase()
 }
 
-fn query_process_private_working_set_for_pid(pid: u32) -> Result<u64, String> {
+fn query_process_private_working_set_for_pid(pid: u32, expected_creation: u64) -> Result<u64, String> {
     let primary = with_process_handle(pid, MEMORY_QUERY_ACCESS, |handle| {
+        validate_memory_process_instance(pid, handle, expected_creation)?;
         query_process_private_working_set_ex2(handle)
     });
     query_with_fallback(primary, || {
         let page_size = page_size()?;
         with_process_handle(pid, LEGACY_MEMORY_QUERY_ACCESS, |handle| {
+            validate_memory_process_instance(pid, handle, expected_creation)?;
             process_private_working_set_bytes(handle, page_size)
         })
     })
+}
+
+fn validate_memory_process_instance(pid: u32, handle: HANDLE, expected_creation: u64) -> Result<(), String> {
+    if crate::windows::process_creation_time_from_handle(pid, handle)? != expected_creation {
+        return Err("process instance changed during memory sampling".into());
+    }
+    Ok(())
 }
 
 fn with_process_handle(
@@ -388,10 +410,12 @@ mod tests {
             pid,
             parent_pid,
             name: name.to_string(),
+            creation_time: u64::from(pid),
         }
     }
 
-    fn sorted(mut ids: Vec<u32>) -> Vec<u32> {
+    fn sorted(entries: Vec<ProcessEntry>) -> Vec<u32> {
+        let mut ids = entries.into_iter().map(|entry| entry.pid).collect::<Vec<_>>();
         ids.sort_unstable();
         ids
     }
@@ -438,10 +462,30 @@ mod tests {
 
     #[test]
     fn current_process_private_working_set_is_available_without_vm_read() {
-        let bytes = query_process_private_working_set_for_pid(std::process::id())
+        let bytes = query_process_private_working_set_for_pid(std::process::id(), crate::windows::process_creation_time(std::process::id()).unwrap())
             .expect("the current process should expose extended memory counters");
 
         assert!(bytes > 0);
+    }
+
+    #[test]
+    fn security_scan_reused_parent_pid_does_not_adopt_older_processes() {
+        let ids = child_process_ids_from_entries(1, 10, &[
+            ProcessEntry { creation_time: 9, ..proc(2, 1, "unrelated-game.exe") },
+            ProcessEntry { creation_time: 12, ..proc(3, 1, "webview.exe") },
+            ProcessEntry { creation_time: 11, ..proc(4, 3, "unrelated-child.exe") },
+            ProcessEntry { creation_time: 13, ..proc(5, 3, "renderer.exe") },
+        ]);
+        assert_eq!(sorted(ids), vec![3, 5]);
+        assert_eq!(MEMORY_QUERY_ACCESS & 0x10, 0);
+        assert_eq!(LEGACY_MEMORY_QUERY_ACCESS & 0x10, 0);
+        let pid = std::process::id();
+        let created = crate::windows::process_creation_time(pid).unwrap();
+        assert!(query_process_private_working_set_for_pid(pid, created + 1).unwrap_err().contains("instance changed"));
+        assert!(with_process_handle(pid, LEGACY_MEMORY_QUERY_ACCESS, |handle| {
+            validate_memory_process_instance(pid, handle, created)?;
+            process_private_working_set_bytes(handle, page_size()?)
+        }).unwrap() > 0);
     }
 
     #[test]
@@ -539,9 +583,9 @@ mod tests {
     }
 
     #[test]
-    fn child_process_ids_walks_descendants_and_skips_conhost() {
+    fn child_process_ids_walks_descendants_including_children_of_conhost() {
         let ids = child_process_ids_from_entries(
-            10,
+            10, 0,
             &[
                 proc(20, 10, "msedgewebview2.exe"),
                 proc(30, 20, "renderer.exe"),
@@ -551,13 +595,13 @@ mod tests {
             ],
         );
 
-        assert_eq!(sorted(ids), vec![20, 30, 50]);
+        assert_eq!(sorted(ids), vec![20, 30, 40, 50]);
     }
 
     #[test]
     fn child_process_ids_deduplicates_cycles() {
         let ids = child_process_ids_from_entries(
-            1,
+            1, 0,
             &[
                 proc(2, 1, "child.exe"),
                 proc(3, 2, "grandchild.exe"),
