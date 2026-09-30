@@ -105,8 +105,8 @@ listen("ffmpeg-install", (event) => {
 });
 
 // Settings writes run one at a time. A full Save sends the whole custom
-// games list, so it must not be built before an "Always add" lands (or it
-// would overwrite the new rule), and Always add must not race a Save.
+// games list, so it must not be built before a prompted Steam game's Add
+// lands (or it would overwrite the new rule), and Add must not race a Save.
 var settingsWriteQueue = Promise.resolve();
 
 function queueSettingsWrite(write) {
@@ -115,33 +115,62 @@ function queueSettingsWrite(write) {
   return run;
 }
 
-var discoveredSteamOfferedAppIds = new Set();
-var discoveredSteamOffer = null;
+// Unlisted Steam game prompt. The backend holds the pending launch and
+// rebuilds the rule itself; the dialog only answers for app + process ids.
+var steamGamePrompt = null;
+var steamGamePromptRevision = -1;
 
-// Clear the offer's deck status only while the offer still owns it; another
-// feature (an export's "Open clip", say) may have replaced it since.
-function clearDiscoveredSteamOffer() {
-  const offer = discoveredSteamOffer;
-  discoveredSteamOffer = null;
-  if (offer && deckStatusActionHandler === offer.handler) setDeckStatus("");
+// Snapshots carry a backend revision that rises on every change, so an older
+// one (a late event, or the boot query racing a new prompt) never overrides
+// a newer dialog state.
+function applySteamGamePromptSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot.revision !== "number") return;
+  if (snapshot.revision < steamGamePromptRevision) return;
+  steamGamePromptRevision = snapshot.revision;
+  showSteamGamePrompt(snapshot.prompt || null);
 }
 
-// First detection of each discovered Steam app in this UI session: show the
-// recording toast plus a one-shot Always add action. Offers are keyed by
-// Steam app id, since unrelated games can share an exe name. Rule building
-// stays on the backend command; the frontend never reconstructs it.
-function maybeOfferDiscoveredSteamAlwaysAdd(event) {
-  const appId = event?.active && event.discovered_steam ? event.steam_app_id : null;
-  if (discoveredSteamOffer && discoveredSteamOffer.appId !== appId) clearDiscoveredSteamOffer();
-  if (appId == null || discoveredSteamOfferedAppIds.has(appId)) return;
-  discoveredSteamOfferedAppIds.add(appId);
-  const name = event.name || event.exe_name || "Steam game";
-  const target = { appId, processId: event.process_id };
-  const handler = async () => {
-    discoveredSteamOffer = null;
-    try {
+function sameSteamLaunch(a, b) {
+  return Boolean(a && b && a.appId === b.appId && a.processId === b.processId);
+}
+
+function showSteamGamePrompt(prompt) {
+  const dialog = $("steam-game-prompt-dialog");
+  const next = prompt && prompt.appId != null ? prompt : null;
+  const sameLaunch = sameSteamLaunch(next, steamGamePrompt);
+  steamGamePrompt = next;
+  setSteamGamePromptBusy(false);
+  if (!next) {
+    if (dialog.open) dialog.close();
+    return;
+  }
+  $("steam-game-prompt-name").textContent = next.name || "This Steam game";
+  if (!sameLaunch) {
+    $("steam-game-prompt-never").checked = false;
+    $("steam-game-prompt-error").hidden = true;
+  }
+  if (!dialog.open) dialog.showModal();
+}
+
+function setSteamGamePromptBusy(busy) {
+  for (const id of ["steam-game-prompt-add", "steam-game-prompt-ignore", "steam-game-prompt-never"]) {
+    $(id).disabled = busy;
+  }
+}
+
+async function answerSteamGamePrompt(add) {
+  const prompt = steamGamePrompt;
+  if (!prompt || $("steam-game-prompt-add").disabled) return;
+  const target = { appId: prompt.appId, processId: prompt.processId };
+  const neverAskAgain = $("steam-game-prompt-never").checked;
+  const name = prompt.name || "Steam game";
+  setSteamGamePromptBusy(true);
+  $("steam-game-prompt-error").hidden = true;
+  let failure = null;
+  try {
+    if (add) {
       const added = await queueSettingsWrite(async () => {
-        const saved = await invoke("add_discovered_steam_game", { target });
+        const saved = await invoke("add_prompted_steam_game", { target });
         if (saved) mergeSavedCustomGame(saved);
         return saved;
       });
@@ -149,14 +178,45 @@ function maybeOfferDiscoveredSteamAlwaysAdd(event) {
         added ? "Added " + name + " to Custom games" : name + " is already a custom game",
         { transient: true }
       );
-    } catch (error) {
-      $("error").textContent = String(error);
+    } else {
+      applyIgnoredSteamGames(await invoke("ignore_prompted_steam_game", { target, neverAskAgain }));
     }
-  };
-  discoveredSteamOffer = { appId, handler };
-  setDeckStatus("Recording " + name);
-  setDeckStatusAction("Always add", handler);
+  } catch (error) {
+    failure = String(error);
+  }
+  // Re-sync with the backend either way: success closes the dialog, while a
+  // failed save leaves the same launch pending so the user can retry.
+  try {
+    applySteamGamePromptSnapshot(await invoke("steam_game_prompt"));
+  } catch (error) {
+    console.warn("steam game prompt query failed:", error);
+    if (!failure && sameSteamLaunch(steamGamePrompt, prompt)) showSteamGamePrompt(null);
+  }
+  if (!failure) return;
+  if (sameSteamLaunch(steamGamePrompt, prompt)) {
+    setSteamGamePromptBusy(false);
+    $("steam-game-prompt-error").textContent = failure;
+    $("steam-game-prompt-error").hidden = false;
+  } else {
+    $("error").textContent = failure;
+  }
 }
+
+$("steam-game-prompt-add").addEventListener("click", () => answerSteamGamePrompt(true));
+$("steam-game-prompt-ignore").addEventListener("click", () => answerSteamGamePrompt(false));
+// Escape answers Ignore so the backend never keeps a prompt nobody sees.
+$("steam-game-prompt-dialog").addEventListener("cancel", (ev) => {
+  ev.preventDefault();
+  answerSteamGamePrompt(false);
+});
+// A window rebuilt from the tray asks for a prompt that opened while it was gone.
+listen("steam-game-prompt", (event) => applySteamGamePromptSnapshot(event.payload)).then(async () => {
+  try {
+    applySteamGamePromptSnapshot(await invoke("steam_game_prompt"));
+  } catch (error) {
+    console.warn("steam game prompt query failed:", error);
+  }
+});
 
 listen("encoders-changed", (event) => {
   videoEncoders = Array.isArray(event.payload) ? event.payload : [];
@@ -174,7 +234,6 @@ listen("game-detection", (e) => {
   updateCaptureStatus();
   updateGameDetectionStatus();
   maybeWarnElevatedGame(activeDetectedGame);
-  maybeOfferDiscoveredSteamAlwaysAdd(activeDetectedGame);
 });
 
 listen("cloud-upload-progress", (e) => {
@@ -495,7 +554,7 @@ $("settings-save").addEventListener("click", async () => {
   }
   try {
     // Build the payload inside the queue so it includes any rule an
-    // in-flight "Always add" is merging.
+    // in-flight Steam prompt Add is merging.
     await queueSettingsWrite(async () => {
       fillSettings(await invoke("save_settings", { settings: syncSettingsDraftFromForm() }));
     });
@@ -550,8 +609,7 @@ video.addEventListener("loadedmetadata", () => {
       ? groupReviewMeta(group, video.duration)
       : `${fmtDur(video.duration)} · ${fmtMegabytes(currentClip.size_mb)} · ${PlayerCore.clipFileLabel(currentClip)}`;
     setTrim(0, video.duration);
-    // Duration is now exact: rebuild the whole-clip navigator and re-render.
-    renderOverviewMarkers();
+    // Duration is now exact: re-render the view.
     applyView({ start: zoomStart, span: zoomSpan });
   }
 });
@@ -656,13 +714,6 @@ document.querySelectorAll("[data-game-plugin-settings-tab]").forEach((tab) => {
 });
 
 $("trim-mode-toggle").addEventListener("click", () => setSimpleTrimMode(!simpleTrimMode));
-$("zoom-in").addEventListener("click", () => zoomAtPlayhead(0.5));
-$("zoom-out").addEventListener("click", () => zoomAtPlayhead(2));
-// Plain click frames the trim selection (the editing default); Shift-click fits
-// the whole clip — mirroring \ and Shift+\.
-$("zoom-fit").addEventListener("click", (ev) => (ev.shiftKey ? zoomFit() : zoomToSelection()));
-$("snap-toggle").addEventListener("click", toggleSnap);
-
 // Keyboard shortcuts guide — the corner "K" keycap opens it; click the X or the
 // backdrop (or press Esc, which the modal dialog handles) to close.
 $("keys-close").addEventListener("click", () => $("keys-dialog").close());
@@ -808,14 +859,6 @@ document
   .addEventListener("wheel", onTimelineWheel, { passive: false });
 $("ruler").addEventListener("wheel", onTimelineWheel, { passive: false });
 
-// Navigator (whole-clip minimap): drag the box to pan, its grips to zoom.
-$("overview").addEventListener("pointerdown", onOverviewPointerDown);
-$("overview").addEventListener("pointermove", moveOverviewDrag);
-$("overview").addEventListener("pointerup", endOverviewDrag);
-$("overview").addEventListener("pointercancel", endOverviewDrag);
-$("overview").addEventListener("lostpointercapture", endOverviewDrag);
-$("overview").addEventListener("wheel", onOverviewWheel, { passive: false });
-
 stage.addEventListener("pointermove", noteActivity);
 stage.addEventListener("pointerdown", noteActivity);
 stage.addEventListener("pointerleave", () => {
@@ -872,11 +915,11 @@ document.addEventListener("keydown", (ev) => {
     case "seek-to": seekTo(intent.seconds); break;
     case "seek-to-end": seekTo(clipDuration()); break;
     case "set-in":
-      if (!legacyTimelineEnabled() && !simpleTrimMode) setSimpleTrimMode(true);
+      if (!simpleTrimMode) setSimpleTrimMode(true);
       setTrim(video.currentTime || 0, trimEnd);
       break;
     case "set-out":
-      if (!legacyTimelineEnabled() && !simpleTrimMode) setSimpleTrimMode(true);
+      if (!simpleTrimMode) setSimpleTrimMode(true);
       setTrim(trimStart, video.currentTime || 0);
       break;
     case "next-marker": jumpMarker(1); break;
@@ -884,16 +927,13 @@ document.addEventListener("keydown", (ev) => {
     case "next-edit": jumpEdit(1); break;
     case "prev-edit": jumpEdit(-1); break;
     case "zoom":
-      if (legacyTimelineEnabled() || simpleTrimMode) zoomAtPlayhead(intent.factor);
+      if (timelineZoomEnabled()) zoomAtPlayhead(intent.factor);
       break;
     case "zoom-fit":
-      if (legacyTimelineEnabled() || simpleTrimMode) zoomFit();
+      if (timelineZoomEnabled()) zoomFit();
       break;
     case "zoom-selection":
-      if (legacyTimelineEnabled() || simpleTrimMode) zoomToSelection();
-      break;
-    case "toggle-snap":
-      if (legacyTimelineEnabled()) toggleSnap();
+      if (timelineZoomEnabled()) zoomToSelection();
       break;
     case "toggle-fullscreen": toggleReviewFullscreen(); break;
     case "close": closeReview(); break;
@@ -1013,6 +1053,15 @@ function applyWindowLifecycleSnapshot(snapshot) {
   }
 }
 
+function applyBuildInfo(build) {
+  if (!build || !build.version) return;
+  $("rail-build-version").textContent = "v" + build.version;
+  // SVG elements have no reflecting `hidden` property; set the attribute.
+  $("rail-build-nightly").toggleAttribute("hidden", !build.nightly);
+  $("rail-build").title = (build.nightly ? "Nightly " : "") + "v" + build.version;
+  $("rail-build").hidden = false;
+}
+
 async function reportFrontendReady() {
   try {
     await windowLifecycleListenerReady;
@@ -1022,6 +1071,7 @@ async function reportFrontendReady() {
       $("error").textContent = warnings.join(" ");
     }
     applyWindowLifecycleSnapshot(response && response.window_lifecycle);
+    applyBuildInfo(response && response.build);
   } catch (e) {
     console.warn("frontend_ready failed:", e);
   }

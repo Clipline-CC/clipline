@@ -41,7 +41,6 @@ var {
   clampView,
   zoomView,
   panView,
-  setViewEdge,
   viewForRange,
   followView,
   snapTime,
@@ -242,10 +241,6 @@ var overlayTimerId = 0;
 // zoomed out (the whole clip is shown); a smaller span shows [zoomStart, +span].
 var zoomStart = 0;
 var zoomSpan = 0;
-// Active navigator drag: { mode:"pan"|"left"|"right", grab?, pointerId } or null.
-var overviewDrag = null;
-// Magnetic snapping for scrub/trim drags (toggle with S, hold Alt to bypass).
-var snapEnabled = true;
 var MIC_MONITOR_START_DELAY_S = 0.02;
 var MIC_MONITOR_MAX_LATENCY_S = 0.25;
 // Clicking a marker/event row starts playback this many seconds before the

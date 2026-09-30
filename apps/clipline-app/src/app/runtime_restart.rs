@@ -236,6 +236,7 @@ mod tests {
             quota_blocked: None,
             league_gate: None,
             league_gate_rx: None,
+            steam_prompt: Default::default(),
         };
 
         let prepared = RuntimeState::prepare_service_restart(&mut inner).unwrap();
@@ -268,6 +269,7 @@ mod tests {
             quota_blocked: None,
             league_gate: None,
             league_gate_rx: None,
+            steam_prompt: Default::default(),
         };
 
         let prepared = RuntimeState::prepare_service_restart(&mut inner).unwrap();
@@ -527,6 +529,7 @@ mod tests {
             quota_blocked: None,
             league_gate: None,
             league_gate_rx: None,
+            steam_prompt: Default::default(),
         };
 
         let err = match RuntimeState::prepare_service_restart(&mut inner) {
@@ -564,6 +567,7 @@ mod tests {
             quota_blocked: None,
             league_gate: None,
             league_gate_rx: None,
+            steam_prompt: Default::default(),
         };
 
         let prepared = RuntimeState::prepare_service_restart(&mut inner).unwrap();
@@ -711,6 +715,7 @@ mod tests {
             quota_blocked: None,
             league_gate: None,
             league_gate_rx: None,
+            steam_prompt: Default::default(),
         };
 
         let err = match RuntimeState::prepare_service_restart(&mut inner) {
@@ -745,6 +750,7 @@ mod tests {
             quota_blocked: None,
             league_gate: None,
             league_gate_rx: None,
+            steam_prompt: Default::default(),
         };
 
         assert!(RuntimeState::prepare_service_restart(&mut inner).is_err());

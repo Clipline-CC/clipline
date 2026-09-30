@@ -275,7 +275,6 @@ function fillSettings(s) {
   $("set-open-on-startup").checked = !!s.open_on_startup;
   $("set-close-to-tray").checked = s.close_to_tray !== false;
   $("set-minimize-to-tray").checked = !!s.minimize_to_tray;
-  $("set-legacy-timeline-editor").checked = !!s.legacy_timeline_editor;
   $("set-theme").value = s.ui_theme || "booth";
   applyUiTheme(s.ui_theme);
   $("set-update-channel").value = s.update_channel || "nightly";
@@ -290,6 +289,7 @@ function fillSettings(s) {
   syncReplayStorageFields();
   renderGamePlugins();
   renderCustomGames();
+  renderIgnoredSteamGames();
   updateGameDetectionStatus();
   updateCaptureStatus();
   syncUploadClipButton();
@@ -298,7 +298,7 @@ function fillSettings(s) {
   resetSettingsBaselineFromForm();
 }
 
-// "Always add" saves one rule on the backend. Merge just that rule into the
+// A Steam prompt's Add saves one rule on the backend. Merge just that rule into the
 // saved baseline, the draft and the live list so unsaved Settings edits
 // survive, and the new rule alone does not mark Settings dirty.
 function mergeSavedCustomGame(saved) {
@@ -318,6 +318,17 @@ function mergeSavedCustomGame(saved) {
   settingsIndicatorBaseline = withGameInSettings(settingsIndicatorBaseline);
   renderCustomGames();
   syncSettingsDirtyState();
+}
+
+// The ignore list is backend-owned (Save never sends it), so the prompt and
+// the Settings list patch every snapshot directly.
+function applyIgnoredSteamGames(ignored) {
+  const list = Array.isArray(ignored) ? ignored : [];
+  const withList = (snapshot) =>
+    snapshot && { ...snapshot, games: { ...snapshot.games, ignored_steam_games: list } };
+  currentSettings = withList(currentSettings);
+  settingsDraft = withList(settingsDraft);
+  renderIgnoredSteamGames();
 }
 
 function readSettings() {
@@ -377,7 +388,6 @@ function readSettings() {
     open_on_startup: $("set-open-on-startup").checked,
     close_to_tray: $("set-close-to-tray").checked,
     minimize_to_tray: $("set-minimize-to-tray").checked,
-    legacy_timeline_editor: $("set-legacy-timeline-editor").checked,
     ui_theme: $("set-theme").value,
     update_channel: $("set-update-channel").value,
     reopen_window_after_update: $("set-reopen-window-after-update").checked,
@@ -493,6 +503,7 @@ function defaultGameSettings() {
     auto_detect_steam_launches: false,
     plugins: {},
     custom_games: [],
+    ignored_steam_games: [],
   };
 }
 
@@ -684,7 +695,6 @@ function gamePluginSummary(plugin, settings = gamePluginSetting(plugin)) {
 function refreshReviewForSettingsChange() {
   if (clipsCache.length) renderClips();
   if (!currentClip) return;
-  if (typeof renderOverviewMarkers === "function") renderOverviewMarkers();
   if (typeof renderMarkers === "function") renderMarkers();
   renderGameEventRail(currentClip);
   renderGamePlayRail(currentClip);

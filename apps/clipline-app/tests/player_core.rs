@@ -1564,10 +1564,8 @@ fn key_intents_cover_the_documented_shortcuts() {
         eval_json(&mut ctx, "PlayerCore.keyIntent('ArrowDown', false)"),
         r#"{"kind":"next-edit"}"#
     );
-    assert_eq!(
-        eval_json(&mut ctx, "PlayerCore.keyIntent('KeyS', false)"),
-        r#"{"kind":"toggle-snap"}"#
-    );
+    // S toggled snapping in the removed legacy timeline editor.
+    assert_eq!(eval_json(&mut ctx, "PlayerCore.keyIntent('KeyS', false)"), "null");
 }
 
 #[test]
@@ -2089,43 +2087,6 @@ fn pan_view_slides_and_clamps_the_window() {
     assert_eq!(
         eval_json(&mut ctx, "PlayerCore.panView(0, 0, 100, 30)"),
         r#"{"start":0,"span":100}"#
-    );
-}
-
-#[test]
-fn set_view_edge_moves_one_boundary() {
-    let mut ctx = player_core_context();
-    // Drag the left edge in: the right edge stays, the span shrinks.
-    assert_eq!(
-        eval_json(
-            &mut ctx,
-            "PlayerCore.setViewEdge(10, 40, 100, 'left', 20, 1)"
-        ),
-        r#"{"start":20,"span":30}"#
-    );
-    // Drag the right edge out: the left edge stays.
-    assert_eq!(
-        eval_json(
-            &mut ctx,
-            "PlayerCore.setViewEdge(10, 40, 100, 'right', 80, 1)"
-        ),
-        r#"{"start":10,"span":70}"#
-    );
-    // The min span floors how far an edge can close.
-    assert_eq!(
-        eval_json(
-            &mut ctx,
-            "PlayerCore.setViewEdge(10, 40, 100, 'left', 49.5, 1)"
-        ),
-        r#"{"start":49,"span":1}"#
-    );
-    // Edges clamp to the clip bounds.
-    assert_eq!(
-        eval_json(
-            &mut ctx,
-            "PlayerCore.setViewEdge(10, 40, 100, 'right', 200, 1)"
-        ),
-        r#"{"start":10,"span":90}"#
     );
 }
 

@@ -22,6 +22,8 @@ mod runtime_restart;
 mod runtime_control;
 #[path = "app/commands.rs"]
 mod commands;
+#[path = "app/steam_prompt.rs"]
+mod steam_prompt;
 #[path = "app/settings_txn.rs"]
 mod settings_txn;
 #[path = "app/hotkeys.rs"]

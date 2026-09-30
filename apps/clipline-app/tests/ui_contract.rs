@@ -1266,13 +1266,6 @@ fn review_player_owns_all_controls() {
         "id=\"keys-close\"",
         "id=\"delete-clip\"",
         "id=\"ruler\"",
-        "id=\"overview\"",
-        "id=\"overview-trim\"",
-        "id=\"overview-markers\"",
-        "id=\"overview-playhead\"",
-        "id=\"overview-window\"",
-        "id=\"overview-window-l\"",
-        "id=\"overview-window-r\"",
         "id=\"game-event-rail\"",
         "id=\"game-event-rail-title\"",
         "id=\"game-event-rail-summary\"",
@@ -1280,10 +1273,6 @@ fn review_player_owns_all_controls() {
         "id=\"game-event-list\"",
         "id=\"game-metadata-panel\"",
         "id=\"game-metadata-fields\"",
-        "id=\"zoom-out\"",
-        "id=\"zoom-fit\"",
-        "id=\"zoom-in\"",
-        "id=\"snap-toggle\"",
         "id=\"trim-mode-toggle\"",
         "id=\"audio-track-panel\"",
         "id=\"audio-track-summary\"",
@@ -1324,7 +1313,6 @@ fn review_player_owns_all_controls() {
         "id=\"set-open-on-startup\"",
         "id=\"set-close-to-tray\"",
         "id=\"set-minimize-to-tray\"",
-        "id=\"set-legacy-timeline-editor\"",
         "id=\"set-update-channel\"",
         "id=\"set-reopen-window-after-update\"",
         "id=\"check-updates\"",
@@ -1465,14 +1453,12 @@ fn review_player_owns_all_controls() {
     assert!(
         html.contains("Close to Tray")
             && html.contains("Minimize to Tray")
-            && html.contains("Legacy timeline editor")
             && html.contains("Updates")
             && html.contains("value=\"stable\"")
             && !html.contains("value=\"stable\" disabled")
             && !html.contains("Stable (coming soon)")
             && main_js().contains("close_to_tray")
             && main_js().contains("minimize_to_tray")
-            && main_js().contains("legacy_timeline_editor")
             && main_js().contains("update_channel")
             && main_js().contains("check_for_updates")
             && main_js().contains("channel: $(\"set-update-channel\").value")
@@ -1490,11 +1476,28 @@ fn review_player_owns_all_controls() {
         main_js().contains("function setSimpleTrimMode(active)")
             && main_js().contains("function applyTimelineEditorPreference()")
             && main_js().contains("quickTrimRange(")
-            && styles_css().contains(".deck.simple-timeline")
-            && styles_css().contains("#trim-mode-toggle.active")
-            && styles_css().contains(".deck.legacy-timeline"),
-        "review timeline must default to simple trim mode while preserving the legacy editor mode"
+            && styles_css().contains("#trim-mode-toggle.active"),
+        "review timeline must use the simple trim mode"
     );
+    // The legacy timeline editor (navigator, zoom buttons, snap toggle) is gone.
+    for removed in [
+        "set-legacy-timeline-editor",
+        "id=\"overview\"",
+        "id=\"snap-toggle\"",
+        "id=\"zoom-in\"",
+        "class=\"nav-row\"",
+    ] {
+        assert!(!html.contains(removed), "index.html still contains {removed}");
+    }
+    for removed in ["legacy_timeline_editor", "legacyTimelineEnabled", "toggleSnap", "overviewDrag"] {
+        assert!(!main_js().contains(removed), "the UI still references {removed}");
+    }
+    assert!(!styles_css().contains("legacy-timeline") && !styles_css().contains("#overview"));
+    assert!(!html.contains("navigator"), "the shortcuts guide must not mention the navigator");
+    // Group review has no Clip toggle, so its timeline must still zoom.
+    assert!(main_js().contains("return simpleTrimMode || Boolean(activeGroup());"));
+    assert!(main_js().contains("if (!timelineZoomEnabled()) return;"));
+    assert!(main_js().contains("if (timelineZoomEnabled()) zoomAtPlayhead(intent.factor);"));
     assert!(
         main_js().contains("requestWindowClose")
             && main_js().contains("confirmQuit")
@@ -2003,10 +2006,6 @@ fn review_player_owns_all_controls() {
         "id=\"rail-settings\"",
         "id=\"delete-clip\"",
         "id=\"export-clip\"",
-        "id=\"zoom-out\"",
-        "id=\"zoom-fit\"",
-        "id=\"zoom-in\"",
-        "id=\"snap-toggle\"",
     ] {
         let start = html.find(id).expect("transport button exists");
         let body_end = html[start..]
@@ -3418,7 +3417,6 @@ fn timeline_and_media_events_render_the_logical_playhead() {
     let review = review_js();
     let main = read_ui_js("main.js");
     assert!(js_function_body(&review, "paintTimeline").contains("reviewPlayheadTime()"));
-    assert!(js_function_body(&review, "paintOverview").contains("reviewPlayheadTime()"));
     assert!(js_function_body(&review, "seekBy").contains("reviewSeekState.targetTime"));
     assert!(main.contains("const current = reviewPlayheadTime();"));
 }
@@ -3752,7 +3750,7 @@ fn settings_tabs_preserve_unsaved_draft_until_save() {
 }
 
 #[test]
-fn timeline_navigator_and_zoom_controls_are_wired() {
+fn timeline_view_and_trim_controls_are_wired() {
     let html = index_html();
     let js = main_js();
     let css = styles_css();
@@ -3820,25 +3818,19 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
         "event markers must live on the timeline band above the attached time ruler"
     );
 
-    let overview = html.find("id=\"overview\"").expect("overview");
     assert!(
-        ruler < overview && overview < timeline_footer_row && timeline_footer_row < export_row,
-        "the navigator minimap and below-timeline actions must sit above the export row"
+        timeline_footer_row < export_row,
+        "the below-timeline actions must sit above the export row"
     );
 
-    // Central view setter + paint/rebuild split keep the navigator in sync, and
-    // every view change routes through the pure helpers.
+    // Every view change routes through the central setter and the pure helpers.
     for required in [
         "function applyView",
-        "function paintOverview",
-        "function renderOverviewMarkers",
         "function maybeFollow",
-        "onOverviewPointerDown",
         "function zoomAtPlayhead",
         "function zoomToSelection",
         "zoomView(",
         "panView(",
-        "setViewEdge(",
         "followView(",
         "snapTime(",
     ] {
@@ -3848,11 +3840,7 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
         );
     }
 
-    // Navigator window, markers, and snap feedback need styles.
-    assert!(
-        css.contains("#overview-window") && css.contains(".ov-marker") && css.contains(".snapped"),
-        "navigator window, marker ticks, and snap feedback must be styled"
-    );
+    assert!(css.contains(".snapped"), "snap feedback must be styled");
     let metadata_panel_rule = css_rule_body(&css, ".game-metadata-panel");
     let metadata_fields_rule = css_rule_body(&css, ".game-metadata-fields");
     let timeline_footer_row_rule = css_rule_body(&css, ".timeline-footer-row");
@@ -3939,8 +3927,8 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
         .and_then(|rest| rest.split("function setSimpleTrimMode").next())
         .expect("timeline preference function");
     assert!(
-        timeline_preference.contains("$(\"trim-action-panel\").hidden = legacy || group;"),
-        "legacy timeline and group playlist modes should hide the below-timeline scissors strip"
+        timeline_preference.contains("$(\"trim-action-panel\").hidden = group;"),
+        "group playlist mode should hide the below-timeline scissors strip"
     );
     assert!(
         timeline_preference.contains("$(\"trim-mode-label\")")
@@ -3951,8 +3939,8 @@ fn timeline_navigator_and_zoom_controls_are_wired() {
         "the scissors toggle must read Close in clip mode and Clip when idle"
     );
     assert!(
-        css.contains(".deck.simple-timeline:not(.simple-trim-active) #export-clip")
-            && css.contains(".deck.simple-timeline:not(.simple-trim-active) .trim-readout"),
+        css.contains(".deck:not(.simple-trim-active) #export-clip")
+            && css.contains(".deck:not(.simple-trim-active) .trim-readout"),
         "the export clip action must remain scoped to the deck trim-mode state"
     );
     assert!(
@@ -4844,7 +4832,7 @@ fn games_ui_wires_detection_commands() {
 }
 
 #[test]
-fn steam_launch_detection_wires_settings_checkbox_and_always_add() {
+fn steam_launch_detection_wires_settings_checkbox_and_prompt() {
     let html = index_html();
     for required in [
         "id=\"set-games-auto-detect-steam\"",
@@ -4866,32 +4854,51 @@ fn steam_launch_detection_wires_settings_checkbox_and_always_add() {
     let main = main_js();
     for required in [
         "\"set-games-auto-detect-steam\"",
-        "discovered_steam",
-        "invoke(\"add_discovered_steam_game\"",
-        "setDeckStatusAction(\"Always add\"",
-        "discoveredSteamOfferedAppIds",
-        "const target = { appId, processId: event.process_id };",
-        "event.steam_app_id",
-        "invoke(\"add_discovered_steam_game\", { target })",
+        // Unlisted Steam launches ask first: Add / Ignore / Never ask again.
+        "listen(\"steam-game-prompt\"",
+        "invoke(\"steam_game_prompt\")",
+        // Stale snapshots (late events, the boot query) never win.
+        "if (snapshot.revision < steamGamePromptRevision) return;",
+        "listen(\"steam-game-prompt\", (event) => applySteamGamePromptSnapshot(event.payload))",
+        // A failed Add/Ignore re-syncs instead of hiding a pending prompt.
+        "applySteamGamePromptSnapshot(await invoke(\"steam_game_prompt\"));",
+        "$(\"steam-game-prompt-error\").hidden = false;",
+        "const target = { appId: prompt.appId, processId: prompt.processId };",
+        "invoke(\"add_prompted_steam_game\", { target })",
+        "invoke(\"ignore_prompted_steam_game\", { target, neverAskAgain })",
         "if (saved) mergeSavedCustomGame(saved);",
-        "clearDiscoveredSteamOffer()",
-        // Clearing must not remove another feature's deck action.
-        "deckStatusActionHandler === offer.handler",
+        "$(\"steam-game-prompt-dialog\").addEventListener(\"cancel\"",
     ] {
         assert!(
             main.contains(required),
             "game detection UI is missing required wiring {required}"
         );
     }
+    for removed in ["Always add", "discovered_steam", "add_discovered_steam_game"] {
+        assert!(!main.contains(removed), "main.js still references {removed}");
+    }
+    for required in [
+        "<dialog id=\"steam-game-prompt-dialog\"",
+        "id=\"steam-game-prompt-add\"",
+        "id=\"steam-game-prompt-ignore\"",
+        "id=\"steam-game-prompt-never\"",
+        "<span>Never ask again</span>",
+        "id=\"ignored-steam-games\"",
+    ] {
+        assert!(html.contains(required), "index.html is missing {required}");
+    }
+    let never = html.find("id=\"steam-game-prompt-never\"").unwrap();
+    let add = html.find("id=\"steam-game-prompt-add\"").unwrap();
+    assert!(never < add, "the Never ask again checkbox sits above the buttons");
     // Reloading saved custom games would discard unsaved Settings edits.
     assert!(!main.contains("refreshCustomGamesFromBackend"));
     assert!(!settings.contains("refreshCustomGamesFromBackend"));
 
-    // A full Save and Always add never interleave: Save builds its custom
+    // A full Save and a Steam prompt Add never interleave: Save builds its custom
     // games list only after an in-flight add has merged its rule.
     for required in [
         "function queueSettingsWrite(write)",
-        "await queueSettingsWrite(async () => {\n        const saved = await invoke(\"add_discovered_steam_game\", { target });",
+        "await queueSettingsWrite(async () => {\n        const saved = await invoke(\"add_prompted_steam_game\", { target });",
         "await queueSettingsWrite(async () => {\n      fillSettings(await invoke(\"save_settings\", { settings: syncSettingsDraftFromForm() }));",
         // Turning games-only on also turns Steam launch detection on.
         "if ($(\"set-games-pause-when-empty\").checked) $(\"set-games-auto-detect-steam\").checked = true;",
@@ -4906,8 +4913,10 @@ fn steam_launch_detection_wires_settings_checkbox_and_always_add() {
 
     assert!(
         settings.contains("function mergeSavedCustomGame"),
-        "settings.js must merge an Always add rule without replacing the draft"
+        "settings.js must merge a prompted Steam game's rule without replacing the draft"
     );
+    assert!(settings.contains("function applyIgnoredSteamGames"));
+    assert!(games.contains("invoke(\"unignore_steam_game\", { appId: game.app_id })"));
     assert!(
         settings.contains("settingsIndicatorBaseline"),
         "settings.js must update the dirty baseline when merging custom games"
@@ -6648,4 +6657,23 @@ fn favorites_are_guarded_across_review_gallery_and_context_menu() {
             && main.contains("clip-menu-favorite"),
         "cloud/game-play menus must hide the favorite action; main.js must wire the toggle"
     );
+}
+
+#[test]
+fn rail_shows_the_build_version_with_a_nightly_moon_above_the_profile() {
+    let html = index_html();
+    let build = html.find("id=\"rail-build\"").expect("rail build badge");
+    let profile = html.find("id=\"rail-profile\"").expect("rail profile");
+    assert!(build < profile, "the build badge sits above the profile icon");
+    assert!(html.contains("id=\"rail-build-nightly\""));
+    assert!(html.contains("id=\"rail-build-version\""));
+
+    let main = main_js();
+    for required in [
+        "applyBuildInfo(response && response.build);",
+        "$(\"rail-build-version\").textContent = \"v\" + build.version;",
+        "$(\"rail-build-nightly\").toggleAttribute(\"hidden\", !build.nightly);",
+    ] {
+        assert!(main.contains(required), "main.js is missing {required}");
+    }
 }

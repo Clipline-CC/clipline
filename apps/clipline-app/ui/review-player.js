@@ -807,7 +807,6 @@ function openClip(clip, { preserveGroup = false, autoplay = true } = {}) {
   video.playbackRate = Number($("rate-select").value);
   resetZoom();
   setTrim(0, clip.duration_s ?? (clip.markers ? clip.markers.duration_s : 0));
-  renderOverviewMarkers();
   applyView({ start: 0, span: 0 });
   applyTimelineEditorPreference();
   renderAudioTrackPanel();

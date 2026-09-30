@@ -202,7 +202,10 @@ pub fn run() {
             commands::list_game_plugins,
             commands::list_game_windows,
             commands::detect_installed_games,
-            commands::add_discovered_steam_game,
+            steam_prompt::steam_game_prompt,
+            steam_prompt::add_prompted_steam_game,
+            steam_prompt::ignore_prompted_steam_game,
+            steam_prompt::unignore_steam_game,
             commands::extract_window_icon,
             webview::memory_status,
             webview::frontend_ready,
@@ -531,7 +534,8 @@ pub(crate) fn spawn_game_detector<R: Runtime>(app: AppHandle<R>) {
             loop {
                 std::thread::sleep(GAME_DETECTOR_INTERVAL);
                 let settings = app.state::<RuntimeState>().settings();
-                let detected = crate::games::detect_active_game(&settings.games);
+                let skipped = app.state::<RuntimeState>().skipped_steam_launches();
+                let detected = crate::games::detect_active_game(&settings.games, &skipped);
                 let league_lookup = league_gate_applies(&settings, detected.as_ref()).then(|| {
                     Box::new(|game: &DetectedGame| spawn_gate_lookup(game)) as LeagueGateLookup
                 });

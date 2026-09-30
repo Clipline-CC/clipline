@@ -223,6 +223,25 @@ pub(crate) fn ensure_foreground_microphone_test(state: &WindowLifecycleState) ->
 pub(crate) struct FrontendReadyResponse {
     pub(crate) warnings: Vec<String>,
     pub(crate) window_lifecycle: WindowLifecycleSnapshot,
+    pub(crate) build: BuildInfo,
+}
+
+/// Rail build badge: the running version, and whether this package is a
+/// Nightly build (the channel release workflows bake in; dev builds count).
+#[derive(serde::Serialize)]
+pub(crate) struct BuildInfo {
+    pub(crate) version: &'static str,
+    pub(crate) nightly: bool,
+}
+
+impl BuildInfo {
+    pub(crate) fn current() -> Self {
+        Self {
+            version: env!("CARGO_PKG_VERSION"),
+            nightly: crate::updates::UpdateChannel::install_default()
+                == crate::updates::UpdateChannel::Nightly,
+        }
+    }
 }
 
 pub(crate) fn open_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {

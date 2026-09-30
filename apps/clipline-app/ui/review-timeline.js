@@ -110,43 +110,40 @@ function scheduleTrimBoundaryCheck() {
   });
 }
 
-function legacyTimelineEnabled() {
-  return !!(currentSettings && currentSettings.legacy_timeline_editor);
-}
-
 function applyTimelineEditorPreference() {
   const deck = document.querySelector(".deck");
   if (!deck) return;
-  const legacy = legacyTimelineEnabled();
   const group = Boolean(activeGroup());
-  if (legacy || group) simpleTrimMode = false;
-  deck.classList.toggle("legacy-timeline", legacy);
-  deck.classList.toggle("simple-timeline", !legacy);
-  deck.classList.toggle("simple-trim-active", !legacy && simpleTrimMode);
+  if (group) simpleTrimMode = false;
+  deck.classList.toggle("simple-trim-active", simpleTrimMode);
 
   const toggle = $("trim-mode-toggle");
-  $("trim-action-panel").hidden = legacy || group;
-  toggle.disabled = legacy || group;
-  toggle.hidden = legacy || group;
-  toggle.classList.toggle("active", !legacy && simpleTrimMode);
-  toggle.setAttribute("aria-pressed", String(!legacy && simpleTrimMode));
+  $("trim-action-panel").hidden = group;
+  toggle.disabled = group;
+  toggle.hidden = group;
+  toggle.classList.toggle("active", simpleTrimMode);
+  toggle.setAttribute("aria-pressed", String(simpleTrimMode));
   toggle.title = simpleTrimMode ? "Close" : "Clip";
   toggle.setAttribute("aria-label", simpleTrimMode ? "Close" : "Clip");
   const trimLabel = $("trim-mode-label");
   if (trimLabel) trimLabel.textContent = simpleTrimMode ? "Close" : "Clip";
 
   const exportLabel = $("export-clip").querySelector("span");
-  if (exportLabel) exportLabel.textContent = !legacy && simpleTrimMode ? "Create Clip" : "Clip";
-  $("timeline").title = legacy
-    ? "Click to seek · drag the selection to slide · drag the edges to trim · scroll to zoom"
-    : simpleTrimMode
-      ? "Drag the handles to trim · drag the selection to slide · click to seek"
-      : "Click to seek · press Clip to create a clip";
+  if (exportLabel) exportLabel.textContent = simpleTrimMode ? "Create Clip" : "Clip";
+  $("timeline").title = simpleTrimMode
+    ? "Drag the handles to trim · drag the selection to slide · click to seek"
+    : "Click to seek · press Clip to create a clip";
   paintTimeline();
 }
 
+// Zoom and pan follow Clip mode, except in group review: that mode has no
+// Clip toggle, so its timeline always zooms (scroll, +/-, \).
+function timelineZoomEnabled() {
+  return simpleTrimMode || Boolean(activeGroup());
+}
+
 function setSimpleTrimMode(active) {
-  if (legacyTimelineEnabled() || activeGroup()) {
+  if (activeGroup()) {
     simpleTrimMode = false;
     scheduleTrimBoundaryCheck();
     applyTimelineEditorPreference();
@@ -208,7 +205,7 @@ function noteViewActivity() {
 // marker clicks). Gated on no active drag and a quiet period after a manual view
 // change so it never pages out from under the user; only re-renders on a change.
 function maybeFollow(playhead) {
-  if (dragging || overviewDrag) return;
+  if (dragging) return;
   if (performance.now() < suppressFollowUntil) return;
   if (!(zoomSpan > 0)) return; // zoomed out: the whole clip is already in view
   const v = timelineView();
@@ -218,7 +215,7 @@ function maybeFollow(playhead) {
   }
 }
 
-/* ---- zoom / snap controls ---- */
+/* ---- zoom controls ---- */
 
 // Zoom by a factor (<1 in, >1 out) anchored on the playhead so it stays in view.
 function zoomAtPlayhead(factor) {
@@ -241,15 +238,6 @@ function zoomToSelection() {
   if (!(dur > 0)) return;
   noteViewActivity();
   applyView(viewForRange(trimStart, trimEnd, dur));
-}
-
-function setSnap(on) {
-  snapEnabled = on;
-  $("snap-toggle").classList.toggle("active", snapEnabled);
-}
-
-function toggleSnap() {
-  setSnap(!snapEnabled);
 }
 
 // Best-effort clip frame rate: the recorder's configured fps, else a fine
@@ -296,41 +284,6 @@ function paintTimeline() {
   if (!full) {
     band.style.left = `${pct(trimStart)}%`;
     band.style.width = `${Math.max(0, pct(trimEnd) - pct(trimStart))}%`;
-  }
-  paintOverview();
-}
-
-// Cheap per-frame navigator update, in whole-clip coordinates: the trim band,
-// the playhead, and the visible-window rectangle. The marker ticks are rebuilt
-// separately (renderOverviewMarkers) only when the clip changes.
-function paintOverview() {
-  const win = $("overview-window");
-  if (!win) return;
-  const dur = clipDuration();
-  const view = timelineView();
-  const current = dur ? clampTime(reviewPlayheadTime(), dur) : 0;
-  const a = percentFor(trimStart, dur);
-  const b = percentFor(trimEnd, dur);
-  $("overview-trim").style.left = `${a}%`;
-  $("overview-trim").style.width = `${Math.max(0, b - a)}%`;
-  $("overview-playhead").style.left = `${percentFor(current, dur)}%`;
-  win.style.left = `${percentFor(view.start, dur)}%`;
-  win.style.width = `${dur ? Math.max(0, Math.min(100, (view.span / dur) * 100)) : 100}%`;
-}
-
-// Rebuild the whole-clip marker ticks in the navigator. View-independent, so it
-// runs on clip/marker change only — never per frame and never on zoom.
-function renderOverviewMarkers() {
-  const layer = $("overview-markers");
-  if (!layer) return;
-  layer.replaceChildren();
-  const dur = clipDuration();
-  const presentation = currentPluginPresentation();
-  for (const m of clipMarkers()) {
-    const tick = document.createElement("i");
-    tick.className = `ov-marker marker-${markerStyle(m.kind, presentation).cls}`;
-    tick.style.left = `${percentFor(m.t_s, dur)}%`;
-    layer.appendChild(tick);
   }
 }
 
@@ -722,7 +675,7 @@ function moveDrag(ev) {
   const dur = clipDuration();
   const rawT = timelineTimeView(ev.clientX, rect.left, rect.width, view.start, view.span, dur);
   const pps = rect.width && view.span > 0 ? rect.width / view.span : 0;
-  const doSnap = snapEnabled && !ev.altKey && pps > 0;
+  const doSnap = !ev.altKey && pps > 0;
   clearSnapFeedback();
 
   if (dragging === "slide") {
@@ -791,7 +744,7 @@ const ZOOM_SENSITIVITY = 0.0015;
 function onTimelineWheel(ev) {
   const dur = clipDuration();
   if (!currentClip || !(dur > 0)) return;
-  if (!legacyTimelineEnabled() && !simpleTrimMode) return;
+  if (!timelineZoomEnabled()) return;
   ev.preventDefault();
   noteViewActivity();
   const rect = $("timeline").getBoundingClientRect();
@@ -813,72 +766,3 @@ function onTimelineWheel(ev) {
   applyView(zoomView(view.start, view.span, dur, anchorFrac, factor, MIN_VIEW_SPAN_S));
 }
 
-/* ---- navigator (whole-clip minimap) drag: body pans, grips zoom ---- */
-
-// Clip time under the pointer in the whole-clip navigator.
-function overviewTime(ev) {
-  const rect = $("overview").getBoundingClientRect();
-  const dur = clipDuration();
-  if (!rect.width || !dur) return 0;
-  const x = Math.max(0, Math.min(rect.width, ev.clientX - rect.left));
-  return (x / rect.width) * dur;
-}
-
-function onOverviewPointerDown(ev) {
-  if (!currentClip || !(clipDuration() > 0)) return;
-  ev.preventDefault();
-  const dur = clipDuration();
-  const v = timelineView();
-  const t = overviewTime(ev);
-  if (ev.target === $("overview-window-l")) {
-    overviewDrag = { mode: "left", pointerId: ev.pointerId };
-    moveOverviewDrag(ev);
-  } else if (ev.target === $("overview-window-r")) {
-    overviewDrag = { mode: "right", pointerId: ev.pointerId };
-    moveOverviewDrag(ev);
-  } else if (ev.target === $("overview-window")) {
-    // Grab the box where you clicked it and pan, keeping that point under the cursor.
-    overviewDrag = { mode: "pan", grab: t - v.start, pointerId: ev.pointerId };
-  } else {
-    // Clicking the empty track jumps the window to center on the click, then pans.
-    const nv = clampView(t - v.span / 2, v.span, dur);
-    applyView(nv);
-    overviewDrag = { mode: "pan", grab: t - nv.start, pointerId: ev.pointerId };
-  }
-  $("overview").setPointerCapture(ev.pointerId);
-  $("overview-window").classList.add("grabbing");
-}
-
-function moveOverviewDrag(ev) {
-  if (!overviewDrag) return;
-  const dur = clipDuration();
-  const v = timelineView();
-  const t = overviewTime(ev);
-  if (overviewDrag.mode === "pan") {
-    applyView(clampView(t - overviewDrag.grab, v.span, dur));
-  } else {
-    applyView(setViewEdge(v.start, v.span, dur, overviewDrag.mode, t));
-  }
-}
-
-function endOverviewDrag() {
-  if (!overviewDrag) return;
-  overviewDrag = null;
-  $("overview-window").classList.remove("grabbing");
-  noteViewActivity(); // don't snap back to the playhead the instant the drag ends
-}
-
-// Navigator scroll pans the visible window left/right. The strip spans the whole
-// clip, so map pixels scrolled to clip seconds (no-op when fully zoomed out).
-function onOverviewWheel(ev) {
-  const dur = clipDuration();
-  if (!currentClip || !(dur > 0)) return;
-  ev.preventDefault();
-  noteViewActivity();
-  const rect = $("overview").getBoundingClientRect();
-  if (!rect.width) return;
-  const unit = ev.deltaMode === 1 ? 33 : ev.deltaMode === 2 ? rect.width : 1;
-  const raw = Math.abs(ev.deltaX) > Math.abs(ev.deltaY) ? ev.deltaX : ev.deltaY;
-  const view = timelineView();
-  applyView(panView(view.start, view.span, dur, ((raw * unit) / rect.width) * dur));
-}
