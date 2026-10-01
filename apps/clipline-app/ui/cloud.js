@@ -283,6 +283,7 @@ function cloudAccountKey() {
 }
 
 function resetCloudClipsCache() {
+  if (deckStatusAccountKey && deckStatusAccountKey !== cloudAccountKey()) setDeckStatus("");
   cloudClipsRequestGate.invalidate();
   cloudClipsCache = [];
   cloudClipsLoaded = false;
@@ -728,8 +729,8 @@ async function uploadClipToCloud(clip, request = {}) {
     syncUploadClipButton();
     return;
   }
-  setDeckStatus("uploading to cloud...");
   const accountKey = cloudAccountKey();
+  setDeckStatus("uploading to cloud...", { accountKey });
   setNotice("cloud upload started", { transient: true });
   $("error").textContent = "";
   try {
@@ -759,7 +760,7 @@ async function uploadClipToCloud(clip, request = {}) {
         setDeckStatus("");
         $("error").textContent = result.record.error || "cloud upload failed";
       } else {
-        setDeckStatus("cloud upload processing");
+        setDeckStatus("cloud upload processing", { accountKey });
       }
     }
     const uploadStatus = result?.record?.upload_status || "";

@@ -4949,13 +4949,179 @@ fn settings_html_never_repeats_an_element_id() {
 }
 
 #[test]
+fn account_switch_clears_only_stale_upload_deck_status() {
+    use boa_engine::{Context, Source};
+
+    for pending in ["audio", "upload"] {
+        for reject in [false, true] {
+            let mut context = Context::default();
+            context
+                .eval(Source::from_bytes(
+                    r#"
+                    var nodes = new Map();
+                    var document = {
+                        getElementById(id) {
+                            if (!nodes.has(id)) nodes.set(id, {textContent: ''});
+                            return nodes.get(id);
+                        },
+                        querySelector() { return {}; },
+                    };
+                    var window = {
+                        __TAURI__: {
+                            core: {}, event: {},
+                            window: {getCurrentWindow() { return {}; }},
+                        },
+                        addEventListener() {}, clearTimeout() {},
+                        setTimeout() { return 1; },
+                    };
+                    var PlayerCore = {};
+                    var WindowLifecycleCore = {initialState() { return {}; }};
+                    var GalleryWindowCore = {initialState() { return {}; }};
+                    "#,
+                ))
+                .unwrap();
+            for name in ["cloud-core.js", "app-core.js", "cloud.js"] {
+                context
+                    .eval(Source::from_bytes(&read_ui_js(name)))
+                    .unwrap();
+            }
+            let main = read_ui_js("main.js");
+            let progress = main
+                .split("listen(\"cloud-upload-progress\", (e) => {")
+                .nth(1)
+                .unwrap()
+                .split("\n});")
+                .next()
+                .unwrap();
+            context
+                .eval(Source::from_bytes(&format!(
+                    r#"
+                    var onProgress = e => {{{progress}}};
+                    function settingsFor(user) {{
+                        return {{cloud: {{host_url: 'host', connected_user_id: user,
+                            credential_target: 'credential-' + user, uploads: {{}}}}}};
+                    }}
+                    currentSettings = settingsFor('a');
+                    var backendSettings = currentSettings;
+                    var settingsIndicatorBaseline = null;
+                    var resolveOld, rejectOld;
+                    var oldWork = new Promise((resolve, reject) => {{
+                        resolveOld = resolve; rejectOld = reject;
+                    }});
+                    var uploadCalls = 0, completed = false, reloadCompleted = false;
+                    var flushAudioSelectionSave = () =>
+                        '{pending}' === 'audio' ? oldWork : Promise.resolve();
+                    invoke = command => {{
+                        if (command === 'get_settings') return Promise.resolve(backendSettings);
+                        if (command === 'upload_clip_to_cloud') {{ uploadCalls++; return oldWork; }}
+                        throw new Error('unexpected command: ' + command);
+                    }};
+                    fillCloudSettings = () => {{}};
+                    var syncSettingsDirtyState = () => {{}};
+                    var clearCloudPosterCache = () => {{}};
+                    var renderClips = () => {{}};
+                    uploadClipToCloud({{path: 'a.mp4'}}, {{title: 'A'}})
+                        .then(() => {{ completed = true; }});
+                    "#,
+                )))
+                .unwrap();
+            context.run_jobs().unwrap();
+            context
+                .eval(Source::from_bytes(
+                    r#"
+                    if (completed || $('deck-status').textContent !== 'uploading to cloud...')
+                        throw new Error('upload must still be pending');
+                    resetCloudClipsCache();
+                    if ($('deck-status').textContent !== 'uploading to cloud...')
+                        throw new Error('same-account reset cleared upload status');
+                    backendSettings = settingsFor('b');
+                    reloadSettings().then(() => { reloadCompleted = true; });
+                    "#,
+                ))
+                .unwrap();
+            context.run_jobs().unwrap();
+            context
+                .eval(Source::from_bytes(
+                    r#"
+                    if (!reloadCompleted || $('deck-status').textContent !== '')
+                        throw new Error('account switch left A upload status on B');
+                    onProgress({payload: {account_key: cloudAccountKey(),
+                        local_clip_id: 'b', upload_status: 'uploading',
+                        received_size_bytes: 50, file_size_bytes: 100}});
+                    if ($('deck-status').textContent !== 'cloud upload 50%')
+                        throw new Error('B progress must own the newer status');
+                    resetCloudClipsCache();
+                    "#,
+                ))
+                .unwrap();
+            context
+                .eval(Source::from_bytes(if reject {
+                    "rejectOld(new Error('A failed'));"
+                } else {
+                    "resolveOld({record: {local_clip_id: 'a', upload_status: 'uploaded_private'}});"
+                }))
+                .unwrap();
+            context.run_jobs().unwrap();
+            context
+                .eval(Source::from_bytes(&format!(
+                    r#"
+                    if (!completed || $('deck-status').textContent !== 'cloud upload 50%'
+                        || $('error').textContent || cloudSettings().uploads.a
+                        || uploadCalls !== {})
+                        throw new Error('old completion changed B state');
+                    backendSettings = settingsFor('c');
+                    reloadSettings();
+                    "#,
+                    usize::from(pending == "upload"),
+                )))
+                .unwrap();
+            context.run_jobs().unwrap();
+            context
+                .eval(Source::from_bytes(
+                    r#"
+                    if ($('deck-status').textContent !== '')
+                        throw new Error('account switch left B percentage status on C');
+                    onProgress({payload: {account_key: cloudAccountKey(),
+                        local_clip_id: 'c', upload_status: 'processing'}});
+                    setDeckStatus('exporting…');
+                    backendSettings = settingsFor('d');
+                    reloadSettings();
+                    "#,
+                ))
+                .unwrap();
+            context.run_jobs().unwrap();
+            context
+                .eval(Source::from_bytes(
+                    r#"
+                    if ($('deck-status').textContent !== 'exporting…')
+                        throw new Error('account switch cleared unrelated deck status');
+                    onProgress({payload: {account_key: cloudAccountKey(),
+                        local_clip_id: 'd', upload_status: 'processing'}});
+                    backendSettings = {cloud: {}};
+                    reloadSettings();
+                    "#,
+                ))
+                .unwrap();
+            context.run_jobs().unwrap();
+            context
+                .eval(Source::from_bytes(
+                    "if ($('deck-status').textContent !== '') throw new Error('disconnect left processing status');",
+                ))
+                .unwrap();
+        }
+    }
+}
+
+#[test]
 fn deck_status_success_toasts_auto_clear() {
     let js = main_js();
 
     assert!(
         js.contains("DECK_STATUS_TOAST_MS")
             && js.contains("deckStatusToastTimer")
-            && js.contains("function setDeckStatus(message, { transient = false } = {})"),
+            && js.contains(
+                "function setDeckStatus(message, { transient = false, accountKey = \"\" } = {})",
+            ),
         "deck status messages should flow through a helper that can schedule transient toasts"
     );
     assert!(
@@ -4982,8 +5148,8 @@ fn deck_status_success_toasts_auto_clear() {
         "setDeckStatus(\"switching audio tracks...\")",
         "setDeckStatus(\"renaming clip...\")",
         "setDeckStatus(\"exporting…\")",
-        "setDeckStatus(\"uploading to cloud...\")",
-        "setDeckStatus(\"cloud upload processing\")",
+        "setDeckStatus(\"uploading to cloud...\", { accountKey })",
+        "setDeckStatus(\"cloud upload processing\", { accountKey })",
     ] {
         assert!(
             js.contains(required),

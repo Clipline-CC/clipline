@@ -215,6 +215,7 @@ var reviewAudioDriftTimer = 0;
 var renamePending = false;
 var DECK_STATUS_TOAST_MS = 3200;
 var deckStatusToastTimer = 0;
+var deckStatusAccountKey = "";
 var deckStatusActionHandler = null;
 var NOTICE_TOAST_MS = 2600;
 var noticeToastTimer = 0;
@@ -247,9 +248,10 @@ var MIC_MONITOR_MAX_LATENCY_S = 0.25;
 // moment so its lead-up plays rather than dropping the viewer right on it.
 var MARKER_LEAD_S = 1;
 
-function setDeckStatus(message, { transient = false } = {}) {
+function setDeckStatus(message, { transient = false, accountKey = "" } = {}) {
   window.clearTimeout(deckStatusToastTimer);
   deckStatusToastTimer = 0;
+  deckStatusAccountKey = accountKey;
   setDeckStatusAction("", null);
   $("deck-status").textContent = message;
   if (!transient || !message) return;
@@ -257,6 +259,7 @@ function setDeckStatus(message, { transient = false } = {}) {
   deckStatusToastTimer = window.setTimeout(() => {
     if ($("deck-status").textContent === message) {
       $("deck-status").textContent = "";
+      deckStatusAccountKey = "";
       setDeckStatusAction("", null);
     }
     deckStatusToastTimer = 0;

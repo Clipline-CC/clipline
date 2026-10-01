@@ -247,9 +247,9 @@ listen("cloud-upload-progress", (e) => {
     const done = Number(progress.received_size_bytes) || 0;
     setDeckStatus(total > 0
       ? `cloud upload ${Math.round((done / total) * 100)}%`
-      : "cloud upload in progress");
+      : "cloud upload in progress", { accountKey: progress.account_key });
   } else if (progress.upload_status === "processing") {
-    setDeckStatus("cloud upload processing");
+    setDeckStatus("cloud upload processing", { accountKey: progress.account_key });
   }
   if (update.renderRequired) renderClips();
 });
