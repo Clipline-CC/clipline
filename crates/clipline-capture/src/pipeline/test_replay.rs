@@ -1,12 +1,185 @@
-use super::test_support::*;
-use clipline_buffer::{SampleInfo, Segment, TrackSamples};
-use clipline_test_utils::TestDir;
-use crate::mock::{MockAudioSource, MockCapture, MockEncoder};
-use std::io;
 use super::mux::select_audio_after_replay_origin;
 use super::recorder::Recorder;
 use super::storage::{ReplayStorage, ReplayStorageConfig, ReplayWindow};
+use super::test_support::*;
+use crate::mock::{MockAudioSource, MockCapture, MockEncoder};
+use clipline_buffer::{SampleInfo, Segment, TrackSamples};
 use clipline_mp4::walker::{children, find, walk};
+use clipline_test_utils::TestDir;
+use std::io;
+
+fn audio_fragment_timestamps(bytes: &[u8], track_id: u32) -> Vec<(u64, u32)> {
+    let mut output = Vec::new();
+    // Finalization hides the original fragments inside the outer mdat.
+    for (index, _) in bytes
+        .windows(4)
+        .enumerate()
+        .filter(|(_, value)| *value == b"moof")
+    {
+        let bytes = &bytes[index - 4..];
+        let boxes = walk(bytes);
+        let moof = &boxes[0];
+        for traf in children(bytes, moof)
+            .iter()
+            .filter(|entry| &entry.fourcc == b"traf")
+        {
+            let boxes = children(bytes, traf);
+            let tfhd = &bytes[find(&boxes, b"tfhd").unwrap().payload_offset as usize..];
+            if u32::from_be_bytes(tfhd[4..8].try_into().unwrap()) != track_id {
+                continue;
+            }
+            let tfdt = &bytes[find(&boxes, b"tfdt").unwrap().payload_offset as usize..];
+            assert_eq!(tfdt[0], 1);
+            let mut pts = u64::from_be_bytes(tfdt[4..12].try_into().unwrap());
+            let trun = &bytes[find(&boxes, b"trun").unwrap().payload_offset as usize..];
+            let count = u32::from_be_bytes(trun[4..8].try_into().unwrap());
+            for index in 0..count as usize {
+                let offset = 12 + index * 12;
+                let duration = u32::from_be_bytes(trun[offset..offset + 4].try_into().unwrap());
+                output.push((pts, duration));
+                pts += u64::from(duration);
+            }
+        }
+    }
+    output
+}
+
+fn pcm_discontinuity_round_trip(gop_len: u64) {
+    use crate::opus::{FRAME_DURATION_S, FRAME_LEN, OpusFrameEncoder};
+    use crate::pcm::LoopbackAssembler;
+    use crate::traits::AudioPacket;
+
+    let mut pcm = LoopbackAssembler::new();
+    pcm.push_chunk(0.0, &vec![0.25; FRAME_LEN * 23]);
+    pcm.push_chunk(7.0, &vec![0.5; FRAME_LEN * 3]);
+    let mut opus = OpusFrameEncoder::new().unwrap();
+    let packets: std::collections::VecDeque<_> = std::iter::from_fn(|| pcm.pop_frame())
+        .map(|(pts_s, frame)| AudioPacket {
+            data: opus.encode_frame(&frame).unwrap(),
+            pts_s,
+            duration_s: FRAME_DURATION_S,
+        })
+        .collect();
+    assert_eq!(
+        packets.len(),
+        23 + 250 + 3,
+        "gap fill stays capped at five seconds"
+    );
+    let expected: Vec<_> = packets
+        .iter()
+        .map(|packet| ((packet.pts_s * 48_000.0).round() as u64, 960))
+        .collect();
+    assert_eq!(expected[273].0, 336_000, "PCM resumed at seven seconds");
+
+    let dir = TestDir::new("clipline-pipeline", &format!("pcm-gap-{gop_len}"));
+    let mut replays = Vec::new();
+    for disk in [false, true] {
+        let storage = if disk {
+            ReplayStorageConfig::Disk {
+                max_bytes: usize::MAX,
+                retention_s: f64::INFINITY,
+                dir: dir.path().join("ring"),
+            }
+        } else {
+            ReplayStorageConfig::Memory {
+                max_bytes: usize::MAX,
+                retention_s: f64::INFINITY,
+            }
+        };
+        let mut recorder = Recorder::new_with_replay_storage(
+            MockCapture::new(9, 1),
+            MockEncoder::new(gop_len, 1),
+            storage,
+        )
+        .unwrap()
+        .with_audio(Box::new(GappedAudioSource {
+            packets: packets.clone(),
+        }))
+        .with_audio(Box::new(MockAudioSource::new(48_000, 20)));
+        let full_path = dir.path().join(format!("full-{disk}.mp4"));
+        recorder
+            .start_full_session(std::fs::File::create(&full_path).unwrap())
+            .unwrap();
+        recorder.run_to_end().unwrap();
+        recorder.finish_full_session().unwrap().unwrap();
+        let full = std::fs::read(full_path).unwrap();
+        let replay = recorder
+            .save_replay(std::io::Cursor::new(Vec::new()), 20.0, None)
+            .unwrap()
+            .0
+            .into_inner();
+        for bytes in [&replay, &full] {
+            let actual = audio_fragment_timestamps(bytes, 2);
+            assert_eq!(actual.len(), expected.len());
+            assert_eq!(
+                actual[273], expected[273],
+                "resumed audio must retain its decode time, GOP={gop_len}, disk={disk}"
+            );
+            assert_eq!(actual, expected, "every packet retains its 20 ms cadence");
+            assert_eq!(
+                audio_fragment_timestamps(bytes, 3),
+                (0..450).map(|index| (index * 960, 960)).collect::<Vec<_>>(),
+                "a continuous sibling audio track must not repeat or skip packets"
+            );
+            assert_eq!(first_opus_pre_skip(bytes), 312);
+            // Exercise the production finalized sample-table/edit-list parser,
+            // which must expand the gap back into presentation timestamps.
+            let remux = clipline_mp4::remux_with_selected_audio_tracks(bytes, &[0]).unwrap();
+            assert_eq!(audio_fragment_timestamps(&remux, 2), expected);
+            let (trimmed, info) = clipline_mp4::trim_keyframe_aligned(bytes, 7.0, 8.0).unwrap();
+            let trimmed_expected: Vec<_> = expected
+                .iter()
+                .filter(|(pts, _)| {
+                    *pts as f64 / 48_000.0 >= info.aligned_start_s
+                        && (*pts as f64 / 48_000.0) < info.aligned_end_s
+                })
+                .map(|(pts, duration)| {
+                    (
+                        pts - (info.aligned_start_s * 48_000.0).round() as u64,
+                        *duration,
+                    )
+                })
+                .collect();
+            assert_eq!(audio_fragment_timestamps(&trimmed, 2), trimmed_expected);
+        }
+        let (origin_s, _) = recorder.save_window_bounds(3.5, None).unwrap();
+        let seek_replay = recorder
+            .save_replay(std::io::Cursor::new(Vec::new()), 3.5, None)
+            .unwrap()
+            .0
+            .into_inner();
+        let origin_ticks = (origin_s * 48_000.0).round() as u64;
+        let seek_expected: Vec<_> = expected
+            .iter()
+            .filter(|(pts, _)| *pts >= origin_ticks)
+            .map(|(pts, duration)| (pts - origin_ticks, *duration))
+            .collect();
+        assert_eq!(audio_fragment_timestamps(&seek_replay, 2), seek_expected);
+        assert_eq!(
+            first_opus_pre_skip(&seek_replay),
+            if origin_s > 0.0 { 960 } else { 312 }
+        );
+        let seek_remux =
+            clipline_mp4::remux_with_selected_audio_tracks(&seek_replay, &[0]).unwrap();
+        assert_eq!(audio_fragment_timestamps(&seek_remux, 2), seek_expected);
+        replays.push((replay, seek_replay));
+    }
+    assert_eq!(
+        replays[0], replays[1],
+        "disk replay retains identical timing and payload"
+    );
+}
+
+#[test]
+fn pcm_discontinuity_within_gop_preserves_audio_decode_times() {
+    pcm_discontinuity_round_trip(9);
+}
+
+#[test]
+fn pcm_discontinuity_across_gop_boundary_preserves_audio_decode_times() {
+    pcm_discontinuity_round_trip(4);
+    pcm_discontinuity_round_trip(7);
+}
 
     #[test]
     fn delayed_and_gapped_audio_timing_survives_replay_and_full_session_muxing() {
@@ -190,6 +363,7 @@ use clipline_mp4::walker::{children, find, walk};
     fn sample_selection_drops_straddling_audio_without_mutating_payload() {
         let track = TrackSamples {
             pts_start_s: Some(1.50),
+            discontinuities: Vec::new(),
             data: b"AB".to_vec(),
             samples: vec![
                 SampleInfo {
@@ -253,6 +427,7 @@ use clipline_mp4::walker::{children, find, walk};
             }],
             audio: vec![TrackSamples {
                 pts_start_s: Some(0.0),
+                discontinuities: Vec::new(),
                 data: vec![5, 6, 7, 8],
                 samples: vec![SampleInfo {
                     size: 4,
@@ -488,6 +663,7 @@ use clipline_mp4::walker::{children, find, walk};
             samples: vec![sample()],
             audio: vec![TrackSamples {
                 pts_start_s: Some(audio_start_s),
+                discontinuities: Vec::new(),
                 samples: vec![sample(); audio.len()],
                 data: audio,
             }],

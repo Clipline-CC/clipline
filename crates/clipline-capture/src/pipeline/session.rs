@@ -5,9 +5,9 @@ use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::thread::{self, JoinHandle};
 
 use clipline_buffer::Segment;
-use clipline_mp4::{AudioTrackConfig, FragSampleRef, HybridMp4Writer, TrackConfig, VideoTrackConfig};
+use clipline_mp4::{AudioTrackConfig, HybridMp4Writer, TrackConfig, VideoTrackConfig};
 
-use super::mux::{segment_audio_selections, segment_fragment_refs, set_segment_decode_times};
+use super::mux::write_memory_replay_segment;
 
 
 pub trait WriteSeek: Write + Seek + Send {}
@@ -147,19 +147,7 @@ pub(crate) fn write_full_session_segment(
         *writer = Some(HybridMp4Writer::new_multi(target, track_cfgs)?);
     }
     let writer = writer.as_mut().expect("writer initialized");
-    let audio_selections = segment_audio_selections(&seg, Some(origin_s))?;
-    let timelines = set_segment_decode_times(
-        writer,
-        seg.pts_start_s,
-        &audio_selections,
-        &video_cfg,
-        &audio_cfgs,
-        origin_s,
-    )?;
-    let per_track =
-        segment_fragment_refs(&seg, &audio_selections, &video_cfg, &audio_cfgs, &timelines)?;
-    let slices: Vec<&[FragSampleRef<'_>]> = per_track.iter().map(|v| v.as_slice()).collect();
-    writer.write_fragment_multi_borrowed(&slices)
+    write_memory_replay_segment(writer, &seg, &video_cfg, &audio_cfgs, origin_s)
 }
 
 pub(crate) fn try_reserve_queue_bytes(queued: &AtomicUsize, bytes: usize, max_bytes: usize) -> bool {

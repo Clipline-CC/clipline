@@ -146,18 +146,21 @@ mod tests {
         let mut s1 = seg(0.0, 2.0, 50, true);
         s1.audio.push(crate::segment::TrackSamples {
             pts_start_s: Some(0.0),
+            discontinuities: Vec::new(),
             data: vec![0; 60],
             samples: vec![],
         });
         let mut s2 = seg(2.0, 2.0, 50, true);
         s2.audio.push(crate::segment::TrackSamples {
             pts_start_s: Some(2.0),
+            discontinuities: Vec::new(),
             data: vec![0; 60],
             samples: vec![],
         });
         let mut s3 = seg(4.0, 2.0, 50, true);
         s3.audio.push(crate::segment::TrackSamples {
             pts_start_s: Some(4.0),
+            discontinuities: Vec::new(),
             data: vec![0; 60],
             samples: vec![],
         });

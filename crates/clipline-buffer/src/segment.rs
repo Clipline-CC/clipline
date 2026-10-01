@@ -13,6 +13,9 @@ pub struct SampleInfo {
 pub struct TrackSamples {
     /// Presentation start of the first sample, seconds since recording t0.
     pub pts_start_s: Option<f64>,
+    /// Later contiguous audio runs: (first sample index, absolute PTS).
+    /// Durations keep the encoded packet cadence; omitted time is a decode gap.
+    pub discontinuities: Vec<(usize, f64)>,
     pub data: Vec<u8>,
     pub samples: Vec<SampleInfo>,
 }
@@ -128,11 +131,13 @@ mod tests {
             audio: vec![
                 TrackSamples {
                     pts_start_s: Some(0.0),
+                    discontinuities: Vec::new(),
                     data: vec![0; 30],
                     samples: vec![],
                 },
                 TrackSamples {
                     pts_start_s: Some(0.0),
+                    discontinuities: Vec::new(),
                     data: vec![0; 20],
                     samples: vec![],
                 },
@@ -145,6 +150,7 @@ mod tests {
     fn track_samples_slice_like_segments() {
         let t = TrackSamples {
             pts_start_s: Some(0.0),
+            discontinuities: Vec::new(),
             data: b"XXYYY".to_vec(),
             samples: vec![
                 SampleInfo {
@@ -167,6 +173,7 @@ mod tests {
     fn malformed_public_sample_metadata_returns_error_instead_of_panicking() {
         let track = TrackSamples {
             pts_start_s: None,
+            discontinuities: Vec::new(),
             data: vec![1, 2],
             samples: vec![SampleInfo {
                 size: 3,
