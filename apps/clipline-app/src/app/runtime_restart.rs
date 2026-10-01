@@ -53,10 +53,12 @@ impl RuntimeState {
             inner.active_game.as_ref()
         };
         let base_should_run = recorder_should_run(&settings, active_game);
-        // A game dropped by the settings change takes its gate verdict with
-        // it: the stale Denied/Pending must not keep blocking (it is also
-        // cleared below, but the spawn decision happens first).
-        let gate_allows = cleared_active_game || league_gate_allows(inner);
+        let gate_applies = league_gate_applies(&settings, active_game);
+        let refresh_gate = gate_applies
+            && (inner.settings.league != settings.league || inner.league_gate.is_none());
+        // A verdict belongs to the policy that resolved it. Defer a fresh
+        // lookup to the detector; preserve any lookup already in flight.
+        let gate_allows = !gate_applies || (!refresh_gate && league_gate_allows(inner));
         let should_run = inner.recording_desired
             && inner.quota_blocked.is_none()
             && (inner.manual_full_session_desired
@@ -84,8 +86,12 @@ impl RuntimeState {
         inner.settings = settings;
         if cleared_active_game {
             inner.active_game = None;
-            inner.league_gate = None;
             inner.league_gate_rx = None;
+        }
+        if !gate_applies {
+            inner.league_gate = None;
+        } else if refresh_gate {
+            inner.league_gate = Some(LeagueGateVerdict::Pending);
         }
         let old_tx = inner.tx.take();
         let replacement = if let Some(options) = next_options {
@@ -95,7 +101,9 @@ impl RuntimeState {
         } else {
             None
         };
-        if waiting_for_game {
+        if replacement.is_none() {
+            // Also invalidate a detector restart already spawning when the
+            // settings commit pauses for a fresh League verdict.
             inner.recording_generation = inner.recording_generation.wrapping_add(1);
             inner.last_save_request = None;
         }
@@ -123,7 +131,15 @@ impl RuntimeState {
             waiting_generation,
         } = {
             let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
-            Self::commit_prepared_restart_with(&mut inner, prepared, service::spawn)?
+            let committed = Self::commit_prepared_restart_with(&mut inner, prepared, service::spawn)?;
+            if committed.old_tx.is_some()
+                && committed.replacement.is_none()
+                && !committed.waiting_for_game
+            {
+                // Publish the policy pause before the detector can install a successor.
+                let _ = app.emit("status", stopped_status());
+            }
+            committed
         };
         if let Some(tx) = old_tx {
             let _ = tx.send(Cmd::Stop { announce: false });
@@ -365,6 +381,43 @@ mod tests {
             Ok(Cmd::Stop { announce: false })
         ));
         assert!(!state.send(Cmd::Save));
+    }
+
+    #[test]
+    fn league_policy_change_invalidates_detector_restart_already_spawning() {
+        let (tx, _rx) = mpsc::channel();
+        let state = RuntimeState::with_sender(tx, AppSettings::default(), None);
+        let detector_generation = {
+            let mut inner = state.0.lock().unwrap();
+            inner.active_game = Some(detected_built_in_game(
+                crate::game_plugins::LEAGUE_OF_LEGENDS_ID,
+                "League",
+                41,
+            ));
+            RuntimeState::prepare_service_restart(&mut inner)
+                .unwrap()
+                .replacement
+                .unwrap()
+                .1
+        };
+        let mut changed = state.settings();
+        changed.league.record_normal = false;
+        let prepared = state.prepare_settings_restart(changed).unwrap();
+        let (stale_tx, _stale_rx) = mpsc::channel();
+        let mut inner = state.0.lock().unwrap();
+        let committed: CommittedRuntimeRestart<()> =
+            RuntimeState::commit_prepared_restart_with(&mut inner, prepared, |_| {
+                panic!("policy refresh must wait for a new League verdict")
+            })
+            .unwrap();
+        assert!(!committed.waiting_for_game);
+        assert!(committed.replacement.is_none());
+        assert!(RuntimeState::install_prepared_service_restart(
+            &mut inner,
+            detector_generation,
+            stale_tx
+        )
+        .is_err());
     }
 
     #[test]
