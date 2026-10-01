@@ -2432,7 +2432,7 @@ fn trim_edge_drag_scrolls_while_held_and_stops_on_release_or_teardown() {
       }
       var fields=Object.fromEntries(['timeline','playhead','handle-in','handle-out','trim-band','trim-summary'].map(id=>[id,new Node()]));
       var $=id=>fields[id];
-      var document={hidden:false};
+      var document={hidden:false,listeners:{},addEventListener(name,cb){this.listeners[name]=cb;}};
       var window={listeners:{},addEventListener(name,cb){this.listeners[name]=cb;}};
       var video={currentTime:60,paused:true,plays:0,addEventListener(){},pause(){this.paused=true;},play(){this.plays++;this.paused=false;return {catch(){}};}};
       var clipDuration=()=>currentClip ? currentClip.duration_s : 0;
@@ -2450,13 +2450,16 @@ fn trim_edge_drag_scrolls_while_held_and_stops_on_release_or_teardown() {
       seekTo=t=>{video.currentTime=t;};
       var setup=(kind,x,alt=true,eventMarkers=[])=>{
         endDrag({resume:false});currentClip={duration_s:120};simpleTrimMode=true;settingsOpen=false;document.hidden=false;
-        zoomStart=40;zoomSpan=20;trimStart=40;trimEnd=60;video.currentTime=kind==='in'?40:60;video.paused=true;markers=eventMarkers;
-        startDrag(kind,{...pointer(x),altKey:alt});
+        zoomStart=40;zoomSpan=20;trimStart=kind==='in'?45:40;trimEnd=kind==='out'?55:60;
+        video.currentTime=kind==='in'?trimStart:trimEnd;video.paused=true;markers=eventMarkers;
+        const grabX=kind==='in'?150:kind==='out'?250:200;
+        startDrag(kind,{...pointer(grabX),altKey:alt});
+        moveDrag({...pointer(x),altKey:alt});
       };
     "#)).unwrap();
     let main = fs::read_to_string(ui.join("main.js")).unwrap();
     let start = main.find("$(\"timeline\").addEventListener(\"pointerup\"").unwrap();
-    let end = main[start..].find("document.addEventListener(\"keydown\"").unwrap() + start;
+    let end = main[start..].find("document.addEventListener(\"keydown\", (ev) => {").unwrap() + start;
     ctx.eval(Source::from_bytes(&main[start..end])).unwrap();
 
     ctx.eval(Source::from_bytes("setup('out',300);advance(50);advance(50);")).unwrap();
@@ -2469,8 +2472,22 @@ fn trim_edge_drag_scrolls_while_held_and_stops_on_release_or_teardown() {
     assert_eq!(eval(&mut ctx, "zoomStart<stoppedStart"), "true", "returning to the edge restarts scrolling");
     ctx.eval(Source::from_bytes("setup('out',300,false,[{t_s:61,kind:'Bookmark'}]);advance(50);")).unwrap();
     assert_eq!(eval(&mut ctx, "trimEnd"), "61", "existing snapping follows the shifted view");
+    ctx.eval(Source::from_bytes("advance(50);advance(50);")).unwrap();
+    assert_eq!(eval_json(&mut ctx, "[zoomStart,trimEnd,frames.size]"), "[41.5,61,1]", "a stationary drag keeps scrolling while snapped");
+    ctx.eval(Source::from_bytes("advance(50);")).unwrap();
+    assert_eq!(eval(&mut ctx, "trimEnd>61 && frames.size===1"), "true", "a stationary drag continues past the snap tolerance");
+    ctx.eval(Source::from_bytes("setup('out',300,false,[{t_s:61,kind:'Bookmark'}]);advance(50);document.listeners.keydown({altKey:true});advance(25);")).unwrap();
+    assert_eq!(eval(&mut ctx, "trimEnd"), "60.75", "Alt bypasses snapping without pointer motion");
+    ctx.eval(Source::from_bytes("document.listeners.keyup({altKey:false});advance(25);")).unwrap();
+    assert_eq!(eval(&mut ctx, "trimEnd===61 && frames.size===1"), "true", "releasing Alt restores snapping without stopping the pan");
     ctx.eval(Source::from_bytes("setup('out',300,true,[{t_s:61,kind:'Bookmark'}]);advance(50);")).unwrap();
     assert_eq!(eval(&mut ctx, "trimEnd"), "60.5", "Alt still bypasses snapping");
+    ctx.eval(Source::from_bytes("setup('out',200,false,[{t_s:50.5,kind:'Bookmark'}]);advance(50);")).unwrap();
+    assert_eq!(eval_json(&mut ctx, "[trimEnd,frames.size]"), "[50.5,0]");
+    ctx.eval(Source::from_bytes("document.listeners.keydown({altKey:true});")).unwrap();
+    assert_eq!(eval_json(&mut ctx, "[trimEnd,frames.size]"), "[50,0]", "Alt updates snapping immediately after edge scrolling stops");
+    ctx.eval(Source::from_bytes("document.listeners.keyup({altKey:false});")).unwrap();
+    assert_eq!(eval_json(&mut ctx, "[trimEnd,frames.size]"), "[50.5,0]");
     for (kind, x) in [("in", 300), ("out", 100)] {
         ctx.eval(Source::from_bytes(&format!("setup('{kind}',{x});advance(50);"))).unwrap();
         assert_eq!(eval(&mut ctx, "zoomStart===40 && frames.size===0 && (trimEnd-trimStart).toFixed(1)==='0.1'"), "true", "do not scroll past the other handle");
@@ -2493,6 +2510,12 @@ fn trim_edge_drag_scrolls_while_held_and_stops_on_release_or_teardown() {
     }
     ctx.eval(Source::from_bytes("setup('out',300);zoomStart=0;zoomSpan=0;moveDrag(pointer(300));advance(50);")).unwrap();
     assert_eq!(eval_json(&mut ctx, "[zoomStart,zoomSpan,trimEnd,frames.size]"), "[0,0,120,0]");
+    ctx.eval(Source::from_bytes("setup('out',300);endDrag({resume:false});zoomStart=40;zoomSpan=20;trimStart=40;trimEnd=60;startDrag('out',pointer(300));advance(50);advance(50);")).unwrap();
+    assert_eq!(eval_json(&mut ctx, "[zoomStart,trimEnd,frames.size]"), "[40,60,0]", "pressing an edge-adjacent handle does not start scrolling");
+    ctx.eval(Source::from_bytes("moveDrag(pointer(302));advance(50);")).unwrap();
+    assert_eq!(eval_json(&mut ctx, "[zoomStart,trimEnd,frames.size]"), "[40,60,0]", "small pointer jitter does not arm scrolling");
+    ctx.eval(Source::from_bytes("moveDrag(pointer(305));advance(50);")).unwrap();
+    assert_eq!(eval_json(&mut ctx, "[zoomStart,trimEnd,frames.size]"), "[40.5,60.5,1]");
     ctx.eval(Source::from_bytes("setup('out',300);moveDrag({...pointer(100),pointerId:2});endDrag({pointerId:2});advance(50);")).unwrap();
     assert_eq!(eval_json(&mut ctx, "[dragging,zoomStart,trimEnd]"), r#"["out",40.5,60.5]"#, "another pointer cannot redirect or release the active drag");
     ctx.eval(Source::from_bytes("endDrag({resume:false});video.paused=false;startDrag('out',pointer(300));window.listeners.blur();")).unwrap();

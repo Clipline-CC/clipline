@@ -889,6 +889,8 @@ $("timeline").addEventListener("pointerup", endDrag);
 $("timeline").addEventListener("pointercancel", endDrag);
 $("timeline").addEventListener("lostpointercapture", endDrag);
 window.addEventListener("blur", () => endDrag({ resume: false }));
+document.addEventListener("keydown", updateDragModifiers, true);
+document.addEventListener("keyup", updateDragModifiers, true);
 
 document.addEventListener("keydown", (ev) => {
   if (document.querySelector("dialog[open]")) return; // a dialog owns the keyboard

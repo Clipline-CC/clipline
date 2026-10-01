@@ -667,6 +667,8 @@ var resumeAfterDrag = false;
 // moving position (the dragged edge and the playhead are excluded up front).
 var dragCandidates = [];
 var dragPointer = null;
+var dragStartX = 0;
+var dragMoved = false;
 var dragPanFrame = 0;
 var dragPanLastMs = 0;
 // Sliding the whole selection: offset from pointer to selection start, the click
@@ -687,6 +689,8 @@ function clearSnapFeedback() {
 function startDrag(kind, ev) {
   if (!currentClip || dragging) return;
   dragging = kind;
+  dragStartX = ev.clientX;
+  dragMoved = false;
   // Scrub paused so every pointer position shows its frame, then restore.
   resumeAfterDrag = !video.paused;
   if (resumeAfterDrag) video.pause();
@@ -727,12 +731,19 @@ function startDrag(kind, ev) {
 
 function moveDrag(ev) {
   if (!dragging || (dragPointer && ev.pointerId !== dragPointer.pointerId)) return;
+  if (Math.abs(ev.clientX - dragStartX) > SLIDE_THRESHOLD_PX) dragMoved = true;
   dragPointer = { clientX: ev.clientX, altKey: ev.altKey, pointerId: ev.pointerId };
   updateDrag(dragPointer);
-  if (simpleTrimMode && (dragging === "in" || dragging === "out") && !dragPanFrame) {
+  if (dragMoved && simpleTrimMode && (dragging === "in" || dragging === "out") && !dragPanFrame) {
     dragPanLastMs = performance.now();
     dragPanFrame = requestAnimationFrame(panDragFrame);
   }
+}
+
+function updateDragModifiers(ev) {
+  if (!dragPointer || dragPointer.altKey === ev.altKey) return;
+  dragPointer.altKey = ev.altKey;
+  updateDrag(dragPointer);
 }
 
 function panDragFrame() {
@@ -752,7 +763,8 @@ function panDragFrame() {
   if (next.start === view.start) return;
   const time = timelineTimeView(dragPointer.clientX, rect.left, rect.width, next.start, next.span, dur);
   const trim = trimDrag(dragging, time, trimStart, trimEnd, dur);
-  if (dragging === "in" ? trim.start === trimStart : trim.end === trimEnd) return;
+  // Stop at the opposite handle, not at a previously snapped point.
+  if (dragging === "in" ? time > trim.start : time < trim.end) return;
   noteViewActivity();
   applyView(next);
   updateDrag(dragPointer);

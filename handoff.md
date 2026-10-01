@@ -7,12 +7,15 @@
 ## Checkpoint (2026-10-01): Trim-handle edge scrolling
 
 `feat/timeline-trim-edge-pan` starts at `develop` merge `1ff7abba`.
-In Clip mode, holding either trim handle near/beyond the edge of a zoomed timeline
+In Clip mode, dragging either trim handle near/beyond the edge of a zoomed timeline
 scrolls that window and keeps updating the handle/playhead under the pointer.
 The 32px edge zones ease up to half a visible window per second; elapsed time is
 capped at 50ms per frame to avoid jumps after stalls. The zoom level, existing
 snapping/Alt bypass and minimum trim length remain in effect. Clip bounds and the
 opposite handle stop scrolling. Moving back inside stops it; returning restarts it.
+Scrolling arms only after more than 4px of horizontal movement, so a press or small
+jitter at an edge does not move the view. Snap targets do not stop scrolling; Alt
+press/release updates snapping immediately even while the pointer stays still.
 
 One animation-frame loop runs during active edge scrolling. Pointer release,
 cancel/lost capture, leaving Clip mode, opening settings, changing/closing the clip
@@ -23,8 +26,10 @@ keeps the original playback-resumption behavior. Scrubbing and sliding do not pa
 Validation: pure math and actual pointer/animation-loop regressions failed before
 implementation. 1,671 reported workspace checks pass, including the isolated
 clipboard child, with two intentional ignores. Fresh `clipline-app` warning-denied
-workspace Clippy passes. Live WebView mouse-input checks on a real clip cover both
-stationary edge holds, center/restart, release and fully zoomed-out bounds. Temporary
+workspace Clippy passes. Review regressions cover scrolling through snap targets,
+press/jitter arming and stationary Alt changes with and without a running pan loop.
+Live WebView mouse/keyboard checks on a real clip cover both stationary edge holds,
+center/restart, release, press/jitter, snapping/Alt and fully zoomed-out bounds. Temporary
 selections stayed in memory; no clip was exported or sidecar changed. Evidence is
 in ignored `target/trim-edge-pan-*` logs/scripts/screenshots.
 
