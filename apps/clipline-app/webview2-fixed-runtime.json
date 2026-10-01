@@ -7,8 +7,8 @@
   "archive_url": "https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/621dd012-b3d6-4b8b-a6b7-fc3938bfe9d4/Microsoft.WebView2.FixedVersionRuntime.154.0.4258.48.x64.cab",
   "archive_size": 307904013,
   "archive_sha256": "e2356456a8f02e606a731cd7646a604ed3676a9e392bd867b0207a8c3dc2d4f4",
-  "reviewed_on": "2026-09-30",
-  "review_due_on": "2026-10-30",
+  "reviewed_on": "2026-10-01",
+  "review_due_on": "2026-10-31",
   "max_review_age_days": 30,
   "source_url": "https://developer.microsoft.com/en-us/microsoft-edge/webview2/",
   "release_notes_url": "https://learn.microsoft.com/en-us/microsoft-edge/webview2/release-notes/"
