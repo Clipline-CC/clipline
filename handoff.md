@@ -4,6 +4,26 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-10-01): Nightly 1.0.9 preparation
+
+Release metadata advances the current Nightly 1.0.8 to 1.0.9 from `develop`
+merge `e1425dee`. This includes PRs #216–#220: security remediation, the twelve
+bug-hunt fixes, MP4/process-query performance work, player metadata/marker menus,
+and the accepted trim-handle edge scrolling. Cargo, Cargo.lock and Tauri agree.
+
+Microsoft's Fixed Version selector still offers 154.0.4258.48 and the same x64
+CAB URL. Its pinned size/SHA-256 verified during staging; both runtime preflights
+passed. Review dates are 2026-10-01 through 2026-10-31. Workspace tests report
+1,671 passing checks, and fresh-app-cache warning-denied workspace Clippy passes.
+The standalone-config debug harness used the staged Fixed Version executable:
+H.264/Opus, HEVC and AV1 each played through ended with 60 frames, matching the
+HEVC/AV1 `probably` capability probes. Only release metadata/docs changed.
+
+Publication follows the release PR, green OS CI, and immutable `nightly-v1.0.9`
+on its merged develop commit. The Nightly workflow owns builds, protected signing
+and public-download verification; publication is not yet complete at this checkpoint.
+Local evidence is under ignored `target/nightly-20261001/`.
+
 ## Checkpoint (2026-10-01): Trim-handle edge scrolling
 
 `feat/timeline-trim-edge-pan` starts at `develop` merge `1ff7abba`.
