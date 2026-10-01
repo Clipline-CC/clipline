@@ -16,7 +16,10 @@ function updateViews() {
   $("review-viewer").hidden = !currentClip;
   // Settings is an overlay; gallery/review visibility follows only clip state.
   $("gallery-view").hidden = !!currentClip;
-  if (!currentClip) $("timeline-marker-panel").open = false;
+  if (!currentClip) {
+    $("timeline-marker-panel").open = false;
+    $("audio-track-panel").open = false;
+  }
   syncSettingsModalBackground();
 }
 
@@ -399,6 +402,15 @@ function renderTimelineMarkerPanel() {
   }
   const selected = options.filter((option) => option.selected).length;
   $("timeline-marker-summary").textContent = `${selected}/${options.length} types`;
+  const visibility = $("timeline-markers-visibility");
+  visibility.setAttribute("aria-pressed", String(selected > 0));
+  visibility.title = selected ? "Hide all markers" : "Show all markers";
+  const bookmarksOnly = !timelineMarkerFilter.defaultVisible
+    && timelineMarkerFilter.categories.get("bookmark") === true
+    && [...timelineMarkerFilter.categories].every(([category, visible]) => category === "bookmark" || !visible);
+  const bookmarks = $("timeline-markers-bookmarks");
+  bookmarks.setAttribute("aria-pressed", String(bookmarksOnly));
+  bookmarks.title = bookmarksOnly ? "Show all markers" : "Show bookmarks only";
 }
 
 function setTimelineMarkerMode(mode) {

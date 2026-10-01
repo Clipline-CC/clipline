@@ -4979,18 +4979,14 @@ button.primary.settings-save-glow {
 .review-viewer.group-review #handle-in,
 .review-viewer.group-review #handle-out,
 .review-viewer.group-review #trim-band { display: none !important; }
-.audio-track-panel {
-  flex: 1 1 auto;
-  min-width: 0;
-  border-top: 0;
-  padding-top: 0;
-}
-.audio-track-panel[hidden] { display: none; }
+.audio-track-panel,
 .timeline-marker-panel {
   position: relative;
   flex: 0 0 auto;
 }
+.audio-track-panel[hidden],
 .timeline-marker-panel[hidden] { display: none; }
+.audio-track-menu,
 .timeline-marker-menu {
   position: absolute;
   bottom: calc(100% + 8px);
@@ -5010,7 +5006,10 @@ button.primary.settings-save-glow {
   flex-wrap: wrap;
   gap: 6px;
 }
-.timeline-marker-actions button { padding: 4px 8px; font-size: 11px; }
+.timeline-marker-actions button { display: grid; place-items: center; padding: 6px; }
+.timeline-marker-actions button svg { width: 18px; height: 18px; }
+.timeline-marker-actions button[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
+#timeline-markers-visibility[aria-pressed="true"] .eye-slash { display: none; }
 .audio-track-panel summary,
 .timeline-marker-panel summary {
   display: inline-flex;
@@ -5047,6 +5046,7 @@ button.primary.settings-save-glow {
   gap: 6px;
   margin-top: 8px;
 }
+.audio-track-menu .audio-track-list { margin-top: 0; }
 .audio-track-row,
 .timeline-marker-row {
   display: grid;

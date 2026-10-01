@@ -625,12 +625,16 @@ $("timeline-marker-list").addEventListener("change", (ev) => {
   timelineMarkerFilter.categories.set(category, ev.target.checked);
   renderMarkers();
 });
-$("timeline-markers-all").addEventListener("click", () => setTimelineMarkerMode("all"));
-$("timeline-markers-none").addEventListener("click", () => setTimelineMarkerMode("none"));
-$("timeline-markers-bookmarks").addEventListener("click", () => setTimelineMarkerMode("bookmarks"));
+$("timeline-markers-visibility").addEventListener("click", () => {
+  setTimelineMarkerMode(timelineMarkers().length ? "none" : "all");
+});
+$("timeline-markers-bookmarks").addEventListener("click", () => {
+  setTimelineMarkerMode($("timeline-markers-bookmarks").getAttribute("aria-pressed") === "true" ? "all" : "bookmarks");
+});
 document.addEventListener("pointerdown", (ev) => {
-  const panel = $("timeline-marker-panel");
-  if (!panel.contains(ev.target)) panel.open = false;
+  for (const panel of [$("timeline-marker-panel"), $("audio-track-panel")]) {
+    if (!panel.contains(ev.target)) panel.open = false;
+  }
 }, true);
 $("game-event-rail-toggle").addEventListener("click", () => {
   setGameEventRailCollapsed(!gameEventRailCollapsed);
@@ -893,16 +897,17 @@ document.addEventListener("keydown", (ev) => {
     return;
   }
   if (settingsOpen) return; // player shortcuts are inert behind the page
-  const markerPanel = $("timeline-marker-panel");
-  if (ev.code === "Escape" && markerPanel.open) {
-    ev.preventDefault();
-    markerPanel.open = false;
-    markerPanel.querySelector("summary").focus();
-    return;
+  for (const panel of [$("timeline-marker-panel"), $("audio-track-panel")]) {
+    if (ev.code === "Escape" && panel.open) {
+      ev.preventDefault();
+      panel.open = false;
+      panel.querySelector("summary").focus();
+      return;
+    }
+    // Keep menu activation native; resume other player shortcuts after dismissal.
+    if (panel.contains(ev.target)
+        && (panel.open || ev.code === "Space" || ev.code === "Enter")) return;
   }
-  // Keep menu activation native; resume other player shortcuts after dismissal.
-  if (markerPanel.contains(ev.target)
-      && (markerPanel.open || ev.code === "Space" || ev.code === "Enter")) return;
   const tag = ev.target && ev.target.tagName;
   if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
   // "?" opens the shortcuts guide from anywhere in the player (clip or not).

@@ -3775,8 +3775,7 @@ fn player_metadata_is_in_the_header_and_marker_filters_are_recoverable() {
     for id in [
         "timeline-marker-panel",
         "timeline-marker-list",
-        "timeline-markers-all",
-        "timeline-markers-none",
+        "timeline-markers-visibility",
         "timeline-markers-bookmarks",
     ] {
         assert!(

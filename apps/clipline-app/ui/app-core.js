@@ -475,25 +475,32 @@ function audioTrackLabel(track) {
 function renderAudioTrackRows(container, clip, selected, onChange, {
   rowState = PlayerCore.audioTrackRowState,
 } = {}) {
-  container.replaceChildren();
   const tracks = clipAudioTracks(clip);
+  const key = JSON.stringify(tracks.map(track => [track.id, audioTrackLabel(track)]));
+  if (container.dataset.tracksKey !== key || container.children.length !== tracks.length) {
+    container.dataset.tracksKey = key;
+    container.replaceChildren();
+    for (const track of tracks) {
+      const row = document.createElement("label");
+      row.className = "audio-track-row";
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.dataset.trackId = track.id || "";
+      const label = document.createElement("span");
+      label.className = "audio-track-label";
+      label.textContent = audioTrackLabel(track);
+      label.title = label.textContent;
+      row.append(input, label);
+      container.appendChild(row);
+    }
+  }
   const selectedIds = [...selected];
-  for (const track of tracks) {
-    const row = document.createElement("label");
-    row.className = "audio-track-row";
-    const input = document.createElement("input");
+  for (const [index, input] of [...container.querySelectorAll("input")].entries()) {
+    const track = tracks[index];
     const state = rowState(track, tracks, selectedIds);
-    input.type = "checkbox";
     input.checked = state.checked;
     input.indeterminate = state.indeterminate;
-    input.dataset.trackId = track.id || "";
-    input.addEventListener("change", () => onChange(track, input.checked));
-    const label = document.createElement("span");
-    label.className = "audio-track-label";
-    label.textContent = audioTrackLabel(track);
-    label.title = label.textContent;
-    row.append(input, label);
-    container.appendChild(row);
+    input.onchange = () => onChange(track, input.checked);
   }
 }
 
@@ -504,6 +511,7 @@ function renderAudioTrackPanel() {
   const tracks = clipAudioTracks();
   panel.hidden = tracks.length === 0;
   if (!tracks.length) {
+    panel.open = false;
     list.replaceChildren();
     summary.textContent = "";
     return;

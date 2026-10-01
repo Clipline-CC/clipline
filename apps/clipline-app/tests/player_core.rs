@@ -1087,7 +1087,9 @@ fn player_marker_controls_preserve_checkbox_focus_and_gallery_markers() {
       var pluginPresentationForClip = () => null;
       var currentPluginPresentation = () => null;
       class Node {
-        constructor() { this.children = []; this.dataset = {}; this.listeners = {}; }
+        constructor() { this.children = []; this.dataset = {}; this.listeners = {}; this.attributes = {}; }
+        setAttribute(name, value) { this.attributes[name] = value; }
+        getAttribute(name) { return this.attributes[name]; }
         replaceChildren() { this.children = []; }
         append(...nodes) { this.children.push(...nodes); }
         appendChild(node) { this.append(node); }
@@ -1098,7 +1100,7 @@ fn player_marker_controls_preserve_checkbox_focus_and_gallery_markers() {
         focus() { document.activeElement = this; }
       }
       const fields = Object.fromEntries(['timeline-marker-panel','timeline-marker-list','timeline-marker-summary',
-        'timeline-markers-all','timeline-markers-none','timeline-markers-bookmarks',
+        'timeline-markers-visibility','timeline-markers-bookmarks','audio-track-panel','audio-track-list',
         'review-viewer','gallery-view','settings-page'].map(id => [id,new Node()]));
       var $ = id => fields[id];
       var video = new Node();
@@ -1142,18 +1144,20 @@ fn player_marker_controls_preserve_checkbox_focus_and_gallery_markers() {
         "2",
         "gallery accessor is independent of player selection"
     );
+    assert_eq!(eval(&mut ctx, "fields['timeline-markers-visibility'].getAttribute('aria-pressed')"), "true", "partial selection is still visible");
     ctx.eval(Source::from_bytes(
-        "fields['timeline-markers-none'].listeners.click();",
+        "fields['timeline-markers-visibility'].listeners.click();",
     ))
     .unwrap();
     assert_eq!(eval(&mut ctx, "timelineMarkers().length"), "0");
+    assert_eq!(eval(&mut ctx, "fields['timeline-markers-visibility'].getAttribute('aria-pressed')"), "false");
     assert_eq!(
         eval(&mut ctx, "fields['timeline-marker-panel'].hidden"),
         "false",
         "Hide all must leave the restore controls available"
     );
     ctx.eval(Source::from_bytes(
-        "fields['timeline-markers-all'].listeners.click();",
+        "fields['timeline-markers-visibility'].listeners.click();",
     ))
     .unwrap();
     assert_eq!(eval(&mut ctx, "timelineMarkers().length"), "2");
@@ -1163,11 +1167,17 @@ fn player_marker_controls_preserve_checkbox_focus_and_gallery_markers() {
         r#"["Bookmark"]"#
     );
     assert_eq!(eval(&mut ctx, "clipMarkers().length"), "2");
-    ctx.eval(Source::from_bytes("fields['timeline-marker-panel'].open = true; document.listeners.pointerdown.listener({target:new Node()});")).unwrap();
+    assert_eq!(eval(&mut ctx, "fields['timeline-markers-bookmarks'].getAttribute('aria-pressed')"), "true");
+    ctx.eval(Source::from_bytes("fields['timeline-markers-bookmarks'].listeners.click();")).unwrap();
+    assert_eq!(eval(&mut ctx, "timelineMarkers().length"), "2", "bookmark shortcut toggles back to all");
+    assert_eq!(eval(&mut ctx, "fields['timeline-markers-bookmarks'].getAttribute('aria-pressed')"), "false");
+    ctx.eval(Source::from_bytes("fields['timeline-marker-panel'].open = true; fields['audio-track-panel'].open = true; document.listeners.pointerdown.listener({target:new Node()});")).unwrap();
     assert_eq!(eval(&mut ctx, "fields['timeline-marker-panel'].open"), "false");
+    assert_eq!(eval(&mut ctx, "fields['audio-track-panel'].open"), "false");
     assert_eq!(eval(&mut ctx, "document.listeners.pointerdown.capture"), "true", "dismiss before a timeline pin stops propagation");
-    ctx.eval(Source::from_bytes("currentClip = null; fields['timeline-marker-panel'].open = true; syncSettingsModalBackground = () => {}; updateViews();")).unwrap();
+    ctx.eval(Source::from_bytes("currentClip = null; fields['timeline-marker-panel'].open = true; fields['audio-track-panel'].open = true; syncSettingsModalBackground = () => {}; updateViews();")).unwrap();
     assert_eq!(eval(&mut ctx, "fields['timeline-marker-panel'].open"), "false", "hidden review controls must not consume gallery Escape");
+    assert_eq!(eval(&mut ctx, "fields['audio-track-panel'].open"), "false");
 
     // Exercise the real shortcut handler after Escape returns focus to the summary.
     let start = main.find("document.addEventListener(\"keydown\", (ev) => {").unwrap();
@@ -1182,29 +1192,71 @@ fn player_marker_controls_preserve_checkbox_focus_and_gallery_markers() {
       closeReview = () => { currentClip = null; updateViews(); };
       var lastSeek = 0;
       seekBy = delta => { lastSeek = delta; };
-      const panel = fields['timeline-marker-panel'];
+      var panel;
+      var key = code => {
+        const event = {code,target:panel.summary,preventDefault(){this.prevented=true;}};
+        document.listeners.keydown.listener(event);
+        return event;
+      };
+    "#)).unwrap();
+    for panel_id in ["timeline-marker-panel", "audio-track-panel"] {
+        ctx.eval(Source::from_bytes(&format!("panel = fields['{panel_id}'];"))).unwrap();
+        ctx.eval(Source::from_bytes(r#"
       panel.summary = new Node();
       panel.summary.tagName = 'SUMMARY';
       panel.append(fields['timeline-marker-list']);
       currentClip = {markers:{bookmarks:[{t_s:3}]}};
       updateViews();
       panel.open = true;
-      const key = code => {
-        const event = {code,target:panel.summary,preventDefault(){this.prevented=true;}};
-        document.listeners.keydown.listener(event);
-        return event;
-      };
       key('Escape');
+        "#)).unwrap();
+        assert_eq!(eval(&mut ctx, "panel.open"), "false");
+        assert_eq!(eval(&mut ctx, "document.activeElement === panel.summary"), "true");
+        assert_eq!(eval(&mut ctx, "key('Space').prevented === undefined"), "true", "summary activation stays native");
+        ctx.eval(Source::from_bytes("key('ArrowRight');")).unwrap();
+        assert_eq!(eval(&mut ctx, "lastSeek"), "5", "player shortcuts resume when the menu is closed");
+        ctx.eval(Source::from_bytes("panel.open = true; lastSeek = 0; key('ArrowRight');")).unwrap();
+        assert_eq!(eval(&mut ctx, "lastSeek"), "0", "open menu keeps its keyboard behavior");
+        ctx.eval(Source::from_bytes("key('Escape'); key('Escape');")).unwrap();
+        assert_eq!(eval(&mut ctx, "currentClip === null"), "true", "a second Escape closes review");
+    }
+}
+
+#[test]
+fn audio_track_rows_preserve_focus_and_refresh_selection_callbacks() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(r#"
+      class Node {
+        constructor() { this.children = []; this.dataset = {}; }
+        replaceChildren() { this.children = []; }
+        append(...nodes) { this.children.push(...nodes); }
+        appendChild(node) { this.append(node); }
+        addEventListener(name, listener) { this['on' + name] = listener; }
+        querySelectorAll() { return this.children.flatMap(row => row.children.filter(node => node.type === 'checkbox')); }
+        focus() { document.activeElement = this; }
+      }
+      var document = {createElement: () => new Node()};
+      var tracks = [{id:'output',kind:'output',label:'Game'}, {id:'microphone',kind:'microphone',label:'Mic'}];
+      var clipAudioTracks = () => tracks;
+      const rows = new Node();
+      var called = '';
     "#)).unwrap();
-    assert_eq!(eval(&mut ctx, "panel.open"), "false");
-    assert_eq!(eval(&mut ctx, "document.activeElement === panel.summary"), "true");
-    assert_eq!(eval(&mut ctx, "key('Space').prevented === undefined"), "true", "summary activation stays native");
-    ctx.eval(Source::from_bytes("key('ArrowRight');")).unwrap();
-    assert_eq!(eval(&mut ctx, "lastSeek"), "5", "player shortcuts resume when the menu is closed");
-    ctx.eval(Source::from_bytes("panel.open = true; lastSeek = 0; key('ArrowRight');")).unwrap();
-    assert_eq!(eval(&mut ctx, "lastSeek"), "0", "open menu keeps its keyboard behavior");
-    ctx.eval(Source::from_bytes("key('Escape'); key('Escape');")).unwrap();
-    assert_eq!(eval(&mut ctx, "currentClip === null"), "true", "a second Escape closes review");
+    let app = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/app-core.js")).unwrap();
+    let start = app.find("function audioTrackLabel(").unwrap();
+    let end = app.find("function renderAudioTrackPanel(").unwrap();
+    ctx.eval(Source::from_bytes(&app[start..end])).unwrap();
+    ctx.eval(Source::from_bytes(r#"
+      renderAudioTrackRows(rows, {}, new Set(['output']), () => { called = 'old'; });
+      const checkbox = rows.querySelectorAll()[0];
+      checkbox.focus();
+      renderAudioTrackRows(rows, {}, new Set(['microphone']), () => { called = 'new'; });
+    "#)).unwrap();
+    assert_eq!(eval(&mut ctx, "rows.querySelectorAll()[0] === checkbox && document.activeElement === checkbox"), "true");
+    assert_eq!(eval_json(&mut ctx, "rows.querySelectorAll().map(input => input.checked)"), "[false,true]");
+    ctx.eval(Source::from_bytes("checkbox.onchange();")).unwrap();
+    assert_eq!(eval(&mut ctx, "called"), "new", "reused inputs must call the current render's callback");
+    ctx.eval(Source::from_bytes("rows.replaceChildren(); renderAudioTrackRows(rows, {}, new Set(), () => {});")).unwrap();
+    assert_eq!(eval(&mut ctx, "rows.querySelectorAll().length"), "2", "tracks return after an empty clip");
 }
 
 #[test]
