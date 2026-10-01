@@ -900,7 +900,9 @@ document.addEventListener("keydown", (ev) => {
     markerPanel.querySelector("summary").focus();
     return;
   }
-  if (markerPanel.contains(ev.target)) return; // native checkbox/menu keyboard behavior
+  // Keep menu activation native; resume other player shortcuts after dismissal.
+  if (markerPanel.contains(ev.target)
+      && (markerPanel.open || ev.code === "Space" || ev.code === "Enter")) return;
   const tag = ev.target && ev.target.tagName;
   if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
   // "?" opens the shortcuts guide from anywhere in the player (clip or not).

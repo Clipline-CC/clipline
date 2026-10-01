@@ -18,6 +18,8 @@ after existing game-review settings/bookmark merging. Pins, counts, marker/edit 
 and snapping share the player-only accessor; gallery counts, event rails and saved
 sidecars keep their existing behavior. Hidden categories remain selectable, checkbox
 focus survives repainting, and Escape/outside clicks/review teardown dismiss the menu.
+After dismissal, the focused summary keeps native activation keys while other
+player shortcuts resume; a second Escape can close review.
 
 Validation: regression tests failed before implementation; 1,668 reported workspace
 test checks pass (including the isolated clipboard child), with two intentional

@@ -1093,14 +1093,16 @@ fn player_marker_controls_preserve_checkbox_focus_and_gallery_markers() {
         appendChild(node) { this.append(node); }
         addEventListener(name, listener) { this.listeners[name] = listener; }
         querySelectorAll() { return this.children.flatMap(row => row.children.filter(node => node.type === 'checkbox')); }
-        contains(node) { return node === this; }
+        contains(node) { return node === this || node === this.summary || this.children.some(child => child.contains(node)); }
+        querySelector() { return this.summary; }
+        focus() { document.activeElement = this; }
       }
       const fields = Object.fromEntries(['timeline-marker-panel','timeline-marker-list','timeline-marker-summary',
         'timeline-markers-all','timeline-markers-none','timeline-markers-bookmarks',
         'review-viewer','gallery-view','settings-page'].map(id => [id,new Node()]));
       var $ = id => fields[id];
       var video = new Node();
-      var document = { listeners: {}, createElement: () => new Node(),
+      var document = { listeners: {}, createElement: () => new Node(), querySelector: () => null,
         addEventListener(name, listener, capture) { this.listeners[name] = {listener,capture}; } };
     "#)).unwrap();
     let ui = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui");
@@ -1166,6 +1168,43 @@ fn player_marker_controls_preserve_checkbox_focus_and_gallery_markers() {
     assert_eq!(eval(&mut ctx, "document.listeners.pointerdown.capture"), "true", "dismiss before a timeline pin stops propagation");
     ctx.eval(Source::from_bytes("currentClip = null; fields['timeline-marker-panel'].open = true; syncSettingsModalBackground = () => {}; updateViews();")).unwrap();
     assert_eq!(eval(&mut ctx, "fields['timeline-marker-panel'].open"), "false", "hidden review controls must not consume gallery Escape");
+
+    // Exercise the real shortcut handler after Escape returns focus to the summary.
+    let start = main.find("document.addEventListener(\"keydown\", (ev) => {").unwrap();
+    let end = main.find("function maybeWarnElevatedGame(").unwrap();
+    ctx.eval(Source::from_bytes(&main[start..end])).unwrap();
+    ctx.eval(Source::from_bytes(r#"
+      var keyIntent = PlayerCore.keyIntent;
+      var selectMode = false;
+      var selectedClipPaths = new Set();
+      noteActivity = () => {};
+      reviewFullscreenActive = () => false;
+      closeReview = () => { currentClip = null; updateViews(); };
+      var lastSeek = 0;
+      seekBy = delta => { lastSeek = delta; };
+      const panel = fields['timeline-marker-panel'];
+      panel.summary = new Node();
+      panel.summary.tagName = 'SUMMARY';
+      panel.append(fields['timeline-marker-list']);
+      currentClip = {markers:{bookmarks:[{t_s:3}]}};
+      updateViews();
+      panel.open = true;
+      const key = code => {
+        const event = {code,target:panel.summary,preventDefault(){this.prevented=true;}};
+        document.listeners.keydown.listener(event);
+        return event;
+      };
+      key('Escape');
+    "#)).unwrap();
+    assert_eq!(eval(&mut ctx, "panel.open"), "false");
+    assert_eq!(eval(&mut ctx, "document.activeElement === panel.summary"), "true");
+    assert_eq!(eval(&mut ctx, "key('Space').prevented === undefined"), "true", "summary activation stays native");
+    ctx.eval(Source::from_bytes("key('ArrowRight');")).unwrap();
+    assert_eq!(eval(&mut ctx, "lastSeek"), "5", "player shortcuts resume when the menu is closed");
+    ctx.eval(Source::from_bytes("panel.open = true; lastSeek = 0; key('ArrowRight');")).unwrap();
+    assert_eq!(eval(&mut ctx, "lastSeek"), "0", "open menu keeps its keyboard behavior");
+    ctx.eval(Source::from_bytes("key('Escape'); key('Escape');")).unwrap();
+    assert_eq!(eval(&mut ctx, "currentClip === null"), "true", "a second Escape closes review");
 }
 
 #[test]
