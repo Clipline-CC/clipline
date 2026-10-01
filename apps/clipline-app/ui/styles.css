@@ -3829,7 +3829,7 @@ button.primary.settings-save-glow {
   gap: 8px 20px;
   min-width: 0;
 }
-.review-head .clip-title { flex: 1 1 240px; min-width: 0; display: grid; gap: 1px; }
+.review-head .clip-title { flex: 0 1 auto; min-width: 0; display: grid; gap: 1px; }
 .clip-title-display {
   display: flex;
   align-items: center;
