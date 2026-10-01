@@ -2,6 +2,7 @@
 //! match only, so Clipline enumerates windows and matches the metadata it
 //! needs for capture and custom-game detection.
 
+use std::collections::HashMap;
 use std::mem::size_of;
 use std::path::Path;
 
@@ -31,6 +32,28 @@ pub struct CapturableWindow {
     pub process_id: u32,
     pub exe_name: String,
     pub exe_path: Option<String>,
+}
+
+#[derive(Default)]
+struct WindowEnumeration {
+    windows: Vec<CapturableWindow>,
+    process_paths: HashMap<u32, Option<String>>,
+    path_buffer: Vec<u16>,
+}
+
+impl WindowEnumeration {
+    fn process_path(&mut self, process_id: u32) -> Option<String> {
+        // ponytail: scan-local discovery metadata; cross-scan caching needs
+        // live process-instance validation to handle exits and PID reuse.
+        self.process_paths
+            .entry(process_id)
+            .or_insert_with(|| {
+                // SAFETY: process_path owns/closes the query handle and bounds
+                // Win32's output to this enumeration's reusable path buffer.
+                unsafe { process_path(process_id, &mut self.path_buffer) }
+            })
+            .clone()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,16 +93,16 @@ pub fn window_from_raw_handle(raw: isize) -> Option<HWND> {
 }
 
 pub fn enumerate_capturable_windows() -> Vec<CapturableWindow> {
-    let mut windows = Vec::new();
+    let mut enumeration = WindowEnumeration::default();
     // SAFETY: the callback only runs during this call; lparam points at
-    // `windows`, which outlives it.
+    // `enumeration`, which outlives it.
     unsafe {
         let _ = EnumWindows(
             Some(enum_capturable_proc),
-            LPARAM(&mut windows as *mut Vec<CapturableWindow> as isize),
+            LPARAM(&mut enumeration as *mut WindowEnumeration as isize),
         );
     }
-    windows
+    enumeration.windows
 }
 
 pub(super) fn window_client_crop_state(hwnd: HWND) -> Option<WindowClientCrop> {
@@ -129,9 +152,9 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
 }
 
 unsafe extern "system" fn enum_capturable_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
-    // SAFETY: lparam is the Vec pointer passed by enumerate_capturable_windows
+    // SAFETY: lparam is the enumeration passed by enumerate_capturable_windows
     // on this same thread, alive for the whole enumeration.
-    let windows = unsafe { &mut *(lparam.0 as *mut Vec<CapturableWindow>) };
+    let enumeration = unsafe { &mut *(lparam.0 as *mut WindowEnumeration) };
     // SAFETY: hwnd comes from the enumeration; these are read-only queries.
     unsafe {
         if !IsWindowVisible(hwnd).as_bool() {
@@ -145,12 +168,12 @@ unsafe extern "system" fn enum_capturable_proc(hwnd: HWND, lparam: LPARAM) -> BO
         }
         let mut process_id = 0u32;
         GetWindowThreadProcessId(hwnd, Some(&mut process_id));
-        let exe_path = process_path(process_id);
+        let exe_path = enumeration.process_path(process_id);
         let exe_name = exe_path
             .as_deref()
             .and_then(exe_name_from_path)
             .unwrap_or_default();
-        windows.push(CapturableWindow {
+        enumeration.windows.push(CapturableWindow {
             handle: hwnd.0 as isize,
             title,
             process_id,
@@ -170,12 +193,12 @@ unsafe fn window_title(hwnd: HWND) -> Option<String> {
     Some(String::from_utf16_lossy(&buf[..len as usize]))
 }
 
-unsafe fn process_path(process_id: u32) -> Option<String> {
+unsafe fn process_path(process_id: u32, buf: &mut Vec<u16>) -> Option<String> {
     if process_id == 0 {
         return None;
     }
     let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id).ok()? };
-    let mut buf = vec![0u16; 32_768];
+    buf.resize(32_768, 0);
     let mut len = buf.len() as u32;
     let result = unsafe {
         QueryFullProcessImageNameW(
@@ -245,6 +268,33 @@ fn client_crop_from_rects(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn process_queries_reuse_metadata_and_scratch_only_within_one_scan() {
+        let pid = std::process::id();
+        let mut scan = WindowEnumeration::default();
+        let path = scan.process_path(pid).expect("query this live process");
+        let scratch = scan.path_buffer.as_ptr();
+        assert_eq!(scan.path_buffer.len(), 32_768);
+
+        // A repeated PID must not query Win32 again: that would overwrite this
+        // scratch buffer. The cache must also retain failed queries.
+        scan.path_buffer.fill(0x2603);
+        assert_eq!(scan.process_path(pid), Some(path.clone()));
+        assert!(scan.path_buffer.iter().all(|value| *value == 0x2603));
+        assert_eq!(scan.path_buffer.as_ptr(), scratch);
+        scan.process_paths.insert(pid, None);
+        assert_eq!(scan.process_path(pid), None);
+        assert!(scan.path_buffer.iter().all(|value| *value == 0x2603));
+
+        assert_eq!(scan.process_path(0), None);
+        assert!(scan.process_paths.contains_key(&0));
+        assert_eq!(scan.path_buffer.as_ptr(), scratch);
+
+        // No stale success or failure survives a new enumeration.
+        let mut next_scan = WindowEnumeration::default();
+        assert_eq!(next_scan.process_path(pid), Some(path));
+    }
 
     #[test]
     fn no_match_returns_none() {
