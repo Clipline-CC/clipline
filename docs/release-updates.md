@@ -92,6 +92,11 @@ The workflow needs `TAURI_SIGNING_PRIVATE_KEY` only as a `release-signing` envir
 password, so `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` may remain unset. The version tag remains as an
 immutable audit marker while the separate `nightly` tag continues moving for installed clients.
 
+Both release callers explicitly map these two optional secrets into the reusable signer. Keep
+that routing even though the caller has no environment key: GitHub needs it to resolve the
+callee's environment secrets after approval. Do not replace it with broad `secrets: inherit`.
+Keep the signer's password argument quoted so an unset password is passed as an empty argument.
+
 The release must include both updater metadata assets (`latest.json`,
 `latest-standalone.json`). A WebView2 Fixed Version review is required for
 every standalone release and at least every 30 days. Compare the official
