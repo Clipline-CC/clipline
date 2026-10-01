@@ -1,6 +1,39 @@
 //! `upload_clip_to_cloud` command orchestration and post-upload bookkeeping.
 use super::*;
 
+static ACTIVE_UPLOAD_COMMANDS: Mutex<BTreeSet<(String, String)>> = Mutex::new(BTreeSet::new());
+
+/// One command owns a clip through payload preparation, processing and cleanup.
+struct UploadCommandGuard((String, String));
+
+impl UploadCommandGuard {
+    fn acquire(account: &CloudSettings, path: &Path) -> Result<Self, String> {
+        let path = path.to_string_lossy();
+        let key = (
+            cloud_account_key(account),
+            windows_clip_path_key(&path).unwrap_or_else(|| path.into_owned()),
+        );
+        let mut active = ACTIVE_UPLOAD_COMMANDS
+            .lock()
+            .map_err(|_| "upload command lock poisoned")?;
+        if !active.insert(key.clone()) {
+            return Err(
+                "this clip is already uploading; wait for processing to finish before retrying".into(),
+            );
+        }
+        Ok(Self(key))
+    }
+}
+
+impl Drop for UploadCommandGuard {
+    fn drop(&mut self) {
+        ACTIVE_UPLOAD_COMMANDS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.0);
+    }
+}
+
 #[tauri::command]
 pub async fn upload_clip_to_cloud<R: Runtime>(
     app: AppHandle<R>,
@@ -12,6 +45,9 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
     let media_root = storage.media_dir();
     let settings = state.settings();
     let cloud = settings.cloud.clone();
+    let _command = UploadCommandGuard::acquire(&cloud, &target)?;
+    // An earlier command may have finished between the snapshot and acquisition.
+    let cloud = state.with_cloud_account(&cloud, || state.settings().cloud)?;
 
     let meta = std::fs::metadata(&target).map_err(|e| format!("read clip metadata: {e}"))?;
     if meta.len() == 0 {
@@ -339,6 +375,25 @@ pub(crate) fn emit_upload_progress<R: Runtime>(
 mod tests {
     use super::*;
     use clipline_test_utils::TestDir;
+
+    #[test]
+    fn overlapping_upload_commands_cannot_replace_an_active_attempt() {
+        let dir = TestDir::new("clipline-cloud", "command-owner");
+        let path = dir.path().join("clip.mp4");
+        let account = CloudSettings::default();
+        let first = UploadCommandGuard::acquire(&account, &path).unwrap();
+        assert!(UploadCommandGuard::acquire(&account, &path).is_err());
+        let alias = PathBuf::from(path.to_string_lossy().to_ascii_uppercase());
+        assert!(UploadCommandGuard::acquire(&account, &alias).is_err());
+        let mut other_account = account.clone();
+        other_account.connected_user_id = Some("another-user".into());
+        let other = UploadCommandGuard::acquire(&other_account, &path).unwrap();
+        drop(first); // Success, failure and cancellation all release ownership.
+        let retry = UploadCommandGuard::acquire(&account, &path).unwrap();
+        assert!(UploadCommandGuard::acquire(&account, &path).is_err());
+        drop(retry);
+        drop(other);
+    }
 
     #[test]
     fn upload_metadata_uses_clip_title_and_kind_sidecar() {
