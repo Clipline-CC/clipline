@@ -6364,7 +6364,7 @@ fn groups_are_created_from_trim_and_managed_in_the_library() {
             && groups.contains("recover_group_order_transaction_unlocked")
             && groups.contains("let _guard = crate::gc::lock_clip_mutations();")
             && groups.contains("sync published group order journal")
-            && library.contains("groups::recover_group_order_transaction(&dir)?;")
+            && library.contains("groups::recover_group_order_transaction_unlocked(&dir)?;")
             && library.contains("groups::recover_group_order_transaction(&clips_dir)?;")
             && library.contains("sync replaced clip metadata")
             && library.contains("crate::windows::replace_file(tmp, target)"),
