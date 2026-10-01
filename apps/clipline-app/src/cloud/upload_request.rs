@@ -13,7 +13,9 @@ pub(crate) struct UploadRequestInput<'a> {
     pub(crate) title: Option<&'a str>,
 }
 
-pub(crate) fn create_upload_request(input: UploadRequestInput<'_>) -> Result<CreateUploadRequest, String> {
+pub(crate) fn create_upload_request(
+    input: UploadRequestInput<'_>,
+) -> Result<CreateUploadRequest, String> {
     let game = read_clip_game(input.path, input.markers);
     Ok(CreateUploadRequest {
         client_clip_id: Some(input.client_clip_id.to_string()),
@@ -63,6 +65,7 @@ pub(crate) enum UploadAudioSelectionPlan {
 pub(crate) struct UploadPayload {
     path: PathBuf,
     owned: bool,
+    source_lease: Option<crate::cloud_upload::UploadSourceLease>,
 }
 
 impl UploadPayload {
@@ -70,15 +73,24 @@ impl UploadPayload {
         Self {
             path: path.to_path_buf(),
             owned: false,
+            source_lease: None,
         }
     }
 
     pub(crate) fn owned(path: PathBuf) -> Self {
-        Self { path, owned: true }
+        Self {
+            path,
+            owned: true,
+            source_lease: None,
+        }
     }
 
     pub(crate) fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub(crate) fn take_source_lease(&mut self) -> Option<crate::cloud_upload::UploadSourceLease> {
+        self.source_lease.take()
     }
 }
 
@@ -95,41 +107,52 @@ pub(crate) async fn upload_payload_for_audio_selection_from_path(
     markers: Option<&ClipMarkers>,
     selected_audio_track_ids: Option<&[String]>,
 ) -> Result<UploadPayload, String> {
+    // Protect the library original, including remux/mix preparation and the
+    // later remote-processing wait, rather than only the transport payload.
+    let source_lease =
+        crate::cloud_upload::UploadSourceLease::acquire(source_path).map_err(cloud_error)?;
     let markers_with_audio = selected_audio_track_ids.and_then(|_| {
         crate::util::markers_with_inferred_audio_tracks(source_path, markers.cloned())
     });
     let selection_markers = markers_with_audio.as_ref().or(markers);
-    match upload_audio_selection_plan(selection_markers, selected_audio_track_ids)? {
-        UploadAudioSelectionPlan::Original => Ok(UploadPayload::original(source_path)),
-        UploadAudioSelectionPlan::Remux(selected_indices) => {
-            let target = reserve_upload_payload_path(source_path)?;
-            let payload = UploadPayload::owned(target.clone());
-            let source = source_path.to_path_buf();
-            tokio::task::spawn_blocking(move || {
-                clipline_mp4::remux_with_selected_audio_tracks_file(
-                    &source,
-                    &target,
-                    &selected_indices,
-                )
-            })
-            .await
-            .map_err(|e| format!("audio remux task failed: {e}"))?
-            .map_err(|e| e.to_string())?;
-            Ok(payload)
-        }
-        UploadAudioSelectionPlan::Mix(selected_indices) => {
-            let target = reserve_upload_payload_path(source_path)?;
-            let payload = UploadPayload::owned(target.clone());
-            let source = source_path.to_path_buf();
-            tokio::task::spawn_blocking(move || {
-                clipline_mp4::remux_with_mixed_audio_track_file(&source, &target, &selected_indices)
-            })
-            .await
-            .map_err(|e| format!("audio mix task failed: {e}"))?
-            .map_err(|e| e.to_string())?;
-            Ok(payload)
-        }
-    }
+    let mut payload =
+        match upload_audio_selection_plan(selection_markers, selected_audio_track_ids)? {
+            UploadAudioSelectionPlan::Original => UploadPayload::original(source_path),
+            UploadAudioSelectionPlan::Remux(selected_indices) => {
+                let target = reserve_upload_payload_path(source_path)?;
+                let payload = UploadPayload::owned(target.clone());
+                let source = source_path.to_path_buf();
+                tokio::task::spawn_blocking(move || {
+                    clipline_mp4::remux_with_selected_audio_tracks_file(
+                        &source,
+                        &target,
+                        &selected_indices,
+                    )
+                })
+                .await
+                .map_err(|e| format!("audio remux task failed: {e}"))?
+                .map_err(|e| e.to_string())?;
+                payload
+            }
+            UploadAudioSelectionPlan::Mix(selected_indices) => {
+                let target = reserve_upload_payload_path(source_path)?;
+                let payload = UploadPayload::owned(target.clone());
+                let source = source_path.to_path_buf();
+                tokio::task::spawn_blocking(move || {
+                    clipline_mp4::remux_with_mixed_audio_track_file(
+                        &source,
+                        &target,
+                        &selected_indices,
+                    )
+                })
+                .await
+                .map_err(|e| format!("audio mix task failed: {e}"))?
+                .map_err(|e| e.to_string())?;
+                payload
+            }
+        };
+    payload.source_lease = Some(source_lease);
+    Ok(payload)
 }
 
 pub(crate) fn reserve_upload_payload_path(source: &Path) -> Result<PathBuf, String> {
@@ -230,7 +253,10 @@ pub(crate) fn upload_audio_selection_plan(
     }
 }
 
-pub(crate) fn read_clip_game(path: &Path, markers: Option<&ClipMarkers>) -> Option<crate::library::ClipGame> {
+pub(crate) fn read_clip_game(
+    path: &Path,
+    markers: Option<&ClipMarkers>,
+) -> Option<crate::library::ClipGame> {
     path.parent()
         .and_then(|dir| std::fs::read_to_string(dir.join("clipline-session.json")).ok())
         .and_then(|json| serde_json::from_str::<crate::library::ClipGame>(&json).ok())
@@ -261,7 +287,11 @@ pub(crate) fn source_type(path: &Path) -> String {
     crate::library::clip_kind_for_path(path)
 }
 
-pub(crate) fn local_clip_id(path: &Path, meta: &std::fs::Metadata, checksum: &str) -> Result<String, String> {
+pub(crate) fn local_clip_id(
+    path: &Path,
+    meta: &std::fs::Metadata,
+    checksum: &str,
+) -> Result<String, String> {
     let canonical = path
         .canonicalize()
         .map_err(|e| format!("resolve clip path: {e}"))?;
@@ -284,10 +314,6 @@ pub(crate) fn local_clip_id(path: &Path, meta: &std::fs::Metadata, checksum: &st
 #[cfg(test)]
 mod tests {
     use super::*;
-    
-    
-    
-    
 
     #[test]
     fn source_type_falls_back_to_replay() {
@@ -337,5 +363,4 @@ mod tests {
 
         assert!(err.contains("unknown audio track"), "{err}");
     }
-
 }

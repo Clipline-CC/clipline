@@ -238,6 +238,7 @@ listen("game-detection", (e) => {
 
 listen("cloud-upload-progress", (e) => {
   const progress = e.payload || {};
+  if (progress.account_key !== cloudAccountKey()) return;
   const update = upsertCloudProgress(progress);
   if (progress.error) {
     $("error").textContent = progress.error;

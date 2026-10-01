@@ -292,6 +292,7 @@ function setNotice(message, { transient = false } = {}) {
 }
 
 function showPostRefreshFeedback(feedback) {
+  if (feedback.accountKey && feedback.accountKey !== cloudAccountKey()) return;
   if (feedback.error) $("error").textContent = feedback.error;
   if (feedback.notice) setNotice(feedback.notice, { transient: true });
 }
@@ -299,14 +300,17 @@ function showPostRefreshFeedback(feedback) {
 function finishPostRefreshFeedback(refreshCompleted, feedback = {}) {
   const error = String(feedback.error || "").trim();
   const notice = String(feedback.notice || "").trim();
+  const accountKey = feedback.accountKey || "";
   if (!error && !notice) return;
-  feedback = { error, notice };
+  feedback = { error, notice, accountKey };
   if (refreshCompleted) {
     showPostRefreshFeedback(feedback);
     return;
   }
-  const pending = pendingPostRefreshFeedback || {};
+  const pending = pendingPostRefreshFeedback?.accountKey === accountKey
+    ? pendingPostRefreshFeedback : {};
   pendingPostRefreshFeedback = {
+    accountKey,
     error: error || pending.error || "",
     notice: notice || pending.notice || "",
   };

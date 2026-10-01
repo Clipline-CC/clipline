@@ -83,7 +83,7 @@ pub async fn cloud_user_profile(
     .map_err(cloud_error)?;
     let profile = cloud_user_profile_from_response(&cloud, &response.user)?;
     let profile_for_settings = profile.clone();
-    let _settings = state.update_cloud(|cloud| {
+    let _settings = state.update_cloud_for_account(&cloud, |cloud| {
         cloud.connected_user_id = Some(profile_for_settings.user_id.clone());
         cloud.connected_username = Some(profile_for_settings.username.clone());
         cloud.connected_display_name = profile_for_settings.display_name.clone();
@@ -103,7 +103,6 @@ pub fn open_cloud_user_profile(state: tauri::State<RuntimeState>) -> Result<(), 
     let url = cloud_user_profile_url(&cloud, username)?;
     open_cloud_url(url.as_str(), "cloud user profile")
 }
-
 
 pub(crate) fn cloud_user_avatar_url(cloud: &CloudSettings) -> Result<reqwest::Url, String> {
     let base =
@@ -130,7 +129,10 @@ pub(crate) fn cloud_user_profile_from_response(
     })
 }
 
-pub(crate) fn cloud_user_profile_url(cloud: &CloudSettings, username: &str) -> Result<reqwest::Url, String> {
+pub(crate) fn cloud_user_profile_url(
+    cloud: &CloudSettings,
+    username: &str,
+) -> Result<reqwest::Url, String> {
     let username = username.trim();
     if username.is_empty() {
         return Err("Clipline Cloud username is unknown".to_string());
@@ -159,7 +161,10 @@ pub(crate) fn cloud_user_avatar_cache_key(cloud: &CloudSettings) -> Result<Strin
     Ok(format!("{}|{user_id}", base.as_str().trim_end_matches('/')))
 }
 
-pub(crate) fn cloud_user_avatar_data_url(content_type: Option<&str>, bytes: &[u8]) -> Result<String, String> {
+pub(crate) fn cloud_user_avatar_data_url(
+    content_type: Option<&str>,
+    bytes: &[u8],
+) -> Result<String, String> {
     if bytes.is_empty() {
         return Err("cloud avatar returned an empty body".to_string());
     }
@@ -249,5 +254,4 @@ mod tests {
         let url = cloud_user_profile_url(&cloud, "Dain 98").expect("profile URL");
         assert_eq!(url.as_str(), "https://clips.example.com/cloud/u/Dain%2098");
     }
-
 }

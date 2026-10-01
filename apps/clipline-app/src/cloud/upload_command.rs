@@ -18,7 +18,7 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
         return Err("clip file is empty".into());
     }
     let markers = crate::util::read_markers_raw(&target);
-    let payload = upload_payload_for_audio_selection_from_path(
+    let mut payload = upload_payload_for_audio_selection_from_path(
         &target,
         markers.as_ref(),
         request.audio_track_ids.as_deref(),
@@ -64,8 +64,8 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
         error: None,
         updated_at_unix: unix_now(),
     };
-    persist_record(&state, &record)?;
-    emit_upload_progress(&app, &record, 0, payload_size, None);
+    persist_record(&state, &cloud, &record)?;
+    emit_upload_progress(&app, &cloud, &record, 0, payload_size, None);
 
     let upload_request = create_upload_request(UploadRequestInput {
         path: &target,
@@ -92,6 +92,7 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
                 "uploading"
             };
             let event = CloudUploadProgressEvent {
+                account_key: cloud_account_key(&cloud),
                 local_clip_id: local_clip_id.clone(),
                 path: progress_path.clone(),
                 upload_status: status.to_string(),
@@ -112,8 +113,8 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
             record.upload_status = "failed".to_string();
             record.error = Some(cloud_error(error));
             record.updated_at_unix = unix_now();
-            persist_record(&state, &record)?;
-            emit_upload_progress(&app, &record, 0, payload_size, record.error.clone());
+            persist_record(&state, &cloud, &record)?;
+            emit_upload_progress(&app, &cloud, &record, 0, payload_size, record.error.clone());
             return Ok(CloudUploadResult {
                 record,
                 clip: None,
@@ -127,9 +128,10 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
     record.upload_status = "processing".to_string();
     record.error = None;
     record.updated_at_unix = unix_now();
-    persist_record(&state, &record)?;
+    persist_record(&state, &cloud, &record)?;
     emit_upload_progress(
         &app,
+        &cloud,
         &record,
         progress.received_size_bytes,
         progress.file_size_bytes,
@@ -146,7 +148,7 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
                     .to_string(),
             );
             record.updated_at_unix = unix_now();
-            persist_post_upload_record(&app, &state, &record, progress.file_size_bytes)?;
+            persist_post_upload_record(&app, &state, &cloud, &record, progress.file_size_bytes)?;
             return Ok(CloudUploadResult {
                 record,
                 clip: None,
@@ -155,7 +157,7 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
         }
         Ok(ReadyClipOutcome::TimedOut) => {
             mark_ready_timeout(&mut record);
-            persist_post_upload_record(&app, &state, &record, progress.file_size_bytes)?;
+            persist_post_upload_record(&app, &state, &cloud, &record, progress.file_size_bytes)?;
             return Ok(CloudUploadResult {
                 record,
                 clip: None,
@@ -170,7 +172,7 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
                     cloud_error(error)
                 ),
             );
-            persist_post_upload_record(&app, &state, &record, progress.file_size_bytes)?;
+            persist_post_upload_record(&app, &state, &cloud, &record, progress.file_size_bytes)?;
             return Ok(CloudUploadResult {
                 record,
                 clip: None,
@@ -193,7 +195,13 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
                         updated.status
                     ),
                 );
-                persist_post_upload_record(&app, &state, &record, progress.file_size_bytes)?;
+                persist_post_upload_record(
+                    &app,
+                    &state,
+                    &cloud,
+                    &record,
+                    progress.file_size_bytes,
+                )?;
                 return Ok(CloudUploadResult {
                     record,
                     clip: None,
@@ -208,7 +216,13 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
                         cloud_error(error)
                     ),
                 );
-                persist_post_upload_record(&app, &state, &record, progress.file_size_bytes)?;
+                persist_post_upload_record(
+                    &app,
+                    &state,
+                    &cloud,
+                    &record,
+                    progress.file_size_bytes,
+                )?;
                 return Ok(CloudUploadResult {
                     record,
                     clip: None,
@@ -219,7 +233,7 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
     };
 
     apply_remote_clip_to_record(&mut record, &clip);
-    persist_post_upload_record(&app, &state, &record, progress.file_size_bytes)?;
+    persist_post_upload_record(&app, &state, &cloud, &record, progress.file_size_bytes)?;
 
     if cloud.delete_local_after_upload {
         if let Err(error) = verify_ready_cloud_media(&cloud, &token, &clip.id).await {
@@ -229,21 +243,23 @@ pub async fn upload_clip_to_cloud<R: Runtime>(
                     "cloud reported the upload ready, but its media could not be verified: {error}; the local clip was preserved"
                 ),
             );
-            persist_post_upload_record(&app, &state, &record, progress.file_size_bytes)?;
+            persist_post_upload_record(&app, &state, &cloud, &record, progress.file_size_bytes)?;
             return Ok(CloudUploadResult {
                 record,
                 clip: Some(clip),
                 local_deleted: false,
             });
         }
-        let cleanup_result = delete_uploaded_local_files(&target, &media_root);
+        let cleanup_result = state.with_cloud_account(&cloud, || {
+            delete_uploaded_local_files(&target, &media_root, payload.take_source_lease())
+        })?;
         let local_deleted = cleanup_result.is_ok() || matches!(target.try_exists(), Ok(false));
         if let Err(error) = cleanup_result {
             record.error = Some(format!(
                 "cloud upload is ready, but local cleanup failed: {error}"
             ));
             record.updated_at_unix = unix_now();
-            persist_post_upload_record(&app, &state, &record, progress.file_size_bytes)?;
+            persist_post_upload_record(&app, &state, &cloud, &record, progress.file_size_bytes)?;
         }
         return Ok(CloudUploadResult {
             record,
@@ -269,7 +285,9 @@ pub(crate) fn mark_ready_timeout(record: &mut CloudUploadRecord) {
 }
 
 pub(crate) fn mark_post_upload_problem(record: &mut CloudUploadRecord, message: String) {
-    record.upload_status = "uploaded_processing".to_string();
+    if record.upload_status != "failed" {
+        record.upload_status = "uploaded_processing".to_string();
+    }
     record.error = Some(message);
     record.updated_at_unix = unix_now();
 }
@@ -277,12 +295,14 @@ pub(crate) fn mark_post_upload_problem(record: &mut CloudUploadRecord, message: 
 pub(crate) fn persist_post_upload_record<R: Runtime>(
     app: &AppHandle<R>,
     state: &RuntimeState,
+    account: &CloudSettings,
     record: &CloudUploadRecord,
     file_size_bytes: u64,
 ) -> Result<(), String> {
-    persist_record(state, record)?;
+    persist_record(state, account, record)?;
     emit_upload_progress(
         app,
+        account,
         record,
         file_size_bytes,
         file_size_bytes,
@@ -293,6 +313,7 @@ pub(crate) fn persist_post_upload_record<R: Runtime>(
 
 pub(crate) fn emit_upload_progress<R: Runtime>(
     app: &AppHandle<R>,
+    account: &CloudSettings,
     record: &CloudUploadRecord,
     received_size_bytes: u64,
     file_size_bytes: u64,
@@ -301,6 +322,7 @@ pub(crate) fn emit_upload_progress<R: Runtime>(
     let _ = app.emit(
         CLOUD_UPLOAD_PROGRESS_EVENT,
         CloudUploadProgressEvent {
+            account_key: cloud_account_key(account),
             local_clip_id: record.local_clip_id.clone(),
             path: record.path.clone(),
             upload_status: record.upload_status.clone(),
@@ -385,6 +407,50 @@ mod tests {
         assert!(source.exists());
     }
 
+    #[tokio::test]
+    async fn upload_payload_protects_original_during_transport_and_processing() {
+        for selected in [None, Some(vec!["microphone".to_string()])] {
+            let dir = TestDir::new("clipline-cloud", "upload-original-quota");
+            let source = dir.path().join("source.mp4");
+            std::fs::write(&source, two_audio_mp4()).unwrap();
+            clipline_storage::ensure_clip_owned(&source).unwrap();
+            let markers = audio_markers();
+            let payload = upload_payload_for_audio_selection_from_path(
+                &source,
+                Some(&markers),
+                selected.as_deref(),
+            )
+            .await
+            .unwrap();
+            let transport =
+                crate::cloud_upload::UploadSourceLease::acquire(payload.path()).unwrap();
+            assert_eq!(
+                crate::gc::enforce_quota_with_clip_policy(dir.path(), Some(0), None)
+                    .unwrap()
+                    .deleted_clips,
+                0
+            );
+            drop(transport);
+            assert_eq!(
+                crate::gc::enforce_quota_with_clip_policy(dir.path(), Some(0), None)
+                    .unwrap()
+                    .deleted_clips,
+                0
+            );
+            assert!(
+                source.exists(),
+                "the original must survive remote processing"
+            );
+            drop(payload);
+            assert_eq!(
+                crate::gc::enforce_quota_with_clip_policy(dir.path(), Some(0), None)
+                    .unwrap()
+                    .deleted_clips,
+                1
+            );
+        }
+    }
+
     #[test]
     fn abandoned_upload_payload_prune_is_scoped_and_age_gated() {
         let dir = TestDir::new("clipline-cloud", "upload-payload-prune");
@@ -443,5 +509,4 @@ mod tests {
         );
         assert_eq!(record.error.as_deref(), Some("visibility update failed"));
     }
-
 }
