@@ -4,10 +4,11 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
-## Checkpoint (2026-10-01): Protected signing fix and Nightly 1.0.10 preparation
+## Checkpoint (2026-10-01): Nightly 1.0.10 published
 
-Release metadata advances the current Nightly 1.0.8 to 1.0.10 from `develop`
-merge `2b2d12ce`. This includes PRs #216–#220: security remediation, the twelve
+Published [Nightly 1.0.10](https://github.com/Clipline-CC/clipline/releases/tag/nightly)
+from `develop` commit `fbdd69aae30e52ec772bc44800b7a9ebeb4f33ff` (PR #222),
+with immutable tag `nightly-v1.0.10`. This includes PRs #216–#220: security remediation, the twelve
 bug-hunt fixes, MP4/process-query performance work, player metadata/marker menus,
 and the accepted trim-handle edge scrolling. Cargo, Cargo.lock and Tauri agree.
 
@@ -15,7 +16,8 @@ Microsoft's Fixed Version selector still offers 154.0.4258.48 and the same x64
 CAB URL. Its pinned size/SHA-256 verified during staging; both runtime preflights
 passed. Review dates are 2026-10-01 through 2026-10-31. Workspace tests report
 1,671 passing checks, and fresh-app-cache warning-denied workspace Clippy passes.
-The standalone-config debug harness used the staged Fixed Version executable:
+The standalone-config debug harness at the 1.0.9 source checkpoint used the
+staged Fixed Version executable:
 H.264/Opus, HEVC and AV1 each played through ended with 60 frames, matching the
 HEVC/AV1 `probably` capability probes. Capture/player code is unchanged; this
 follow-up changes release workflows, their security regression and release metadata/docs.
@@ -29,10 +31,16 @@ password argument also fixes a reproduced CLI failure when the password is unset
 The security regression failed before the routing fix. Keep `nightly-v1.0.9`
 immutable; source changes require the next patch version.
 
-Publication follows the fix/release PR, green OS CI, and immutable `nightly-v1.0.10`
-on its merged develop commit. The Nightly workflow owns builds, protected signing
-and public-download verification; publication is not yet complete at this checkpoint.
-Local evidence is under ignored `target/nightly-20261001/`.
+[Nightly Release run 36831482159](https://github.com/Clipline-CC/clipline/actions/runs/36831482159)
+passed build, protected artifact-only signing and publication, including its
+public-download byte comparison. The rolling release targets the exact commit
+above and exposes seven assets. Local public downloads match every GitHub asset
+digest and both reviewed unsigned installer hashes. The signature in each updater
+manifest verifies over its corresponding public installer under the committed
+public key; sidecar signatures also agree. This remotely confirms the routing and
+empty-password fixes. Ubuntu/Windows PR CI and review were green before merging.
+Local evidence is under ignored `target/nightly-20261001/`, including the
+1.0.10 unsigned/public hashes and verification helpers. The normal 1.0.10 app is open.
 
 ## Checkpoint (2026-10-01): Trim-handle edge scrolling
 
