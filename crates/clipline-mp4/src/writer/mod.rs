@@ -1,4 +1,4 @@
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 
 use crate::boxes::{mp4_box, Payload};
 use crate::fragment::{
@@ -86,10 +86,7 @@ impl<W: Write + Seek> HybridMp4Writer<W> {
         w.write_all(&moov_init_multi(&tracks))?;
         Ok(Self {
             w,
-            tracks: tracks
-                .into_iter()
-                .map(TrackState::new)
-                .collect(),
+            tracks: tracks.into_iter().map(TrackState::new).collect(),
             free_offset,
             next_sequence: 1,
         })
@@ -214,7 +211,7 @@ impl<W: Write + Seek> HybridMp4Writer<W> {
         mut write_payload: F,
     ) -> io::Result<()>
     where
-        F: FnMut(&mut W, usize, usize) -> io::Result<()>,
+        F: FnMut(&mut BufWriter<&mut W>, usize, usize) -> io::Result<()>,
     {
         let runs: Vec<TrackRunInfo<'_>> = info_storage
             .iter()
@@ -241,12 +238,19 @@ impl<W: Write + Seek> HybridMp4Writer<W> {
         let frag_start = self.w.stream_position()?;
         let moof = fragment_moof_multi(self.next_sequence, &runs).map_err(fragment_io_error)?;
         let mdat_header = mdat_header(total_payload);
-        self.w.write_all(&moof)?;
-        self.w.write_all(&mdat_header)?;
-        for (track_index, samples) in info_storage.iter().enumerate() {
-            for sample_index in 0..samples.len() {
-                write_payload(&mut self.w, track_index, sample_index)?;
+        {
+            // Batch small packets without retaining data between fragments.
+            // A successful return leaves the full fragment visible for recovery;
+            // seek offsets and into_inner/finalize keep their existing semantics.
+            let mut buffered = BufWriter::with_capacity(256 * 1024, &mut self.w);
+            buffered.write_all(&moof)?;
+            buffered.write_all(&mdat_header)?;
+            for (track_index, samples) in info_storage.iter().enumerate() {
+                for sample_index in 0..samples.len() {
+                    write_payload(&mut buffered, track_index, sample_index)?;
+                }
             }
+            buffered.flush()?;
         }
 
         let mut sample_offset = frag_start + moof.len() as u64 + mdat_header.len() as u64;
@@ -445,7 +449,9 @@ fn fragment_io_error(error: FragmentError) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::track_state::rescale_duration;
-    use super::track_state::support::{all_sync_gop, audio_cfg, gop, read_i32_at, read_u32_at, video_cfg};
+    use super::track_state::support::{
+        all_sync_gop, audio_cfg, gop, read_i32_at, read_u32_at, video_cfg,
+    };
     use super::*;
     use crate::fragment::FragSample;
     use crate::init::{AudioTrackConfig, EditListEntry, VideoTrackConfig, MOVIE_TIMESCALE};
@@ -629,6 +635,135 @@ mod tests {
     }
 
     // --- HybridMp4Writer API tests ---
+
+    #[derive(Default)]
+    struct CountedSink {
+        data: Cursor<Vec<u8>>,
+        writes: usize,
+        flushes: usize,
+        fail_write: bool,
+        fail_flush: bool,
+    }
+
+    impl Write for CountedSink {
+        fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+            self.writes += 1;
+            if self.fail_write {
+                return Err(io::Error::other("injected payload write failure"));
+            }
+            self.data.write(data)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.flushes += 1;
+            if self.fail_flush {
+                return Err(io::Error::other("injected fragment flush failure"));
+            }
+            Ok(())
+        }
+    }
+
+    impl Seek for CountedSink {
+        fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+            self.data.seek(position)
+        }
+    }
+
+    #[test]
+    fn fragment_batches_small_packets_and_publishes_before_returning() {
+        let samples: Vec<_> = (0..2000)
+            .map(|index| FragSample {
+                data: vec![index as u8; 480],
+                duration: 960,
+                is_sync: true,
+            })
+            .collect();
+        let refs: Vec<_> = samples
+            .iter()
+            .map(|sample| FragSampleRef {
+                data: &sample.data,
+                duration: sample.duration,
+                is_sync: sample.is_sync,
+            })
+            .collect();
+        let mut writer = HybridMp4Writer::new_multi(
+            CountedSink::default(),
+            vec![TrackConfig::Audio(audio_cfg())],
+        )
+        .unwrap();
+        let before = writer.w.writes;
+        writer.write_fragment_multi_borrowed(&[&refs]).unwrap();
+        let writes = writer.w.writes - before;
+        assert!(
+            writes < 20,
+            "2000 packets should be batched, got {writes} writes"
+        );
+        assert_eq!(writer.w.flushes, 1, "fragment flush must be explicit");
+
+        // Construct the previous, unbatched format independently and compare the
+        // completed fragment while the streaming writer is still alive.
+        let mut expected = HybridMp4Writer::new_multi(
+            Cursor::new(Vec::new()),
+            vec![TrackConfig::Audio(audio_cfg())],
+        )
+        .unwrap();
+        let info: Vec<_> = samples
+            .iter()
+            .map(|sample| sample.fragment_info().unwrap())
+            .collect();
+        let moof = fragment_moof_multi(
+            1,
+            &[TrackRunInfo {
+                track_id: 1,
+                base_decode_time: 0,
+                samples: &info,
+            }],
+        )
+        .unwrap();
+        expected.w.write_all(&moof).unwrap();
+        expected.w.write_all(&mdat_header(2000 * 480)).unwrap();
+        for sample in &samples {
+            expected.w.write_all(&sample.data).unwrap();
+        }
+        assert_eq!(writer.w.data.get_ref(), expected.w.get_ref());
+        let boxes = walk(writer.w.data.get_ref());
+        assert_eq!(boxes.last().unwrap().fourcc, *b"mdat");
+        assert_eq!(writer.track_decode_time(0).unwrap(), 2000 * 960);
+    }
+
+    #[test]
+    fn fragment_batch_propagates_write_and_flush_failures_without_advancing() {
+        for flush_failure in [false, true] {
+            let mut writer = HybridMp4Writer::new(CountedSink::default(), video_cfg()).unwrap();
+            writer.w.fail_write = !flush_failure;
+            writer.w.fail_flush = flush_failure;
+            let error = writer.write_fragment(&gop(0)).unwrap_err();
+            assert!(error.to_string().contains(if flush_failure {
+                "fragment flush failure"
+            } else {
+                "payload write failure"
+            }));
+            assert_eq!(writer.next_sequence, 1);
+            assert_eq!(writer.track_decode_time(0).unwrap(), 0);
+        }
+
+        let mut writer = HybridMp4Writer::new(CountedSink::default(), video_cfg()).unwrap();
+        let mut source = Cursor::new(vec![0; 7]);
+        let error = writer
+            .write_fragment_multi_from_source(
+                &mut source,
+                &[&[SourceSample {
+                    offset: 0,
+                    size: 8,
+                    duration: 3000,
+                    is_sync: true,
+                }]],
+            )
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(writer.next_sequence, 1);
+        assert_eq!(writer.track_decode_time(0).unwrap(), 0);
+    }
 
     #[test]
     fn write_fragment_multi_rejects_track_count_mismatch() {
