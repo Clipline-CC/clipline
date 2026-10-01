@@ -492,6 +492,146 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bh10_file_copy_replaces_text_in_private_window_station() {
+        use crate::library::{copy_file_to_clipboard, copy_text_to_clipboard_native};
+        use std::ptr;
+        use windows_sys::Win32::System::Ole::{CF_HDROP, CF_UNICODETEXT};
+
+        const CHILD: &str = "CLIPLINE_TEST_PRIVATE_CLIPBOARD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "windows::tests::bh10_file_copy_replaces_text_in_private_window_station", "--nocapture"])
+                .env(CHILD, "1")
+                .status().unwrap();
+            assert!(
+                status.success(),
+                "isolated native clipboard regression failed"
+            );
+            return;
+        }
+
+        // Keep process-wide station changes in a child. No clipboard API runs
+        // until both its private station and desktop have been selected.
+        // These test-only declarations avoid adding a windows-sys feature.
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn CreateWindowStationW(
+                name: *const u16,
+                flags: u32,
+                access: u32,
+                attributes: *const windows_sys::Win32::Security::SECURITY_ATTRIBUTES,
+            ) -> HANDLE;
+            fn SetProcessWindowStation(station: HANDLE) -> i32;
+            fn GetUserObjectInformationW(
+                object: HANDLE,
+                index: i32,
+                info: *mut std::ffi::c_void,
+                length: u32,
+                needed: *mut u32,
+            ) -> i32;
+            fn CreateDesktopW(
+                name: *const u16,
+                device: *const u16,
+                mode: *const windows_sys::Win32::Graphics::Gdi::DEVMODEW,
+                flags: u32,
+                access: u32,
+                attributes: *const windows_sys::Win32::Security::SECURITY_ATTRIBUTES,
+            ) -> HANDLE;
+            fn SetThreadDesktop(desktop: HANDLE) -> i32;
+        }
+        use windows_sys::Win32::System::DataExchange::IsClipboardFormatAvailable;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, WS_POPUP,
+        };
+
+        unsafe {
+            // Windows supplies a noninteractive service station without elevation.
+            // Verify its name before selecting it or calling any clipboard API.
+            let station = CreateWindowStationW(ptr::null(), 0, 0x037f, ptr::null());
+            assert!(
+                !station.is_null(),
+                "{}",
+                last_os_error("create private window station")
+            );
+            let mut station_name = [0_u16; 256];
+            assert_ne!(
+                GetUserObjectInformationW(
+                    station,
+                    2,
+                    station_name.as_mut_ptr().cast(),
+                    std::mem::size_of_val(&station_name) as u32,
+                    ptr::null_mut()
+                ),
+                0
+            );
+            let station_name = String::from_utf16_lossy(&station_name);
+            assert!(
+                station_name.starts_with("Service-"),
+                "refusing interactive clipboard: {station_name}"
+            );
+            assert_ne!(
+                SetProcessWindowStation(station),
+                0,
+                "{}",
+                last_os_error("select private window station")
+            );
+            let desktop_name = crate::windows::wide_null(std::ffi::OsStr::new(&format!(
+                "CliplineClipboardTest-{}",
+                std::process::id()
+            )));
+            let desktop = CreateDesktopW(
+                desktop_name.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+                0,
+                0x0083,
+                ptr::null(),
+            );
+            assert!(
+                !desktop.is_null(),
+                "{}",
+                last_os_error("create private desktop")
+            );
+            assert_ne!(
+                SetThreadDesktop(desktop),
+                0,
+                "{}",
+                last_os_error("select private desktop")
+            );
+            let owner = CreateWindowExW(
+                0,
+                windows_sys::core::w!("STATIC"),
+                ptr::null(),
+                WS_POPUP,
+                0,
+                0,
+                0,
+                0,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null(),
+            );
+            assert!(
+                !owner.is_null(),
+                "{}",
+                last_os_error("create private clipboard owner")
+            );
+            copy_text_to_clipboard_native("old share link", owner).unwrap();
+            assert_ne!(IsClipboardFormatAvailable(CF_UNICODETEXT as u32), 0);
+            copy_file_to_clipboard(Path::new(r"C:\private-test.mp4"), owner).unwrap();
+            assert_ne!(IsClipboardFormatAvailable(CF_HDROP as u32), 0);
+            assert_eq!(
+                IsClipboardFormatAvailable(CF_UNICODETEXT as u32),
+                0,
+                "file copy retained obsolete text"
+            );
+            DestroyWindow(owner);
+        }
+        // Exiting the child releases its station and desktop handles.
+    }
+
+    #[test]
     fn elevated_restart_argument_round_trips_parent_process_instance() {
         let parent = ProcessIdentity {
             process_id: 4242,

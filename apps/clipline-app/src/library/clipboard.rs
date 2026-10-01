@@ -58,19 +58,18 @@ pub async fn copy_text_to_clipboard(
 
 pub(crate) fn copy_file_to_clipboard(path: &Path, owner: HWND) -> Result<(), String> {
     let payload = dropfiles_payload(path);
-    copy_payload_to_clipboard(&payload, CF_HDROP as u32, owner, false)
+    copy_payload_to_clipboard(&payload, CF_HDROP as u32, owner)
 }
 
 pub(crate) fn copy_text_to_clipboard_native(text: &str, owner: HWND) -> Result<(), String> {
     let payload = clipboard_text_payload(text);
-    copy_payload_to_clipboard(&payload, CF_UNICODETEXT as u32, owner, true)
+    copy_payload_to_clipboard(&payload, CF_UNICODETEXT as u32, owner)
 }
 
 pub(crate) fn copy_payload_to_clipboard(
     payload: &[u8],
     format: u32,
     owner: HWND,
-    empty_first: bool,
 ) -> Result<(), String> {
     let handle = unsafe { GlobalAlloc(GMEM_MOVEABLE, payload.len()) };
     if handle.is_null() {
@@ -104,7 +103,7 @@ pub(crate) fn copy_payload_to_clipboard(
             CloseClipboard();
         },
         || {
-            if empty_first && unsafe { EmptyClipboard() } == 0 {
+            if unsafe { EmptyClipboard() } == 0 {
                 return Err(last_os_error("empty clipboard"));
             }
             if unsafe { SetClipboardData(format, transfer.handle()) }.is_null() {

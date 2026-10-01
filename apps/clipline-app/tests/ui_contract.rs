@@ -5211,12 +5211,12 @@ fn clipboard_copy_distinguishes_shareable_and_original_paths() {
             && library.contains("window: tauri::WebviewWindow")
             && library.contains(".hwnd()")
             && library.contains(
-                "copy_payload_to_clipboard(&payload, CF_HDROP as u32, owner, false)"
+                "copy_payload_to_clipboard(&payload, CF_HDROP as u32, owner)"
             )
             && library.contains(
-                "copy_payload_to_clipboard(&payload, CF_UNICODETEXT as u32, owner, true)"
+                "copy_payload_to_clipboard(&payload, CF_UNICODETEXT as u32, owner)"
             ),
-        "file copy should preserve other clipboard formats while native text copy takes clipboard ownership",
+        "file and text copy should replace clipboard contents with their own formats",
     );
     assert!(
         app.contains("crate::library::copy_clip_to_clipboard"),
