@@ -4,6 +4,30 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-09-30): Performance first pass
+
+`perf/mp4-batching-process-query-reuse` starts at merged bug-hunt commit
+`1ea5f854` and implements the two opportunities selected by the user for a new
+PR into `develop`. [Measurements and coverage](docs/audits/2026-09-30-performance-first-pass.md)
+record the real-file comparison and its limits.
+
+The shared MP4 fragment helper batches writes through a temporary 256 KiB
+standard-library buffer and explicitly flushes before advancing bookkeeping.
+Replay, full-session and trim callers benefit without API or byte-format changes.
+Local synthetic 30-second files with 1/2/17 audio tracks remain byte-identical
+and use approximately 95–99% fewer file writes; these are not gameplay FPS claims.
+Window enumeration reuses executable paths, including failed queries, by PID
+within one scan and lazily allocates one UTF-16 path buffer. Every new scan starts
+fresh; title/visibility/ordering and immediate process-handle closure are preserved.
+
+Local gates: 1,664 workspace tests pass, plus the separate native clipboard child
+invocation, with two intentional ignores. Warning-denied workspace Clippy passes
+after cleaning `clipline-mp4` and `clipline-capture`. Logs and benchmark artifacts
+remain in ignored `target/performance-first-pass/`. Manual acceptance: save a replay
+with multiple audio tracks and check playback/seeking; finish and play a full-session
+recording; open the running-game picker and verify multiple windows still show the
+correct executable/title. Larger performance opportunities remain separate work.
+
 ## Checkpoint (2026-09-30): Repository bug-hunt remediation
 
 [`PR #217`](https://github.com/Clipline-CC/clipline/pull/217) into `develop`
