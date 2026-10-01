@@ -290,6 +290,24 @@ pub(crate) fn open_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), Str
     }
 }
 
+fn main_navigation_allowed(url: &tauri::Url) -> bool {
+    url.username().is_empty() && url.password().is_none() && url.port().is_none()
+        && matches!((url.scheme(), url.host_str()),
+            ("http", Some("tauri.localhost")) | ("tauri", Some("localhost")))
+        && matches!(url.path(), "/" | "/index.html") && url.query().is_none()
+}
+
+#[cfg(test)]
+#[test]
+fn security_scan_main_navigation_stays_on_packaged_page() {
+    for url in ["http://tauri.localhost/", "http://tauri.localhost/index.html#review", "tauri://localhost/index.html"] {
+        assert!(main_navigation_allowed(&url.parse().unwrap()));
+    }
+    for url in ["https://attacker.test/", "http://tauri.localhost.attacker.test/", "http://user@tauri.localhost/", "http://tauri.localhost:1234/", "file:///C:/file", "data:text/html,hello", "about:blank", "http://asset.localhost/clip.mp4"] {
+        assert!(!main_navigation_allowed(&url.parse().unwrap()));
+    }
+}
+
 pub(crate) fn build_main_window<R: Runtime>(
     app: &AppHandle<R>,
     label: &str,
@@ -304,6 +322,7 @@ pub(crate) fn build_main_window<R: Runtime>(
     config.label = label.to_string();
     let window = WebviewWindowBuilder::from_config(app, &config)
         .map_err(|e| e.to_string())?
+        .on_navigation(main_navigation_allowed)
         .build()
         .map_err(|e| e.to_string())?;
     let generation = app.state::<FrontendReadinessState>().begin_generation();

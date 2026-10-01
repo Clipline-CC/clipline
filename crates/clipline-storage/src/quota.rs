@@ -411,7 +411,7 @@ fn enforce_quota_reports_cleanup_error_after_counting_deleted_clip() {
 #[test]
 fn enforce_quota_deletes_marker_sidecar_with_clip() {
     let dir = TestDir::new("clipline-storage", "sidecar-delete");
-    let old = dir.write("old.mp4", 10);
+    let old = write_owned(&dir, "old.mp4", 10);
     let sidecar = dir.write("old.markers.json", 2);
     tick_mtime();
     let keep = write_owned(&dir, "keep.mp4", 10);
@@ -429,7 +429,7 @@ fn enforce_quota_deletes_marker_sidecar_with_clip() {
 #[test]
 fn enforce_quota_deletes_poster_sidecar_with_clip() {
     let dir = TestDir::new("clipline-storage", "poster-delete");
-    let old = dir.write("old.mp4", 10);
+    let old = write_owned(&dir, "old.mp4", 10);
     let markers = dir.write("old.markers.json", 2);
     let poster = dir.write("old.poster.jpg", 4);
     tick_mtime();

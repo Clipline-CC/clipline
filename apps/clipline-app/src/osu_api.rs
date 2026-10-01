@@ -52,7 +52,7 @@ impl Drop for EnrichmentPassLease {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct SaveOsuApiSettingsRequest {
     pub client_id: String,
     #[serde(default)]
@@ -80,7 +80,7 @@ pub struct OsuApiConnectionTestResult {
     pub pagination_ceiling_reached: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct OsuApiConfig {
     client_id: String,
     client_secret: String,
@@ -746,7 +746,7 @@ fn credential_target(client_id: &str, user: &str) -> String {
     format!("{CREDENTIAL_PREFIX}:{client_id}:{user}")
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 struct OsuCredentialSavePlan {
     target: String,
     secret_to_write: Option<String>,

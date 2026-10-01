@@ -14,6 +14,7 @@ fn main() {
         eprintln!("administrator restart handoff: {error}");
         return;
     }
+    clipline_capture::ffmpeg::set_candidate_check(ffmpeg_runtime::candidate_allowed);
     app::run();
 }
 

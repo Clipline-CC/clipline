@@ -2919,6 +2919,15 @@ fn game_event_rail_item_falls_back_without_participants() {
 }
 
 #[test]
+fn security_scan_session_groups_accept_object_property_names() {
+    let mut ctx = player_core_context();
+    assert_eq!(
+        eval_json(&mut ctx, "PlayerCore.sessionGroups(['__proto__','constructor','toString','hasOwnProperty'].map((session, i) => ({session, modified_unix:i}))).map(g => g.label)"),
+        r#"["hasOwnProperty","toString","constructor","__proto__"]"#
+    );
+}
+
+#[test]
 fn session_groups_bucket_and_sort_by_newest() {
     let mut ctx = player_core_context();
     ctx.eval(Source::from_bytes(

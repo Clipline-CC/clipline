@@ -628,7 +628,6 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                         }
                         Err(e) => {
                             let _ = events.send(Event::Error { message: e });
-                            let _ = std::fs::remove_file(&path);
                             cleanup_discarded_session(&path, &clips_dir);
                         }
                     }

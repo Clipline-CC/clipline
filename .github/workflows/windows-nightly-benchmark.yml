@@ -77,7 +77,6 @@ jobs:
       expected_cache: ${{ inputs.expected_cache || 'cold' }}
       repetition: ${{ inputs.repetition || '1' }}
       benchmark_zlib: ${{ inputs.benchmark_zlib || false }}
-    secrets: inherit
 
   namespace:
     if: >-
@@ -94,7 +93,6 @@ jobs:
       expected_cache: ${{ inputs.expected_cache || 'cold' }}
       repetition: ${{ inputs.repetition || '1' }}
       benchmark_zlib: ${{ inputs.benchmark_zlib || false }}
-    secrets: inherit
 
   depot:
     if: >-
@@ -111,7 +109,6 @@ jobs:
       expected_cache: ${{ inputs.expected_cache || 'cold' }}
       repetition: ${{ inputs.repetition || '1' }}
       benchmark_zlib: ${{ inputs.benchmark_zlib || false }}
-    secrets: inherit
 
   blacksmith:
     if: >-
@@ -128,7 +125,6 @@ jobs:
       expected_cache: ${{ inputs.expected_cache || 'cold' }}
       repetition: ${{ inputs.repetition || '1' }}
       benchmark_zlib: ${{ inputs.benchmark_zlib || false }}
-    secrets: inherit
 
   parallel-checks:
     if: >-
@@ -183,6 +179,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
+      BENCHMARK_TAURI_CLI: ${{ inputs.tauri_cli || 'source' }}
+      BENCHMARK_COMMIT: ${{ inputs.commit || github.sha }}
     steps:
       - name: Download raw benchmark reports
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -225,7 +223,7 @@ jobs:
               runner_name = $job.runner_name
               cache_strategy = $report.system.cache_strategy
               cache_hit = $report.cache.hit
-              tauri_cli = '${{ inputs.tauri_cli || 'source' }}'
+              tauri_cli = $env:BENCHMARK_TAURI_CLI
               repetition = $report.system.repetition
               run_to_job_start_seconds = [Math]::Round(
                 ([DateTimeOffset]$job.started_at - [DateTimeOffset]$run.created_at).TotalSeconds,
@@ -244,7 +242,7 @@ jobs:
             repository = $env:GITHUB_REPOSITORY
             run_id = $env:GITHUB_RUN_ID
             run_attempt = $env:GITHUB_RUN_ATTEMPT
-            commit = '${{ inputs.commit || github.sha }}'
+            commit = $env:BENCHMARK_COMMIT
             created_utc = $run.created_at
             note = 'run_to_job_start_seconds includes GitHub orchestration plus provider queue/provisioning.'
             results = @($rows)
@@ -263,7 +261,7 @@ jobs:
           @(
             '## Windows Nightly benchmark aggregate'
             ''
-            "Commit: ``${{ inputs.commit || github.sha }}`` · run: ``$env:GITHUB_RUN_ID/$env:GITHUB_RUN_ATTEMPT``"
+            "Commit: ``$env:BENCHMARK_COMMIT`` · run: ``$env:GITHUB_RUN_ID/$env:GITHUB_RUN_ATTEMPT``"
             ''
             '| Provider | Cache | Queue/start | Checkout | Rust | Restore | Test | Clippy | Tauri CLI | Regular | Stage | Standalone | Artifact | Cache save | Total |'
             '|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|'

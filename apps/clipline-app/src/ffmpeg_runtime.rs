@@ -1,8 +1,9 @@
 //! FFmpeg capability matrix, managed-runtime verification, and discovery status
 //! (slim-core Milestone B).
 //!
-//! `clipline_capture::ffmpeg::locate` remains discovery of a runnable binary —
-//! it does **not** mean ManagedVerified. Download/ensure state machine is B3.
+//! Windows discovery verifies pinned executable, DLL, and provenance hashes
+//! before probing. Ordinary launches also permit an explicit absolute LGPL
+//! replacement through `CLIPLINE_FFMPEG`; elevated launches require pinned bytes.
 
 use std::fs::{self, File};
 use std::io::{self, Read};
@@ -11,6 +12,21 @@ use std::path::{Path, PathBuf};
 use clipline_capture::{Codec, EncoderApi, EncoderBackend, EncoderCapability};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+pub(crate) fn candidate_allowed(path: &Path) -> bool {
+    // Intentional LGPL replacements remain available through an absolute override,
+    // but elevated processes only execute the pinned executable and DLL tree.
+    if matches!(crate::windows::current_process_is_elevated(), Ok(false))
+        && std::env::var_os("CLIPLINE_FFMPEG").is_some_and(|value| Path::new(&value) == path)
+    {
+        return true;
+    }
+    let Ok((manifest, hash)) = crate::ffmpeg_install::committed_manifest() else {
+        return false;
+    };
+    path.file_name().is_some_and(|name| name == "ffmpeg.exe")
+        && path.parent().is_some_and(|dir| verify_managed_ffmpeg_runtime(dir, &manifest, &hash).is_ok())
+}
 
 /// Why a Core surface still needs an FFmpeg child process today.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -26,7 +42,7 @@ pub enum FfmpegRequirementReason {
 /// How the shell classifies an FFmpeg binary for UI/ensure.
 ///
 /// `ManagedVerified` is reserved for a LOCALAPPDATA tree that passed the B2
-/// manifest verifier. A successful `locate()` of PATH/override/bundled bytes is
+/// manifest verifier. A successful `locate()` of override/bundled bytes is
 /// `ExternalUnmanaged`, never a silent no-op for Install/Repair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]

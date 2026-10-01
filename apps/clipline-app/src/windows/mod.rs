@@ -390,6 +390,14 @@ fn process_identity_from_handle(
     })
 }
 
+pub(crate) fn process_creation_time_from_handle(pid: u32, handle: HANDLE) -> Result<u64, String> {
+    process_identity_from_handle(pid, handle).map(|identity| identity.creation_time)
+}
+
+pub(crate) fn process_creation_time(pid: u32) -> Result<u64, String> {
+    query_process_identity(pid).map(|identity| identity.creation_time)
+}
+
 fn process_identity_matches(expected: ProcessIdentity, actual: ProcessIdentity) -> bool {
     expected == actual
 }

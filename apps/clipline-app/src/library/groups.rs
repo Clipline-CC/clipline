@@ -191,6 +191,12 @@ pub(crate) fn group_order_committed_path(root: &Path) -> PathBuf {
 }
 
 pub(crate) fn canonical_group_clip(root: &Path, path: &Path) -> Result<(PathBuf, PathBuf), String> {
+    crate::settings::persistence::require_local_path(path)?;
+    if !crate::settings::validation::same_or_nested_path(path, root)
+        || path.components().any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err("group clip escaped its media root".into());
+    }
     let canonical_root = root
         .canonicalize()
         .map_err(|error| format!("resolve group root {root:?}: {error}"))?;
@@ -231,8 +237,7 @@ pub(crate) fn write_group_order_journal(
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let bytes = serde_json::to_vec_pretty(&GroupOrderJournal { entries })
-        .map_err(|error| format!("serialize group order journal: {error}"))?;
+    let bytes = util::serialize_json_sidecar(&GroupOrderJournal { entries })?;
     let tmp = crate::settings::persistence::sibling_tmp_path(&target)?;
     let result = (|| {
         let mut file = std::fs::File::create(&tmp)
@@ -270,13 +275,33 @@ pub(crate) fn recover_group_order_transaction_unlocked(root: &Path) -> Result<()
     if !journal_path.is_file() {
         return Err("group order recovery path is not a file".into());
     }
-    let json = std::fs::read_to_string(&journal_path)
-        .map_err(|error| format!("read group order journal: {error}"))?;
-    let journal: GroupOrderJournal = serde_json::from_str(&json)
-        .map_err(|error| format!("parse group order journal: {error}"))?;
-    for entry in journal.entries {
+    let journal = match util::read_json_sidecar::<GroupOrderJournal>(&journal_path) {
+        Ok(journal) => journal,
+        Err(error) if error.starts_with("parse sidecar ") || error.ends_with("exceeds size limit") => {
+            let quarantine = loop {
+                let candidate = crate::settings::persistence::sibling_tmp_path(
+                    &root.join(".clipline-group-order-invalid.json"),
+                )?;
+                match std::fs::symlink_metadata(&candidate) {
+                    Ok(_) => continue,
+                    Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => break candidate,
+                    Err(cause) => return Err(format!("inspect quarantine destination: {cause}")),
+                }
+            };
+            std::fs::rename(&journal_path, &quarantine)
+                .map_err(|cause| format!("preserve invalid group order journal: {cause}"))?;
+            tracing::warn!(event = "invalid_group_order_journal", error = %error, preserved = ?quarantine);
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    }
+        .ok_or_else(|| "group order journal disappeared during recovery".to_string())?;
+    let entries = journal.entries.into_iter().map(|entry| {
         let (path, _) = canonical_group_clip(root, &root.join(entry.relative_path))?;
-        write_clip_metadata(&path, &entry.previous)?;
+        Ok((path, entry.previous))
+    }).collect::<Result<Vec<_>, String>>()?;
+    for (path, previous) in entries {
+        write_clip_metadata(&path, &previous)?;
     }
     std::fs::remove_file(&journal_path)
         .map_err(|error| format!("finish group order recovery: {error}"))
@@ -295,13 +320,16 @@ pub(crate) fn persist_group_order(root: &Path, members: &[GroupMember]) -> Resul
 }
 
 pub(crate) fn persist_group_order_unlocked(root: &Path, members: &[GroupMember]) -> Result<(), String> {
+    let Some(member) = members.first() else { return Ok(()) };
+    let compilations = group_compilation_paths_unrecovered(root, &member.group.name)?;
+    // Upload lease registration shares our mutation lock, so no new app lease
+    // can appear after this complete preflight and before cleanup.
+    preflight_group_compilations_unlocked(&compilations)?;
     let mut updates = Vec::new();
     for member in members {
         let metadata_path = clip_metadata_path(&member.path);
-        let json = std::fs::read_to_string(&metadata_path)
-            .map_err(|error| format!("read group clip metadata {metadata_path:?}: {error}"))?;
-        let previous: ClipMetadata = serde_json::from_str(&json)
-            .map_err(|error| format!("parse group clip metadata {metadata_path:?}: {error}"))?;
+        let previous: ClipMetadata = util::read_json_sidecar(&metadata_path)?
+            .ok_or_else(|| "group member metadata disappeared".to_string())?;
         if previous.group.as_ref() == Some(&member.group) {
             continue;
         }
@@ -310,6 +338,7 @@ pub(crate) fn persist_group_order_unlocked(root: &Path, members: &[GroupMember])
         updates.push((member.path.clone(), previous, next));
     }
     if updates.is_empty() {
+        cleanup_group_compilations_unlocked(root, &compilations);
         return Ok(());
     }
     let previous = updates
@@ -318,25 +347,42 @@ pub(crate) fn persist_group_order_unlocked(root: &Path, members: &[GroupMember])
         .collect::<Vec<_>>();
     write_group_order_journal(root, &previous)?;
 
-    for (path, _, next) in &updates {
-        if let Err(error) = write_clip_metadata(path, next) {
-            return match recover_group_order_transaction_unlocked(root) {
-                Ok(()) => Err(error),
-                Err(rollback) => Err(format!("{error}; rollback group order: {rollback}")),
-            };
-        }
-    }
     let journal_path = group_order_journal_path(root);
     let committed_path = group_order_committed_path(root);
-    if let Err(error) = crate::windows::replace_file(&journal_path, &committed_path) {
+    let result = (|| {
+        for (path, _, next) in &updates {
+            write_clip_metadata(path, next)?;
+        }
+        crate::windows::replace_file(&journal_path, &committed_path)
+            .map_err(|error| format!("finish group reorder: {error}"))
+    })();
+    if let Err(error) = result {
         return match recover_group_order_transaction_unlocked(root) {
-            Ok(()) => Err(format!("finish group reorder: {error}")),
-            Err(rollback) => Err(format!(
-                "finish group reorder: {error}; rollback group order: {rollback}"
-            )),
+            Ok(()) => Err(error),
+            Err(rollback) => Err(format!("{error}; rollback group order: {rollback}")),
         };
     }
+    cleanup_group_compilations_unlocked(root, &compilations);
     let _ = std::fs::remove_file(committed_path);
+    Ok(())
+}
+
+fn cleanup_group_compilations_unlocked(root: &Path, paths: &[PathBuf]) {
+    // ponytail: fingerprints reject stale group output; retry failed cleanup on
+    // the next group mutation rather than reject an already committed reorder.
+    for path in paths {
+        if let Err(error) = remove_clip_files_unlocked(path, root) {
+            tracing::warn!(event = "group_compilation_cleanup_failed", compilation = ?path, error = %error);
+        }
+    }
+}
+
+fn preflight_group_compilations_unlocked(paths: &[PathBuf]) -> Result<(), String> {
+    for path in paths {
+        if let Some(error) = crate::cloud_upload::active_upload_source_error(path) {
+            return Err(error);
+        }
+    }
     Ok(())
 }
 
@@ -355,7 +401,9 @@ fn group_compilation_paths_unrecovered(root: &Path, name: &str) -> Result<Vec<Pa
 }
 
 pub(super) fn remove_group_compilations_unlocked(root: &Path, name: &str) -> Result<(), String> {
-    for path in group_compilation_paths_unrecovered(root, name)? {
+    let paths = group_compilation_paths_unrecovered(root, name)?;
+    preflight_group_compilations_unlocked(&paths)?;
+    for path in paths {
         remove_clip_files_unlocked(&path, root)
             .map_err(|error| format!("remove group compilation {path:?}: {error}"))?;
     }
@@ -370,7 +418,6 @@ fn reorder_group_file(
     let _guard = crate::gc::lock_clip_mutations();
     recover_group_order_transaction_unlocked(root)?;
     let members = reordered_members(group_members_unrecovered(root, name)?, ordered_paths)?;
-    remove_group_compilations_unlocked(root, name)?;
     persist_group_order_unlocked(root, &members)?;
     Ok(members
         .into_iter()
@@ -383,7 +430,7 @@ fn reorder_group_file(
 
 pub(crate) fn remove_from_group_file(root: &Path, path: &Path) -> Result<(), String> {
     let _guard = crate::gc::lock_clip_mutations();
-    let mut metadata = read_clip_metadata(path).unwrap_or_default();
+    let mut metadata = read_clip_metadata_checked(path)?.unwrap_or_default();
     let group = metadata.group.take().ok_or("clip is not in a group")?;
     remove_group_compilations_unlocked(root, &group.name)?;
     write_clip_metadata(path, &metadata)
@@ -613,6 +660,76 @@ mod tests {
             );
         }
         #[test]
+        fn security_scan_journal_size_rejection_preserves_compilation_and_member_order() {
+            let dir = clipline_test_utils::TestDir::new("clipline-groups", "journal-size-reorder");
+            let mut paths = Vec::new();
+            let mut original = Vec::new();
+            for order in 0..2 {
+                let path = dir.path().join(format!("member-{order}.mp4"));
+                std::fs::write(&path, b"clip").unwrap();
+                write_clip_metadata(&path, &ClipMetadata {
+                    group: Some(ClipGroup { name: "Highlights".into(), order }),
+                    source_group_fingerprint: Some("a".repeat(4 * 1024 * 1024)),
+                    ..ClipMetadata::default()
+                }).unwrap();
+                original.push(std::fs::read(clip_metadata_path(&path)).unwrap());
+                paths.push(path);
+            }
+            let compilation = dir.path().join("compiled.mp4");
+            std::fs::write(&compilation, b"compilation").unwrap();
+            write_clip_metadata(&compilation, &ClipMetadata {
+                kind: Some("compilation".into()), source_group: Some("Highlights".into()),
+                ..ClipMetadata::default()
+            }).unwrap();
+            assert!(reorder_group_file(dir.path(), "Highlights", &[paths[1].clone(), paths[0].clone()])
+                .err().unwrap().contains("size limit"));
+            assert_eq!(std::fs::read(compilation).unwrap(), b"compilation");
+            for (path, bytes) in paths.iter().zip(original) {
+                assert!(path.exists());
+                assert_eq!(std::fs::read(clip_metadata_path(path)).unwrap(), bytes);
+            }
+            assert!(!group_order_journal_path(dir.path()).exists());
+        }
+
+        #[test]
+        fn security_scan_invalid_journal_does_not_block_library_or_change_metadata() {
+            let dir = clipline_test_utils::TestDir::new("clipline-groups", "invalid-journal");
+            let clip = dir.path().join("clip.mp4");
+            std::fs::write(&clip, b"clip").unwrap();
+            let previous = ClipMetadata { title: Some("keep".into()), ..ClipMetadata::default() };
+            write_clip_metadata(&clip, &previous).unwrap();
+            let before = std::fs::read(clip_metadata_path(&clip)).unwrap();
+            for bytes in [b"{".to_vec(), vec![b' '; util::MAX_JSON_SIDECAR_BYTES as usize + 1]] {
+                std::fs::write(group_order_journal_path(dir.path()), &bytes).unwrap();
+                assert!(list_clips_from_dir(dir.path().to_path_buf()).is_ok());
+                assert!(!group_order_journal_path(dir.path()).exists());
+                assert_eq!(std::fs::read(clip_metadata_path(&clip)).unwrap(), before);
+                assert!(std::fs::read_dir(dir.path()).unwrap().flatten().any(|entry| {
+                    entry.file_name().to_string_lossy().contains("group-order-invalid")
+                        && std::fs::read(entry.path()).unwrap() == bytes
+                }));
+            }
+        }
+
+        #[test]
+        fn security_scan_journal_paths_are_all_validated_before_rollback() {
+            let dir = clipline_test_utils::TestDir::new("clipline-groups", "journal-preflight");
+            let clip = dir.path().join("clip.mp4");
+            std::fs::write(&clip, b"clip").unwrap();
+            let current = ClipMetadata { title: Some("current".into()), ..ClipMetadata::default() };
+            write_clip_metadata(&clip, &current).unwrap();
+            let before = std::fs::read(clip_metadata_path(&clip)).unwrap();
+            let journal = GroupOrderJournal { entries: vec![
+                GroupOrderJournalEntry { relative_path: "clip.mp4".into(), previous: ClipMetadata::default() },
+                GroupOrderJournalEntry { relative_path: "../outside.mp4".into(), previous: ClipMetadata::default() },
+            ] };
+            std::fs::write(group_order_journal_path(dir.path()), serde_json::to_vec(&journal).unwrap()).unwrap();
+            assert!(recover_group_order_transaction(dir.path()).is_err());
+            assert_eq!(std::fs::read(clip_metadata_path(&clip)).unwrap(), before);
+            assert!(group_order_journal_path(dir.path()).exists());
+        }
+
+        #[test]
         fn durable_journal_blocks_scans_until_rollback_can_finish() {
             let dir = clipline_test_utils::TestDir::new("clipline-groups", "reorder-journal");
             let clip = dir.path().join("clip.mp4");
@@ -763,6 +880,85 @@ mod tests {
         )
         .unwrap();
 
+        #[cfg(windows)]
+        {
+            let second = dir.path().join("second-compilation.mp4");
+            std::fs::copy(&compilation, &second).unwrap();
+            std::fs::copy(clip_metadata_path(&compilation), clip_metadata_path(&second)).unwrap();
+            let compilations = group_compilation_paths_unrecovered(dir.path(), "Highlights").unwrap();
+            assert_eq!(compilations.len(), 2);
+            for path in &compilations {
+                std::fs::write(path.with_extension("markers.json"), b"{}").unwrap();
+            }
+            let preserved = compilations.iter().flat_map(|path| {
+                [path.clone(), clip_metadata_path(path), path.with_extension("markers.json")]
+            }).map(|path| {
+                let bytes = std::fs::read(&path).unwrap();
+                (path, bytes)
+            }).collect::<Vec<_>>();
+
+            // Lease the last discovered compilation through a hard-link alias:
+            // checking/deleting one at a time would already lose the first one.
+            let alias = dir.path().join("upload-source");
+            std::fs::hard_link(compilations.last().unwrap(), &alias).unwrap();
+            let lease = crate::cloud_upload::UploadSourceLease::acquire(&alias).unwrap();
+            assert!(reorder_group_file(dir.path(), "Highlights", &[b.clone(), a.clone()])
+                .err().unwrap().contains("uploading"));
+            assert!(remove_from_group_file(dir.path(), &a)
+                .err().unwrap().contains("uploading"));
+            assert_eq!(read_clip_metadata(&a).unwrap().group.unwrap().order, 0);
+            assert_eq!(read_clip_metadata(&b).unwrap().group.unwrap().order, 1);
+            for (path, bytes) in &preserved {
+                assert_eq!(std::fs::read(path).unwrap(), *bytes);
+            }
+            assert!(!group_order_journal_path(dir.path()).exists());
+            assert!(!group_order_committed_path(dir.path()).exists());
+            drop(lease);
+            std::fs::remove_file(alias).unwrap();
+
+            // A prior commit marker held without delete sharing blocks the final
+            // journal rename after the new member metadata has been written.
+            use std::os::windows::fs::OpenOptionsExt;
+            let committed = group_order_committed_path(dir.path());
+            std::fs::write(&committed, br#"{"entries":[]}"#).unwrap();
+            let held = std::fs::OpenOptions::new().read(true).share_mode(1)
+                .open(&committed).unwrap();
+            assert!(reorder_group_file(dir.path(), "Highlights", &[b.clone(), a.clone()]).is_err());
+            assert_eq!(read_clip_metadata(&a).unwrap().group.unwrap().order, 0);
+            assert_eq!(read_clip_metadata(&b).unwrap().group.unwrap().order, 1);
+            for (path, bytes) in &preserved {
+                assert_eq!(std::fs::read(path).unwrap(), *bytes);
+            }
+            assert!(!group_order_journal_path(dir.path()).exists());
+            drop(held);
+            std::fs::remove_file(committed).unwrap();
+
+            // An external reader is not an app upload lease. Cleanup failure
+            // after commit must report success and retain the committed order.
+            let held = std::fs::OpenOptions::new().read(true).share_mode(1)
+                .open(&compilation).unwrap();
+            reorder_group_file(dir.path(), "Highlights", &[b.clone(), a.clone()]).unwrap();
+            assert_eq!(read_clip_metadata(&b).unwrap().group.unwrap().order, 0);
+            assert_eq!(read_clip_metadata(&a).unwrap().group.unwrap().order, 1);
+            assert_eq!(std::fs::read(&compilation).unwrap(), b"compilation");
+            let clips = list_clips_from_dir(dir.path().to_path_buf()).unwrap().clips;
+            let retained = clips.iter().find(|clip| {
+                Path::new(&clip.path).file_name() == compilation.file_name()
+            }).unwrap();
+            assert_eq!(retained.kind, "compilation");
+            assert_eq!(retained.source_group.as_deref(), Some("Highlights"));
+            assert_eq!(retained.source_group_fingerprint.as_deref(), Some("old"));
+            assert!(!second.exists(), "cleanup must continue past a blocked compilation");
+            assert!(!group_order_journal_path(dir.path()).exists());
+            assert!(!group_order_committed_path(dir.path()).exists());
+            recover_group_order_transaction(dir.path()).unwrap();
+            assert_eq!(read_clip_metadata(&b).unwrap().group.unwrap().order, 0);
+            assert_eq!(read_clip_metadata(&a).unwrap().group.unwrap().order, 1);
+            // The cleanup-only, same-order request has the same success contract.
+            reorder_group_file(dir.path(), "Highlights", &[b.clone(), a.clone()]).unwrap();
+            assert_eq!(std::fs::read(&compilation).unwrap(), b"compilation");
+            drop(held);
+        }
         reorder_group_file(dir.path(), "Highlights", &[b.clone(), a.clone()]).unwrap();
 
         assert!(!compilation.exists());

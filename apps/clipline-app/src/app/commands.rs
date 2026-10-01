@@ -163,7 +163,7 @@ pub(crate) async fn choose_folder_dialog(
 #[tauri::command]
 pub(crate) async fn choose_media_folder(
     state: tauri::State<'_, RuntimeState>,
-    authorization: tauri::State<'_, NativeMediaFolderAuthorization>,
+    authorization: tauri::State<'_, NativeStorageFolderAuthorizations>,
 ) -> Result<Option<String>, String> {
     let current_dir = state
         .settings()
@@ -180,13 +180,14 @@ pub(crate) async fn choose_media_folder(
     let selected = selected
         .canonicalize()
         .map_err(|e| format!("resolve selected media folder {selected:?}: {e}"))?;
-    authorization.authorize(selected.clone());
+    authorization.media.authorize(selected.clone());
     Ok(Some(display_media_folder_path(&selected)))
 }
 
 #[tauri::command]
 pub(crate) async fn choose_replay_cache_folder(
     state: tauri::State<'_, RuntimeState>,
+    authorization: tauri::State<'_, NativeStorageFolderAuthorizations>,
 ) -> Result<Option<String>, String> {
     let settings = state.settings();
     let current_dir =
@@ -196,9 +197,14 @@ pub(crate) async fn choose_replay_cache_folder(
             .or_else(|| settings.media_dir_path().ok())
             .unwrap_or_else(service::default_clips_dir);
 
-    choose_folder_dialog("Choose Clipline Replay Cache Folder", current_dir)
-        .await
-        .map(|selected| selected.map(|path| path.display().to_string()))
+    let Some(selected) = choose_folder_dialog("Choose Clipline Replay Cache Folder", current_dir).await? else {
+        return Ok(None);
+    };
+    let selected = crate::settings::normalize_replay_cache_dir(&selected.display().to_string())?;
+    let selected = selected.canonicalize().map_err(|error| format!("resolve replay cache folder: {error}"))?;
+    crate::settings::persistence::require_local_path(&selected)?;
+    authorization.replay_cache.authorize(selected.clone());
+    Ok(Some(display_media_folder_path(&selected)))
 }
 
 #[tauri::command]

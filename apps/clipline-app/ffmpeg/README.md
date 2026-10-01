@@ -15,4 +15,7 @@ directory is incomplete or differs from the manifest and provenance receipt.
 The regular slim installer neither stages nor verifies this bundled resource.
 
 FFmpeg remains a separate, independently replaceable process. Users may swap
-these files for a compatible modified LGPL build.
+these files for a compatible modified LGPL build and set `CLIPLINE_FFMPEG` to
+its absolute executable path when launching Clipline without administrator rights.
+Automatic discovery and elevated launches require the pinned executable/DLL hashes.
+Bare PATH discovery is disabled on Windows.

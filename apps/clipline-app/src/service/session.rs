@@ -507,7 +507,7 @@ pub(super) fn write_marker_sidecar(
     {
         return 0;
     }
-    match serde_json::to_string_pretty(&clip) {
+    match crate::util::serialize_json_sidecar(&clip) {
         Ok(json) => {
             if let Err(e) = std::fs::write(path.with_extension("markers.json"), json) {
                 warn_user(events, format!("write marker sidecar for {path:?}: {e}"));
@@ -599,10 +599,13 @@ pub(super) fn save(
         .save_window_bounds(window_s, None)
         .map(|(start, _)| start);
     let result = (|| {
-        let file = std::fs::File::create(path).map_err(|e| format!("create {path:?}: {e}"))?;
-        let (_, end) = rec
-            .save_replay(file, window_s, None)
-            .map_err(|e| format!("save: {e}"))?;
+        let file = std::fs::OpenOptions::new().write(true).create_new(true).open(path)
+            .map_err(|e| format!("create {path:?}: {e}"))?;
+        let saved = rec.save_replay(file, window_s, None);
+        if saved.is_err() {
+            let _ = std::fs::remove_file(path);
+        }
+        let (_, end) = saved.map_err(|e| format!("save: {e}"))?;
         Ok((end, end - saved_from.unwrap_or(end)))
     })();
     if result.is_err() && marker_created {

@@ -104,11 +104,9 @@ jobs:
         if: steps.release_state.outputs.already_published != 'true'
         working-directory: apps/clipline-app
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           CLIPLINE_BUG_REPORT_ENDPOINT: https://support.dain.cafe/api/v1/reports
           CLIPLINE_DEFAULT_UPDATE_CHANNEL: stable
-        run: cargo tauri build
+        run: cargo tauri build --config tauri.unsigned.conf.json
 
       - name: Preserve regular updater assets
         if: steps.release_state.outputs.already_published != 'true'
@@ -119,7 +117,6 @@ jobs:
           $source = Join-Path target/release/bundle/nsis $name
           New-Item -ItemType Directory -Path dist | Out-Null
           Copy-Item -LiteralPath $source -Destination (Join-Path dist $name)
-          Copy-Item -LiteralPath "$source.sig" -Destination (Join-Path dist "$name.sig")
 
       - name: Stage standalone runtimes
         if: steps.release_state.outputs.already_published != 'true'
@@ -138,24 +135,18 @@ jobs:
         if: steps.release_state.outputs.already_published != 'true'
         working-directory: apps/clipline-app
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           CLIPLINE_BUG_REPORT_ENDPOINT: https://support.dain.cafe/api/v1/reports
           CLIPLINE_DEFAULT_UPDATE_CHANNEL: stable
-        run: cargo tauri build --config tauri.standalone.conf.json
+        run: cargo tauri build --config tauri.standalone.conf.json --config tauri.unsigned.conf.json
 
-      - name: Rename and re-sign standalone installer
+      - name: Preserve standalone installer
         if: steps.release_state.outputs.already_published != 'true'
         shell: pwsh
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           $version = (Get-Content apps/clipline-app/tauri.conf.json -Raw | ConvertFrom-Json).version
           $source = "target/release/bundle/nsis/Clipline_${version}_x64-setup.exe"
           $standalone = "dist/Clipline_${version}_x64-standalone-setup.exe"
           Copy-Item -LiteralPath $source -Destination $standalone
-          cargo tauri signer sign -p "" $standalone
 
       - name: Generate release notes and updater manifests
         if: steps.release_state.outputs.already_published != 'true'
@@ -197,20 +188,28 @@ jobs:
             -Channel Stable `
             -Repository $env:GITHUB_REPOSITORY `
             -ReleaseDirectory dist `
+            -Unsigned `
             -NotesPath (Join-Path $env:RUNNER_TEMP 'stable-notes.md')
 
       - name: Upload verified release transaction
         if: steps.release_state.outputs.already_published != 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: clipline-stable-${{ github.sha }}
+          name: clipline-stable-unsigned-${{ github.sha }}
           path: dist/*
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
 
-  publish:
+  sign:
     needs: build
+    if: needs.build.outputs.already_published != 'true'
+    uses: ./.github/workflows/_sign-release.yml
+    with:
+      channel: stable
+
+  publish:
+    needs: [build, sign]
     if: needs.build.outputs.already_published != 'true'
     runs-on: windows-latest
     permissions:

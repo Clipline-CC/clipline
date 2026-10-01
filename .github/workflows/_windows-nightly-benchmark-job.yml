@@ -30,11 +30,6 @@ on:
       benchmark_zlib:
         required: true
         type: boolean
-    secrets:
-      TAURI_SIGNING_PRIVATE_KEY:
-        required: true
-      TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
-        required: false
 
 permissions:
   actions: read
@@ -47,6 +42,8 @@ jobs:
     timeout-minutes: 120
     env:
       CARGO_TERM_COLOR: always
+      BENCHMARK_COMMIT: ${{ inputs.commit }}
+      BENCHMARK_TAURI_CLI: ${{ inputs.tauri_cli }}
       BENCHMARK_PROVIDER: ${{ inputs.provider }}
       BENCHMARK_RUNNER_LABEL: ${{ inputs.runner }}
       BENCHMARK_CACHE_STRATEGY: ${{ inputs.cache_strategy }}
@@ -75,24 +72,31 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if ('${{ inputs.commit }}' -cnotmatch '^[0-9a-f]{40}$') {
+          if ($env:BENCHMARK_PROVIDER -cnotin @('github', 'namespace', 'depot', 'blacksmith') -or
+              $env:BENCHMARK_CACHE_STRATEGY -cnotin @('rust-cache', 'deps-only', 'sccache', 'none') -or
+              $env:BENCHMARK_TAURI_CLI -cnotin @('source', 'prebuilt') -or
+              $env:BENCHMARK_EXPECTED_CACHE -cnotin @('cold', 'warm') -or
+              $env:BENCHMARK_CACHE_EPOCH -cnotmatch '^[A-Za-z0-9_-]{1,64}$' -or
+              $env:BENCHMARK_REPETITION -cnotmatch '^[1-9][0-9]{0,3}$' -or
+              $env:BENCHMARK_RUNNER_LABEL -cnotmatch '^[A-Za-z0-9_-]{1,128}$') { throw 'Invalid benchmark inputs.' }
+          if ($env:BENCHMARK_COMMIT -cnotmatch '^[0-9a-f]{40}$') {
             throw 'commit must be a complete lowercase Git SHA.'
           }
-          if ((git rev-parse HEAD) -cne '${{ inputs.commit }}') {
+          if ((git rev-parse HEAD) -cne $env:BENCHMARK_COMMIT) {
             throw 'Checkout does not match the requested benchmark commit.'
           }
           $version = (Get-Content apps/clipline-app/tauri.conf.json -Raw | ConvertFrom-Json).version
           .\scripts\prepare-nightly-assets.ps1 `
             -Tag "nightly-v$version" `
-            -Commit '${{ inputs.commit }}' `
+            -Commit $env:BENCHMARK_COMMIT `
             -ValidateOnly
 
           git fetch --no-tags origin develop:refs/remotes/origin/develop
-          git merge-base --is-ancestor '${{ inputs.commit }}' origin/develop
+          git merge-base --is-ancestor $env:BENCHMARK_COMMIT origin/develop
           $containedInDevelop = $LASTEXITCODE -eq 0
           if (-not $containedInDevelop) {
             # Benchmark branches may add only this harness on top of develop.
-            git merge-base --is-ancestor origin/develop '${{ inputs.commit }}'
+            git merge-base --is-ancestor origin/develop $env:BENCHMARK_COMMIT
             if ($LASTEXITCODE -ne 0) {
               throw 'Benchmark commit must be contained in, or descend directly from, develop.'
             }
@@ -145,17 +149,17 @@ jobs:
           "RUSTC_WRAPPER=sccache" >> $env:GITHUB_ENV
           "CARGO_INCREMENTAL=0" >> $env:GITHUB_ENV
           "SCCACHE_GHA_ENABLED=true" >> $env:GITHUB_ENV
-          "SCCACHE_GHA_VERSION=clipline-${{ inputs.provider }}-${{ inputs.runner }}-${{ inputs.cache_epoch }}" >> $env:GITHUB_ENV
+          "SCCACHE_GHA_VERSION=clipline-$env:BENCHMARK_PROVIDER-$env:BENCHMARK_RUNNER_LABEL-$env:BENCHMARK_CACHE_EPOCH" >> $env:GITHUB_ENV
           "SCCACHE_BASEDIRS=$env:GITHUB_WORKSPACE" >> $env:GITHUB_ENV
 
       - name: Record cache restore result
         shell: pwsh
         run: |
           [ordered]@{
-            strategy = '${{ inputs.cache_strategy }}'
+            strategy = $env:BENCHMARK_CACHE_STRATEGY
             hit = '${{ steps.rust_cache.outputs.cache-hit }}'
-            expected = '${{ inputs.expected_cache }}'
-            epoch = '${{ inputs.cache_epoch }}'
+            expected = $env:BENCHMARK_EXPECTED_CACHE
+            epoch = $env:BENCHMARK_CACHE_EPOCH
           } | ConvertTo-Json | Set-Content `
             -LiteralPath (Join-Path $env:BENCHMARK_DIR 'cache.json') -Encoding utf8NoBOM
 
@@ -164,7 +168,7 @@ jobs:
         run: |
           cargo test --workspace
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if ('${{ inputs.cache_strategy }}' -eq 'sccache') {
+          if ($env:BENCHMARK_CACHE_STRATEGY -eq 'sccache') {
             .\scripts\benchmark-windows-nightly.ps1 -Action SccacheStats -Name test
           }
 
@@ -173,7 +177,7 @@ jobs:
         run: |
           cargo clippy --workspace --all-targets -- -D warnings
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if ('${{ inputs.cache_strategy }}' -eq 'sccache') {
+          if ($env:BENCHMARK_CACHE_STRATEGY -eq 'sccache') {
             .\scripts\benchmark-windows-nightly.ps1 -Action SccacheStats -Name clippy
           }
 
@@ -187,6 +191,26 @@ jobs:
         shell: pwsh
         run: .\scripts\benchmark-windows-nightly.ps1 -Action InstallTauriCli -WorkingDirectory $env:GITHUB_WORKSPACE
 
+      - name: Generate throwaway benchmark signing key
+        shell: pwsh
+        run: |
+          $key = Join-Path $env:RUNNER_TEMP 'benchmark-updater.key'
+          cargo tauri signer generate --ci -p "" -w $key *> $null
+          if ($LASTEXITCODE -ne 0) { throw 'Could not generate benchmark key.' }
+          $keyContents = (Get-Content -LiteralPath $key -Raw).Trim()
+          "TAURI_SIGNING_PRIVATE_KEY=$keyContents" >> $env:GITHUB_ENV
+          "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=" >> $env:GITHUB_ENV
+
+      - name: Verify throwaway key before building
+        shell: pwsh
+        run: |
+          $payload = Join-Path $env:RUNNER_TEMP 'benchmark-signing-check.bin'
+          Set-Content -LiteralPath $payload -Value 'benchmark signing check' -NoNewline
+          cargo tauri signer sign -p "" $payload *> $null
+          if ($LASTEXITCODE -ne 0 -or (Get-Item -LiteralPath "$payload.sig").Length -eq 0) {
+            throw 'Throwaway key signing check failed.'
+          }
+
       - name: Verify reviewed WebView2 configuration
         shell: pwsh
         run: .\scripts\verify-webview2-runtime.ps1
@@ -195,8 +219,6 @@ jobs:
         shell: pwsh
         working-directory: apps/clipline-app
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           CLIPLINE_BUG_REPORT_ENDPOINT: https://support.dain.cafe/api/v1/reports
           CLIPLINE_DEFAULT_UPDATE_CHANNEL: nightly
         run: |
@@ -208,7 +230,7 @@ jobs:
             -CommandArguments @('tauri', 'build') `
             -WorkingDirectory (Get-Location).Path `
             -MonitorProcess makensis
-          if ('${{ inputs.cache_strategy }}' -eq 'sccache') {
+          if ($env:BENCHMARK_CACHE_STRATEGY -eq 'sccache') {
             ..\..\scripts\benchmark-windows-nightly.ps1 -Action SccacheStats -Name regular-build
           }
 
@@ -242,8 +264,6 @@ jobs:
         shell: pwsh
         working-directory: apps/clipline-app
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           CLIPLINE_BUG_REPORT_ENDPOINT: https://support.dain.cafe/api/v1/reports
           CLIPLINE_DEFAULT_UPDATE_CHANNEL: nightly
         run: |
@@ -255,15 +275,12 @@ jobs:
             -CommandArguments @('tauri', 'build', '--config', 'tauri.standalone.conf.json') `
             -WorkingDirectory (Get-Location).Path `
             -MonitorProcess makensis
-          if ('${{ inputs.cache_strategy }}' -eq 'sccache') {
+          if ($env:BENCHMARK_CACHE_STRATEGY -eq 'sccache') {
             ..\..\scripts\benchmark-windows-nightly.ps1 -Action SccacheStats -Name standalone-build
           }
 
       - name: Rename and re-sign standalone installer
         shell: pwsh
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           $version = (Get-Content apps/clipline-app/tauri.conf.json -Raw | ConvertFrom-Json).version
           $source = "target/release/bundle/nsis/Clipline_${version}_x64-setup.exe"
@@ -276,8 +293,6 @@ jobs:
         shell: pwsh
         working-directory: apps/clipline-app
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           CLIPLINE_BUG_REPORT_ENDPOINT: https://support.dain.cafe/api/v1/reports
           CLIPLINE_DEFAULT_UPDATE_CHANNEL: nightly
         run: |
@@ -362,13 +377,13 @@ jobs:
           $notes = Join-Path $env:RUNNER_TEMP 'benchmark-notes.md'
           [System.IO.File]::WriteAllText(
             $notes,
-            "Unpublished Windows runner benchmark for ${{ inputs.commit }}.`n",
+            "Unpublished Windows runner benchmark for $env:BENCHMARK_COMMIT.`n",
             [System.Text.UTF8Encoding]::new($false)
           )
           $version = (Get-Content apps/clipline-app/tauri.conf.json -Raw | ConvertFrom-Json).version
           .\scripts\prepare-nightly-assets.ps1 `
             -Tag "nightly-v$version" `
-            -Commit '${{ inputs.commit }}' `
+            -Commit $env:BENCHMARK_COMMIT `
             -Repository $env:GITHUB_REPOSITORY `
             -ReleaseDirectory dist `
             -NotesPath $notes

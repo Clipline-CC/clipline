@@ -152,7 +152,7 @@ pub fn run() {
         .manage(MicTestState::default())
         .manage(support::SupportState::default())
         .manage(crate::memory::MemorySampler::default())
-        .manage(NativeMediaFolderAuthorization::default())
+        .manage(NativeStorageFolderAuthorizations::default())
         .manage(crate::library::StorageSettings::new(quota_bytes, media_dir))
         .manage(crate::library::ClipboardExportState::default())
         .plugin(tauri_plugin_single_instance::init(|app, args, cwd| {

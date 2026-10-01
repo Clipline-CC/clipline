@@ -175,8 +175,7 @@ fn spawn_process(
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     crate::ffmpeg::suppress_console(&mut command);
-    let mut child = command
-        .spawn()
+    let mut child = crate::ffmpeg::spawn_verified(&mut command)
         .map_err(|e| EncodeError::Backend(format!("spawn ffmpeg: {e}")))?;
 
     let Some(stdin) = child.stdin.take() else {

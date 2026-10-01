@@ -8,9 +8,53 @@ use clipline_events::{ClipAudioTrack, ClipMarkers};
 
 /// Read the `.markers.json` sidecar next to a clip file.
 pub(crate) fn read_markers_raw(path: &Path) -> Option<ClipMarkers> {
-    std::fs::read_to_string(path.with_extension("markers.json"))
-        .ok()
-        .and_then(|json| serde_json::from_str(&json).ok())
+    read_markers_checked(path).ok().flatten()
+}
+
+pub(crate) const MAX_JSON_SIDECAR_BYTES: u64 = 8 * 1024 * 1024;
+
+pub(crate) fn serialize_json_sidecar<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, String> {
+    let bytes = serde_json::to_vec_pretty(value).map_err(|error| format!("serialize sidecar: {error}"))?;
+    if bytes.len() as u64 > MAX_JSON_SIDECAR_BYTES {
+        return Err("sidecar exceeds size limit".into());
+    }
+    Ok(bytes)
+}
+
+pub(crate) fn read_json_sidecar<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>, String> {
+    use std::io::Read;
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("read sidecar {path:?}: {error}")),
+    };
+    let mut bytes = Vec::new();
+    file.take(MAX_JSON_SIDECAR_BYTES + 1).read_to_end(&mut bytes)
+        .map_err(|error| format!("read sidecar {path:?}: {error}"))?;
+    if bytes.len() as u64 > MAX_JSON_SIDECAR_BYTES {
+        return Err(format!("sidecar {path:?} exceeds size limit"));
+    }
+    serde_json::from_slice(&bytes).map(Some).map_err(|error| format!("parse sidecar {path:?}: {error}"))
+}
+
+pub(crate) fn read_markers_checked(path: &Path) -> Result<Option<ClipMarkers>, String> {
+    read_json_sidecar(&path.with_extension("markers.json"))
+}
+
+#[cfg(test)]
+#[test]
+fn security_scan_sidecar_read_is_bounded() {
+    let dir = clipline_test_utils::TestDir::new("clipline-util", "bounded-sidecar");
+    let path = dir.path().join("record.json");
+    assert!(read_json_sidecar::<serde_json::Value>(&path).unwrap().is_none());
+    let mut bytes = vec![b' '; MAX_JSON_SIDECAR_BYTES as usize];
+    bytes[..2].copy_from_slice(b"{}");
+    std::fs::write(&path, &bytes).unwrap();
+    assert!(read_json_sidecar::<serde_json::Value>(&path).unwrap().is_some());
+    bytes.push(b' ');
+    std::fs::write(&path, bytes).unwrap();
+    assert!(read_json_sidecar::<serde_json::Value>(&path).unwrap_err().contains("size limit"));
+    assert!(serialize_json_sidecar(&"a".repeat(MAX_JSON_SIDECAR_BYTES as usize)).unwrap_err().contains("size limit"));
 }
 
 pub(crate) fn markers_with_inferred_audio_tracks(

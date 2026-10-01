@@ -15,7 +15,7 @@ clipline-mp4 = { path = "../../crates/clipline-mp4" }
 clipline-storage = { path = "../../crates/clipline-storage" }
 # Pinned to an immutable rev (not a branch): a branch ref isn't reproducible —
 # a force-push or rename silently breaks every build. Bump the rev deliberately.
-clipline-cloud-api = { git = "https://github.com/dain98/clipline-cloud", rev = "304f7f6490bd1f6078f4d703fdc33dcd1ecdafcf" }
+clipline-cloud-api = { git = "https://github.com/Clipline-CC/clipline-cloud", rev = "c974427e6cb9a8dffeb66b7f78179937a8e2723f" }
 reqwest = { workspace = true, features = ["stream", "multipart", "blocking"] }
 bytes = "1"
 regex = "1"

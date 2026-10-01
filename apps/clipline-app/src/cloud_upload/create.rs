@@ -17,16 +17,7 @@ pub(crate) async fn create_upload(
         .json(&body)
         .send()
         .await?;
-    let status = response.status();
-    if !status.is_success() {
-        let message = response
-            .json::<ErrorResponse>()
-            .await
-            .map(|body| body.error)
-            .unwrap_or_else(|_| status.to_string());
-        return Err(CloudApiError::Api { status, message });
-    }
-    Ok(response.json::<CreateUploadResponse>().await?)
+    parse_json_response(response).await
 }
 
 pub(crate) fn create_upload_body(
@@ -109,6 +100,19 @@ mod tests {
 
         assert!(body.get("description").is_none());
         assert!(body.get("markers").is_none());
+    }
+
+    #[tokio::test]
+    async fn security_scan_create_response_has_a_size_limit() {
+        let cloud = MockServer::start();
+        cloud.mock(|when, then| {
+            when.method(POST).path("/api/v1/uploads");
+            then.status(200).body("a".repeat(crate::bounded_http::CONTROL_JSON_MAX_BYTES + 1));
+        });
+        let client = test_client(&cloud);
+        let error = create_upload(&client, crate::bounded_http::control_client().unwrap(), TOKEN, &upload_request(b"abc"), None)
+            .await.unwrap_err();
+        assert!(error.to_string().contains("limit"), "{error}");
     }
 
     #[tokio::test]

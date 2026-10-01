@@ -57,11 +57,17 @@ pub(crate) fn validate_clip_path(
     settings: &StorageSettings,
     path: &str,
 ) -> Result<PathBuf, String> {
+    crate::settings::persistence::require_local_path(Path::new(path))?;
     let clips_dir = settings.clips_dir()?;
+    let dir = clips_dir.canonicalize().map_err(|e| e.to_string())?;
+    crate::settings::persistence::require_local_path(&dir)?;
+    if (!crate::settings::validation::same_or_nested_path(Path::new(path), &clips_dir)
+        && !crate::settings::validation::same_or_nested_path(Path::new(path), &dir))
+        || Path::new(path).components().any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err("refusing to access a clip outside the clips directory".into());
+    }
     groups::recover_group_order_transaction(&clips_dir)?;
-    let dir = clips_dir
-        .canonicalize()
-        .map_err(|e| e.to_string())?;
     let target = Path::new(path).canonicalize().map_err(|e| e.to_string())?;
     // Legacy clips sit at the root; session clips one folder down.
     let parent_ok = target.parent() == Some(dir.as_path())
@@ -81,9 +87,12 @@ pub(crate) fn favorite_marker_path(path: &Path) -> PathBuf {
 }
 
 pub(crate) fn read_clip_metadata(path: &Path) -> Option<ClipMetadata> {
-    std::fs::read_to_string(clip_metadata_path(path))
-        .ok()
-        .and_then(|json| serde_json::from_str(&json).ok())
+    read_clip_metadata_checked(path).ok().flatten()
+}
+
+pub(crate) fn read_clip_metadata_checked(path: &Path) -> Result<Option<ClipMetadata>, String> {
+    util::read_json_sidecar(&clip_metadata_path(path))
+        .map_err(|error| format!("read clip metadata: {error}"))
 }
 
 pub(crate) fn write_clip_metadata(path: &Path, metadata: &ClipMetadata) -> Result<(), String> {
@@ -91,8 +100,7 @@ pub(crate) fn write_clip_metadata(path: &Path, metadata: &ClipMetadata) -> Resul
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("create clip metadata folder: {e}"))?;
     }
-    let json =
-        serde_json::to_vec_pretty(metadata).map_err(|e| format!("serialize clip metadata: {e}"))?;
+    let json = util::serialize_json_sidecar(metadata)?;
     let tmp = target.with_extension("clipline.json.tmp");
     let result = (|| {
         let mut file = std::fs::File::create(&tmp)
@@ -347,6 +355,23 @@ mod tests {
                 Some("fingerprint")
             );
         }
+        #[test]
+        fn security_scan_local_junction_root_accepts_canonical_clip_paths() {
+            let dir = TestDir::new("clipline-library", "canonical-junction-root");
+            let target = dir.path().join("target");
+            let clip = target.join("clip.mp4");
+            touch_mp4(&clip);
+            let root = dir.path().join("media");
+            let output = std::process::Command::new("cmd").args(["/c", "mklink", "/J"])
+                .arg(&root).arg(&target).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            let settings = StorageSettings::new(None, root.clone());
+            assert!(validate_clip_path(&settings, root.join("clip.mp4").to_str().unwrap()).is_ok());
+            assert!(validate_clip_path(&settings, clip.canonicalize().unwrap().to_str().unwrap()).is_ok());
+            assert!(validate_clip_path(&settings, r"\\attacker\share\clip.mp4").is_err());
+            std::fs::remove_dir(&root).unwrap();
+        }
+
         #[test]
         fn validate_clip_path_accepts_root_and_session_clips() {
             let dir = TestDir::new("clipline-library", "validate-accept");

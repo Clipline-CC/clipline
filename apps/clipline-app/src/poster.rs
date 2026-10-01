@@ -193,8 +193,7 @@ fn run_poster_child_with_limits(
     max_stdout_bytes: usize,
     max_stderr_bytes: usize,
 ) -> Result<PosterChildOutput, String> {
-    let mut child = command
-        .spawn()
+    let mut child = clipline_capture::ffmpeg::spawn_verified(command)
         .map_err(|error| format!("spawn ffmpeg poster: {error}"))?;
     let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
         let _ = child.kill();

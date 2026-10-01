@@ -21,7 +21,7 @@ pub(crate) fn set_clip_audio_selection_file(
     audio_track_ids: Vec<String>,
 ) -> Result<Vec<String>, String> {
     let _guard = crate::gc::lock_clip_mutations();
-    let mut markers = util::markers_with_inferred_audio_tracks(source, util::read_markers_raw(source))
+    let mut markers = util::markers_with_inferred_audio_tracks(source, util::read_markers_checked(source)?)
         .ok_or_else(|| "this clip has no selectable audio tracks".to_string())?;
     if markers.audio_tracks.is_empty() {
         return Err("this clip has no selectable audio tracks".into());
@@ -40,8 +40,7 @@ pub(crate) fn set_clip_audio_selection_file(
 
 fn write_marker_sidecar_atomically(source: &Path, markers: &ClipMarkers) -> Result<(), String> {
     let target = source.with_extension("markers.json");
-    let bytes = serde_json::to_vec_pretty(markers)
-        .map_err(|error| format!("serialize audio selection: {error}"))?;
+    let bytes = util::serialize_json_sidecar(markers)?;
     let tmp = crate::settings::persistence::sibling_tmp_path(&target)?;
     let result = (|| {
         let mut file = std::fs::OpenOptions::new()
@@ -98,6 +97,36 @@ mod tests {
             serde_json::to_vec_pretty(&markers).unwrap(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn security_scan_audio_edits_preserve_malformed_and_oversized_sidecars() {
+        let dir = TestDir::new("clipline-library", "unreadable-audio-selection");
+        let source = dir.path().join("import.mp4");
+        std::fs::write(&source, super::super::test_support::two_real_opus_audio_mp4()).unwrap();
+        let sidecar = source.with_extension("markers.json");
+        for bytes in [b"{".to_vec(), vec![b' '; util::MAX_JSON_SIDECAR_BYTES as usize + 1]] {
+            std::fs::write(&sidecar, &bytes).unwrap();
+            assert!(set_clip_audio_selection_file(&source, Vec::new()).is_err());
+            assert_eq!(std::fs::read(&sidecar).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn security_scan_imported_audio_selection_does_not_adopt_media() {
+        let dir = TestDir::new("clipline-library", "imported-audio-selection");
+        let source = dir.path().join("my-video.mp4");
+        std::fs::write(&source, super::super::test_support::two_real_opus_audio_mp4()).unwrap();
+        assert!(!clipline_storage::is_clip_owned(&source));
+        for selection in [vec!["audio:1".to_string()], Vec::new()] {
+            set_clip_audio_selection_file(&source, selection.clone()).unwrap();
+            assert_eq!(util::read_markers_raw(&source).unwrap().selected_audio_track_ids, Some(selection));
+            assert!(!clipline_storage::is_clip_owned(&source));
+            assert_eq!(clipline_storage::storage_status(dir.path(), Some(0)).unwrap().total_bytes, 0);
+            clipline_storage::enforce_quota(dir.path(), Some(0), None).unwrap();
+            clipline_storage::delete_all_managed_media(dir.path()).unwrap();
+            assert!(source.exists());
+        }
     }
 
     #[test]

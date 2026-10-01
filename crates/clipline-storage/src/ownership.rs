@@ -4,7 +4,7 @@ use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
 use crate::files::{
-    CLIP_OWNERSHIP_MARKER_SUFFIX, MARKERS_SUFFIX, OSU_ENRICHMENT_SUFFIX, clip_sidecar_path,
+    CLIP_OWNERSHIP_MARKER_SUFFIX, OSU_ENRICHMENT_SUFFIX, clip_sidecar_path,
     is_mp4, is_recording_mp4, recording_final_path,
 };
 use crate::files::remove_file_if_exists;
@@ -50,7 +50,8 @@ pub fn ensure_clip_owned(path: &Path) -> io::Result<bool> {
             Ok(true)
         }
         Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-            if fs::metadata(&marker)?.is_file() {
+            let metadata = fs::symlink_metadata(&marker)?;
+            if metadata.is_file() && !crate::files::is_link_or_reparse_point(&metadata) {
                 Ok(false)
             } else {
                 Err(io::Error::new(
@@ -72,7 +73,7 @@ pub fn ensure_session_clip_owned(path: &Path) -> io::Result<bool> {
         .parent()
         .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "clip path has no parent"))?;
     let _guard = lock_session_mutations();
-    fs::create_dir_all(parent)?;
+    create_session_directory(parent)?;
     ensure_clip_owned(path)
 }
 
@@ -84,7 +85,7 @@ pub fn reserve_session_recording_file(path: &Path) -> io::Result<fs::File> {
         .parent()
         .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "recording path has no parent"))?;
     let _guard = lock_session_mutations();
-    fs::create_dir_all(parent)?;
+    create_session_directory(parent)?;
     fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -99,12 +100,38 @@ pub fn write_session_metadata(
     replace_existing: bool,
 ) -> io::Result<bool> {
     let _guard = lock_session_mutations();
+    validate_session_directory(session_dir)?;
     let path = session_dir.join(SESSION_META_FILE);
-    if !replace_existing && path.exists() {
-        return Ok(false);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if !metadata.is_file() || crate::files::is_link_or_reparse_point(&metadata) => {
+            return Err(io::Error::new(ErrorKind::PermissionDenied, "refusing linked session metadata"));
+        }
+        Ok(_) if !replace_existing => return Ok(false),
+        Ok(_) => {},
+        Err(error) if error.kind() == ErrorKind::NotFound => {},
+        Err(error) => return Err(error),
     }
-    fs::write(path, bytes)?;
+    let mut file = fs::OpenOptions::new().write(true).create_new(!replace_existing)
+        .create(replace_existing).truncate(replace_existing).open(path)?;
+    file.write_all(bytes)?;
     Ok(true)
+}
+
+fn validate_session_directory(dir: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(dir)?;
+    if !metadata.is_dir() || crate::files::is_link_or_reparse_point(&metadata) {
+        return Err(io::Error::new(ErrorKind::PermissionDenied, "refusing linked session directory"));
+    }
+    Ok(())
+}
+
+fn create_session_directory(dir: &Path) -> io::Result<()> {
+    match fs::create_dir(dir) {
+        Ok(()) => {},
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {},
+        Err(error) => return Err(error),
+    }
+    validate_session_directory(dir)
 }
 
 pub fn remove_clip_ownership_marker(path: &Path) -> io::Result<()> {
@@ -115,7 +142,9 @@ pub(crate) fn is_managed_clip(path: &Path) -> bool {
     let Ok(marker) = clip_ownership_marker_path(path) else {
         return false;
     };
-    if marker.is_file() {
+    let is_regular_proof = |proof: &Path| fs::symlink_metadata(proof)
+        .is_ok_and(|metadata| metadata.is_file() && !crate::files::is_link_or_reparse_point(&metadata));
+    if is_regular_proof(&marker) {
         return true;
     }
     // New recordings are identified by their ownership marker. Pre-marker
@@ -123,10 +152,9 @@ pub(crate) fn is_managed_clip(path: &Path) -> bool {
     if is_recording_mp4(path) {
         return is_legacy_generated_clip(path);
     }
-    // Conservative legacy signals. Poster files are deliberately excluded:
-    // merely previewing an unrelated MP4 can create one.
-    clip_sidecar_path(path, MARKERS_SUFFIX).is_file()
-        || clip_sidecar_path(path, OSU_ENRICHMENT_SUFFIX).is_file()
+    // Review can create posters and audio-selection markers for imported MP4s.
+    // Neither proves ownership; explicit edits create the ownership marker.
+    is_regular_proof(&clip_sidecar_path(path, OSU_ENRICHMENT_SUFFIX))
         || is_legacy_generated_clip(path)
 }
 
@@ -175,6 +203,28 @@ mod tests {
     use clipline_test_utils::TestDir;
     use std::sync::mpsc;
     use std::time::Duration;
+
+#[test]
+fn security_scan_session_writes_refuse_linked_directories() {
+    let root = TestDir::new("clipline-storage", "session-link-root");
+    let outside = TestDir::new("clipline-storage", "session-link-target");
+    let sentinel = outside.write(SESSION_META_FILE, 8);
+    let original = fs::read(&sentinel).unwrap();
+    let link = root.path().join("session");
+    #[cfg(windows)]
+    let status = std::process::Command::new("cmd").args(["/c", "mklink", "/J"])
+        .arg(&link).arg(outside.path()).output().unwrap();
+    #[cfg(windows)]
+    assert!(status.status.success(), "{}", String::from_utf8_lossy(&status.stderr));
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+    assert!(ensure_session_clip_owned(&link.join("clip_1.mp4")).is_err());
+    assert!(reserve_session_recording_file(&link.join("session_1.mp4.recording")).is_err());
+    assert!(write_session_metadata(&link, b"replacement", true).is_err());
+    assert_eq!(fs::read(sentinel).unwrap(), original);
+    assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 1);
+    fs::remove_dir(&link).or_else(|_| fs::remove_file(&link)).unwrap();
+}
 
 #[test]
 fn replay_reservation_waits_for_cleanup_lock_before_creating_the_folder() {

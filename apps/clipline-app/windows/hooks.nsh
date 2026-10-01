@@ -31,9 +31,9 @@
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL
-  RMDir /r "$INSTDIR\ffmpeg"
-  RMDir /r "$INSTDIR\ffmpeg-staging"
-  RMDir /r "$INSTDIR\cloud-cache"
-  RMDir /r "$INSTDIR\support-staging"
-  RMDir /r "$INSTDIR\EBWebView"
+  RMDir "$INSTDIR\ffmpeg"
+  RMDir "$INSTDIR\ffmpeg-staging"
+  RMDir "$INSTDIR\cloud-cache"
+  RMDir "$INSTDIR\support-staging"
+  RMDir "$INSTDIR\EBWebView"
 !macroend

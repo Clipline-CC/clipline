@@ -38,6 +38,7 @@ pub(crate) fn is_retryable_proxy_put_status(status: StatusCode) -> bool {
 }
 
 pub(crate) fn classify_direct_put_transport_error(error: reqwest::Error) -> DirectPutError {
+    let error = error.without_url();
     let message = format!("direct S3 PUT request failed: {error}");
     if error.is_builder() || error.is_redirect() {
         DirectPutError::Fallback(message)
@@ -85,6 +86,21 @@ pub(crate) fn direct_put_retry_delay(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn security_scan_direct_upload_errors_do_not_retain_presigned_credentials() {
+        let error = reqwest::Client::new().put("http://objects.example/a?X-Amz-Credential=SECRET")
+            .header("bad\nheader", "value").build().unwrap_err()
+            .with_url("http://objects.example/a?X-Amz-Credential=SECRET".parse().unwrap());
+        let classified = classify_direct_put_transport_error(error);
+        let message = match classified {
+            DirectPutError::Fallback(message) => message,
+            DirectPutError::Terminal(error) => error.to_string(),
+            DirectPutError::Retryable { message, .. } => message,
+        };
+        assert!(!message.contains("SECRET"), "{message}");
+        assert!(!message.contains("objects.example"), "{message}");
+    }
 
     #[test]
     fn direct_put_retry_delay_is_exponential_jittered_and_bounded() {

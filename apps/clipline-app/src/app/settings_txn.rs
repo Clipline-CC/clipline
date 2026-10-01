@@ -95,7 +95,7 @@ pub(crate) fn save_settings<R: Runtime>(
     first_run_state: tauri::State<FirstRunState>,
     tray_items: tauri::State<TrayItems<R>>,
     storage_settings: tauri::State<crate::library::StorageSettings>,
-    media_folder_authorization: tauri::State<NativeMediaFolderAuthorization>,
+    media_folder_authorization: tauri::State<NativeStorageFolderAuthorizations>,
     mut settings: AppSettings,
 ) -> Result<AppSettings, String> {
     settings.hotkey = crate::settings::normalize_hotkey(&settings.hotkey)?;
@@ -118,7 +118,17 @@ pub(crate) fn save_settings<R: Runtime>(
     let old = state.settings();
     preserve_backend_owned_settings_fields(&mut settings, &old);
     let old_media_dir = old.media_dir_path()?;
-    media_folder_authorization.validate_change(&old_media_dir, &media_dir)?;
+    media_folder_authorization.media.validate_change(&old_media_dir, &media_dir)?;
+    let replay_cache_dir = if settings.replay_storage.disk_dir.trim().is_empty() {
+        std::path::PathBuf::new()
+    } else {
+        crate::settings::normalize_replay_cache_dir(&settings.replay_storage.disk_dir)?
+    };
+    if !replay_cache_dir.as_os_str().is_empty() {
+        media_folder_authorization.replay_cache.validate_change(
+            std::path::Path::new(old.replay_storage.disk_dir.trim()), &replay_cache_dir,
+        )?;
+    }
     service::prepare_writable_media_directory(&media_dir)?;
 
     // Apply the autostart registry change before persisting so settings.json
@@ -255,7 +265,8 @@ pub(crate) fn save_settings<R: Runtime>(
         tracing::warn!(event = "storage_quota_recheck_failed", error = %error);
         let _ = app.emit("error", error);
     }
-    media_folder_authorization.commit(&media_dir);
+    media_folder_authorization.media.commit(&media_dir);
+    media_folder_authorization.replay_cache.commit(&replay_cache_dir);
     first_run_state.complete();
     Ok(settings)
 }

@@ -99,8 +99,7 @@ impl RuntimeState {
             })
         };
         if over_quota(&status) && auto_delete {
-            if let Some(quota) = quota_bytes {
-                let target = quota.saturating_sub(required_bytes);
+            if let Some(target) = quota_bytes.and_then(|quota| quota.checked_sub(required_bytes)) {
                 if let Err(error) =
                     crate::gc::enforce_quota_with_clip_policy(media_dir, Some(target), None)
                 {
