@@ -16,9 +16,11 @@ opposite handle stop scrolling. Moving back inside stops it; returning restarts 
 Scrolling arms only after more than 4px of horizontal movement, so a press or small
 jitter at an edge does not move the view. Snap targets do not stop scrolling; Alt
 press/release updates snapping immediately even while the pointer stays still.
+An animation callback with zero elapsed time schedules the next frame, so a drag
+cannot stall when pointer movement and its first callback share a clock tick.
 
 One animation-frame loop runs during active edge scrolling. Pointer release,
-cancel/lost capture, leaving Clip mode, opening settings, changing/closing the clip
+cancel/lost capture, leaving Clip mode, opening settings/dialogs, changing/closing the clip
 and background/focus loss cancel drag work. `resetZoom` is the shared teardown for
 open/close/suspend paths. Cancellation does not resume playback; normal release
 keeps the original playback-resumption behavior. Scrubbing and sliding do not pan.
@@ -27,7 +29,8 @@ Validation: pure math and actual pointer/animation-loop regressions failed befor
 implementation. 1,671 reported workspace checks pass, including the isolated
 clipboard child, with two intentional ignores. Fresh `clipline-app` warning-denied
 workspace Clippy passes. Review regressions cover scrolling through snap targets,
-press/jitter arming and stationary Alt changes with and without a running pan loop.
+press/jitter arming, zero elapsed time, modal cancellation and stationary Alt
+changes with and without a running pan loop.
 Live WebView mouse/keyboard checks on a real clip cover both stationary edge holds,
 center/restart, release, press/jitter, snapping/Alt and fully zoomed-out bounds. Temporary
 selections stayed in memory; no clip was exported or sidecar changed. Evidence is

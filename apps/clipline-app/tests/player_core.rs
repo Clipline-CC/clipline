@@ -2432,7 +2432,7 @@ fn trim_edge_drag_scrolls_while_held_and_stops_on_release_or_teardown() {
       }
       var fields=Object.fromEntries(['timeline','playhead','handle-in','handle-out','trim-band','trim-summary'].map(id=>[id,new Node()]));
       var $=id=>fields[id];
-      var document={hidden:false,listeners:{},addEventListener(name,cb){this.listeners[name]=cb;}};
+      var document={hidden:false,dialogOpen:false,listeners:{},querySelector(){return this.dialogOpen ? {} : null;},addEventListener(name,cb){this.listeners[name]=cb;}};
       var window={listeners:{},addEventListener(name,cb){this.listeners[name]=cb;}};
       var video={currentTime:60,paused:true,plays:0,addEventListener(){},pause(){this.paused=true;},play(){this.plays++;this.paused=false;return {catch(){}};}};
       var clipDuration=()=>currentClip ? currentClip.duration_s : 0;
@@ -2449,7 +2449,7 @@ fn trim_edge_drag_scrolls_while_held_and_stops_on_release_or_teardown() {
       applyTimelineEditorPreference=()=>{};
       seekTo=t=>{video.currentTime=t;};
       var setup=(kind,x,alt=true,eventMarkers=[])=>{
-        endDrag({resume:false});currentClip={duration_s:120};simpleTrimMode=true;settingsOpen=false;document.hidden=false;
+        endDrag({resume:false});currentClip={duration_s:120};simpleTrimMode=true;settingsOpen=false;document.hidden=false;document.dialogOpen=false;
         zoomStart=40;zoomSpan=20;trimStart=kind==='in'?45:40;trimEnd=kind==='out'?55:60;
         video.currentTime=kind==='in'?trimStart:trimEnd;video.paused=true;markers=eventMarkers;
         const grabX=kind==='in'?150:kind==='out'?250:200;
@@ -2462,7 +2462,9 @@ fn trim_edge_drag_scrolls_while_held_and_stops_on_release_or_teardown() {
     let end = main[start..].find("document.addEventListener(\"keydown\", (ev) => {").unwrap() + start;
     ctx.eval(Source::from_bytes(&main[start..end])).unwrap();
 
-    ctx.eval(Source::from_bytes("setup('out',300);advance(50);advance(50);")).unwrap();
+    ctx.eval(Source::from_bytes("setup('out',300);advance(0);")).unwrap();
+    assert_eq!(eval_json(&mut ctx, "[zoomStart,trimEnd,frames.size]"), "[40,60,1]", "a callback in the pointer move's clock tick must keep the drag alive");
+    ctx.eval(Source::from_bytes("advance(50);advance(50);")).unwrap();
     assert_eq!(eval_json(&mut ctx, "[zoomStart,zoomSpan,trimStart,trimEnd,video.currentTime]"), "[41,20,40,61,61]", "stationary edge hold keeps extending the out point");
     ctx.eval(Source::from_bytes("setup('in',100);advance(50);advance(50);")).unwrap();
     assert_eq!(eval_json(&mut ctx, "[zoomStart,trimStart,trimEnd]"), "[39,39,60]");
@@ -2488,6 +2490,8 @@ fn trim_edge_drag_scrolls_while_held_and_stops_on_release_or_teardown() {
     assert_eq!(eval_json(&mut ctx, "[trimEnd,frames.size]"), "[50,0]", "Alt updates snapping immediately after edge scrolling stops");
     ctx.eval(Source::from_bytes("document.listeners.keyup({altKey:false});")).unwrap();
     assert_eq!(eval_json(&mut ctx, "[trimEnd,frames.size]"), "[50.5,0]");
+    ctx.eval(Source::from_bytes("document.dialogOpen=true;document.listeners.keydown({altKey:true});")).unwrap();
+    assert_eq!(eval(&mut ctx, "dragging===null && trimEnd===50.5 && frames.size===0"), "true", "a dialog cancels stationary modifier updates behind it");
     for (kind, x) in [("in", 300), ("out", 100)] {
         ctx.eval(Source::from_bytes(&format!("setup('{kind}',{x});advance(50);"))).unwrap();
         assert_eq!(eval(&mut ctx, "zoomStart===40 && frames.size===0 && (trimEnd-trimStart).toFixed(1)==='0.1'"), "true", "do not scroll past the other handle");
@@ -2500,7 +2504,7 @@ fn trim_edge_drag_scrolls_while_held_and_stops_on_release_or_teardown() {
         ctx.eval(Source::from_bytes(&format!("setup('out',300);advance(50);fields.timeline.listeners.{event}();const before{event}=trimEnd;advance(50);"))).unwrap();
         assert_eq!(eval(&mut ctx, &format!("dragging===null && frames.size===0 && trimEnd===before{event} && fields.timeline.capture===null")), "true");
     }
-    for action in ["resetZoom();", "setSimpleTrimMode(false);", "window.listeners.blur();", "settingsOpen=true;advance(50);", "document.hidden=true;advance(50);", "currentClip=null;advance(50);"] {
+    for action in ["resetZoom();", "setSimpleTrimMode(false);", "window.listeners.blur();", "settingsOpen=true;advance(50);", "document.dialogOpen=true;advance(50);", "document.hidden=true;advance(50);", "currentClip=null;advance(50);"] {
         ctx.eval(Source::from_bytes(&format!("setup('out',300);{action}"))).unwrap();
         assert_eq!(eval(&mut ctx, "dragging===null && frames.size===0"), "true", "cancel obsolete drag work: {action}");
     }

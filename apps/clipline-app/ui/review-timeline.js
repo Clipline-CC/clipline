@@ -741,7 +741,9 @@ function moveDrag(ev) {
 }
 
 function updateDragModifiers(ev) {
-  if (!dragPointer || dragPointer.altKey === ev.altKey) return;
+  if (!dragPointer) return;
+  if (document.querySelector("dialog[open]")) { endDrag({ resume: false }); return; }
+  if (dragPointer.altKey === ev.altKey) return;
   dragPointer.altKey = ev.altKey;
   updateDrag(dragPointer);
 }
@@ -749,6 +751,7 @@ function updateDragModifiers(ev) {
 function panDragFrame() {
   dragPanFrame = 0;
   if (!dragPointer || !currentClip || !simpleTrimMode || settingsOpen || document.hidden
+      || document.querySelector("dialog[open]")
       || (dragging !== "in" && dragging !== "out")) {
     endDrag({ resume: false });
     return;
@@ -757,9 +760,16 @@ function panDragFrame() {
   const view = timelineView();
   const dur = clipDuration();
   const now = performance.now();
-  const next = PlayerCore.edgePanView(dragPointer.clientX, rect.left, rect.width,
-    view.start, view.span, dur, (now - dragPanLastMs) / 1000);
+  const elapsedSeconds = (now - dragPanLastMs) / 1000;
   dragPanLastMs = now;
+  // The first callback can share the pointer move's clock tick. Wait for time
+  // to advance instead of treating that zero delta as the end of scrolling.
+  if (!(elapsedSeconds > 0)) {
+    dragPanFrame = requestAnimationFrame(panDragFrame);
+    return;
+  }
+  const next = PlayerCore.edgePanView(dragPointer.clientX, rect.left, rect.width,
+    view.start, view.span, dur, elapsedSeconds);
   if (next.start === view.start) return;
   const time = timelineTimeView(dragPointer.clientX, rect.left, rect.width, next.start, next.span, dur);
   const trim = trimDrag(dragging, time, trimStart, trimEnd, dur);
