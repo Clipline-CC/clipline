@@ -6,7 +6,8 @@
 
 ## Checkpoint (2026-09-30): Repository bug-hunt remediation
 
-`fix/repository-bug-hunt-2026-09-30` covers all twelve findings supplied from the
+[`PR #217`](https://github.com/Clipline-CC/clipline/pull/217) into `develop`
+(`fix/repository-bug-hunt-2026-09-30`) covers all twelve findings supplied from the
 audit of `e8076200`, starting from merged security PR #216 (`2faf33e3`). The
 [per-finding ledger](docs/audits/2026-09-30-repository-bug-hunt-remediation.md)
 records changes, deterministic regressions, and practical limits. BH-09 and BH-11
@@ -14,18 +15,21 @@ were already fixed on develop; additional regressions preserve those fixes.
 
 Upload originals remain leased through preparation and remote verification;
 account ownership and captured status records are checked under the existing save
-lock before completion mutations. Concurrent exports own reserved pending/final
-paths. Sparse audio timestamps preserve gaps through every segment consumer.
+lock before completion mutations. A command owns each account/clip until processing
+and cleanup finish, and refreshes settings after acquiring ownership. Concurrent
+exports own reserved pending/final paths; recovery and full Library scans share
+their publication lock. Account switches clear obsolete upload status without
+erasing a newer status. Sparse audio timestamps preserve gaps through every segment consumer.
 WGC reports invalid fixed regions, obsolete recorder roots cannot replace the
 current library root, League policy changes refresh their verdict, and stale osu!
 workers cannot resurrect deleted/renamed sessions. File copy replaces old formats
 in the clipboard. No new dependency, schema, updater trust, or release change.
 
-Local gates: 1,658 workspace tests pass, with two intentional ignores and one
+Local gates: 1,661 workspace tests pass, with two intentional ignores and one
 additional isolated-child invocation for the native clipboard regression.
 Warning-denied workspace Clippy passes with fresh caches for changed crates.
 Evidence: ignored `target/bug-hunt-workspace-{tests,clippy}.log`. Ubuntu/Windows CI
-and PR review are tracked in the new PR into develop. Manual acceptance: export
+and PR review are tracked in PR #217. Manual acceptance: export
 two different play ranges concurrently; copy a file after a cloud link; toggle
 League categories during the same match; confirm selected-audio uploads preserve
 their originals while processing and account switches reject old completions.
