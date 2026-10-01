@@ -3753,6 +3753,50 @@ fn settings_tabs_preserve_unsaved_draft_until_save() {
 }
 
 #[test]
+fn player_metadata_is_in_the_header_and_marker_filters_are_recoverable() {
+    let html = index_html();
+    let header = html.find("<header class=\"review-head\">").unwrap();
+    let header_end = header + html[header..].find("</header>").unwrap();
+    let metadata = html.find("id=\"game-metadata-panel\"").unwrap();
+    assert!(
+        header < metadata && metadata < header_end,
+        "game details belong beside the clip title in the header"
+    );
+    assert!(html[header..header_end].contains("class=\"review-heading\""));
+    let css = styles_css();
+    assert_eq!(
+        css_decl_value(css_rule_body(&css, ".review-heading"), "flex-wrap"),
+        Some("wrap")
+    );
+    assert_eq!(
+        css_decl_value(css_rule_body(&css, ".review-viewer"), "grid-template-rows"),
+        Some("auto minmax(0, 1fr) auto")
+    );
+    for id in [
+        "timeline-marker-panel",
+        "timeline-marker-list",
+        "timeline-markers-all",
+        "timeline-markers-none",
+        "timeline-markers-bookmarks",
+    ] {
+        assert!(
+            html.contains(&format!("id=\"{id}\"")),
+            "player filter control: {id}"
+        );
+    }
+    let timeline = read_ui_js("review-timeline.js");
+    assert!(timeline.contains("editPoints(timelineMarkers()"));
+    assert_eq!(
+        timeline
+            .matches("const markers = timelineMarkers();")
+            .count(),
+        2,
+        "rendering and marker jumps use the same selection"
+    );
+    assert!(timeline.contains("snapCandidates(clipDuration(), timelineMarkers()"));
+}
+
+#[test]
 fn timeline_view_and_trim_controls_are_wired() {
     let html = index_html();
     let js = main_js();

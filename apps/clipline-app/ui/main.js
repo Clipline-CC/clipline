@@ -619,6 +619,19 @@ $("seek-back").addEventListener("click", () => seekBy(-5));
 $("seek-forward").addEventListener("click", () => seekBy(5));
 $("prev-marker").addEventListener("click", () => jumpMarker(-1));
 $("next-marker").addEventListener("click", () => jumpMarker(1));
+$("timeline-marker-list").addEventListener("change", (ev) => {
+  const category = ev.target.dataset.category;
+  if (!category) return;
+  timelineMarkerFilter.categories.set(category, ev.target.checked);
+  renderMarkers();
+});
+$("timeline-markers-all").addEventListener("click", () => setTimelineMarkerMode("all"));
+$("timeline-markers-none").addEventListener("click", () => setTimelineMarkerMode("none"));
+$("timeline-markers-bookmarks").addEventListener("click", () => setTimelineMarkerMode("bookmarks"));
+document.addEventListener("pointerdown", (ev) => {
+  const panel = $("timeline-marker-panel");
+  if (!panel.contains(ev.target)) panel.open = false;
+}, true);
 $("game-event-rail-toggle").addEventListener("click", () => {
   setGameEventRailCollapsed(!gameEventRailCollapsed);
 });
@@ -880,6 +893,14 @@ document.addEventListener("keydown", (ev) => {
     return;
   }
   if (settingsOpen) return; // player shortcuts are inert behind the page
+  const markerPanel = $("timeline-marker-panel");
+  if (ev.code === "Escape" && markerPanel.open) {
+    ev.preventDefault();
+    markerPanel.open = false;
+    markerPanel.querySelector("summary").focus();
+    return;
+  }
+  if (markerPanel.contains(ev.target)) return; // native checkbox/menu keyboard behavior
   const tag = ev.target && ev.target.tagName;
   if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
   // "?" opens the shortcuts guide from anywhere in the player (clip or not).

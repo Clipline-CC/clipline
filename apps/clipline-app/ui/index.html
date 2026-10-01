@@ -152,23 +152,28 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
             <span>Library</span>
           </button>
-          <div class="clip-title">
-            <div id="clip-title-display" class="clip-title-display">
-              <strong id="pname"></strong>
-              <button id="rename-clip" class="inline-icon-button" title="Rename clip" type="button">
-                <svg class="icon-stroke" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="m16.5 3.5 4 4L7 21l-4 1 1-4L16.5 3.5z"/></svg>
-              </button>
+          <div class="review-heading">
+            <div class="clip-title">
+              <div id="clip-title-display" class="clip-title-display">
+                <strong id="pname"></strong>
+                <button id="rename-clip" class="inline-icon-button" title="Rename clip" type="button">
+                  <svg class="icon-stroke" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="m16.5 3.5 4 4L7 21l-4 1 1-4L16.5 3.5z"/></svg>
+                </button>
+              </div>
+              <form id="clip-title-edit" class="clip-title-edit" hidden>
+                <input id="rename-input" type="text" spellcheck="false" autocomplete="off" />
+                <button id="rename-save" class="inline-icon-button" title="Save rename" type="submit">
+                  <svg viewBox="0 0 24 24"><path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4L9 16.2z"/></svg>
+                </button>
+                <button id="rename-cancel" class="inline-icon-button" title="Discard rename" type="button">
+                  <svg viewBox="0 0 24 24"><path d="M6.4 5 5 6.4 10.6 12 5 17.6 6.4 19 12 13.4 17.6 19 19 17.6 13.4 12 19 6.4 17.6 5 12 10.6 6.4 5z"/></svg>
+                </button>
+              </form>
+              <span id="pmeta"></span>
             </div>
-            <form id="clip-title-edit" class="clip-title-edit" hidden>
-              <input id="rename-input" type="text" spellcheck="false" autocomplete="off" />
-              <button id="rename-save" class="inline-icon-button" title="Save rename" type="submit">
-                <svg viewBox="0 0 24 24"><path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4L9 16.2z"/></svg>
-              </button>
-              <button id="rename-cancel" class="inline-icon-button" title="Discard rename" type="button">
-                <svg viewBox="0 0 24 24"><path d="M6.4 5 5 6.4 10.6 12 5 17.6 6.4 19 12 13.4 17.6 19 19 17.6 13.4 12 19 6.4 17.6 5 12 10.6 6.4 5z"/></svg>
-              </button>
-            </form>
-            <span id="pmeta"></span>
+            <aside id="game-metadata-panel" class="game-metadata-panel" hidden>
+              <div id="game-metadata-fields" class="game-metadata-fields"></div>
+            </aside>
           </div>
           <div class="review-actions">
             <button id="favorite-clip" class="icon-button" title="Add to favorites" aria-pressed="false">
@@ -265,10 +270,6 @@
           </aside>
         </div>
 
-        <aside id="game-metadata-panel" class="game-metadata-panel" hidden>
-          <div id="game-metadata-fields" class="game-metadata-fields"></div>
-        </aside>
-
         <div class="deck">
           <div class="timeline-stack">
             <div class="timeline-main">
@@ -287,6 +288,20 @@
           </div>
 
           <div class="timeline-footer-row">
+            <details id="timeline-marker-panel" class="timeline-marker-panel" hidden>
+              <summary>
+                <span>Markers</span>
+                <span id="timeline-marker-summary"></span>
+              </summary>
+              <div class="timeline-marker-menu">
+                <div class="timeline-marker-actions">
+                  <button id="timeline-markers-all" type="button">Show all</button>
+                  <button id="timeline-markers-none" type="button">Hide all</button>
+                  <button id="timeline-markers-bookmarks" type="button">Bookmarks only</button>
+                </div>
+                <div id="timeline-marker-list" class="timeline-marker-list" role="group" aria-label="Visible timeline marker types"></div>
+              </div>
+            </details>
             <details id="audio-track-panel" class="audio-track-panel" hidden>
               <summary>
                 <span>Audio tracks</span>

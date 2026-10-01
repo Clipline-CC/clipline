@@ -4,6 +4,34 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-09-30): Player header and marker filters
+
+`feat/player-metadata-marker-filters` starts at `develop` merge `a3885f12`.
+League champion/spells/KDA/items now use the existing metadata renderer in the
+player header beside the title/file details. The header wraps without reserving
+the former metadata row below the video.
+
+The timeline's Markers menu has native category checkboxes plus Show all, Hide all
+and Bookmarks only. Selection stays across clip switches within the current webview;
+a new webview starts with all markers visible. Category defaults and overrides apply
+after existing game-review settings/bookmark merging. Pins, counts, marker/edit jumps
+and snapping share the player-only accessor; gallery counts, event rails and saved
+sidecars keep their existing behavior. Hidden categories remain selectable, checkbox
+focus survives repainting, and Escape/outside clicks/review teardown dismiss the menu.
+
+Validation: regression tests failed before implementation; 1,668 reported workspace
+test checks pass (including the isolated clipboard child), with two intentional
+ignores. Warning-denied workspace Clippy passes after cleaning `clipline-app`.
+Live WebView checks cover League/osu!, 1200px and the supported 960px minimum layout,
+filter toggles, all-hidden restoration, keyboard Space/Escape and pin dismissal.
+Bookmarks-only uses temporary in-memory bookmarks; no recording/sidecar was edited.
+Native Computer Use was unavailable, so layout inspection used WebView screenshots
+and viewport emulation. Logs/screenshots remain in ignored `target/player-*` artifacts.
+
+Manual acceptance: open a League clip and check the header; expand Markers, toggle
+categories or select Bookmarks only, then use Previous/Next marker; Hide all and
+restore with Show all. Try another clip and narrow the window to check the layout.
+
 ## Checkpoint (2026-09-30): Performance first pass
 
 `perf/mp4-batching-process-query-reuse` starts at merged bug-hunt commit

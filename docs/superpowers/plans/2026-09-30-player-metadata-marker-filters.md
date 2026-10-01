@@ -11,7 +11,9 @@ including a bookmarks-only view.
 - [ ] Add a native checkbox category menu beside timeline controls, with Show all,
   Hide all and Bookmarks only actions. Derive options/counts from available markers,
   keep the control reachable when every marker is hidden, and default to all visible.
-- [ ] Keep the viewer's hidden-category set across clip switches within this webview.
+- [ ] Keep the viewer's default visibility plus per-category overrides across clip
+  switches within this webview. This makes bookmarks-only/Hide all apply to newly
+  encountered categories while individual checkbox changes preserve other defaults.
   Apply it after existing game-review filters/bookmark merging in a separate timeline
   accessor. Gallery marker counts/filters, match-event rails and saved marker data
   continue using their existing accessors. Route player pins, counts, marker/edit

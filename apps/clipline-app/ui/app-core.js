@@ -100,6 +100,7 @@ var video = $("video");
 var stage = document.querySelector(".stage");
 var stageFrame = $("stage-frame");
 var currentClip = null;
+var timelineMarkerFilter = { defaultVisible: true, categories: new Map() };
 var clipsCache = [];
 var windowLifecycleState = WindowLifecycleCore.initialState();
 var foregroundBootCompleted = false;
@@ -372,6 +373,10 @@ function clipMarkers(clip = currentClip) {
     ),
     rawClipBookmarks(clip),
   );
+}
+
+function timelineMarkers(clip = currentClip) {
+  return PlayerCore.filterTimelineMarkers(clipMarkers(clip), timelineMarkerFilter, pluginPresentationForClip(clip));
 }
 
 function clipPlays(clip = currentClip) {

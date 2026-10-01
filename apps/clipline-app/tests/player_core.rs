@@ -988,6 +988,187 @@ fn user_bookmarks_join_the_timeline_regardless_of_game_review_filters() {
 }
 
 #[test]
+fn timeline_category_filters_keep_bookmarks_and_new_categories_under_the_selected_mode() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(
+        r#"
+      const markers = [
+        { t_s: 2, kind: 'ChampionKill' },
+        { t_s: 4, kind: 'ChampionDeath' },
+        { t_s: 6, kind: 'Bookmark' },
+        { t_s: 8, kind: 'DragonKill' },
+        { t_s: 10, kind: 'BaronKill' },
+        { t_s: 12, kind: 'RoundStart' }
+      ];
+      const presentation = {
+        marker_kinds: { RoundStart: { category: 'round' } },
+        marker_categories: { round: { plural: 'Rounds' } }
+      };
+      const filter = { defaultVisible: true, categories: new Map() };
+      const visible = () => PlayerCore.filterTimelineMarkers(markers, filter, presentation);
+      const options = () => PlayerCore.timelineMarkerOptions(markers, filter, presentation);
+    "#,
+    ))
+    .unwrap();
+    assert_eq!(eval(&mut ctx, "visible().length"), "6");
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "options().map(o => [o.category, o.label, o.count, o.selected])"
+        ),
+        r#"[["kill","kills",1,true],["death","deaths",1,true],["bookmark","bookmarks",1,true],["objective","objectives",2,true],["round","Rounds",1,true]]"#
+    );
+
+    ctx.eval(Source::from_bytes("filter.categories.set('kill', false);"))
+        .unwrap();
+    assert_eq!(
+        eval_json(&mut ctx, "visible().map(m => m.t_s)"),
+        "[4,6,8,10,12]"
+    );
+    ctx.eval(Source::from_bytes("filter.defaultVisible = false; filter.categories.clear(); filter.categories.set('bookmark', true);")).unwrap();
+    assert_eq!(eval_json(&mut ctx, "visible().map(m => m.t_s)"), "[6]");
+    assert_eq!(
+        eval(&mut ctx, "options().length"),
+        "5",
+        "hidden categories remain available to select"
+    );
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.nextMarker(visible(), 0).t_s"),
+        "6"
+    );
+    assert_eq!(
+        eval(&mut ctx, "PlayerCore.prevMarker(visible(), 15).t_s"),
+        "6"
+    );
+    assert_eq!(
+        eval_json(
+            &mut ctx,
+            "PlayerCore.editPoints(visible(), 0, 20, 20).map(p => p.t_s)"
+        ),
+        "[0,6,20]"
+    );
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "PlayerCore.snapCandidates(20, visible(), 0, 0, 20, null).includes(4)"
+        ),
+        "false"
+    );
+
+    // The same mode governs marker types encountered in the next clip.
+    assert_eq!(eval_json(&mut ctx, "PlayerCore.filterTimelineMarkers([{t_s:1,kind:'ChampionAssist'},{t_s:3,kind:'Bookmark'}], filter).map(m => m.t_s)"), "[3]");
+    ctx.eval(Source::from_bytes(
+        "filter.categories.set('objective', true);",
+    ))
+    .unwrap();
+    assert_eq!(eval_json(&mut ctx, "visible().map(m => m.t_s)"), "[6,8,10]");
+    ctx.eval(Source::from_bytes("filter.categories.clear();"))
+        .unwrap();
+    assert_eq!(eval_json(&mut ctx, "visible()"), "[]");
+    assert_eq!(eval(&mut ctx, "options().every(o => !o.selected)"), "true");
+    ctx.eval(Source::from_bytes("filter.defaultVisible = true;"))
+        .unwrap();
+    assert_eq!(eval(&mut ctx, "visible().length"), "6");
+    assert_eq!(
+        eval(&mut ctx, "markers.length"),
+        "6",
+        "filtering never changes stored markers"
+    );
+}
+
+#[test]
+fn player_marker_controls_preserve_checkbox_focus_and_gallery_markers() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(r#"
+      var currentClip = { markers: { markers: [{t_s:2,kind:'DragonKill'}], bookmarks: [{t_s:6}] } };
+      var gamePluginSettings = {};
+      var timelineMarkerFilter = { defaultVisible: true, categories: new Map() };
+      var normalizeGameReviewSettings = PlayerCore.normalizeGameReviewSettings;
+      var pluginPresentationForClip = () => null;
+      var currentPluginPresentation = () => null;
+      class Node {
+        constructor() { this.children = []; this.dataset = {}; this.listeners = {}; }
+        replaceChildren() { this.children = []; }
+        append(...nodes) { this.children.push(...nodes); }
+        appendChild(node) { this.append(node); }
+        addEventListener(name, listener) { this.listeners[name] = listener; }
+        querySelectorAll() { return this.children.flatMap(row => row.children.filter(node => node.type === 'checkbox')); }
+        contains(node) { return node === this; }
+      }
+      const fields = Object.fromEntries(['timeline-marker-panel','timeline-marker-list','timeline-marker-summary',
+        'timeline-markers-all','timeline-markers-none','timeline-markers-bookmarks',
+        'review-viewer','gallery-view','settings-page'].map(id => [id,new Node()]));
+      var $ = id => fields[id];
+      var video = new Node();
+      var document = { listeners: {}, createElement: () => new Node(),
+        addEventListener(name, listener, capture) { this.listeners[name] = {listener,capture}; } };
+    "#)).unwrap();
+    let ui = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui");
+    let app = fs::read_to_string(ui.join("app-core.js")).unwrap();
+    let start = app.find("function rawClipMarkers(").unwrap();
+    let end = app.find("function clipPlays(").unwrap();
+    ctx.eval(Source::from_bytes(&app[start..end])).unwrap();
+    let timeline = fs::read_to_string(ui.join("review-timeline.js")).unwrap();
+    ctx.eval(Source::from_bytes(&timeline)).unwrap();
+    ctx.eval(Source::from_bytes(
+        "renderMarkers = renderTimelineMarkerPanel;",
+    ))
+    .unwrap();
+    let main = fs::read_to_string(ui.join("main.js")).unwrap();
+    let start = main
+        .find("$(\"timeline-marker-list\").addEventListener")
+        .unwrap();
+    let end = main
+        .find("$(\"game-event-rail-toggle\").addEventListener")
+        .unwrap();
+    ctx.eval(Source::from_bytes(&main[start..end])).unwrap();
+
+    ctx.eval(Source::from_bytes("renderMarkers(); const checkbox = fields['timeline-marker-list'].querySelectorAll()[0]; checkbox.checked = false; fields['timeline-marker-list'].listeners.change({target:checkbox});")).unwrap();
+    assert_eq!(
+        eval(
+            &mut ctx,
+            "fields['timeline-marker-list'].querySelectorAll()[0] === checkbox"
+        ),
+        "true"
+    );
+    assert_eq!(
+        eval_json(&mut ctx, "timelineMarkers().map(m => m.kind)"),
+        r#"["Bookmark"]"#
+    );
+    assert_eq!(
+        eval(&mut ctx, "clipMarkers().length"),
+        "2",
+        "gallery accessor is independent of player selection"
+    );
+    ctx.eval(Source::from_bytes(
+        "fields['timeline-markers-none'].listeners.click();",
+    ))
+    .unwrap();
+    assert_eq!(eval(&mut ctx, "timelineMarkers().length"), "0");
+    assert_eq!(
+        eval(&mut ctx, "fields['timeline-marker-panel'].hidden"),
+        "false",
+        "Hide all must leave the restore controls available"
+    );
+    ctx.eval(Source::from_bytes(
+        "fields['timeline-markers-all'].listeners.click();",
+    ))
+    .unwrap();
+    assert_eq!(eval(&mut ctx, "timelineMarkers().length"), "2");
+    ctx.eval(Source::from_bytes("fields['timeline-markers-bookmarks'].listeners.click(); currentClip = {markers:{markers:[{t_s:1,kind:'ChampionAssist',involves_local_player:true}],bookmarks:[{t_s:3}]}}; renderMarkers();")).unwrap();
+    assert_eq!(
+        eval_json(&mut ctx, "timelineMarkers().map(m => m.kind)"),
+        r#"["Bookmark"]"#
+    );
+    assert_eq!(eval(&mut ctx, "clipMarkers().length"), "2");
+    ctx.eval(Source::from_bytes("fields['timeline-marker-panel'].open = true; document.listeners.pointerdown.listener({target:new Node()});")).unwrap();
+    assert_eq!(eval(&mut ctx, "fields['timeline-marker-panel'].open"), "false");
+    assert_eq!(eval(&mut ctx, "document.listeners.pointerdown.capture"), "true", "dismiss before a timeline pin stops propagation");
+    ctx.eval(Source::from_bytes("currentClip = null; fields['timeline-marker-panel'].open = true; syncSettingsModalBackground = () => {}; updateViews();")).unwrap();
+    assert_eq!(eval(&mut ctx, "fields['timeline-marker-panel'].open"), "false", "hidden review controls must not consume gallery Escape");
+}
+
+#[test]
 fn bookmark_markers_drop_unusable_offsets_and_duplicates() {
     let mut ctx = player_core_context();
 
