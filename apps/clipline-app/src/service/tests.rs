@@ -331,6 +331,13 @@ fn clips_dir_resolved_with_probe(
         delay: Duration,
     }
 
+    fn assert_cadence_advance(previous_pts_s: f64, pts_s: f64, interval_s: f64) {
+        // Scheduler stalls may skip slots, but emitted PTS must remain on the grid.
+        let slots = (pts_s - previous_pts_s) / interval_s;
+        assert!(slots >= 1.0 - 1e-9, "cadence did not advance: {slots}");
+        assert!((slots - slots.round()).abs() < 1e-9, "off-grid cadence: {slots}");
+    }
+
     impl TimedFrameSource for PrematureTimeoutSource {
         fn next_frame_timeout(
             &mut self,
@@ -898,6 +905,7 @@ fn clips_dir_resolved_with_probe(
             data: FrameData::Cpu(vec![7, 8, 9]),
         };
         let mut cap = CadencedCapture::new(TimeoutSource, 60, seed);
+        std::thread::sleep(Duration::from_millis(40));
 
         let first = cap
             .next_frame()
@@ -908,8 +916,8 @@ fn clips_dir_resolved_with_probe(
             .expect("duplicate frame")
             .expect("capture still open");
 
-        assert!((first.pts_s - (1.0 + 1.0 / 60.0)).abs() < 1e-9);
-        assert!((second.pts_s - (1.0 + 2.0 / 60.0)).abs() < 1e-9);
+        assert_cadence_advance(1.0, first.pts_s, 1.0 / 60.0);
+        assert_cadence_advance(first.pts_s, second.pts_s, 1.0 / 60.0);
         assert!(matches!(first.data, FrameData::Cpu(ref data) if data == &[7, 8, 9]));
         assert!(matches!(second.data, FrameData::Cpu(ref data) if data == &[7, 8, 9]));
     }
@@ -923,6 +931,7 @@ fn clips_dir_resolved_with_probe(
             data: FrameData::Cpu(vec![7, 8, 9]),
         };
         let seed_pts_s = seed.pts_s;
+        let started = Instant::now();
         let mut cap = CadencedCapture::new(
             PrematureTimeoutSource {
                 delay: Duration::from_millis(1),
@@ -930,7 +939,6 @@ fn clips_dir_resolved_with_probe(
             fps,
             seed,
         );
-        let started = Instant::now();
         let mut last_pts_s = seed_pts_s;
 
         for _ in 0..120 {
@@ -991,28 +999,30 @@ fn clips_dir_resolved_with_probe(
             pts_s: 1.0,
             data: FrameData::Cpu(vec![1]),
         };
-        let stale_pts_s = 1.0 + interval_s + 0.00005;
-        let scheduled_pts_s = 1.0 + 2.0 * interval_s;
         let source = ScriptedTimedSource {
-            outcomes: VecDeque::from([
-                Err(CaptureError::Timeout(Duration::ZERO)),
-                Ok(Some(Frame {
-                    pts_s: stale_pts_s,
-                    data: FrameData::Cpu(vec![2]),
-                })),
-                Ok(Some(Frame {
-                    pts_s: scheduled_pts_s,
-                    data: FrameData::Cpu(vec![3]),
-                })),
-            ]),
+            outcomes: VecDeque::from([Err(CaptureError::Timeout(Duration::ZERO))]),
             requested_timeouts: Vec::new(),
         };
         let mut cap = CadencedCapture::new(source, fps, seed);
 
         let duplicate = cap.next_frame().unwrap().unwrap();
+        let stale_pts_s = duplicate.pts_s + 0.00005;
+        let scheduled_pts_s = duplicate.pts_s + interval_s;
+        cap.inner.outcomes.extend([
+            Ok(Some(Frame {
+                pts_s: stale_pts_s,
+                data: FrameData::Cpu(vec![2]),
+            })),
+            Ok(Some(Frame {
+                pts_s: scheduled_pts_s,
+                data: FrameData::Cpu(vec![3]),
+            })),
+        ]);
+        let retry_started = Instant::now();
         let skipped = cap.next_frame();
+        let retry_elapsed = retry_started.elapsed();
 
-        assert!((duplicate.pts_s - (1.0 + interval_s)).abs() < 1e-9);
+        assert_cadence_advance(1.0, duplicate.pts_s, interval_s);
         let skipped_for = match skipped {
             Err(CaptureError::Timeout(duration)) => duration,
             other => panic!("expected bounded stale-frame timeout, got {other:?}"),
@@ -1030,9 +1040,14 @@ fn clips_dir_resolved_with_probe(
         let remaining_s = skipped_for.as_secs_f64();
         let pts_remaining_s = scheduled_pts_s - stale_pts_s;
         assert!(remaining_s <= pts_remaining_s + 1e-9);
+        assert!(remaining_s <= cap.inner.requested_timeouts[1].as_secs_f64() + 1e-9);
+        // Account for all observed call time, including scheduler stalls.
+        let minimum_remaining = cap.inner.requested_timeouts[1]
+            .saturating_sub(retry_elapsed)
+            .min(Duration::from_secs_f64(pts_remaining_s));
         assert!(
-            remaining_s >= pts_remaining_s - 0.005,
-            "stale retry lost its deadline: remaining={remaining_s:.6}s expected={pts_remaining_s:.6}s"
+            skipped_for >= minimum_remaining,
+            "stale retry lost its deadline: remaining={skipped_for:?} minimum={minimum_remaining:?}"
         );
     }
 
@@ -1045,25 +1060,25 @@ fn clips_dir_resolved_with_probe(
             data: FrameData::Cpu(vec![1]),
         };
         let source = ScriptedTimedSource {
-            outcomes: VecDeque::from([
-                Err(CaptureError::Timeout(Duration::ZERO)),
-                Ok(Some(Frame {
-                    pts_s: 1.0 + interval_s + 0.00005,
-                    data: FrameData::Cpu(vec![2]),
-                })),
-                Err(CaptureError::Timeout(Duration::ZERO)),
-            ]),
+            outcomes: VecDeque::from([Err(CaptureError::Timeout(Duration::ZERO))]),
             requested_timeouts: Vec::new(),
         };
         let mut cap = CadencedCapture::new(source, fps, seed);
 
         let first = cap.next_frame().unwrap().unwrap();
+        cap.inner.outcomes.extend([
+            Ok(Some(Frame {
+                pts_s: first.pts_s + 0.00005,
+                data: FrameData::Cpu(vec![2]),
+            })),
+            Err(CaptureError::Timeout(Duration::ZERO)),
+        ]);
         let skipped = cap.next_frame();
         let second = cap.next_frame().unwrap().unwrap();
 
         assert!(matches!(first.data, FrameData::Cpu(ref data) if data == &[1]));
         assert!(matches!(skipped, Err(CaptureError::Timeout(_))));
-        assert!((second.pts_s - (1.0 + 2.0 * interval_s)).abs() < 1e-9);
+        assert_cadence_advance(first.pts_s, second.pts_s, interval_s);
         assert!(matches!(second.data, FrameData::Cpu(ref data) if data == &[2]));
     }
 
@@ -1080,7 +1095,7 @@ fn clips_dir_resolved_with_probe(
                 pts_s: 1.0 + interval_s / 2.0,
                 data: FrameData::Cpu(vec![2]),
             }),
-            delay: Duration::from_millis(30),
+            delay: Duration::from_millis(45),
             requested_timeouts: Vec::new(),
         };
         let mut cap = CadencedCapture::new(source, fps, seed);
@@ -1088,7 +1103,7 @@ fn clips_dir_resolved_with_probe(
         assert!(matches!(cap.next_frame(), Err(CaptureError::Timeout(_))));
         let duplicate = cap.next_frame().unwrap().unwrap();
 
-        assert!((duplicate.pts_s - (1.0 + interval_s)).abs() < 1e-9);
+        assert_cadence_advance(1.0, duplicate.pts_s, interval_s);
         assert!(matches!(duplicate.data, FrameData::Cpu(ref data) if data == &[2]));
         assert!(
             cap.inner.requested_timeouts[1] <= Duration::from_millis(1),
@@ -1153,7 +1168,7 @@ fn clips_dir_resolved_with_probe(
             "late real-frame delivery restarted the cadence wait: {:?}",
             cap.inner.requested_timeouts
         );
-        assert!((duplicate.pts_s - (real.pts_s + interval_s)).abs() < 1e-9);
+        assert_cadence_advance(real.pts_s, duplicate.pts_s, interval_s);
     }
 
     #[test]

@@ -190,6 +190,29 @@ impl RuntimeState {
     where
         F: FnOnce(&mut crate::settings::CloudSettings),
     {
+        self.update_cloud_checked_with(None, update, save)
+    }
+
+    pub(crate) fn update_cloud_for_account<F>(
+        &self,
+        account: &crate::settings::CloudSettings,
+        update: F,
+    ) -> Result<AppSettings, String>
+    where
+        F: FnOnce(&mut crate::settings::CloudSettings),
+    {
+        self.update_cloud_checked_with(Some(account), update, AppSettings::save)
+    }
+
+    fn update_cloud_checked_with<F>(
+        &self,
+        account: Option<&crate::settings::CloudSettings>,
+        update: F,
+        save: impl FnOnce(&AppSettings) -> Result<(), String>,
+    ) -> Result<AppSettings, String>
+    where
+        F: FnOnce(&mut crate::settings::CloudSettings),
+    {
         // Serialize cloud settings saves so concurrent uploads preserve their
         // read-modify-write order without holding runtime state during disk I/O.
         let _save_guard = CLOUD_SETTINGS_SAVE_LOCK
@@ -201,12 +224,40 @@ impl RuntimeState {
             .map_err(|_| "runtime state lock poisoned")?
             .settings
             .clone();
+        if let Some(account) = account {
+            Self::require_same_cloud_account(&next.cloud, account)?;
+        }
         update(&mut next.cloud);
         next.cloud.normalize();
         save(&next)?;
         let mut inner = self.0.lock().map_err(|_| "runtime state lock poisoned")?;
         inner.settings.cloud = next.cloud;
         Ok(inner.settings.clone())
+    }
+
+    pub(crate) fn with_cloud_account<T>(
+        &self,
+        account: &crate::settings::CloudSettings,
+        action: impl FnOnce() -> T,
+    ) -> Result<T, String> {
+        // Keep completion side effects (especially local deletion) atomic with
+        // connect/disconnect and settings saves; never hold this across an await.
+        let _guard = Self::lock_cloud_settings_save()?;
+        Self::require_same_cloud_account(&self.settings().cloud, account)?;
+        Ok(action())
+    }
+
+    fn require_same_cloud_account(
+        current: &crate::settings::CloudSettings,
+        expected: &crate::settings::CloudSettings,
+    ) -> Result<(), String> {
+        if current.host_url != expected.host_url
+            || current.connected_user_id != expected.connected_user_id
+            || current.credential_target != expected.credential_target
+        {
+            return Err("cloud account changed while the request was running; the local clip was preserved".into());
+        }
+        Ok(())
     }
 
     pub(crate) fn update_osu<F>(&self, update: F) -> Result<AppSettings, String>
@@ -442,6 +493,44 @@ mod tests {
 
         assert_eq!(error, "disk full");
         assert!(state.settings().cloud.host_url.is_empty());
+    }
+
+    #[test]
+    fn old_account_completion_cannot_mutate_new_account() {
+        let mut settings = AppSettings::default();
+        settings.cloud.host_url = "https://cloud.example".into();
+        settings.cloud.connected_user_id = Some("account-a".into());
+        settings.cloud.credential_target = Some("target-a".into());
+        let old_account = settings.cloud.clone();
+        let state = RuntimeState::new(settings, None);
+        state.update_cloud_with(|cloud| {
+            cloud.connected_user_id = Some("account-b".into());
+            cloud.credential_target = Some("target-b".into());
+            cloud.uploads.clear();
+        }, |_| Ok(())).unwrap();
+        let saved = std::cell::Cell::new(false);
+        let result = state.update_cloud_checked_with(Some(&old_account), |cloud| {
+            cloud.connected_username = Some("old-profile".into());
+            cloud.uploads.insert("old".into(), crate::settings::CloudUploadRecord {
+                local_clip_id: "old".into(), path: "clip.mp4".into(),
+                remote_clip_id: Some("account-a-remote".into()), remote_url: None,
+                visibility: "private".into(), upload_status: "uploaded_private".into(),
+                error: None, updated_at_unix: 1,
+            });
+        }, |_| { saved.set(true); Ok(()) });
+        assert!(result.is_err(), "an obsolete response must be rejected");
+        assert!(!saved.get(), "stale data must never reach settings.json");
+        let current = state.settings().cloud;
+        assert_eq!(current.connected_user_id.as_deref(), Some("account-b"));
+        assert!(current.connected_username.is_none());
+        assert!(current.uploads.is_empty());
+        let acted = std::cell::Cell::new(false);
+        assert!(state.with_cloud_account(&old_account, || acted.set(true)).is_err());
+        assert!(!acted.get(), "old-account completion must not delete a local clip");
+        state.update_cloud_checked_with(Some(&current), |cloud| {
+            cloud.connected_username = Some("current-profile".into());
+        }, |_| Ok(())).unwrap();
+        assert_eq!(state.settings().cloud.connected_username.as_deref(), Some("current-profile"));
     }
 
     #[test]

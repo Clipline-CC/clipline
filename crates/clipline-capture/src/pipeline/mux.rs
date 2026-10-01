@@ -1,12 +1,14 @@
+use clipline_buffer::{DiskSegment, DiskTrackRef, SampleInfo, Segment};
+use clipline_mp4::{
+    AudioTrackConfig, FragSampleRef, HybridMp4Writer, SourceSample, VideoTrackConfig,
+};
 use std::io;
 use std::io::{Seek, Write};
-use clipline_buffer::{DiskSegment, DiskTrackRef, SampleInfo, Segment};
-use clipline_mp4::{AudioTrackConfig, FragSampleRef, HybridMp4Writer, SourceSample, VideoTrackConfig};
 
-
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct SampleSelection {
     pub(crate) first_sample: usize,
+    pub(crate) end_sample: usize,
     pub(crate) first_byte: usize,
     pub(crate) pts_start_s: Option<f64>,
 }
@@ -20,6 +22,7 @@ pub(crate) fn select_audio_after_replay_origin(
     if samples.is_empty() {
         return Ok(SampleSelection {
             first_sample: 0,
+            end_sample: samples.len(),
             first_byte: 0,
             pts_start_s: None,
         });
@@ -27,6 +30,7 @@ pub(crate) fn select_audio_after_replay_origin(
     let Some(mut sample_start_s) = pts_start_s else {
         return Ok(SampleSelection {
             first_sample: 0,
+            end_sample: samples.len(),
             first_byte: 0,
             pts_start_s: None,
         });
@@ -65,35 +69,69 @@ pub(crate) fn select_audio_after_replay_origin(
     }
     Ok(SampleSelection {
         first_sample,
+        end_sample: samples.len(),
         first_byte,
         pts_start_s: (first_sample < samples.len()).then_some(sample_start_s),
     })
 }
 
-pub(crate) fn segment_audio_selections(
-    segment: &Segment,
-    replay_origin_s: Option<f64>,
+fn select_audio_runs(
+    pts_start_s: Option<f64>,
+    samples: &[SampleInfo],
+    discontinuities: &[(usize, f64)],
+    payload_len: usize,
+    origin_s: f64,
 ) -> io::Result<Vec<SampleSelection>> {
-    segment
-        .audio
+    let mut previous = 0;
+    for &(index, pts_s) in discontinuities {
+        if index <= previous || index >= samples.len() || !pts_s.is_finite() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid audio discontinuity",
+            ));
+        }
+        previous = index;
+    }
+    let mut runs = Vec::new();
+    let mut first_sample = 0;
+    let mut first_byte = 0usize;
+    let mut start_s = pts_start_s;
+    for (end_sample, next_start_s) in discontinuities
         .iter()
-        .map(|track| {
-            if let Some(origin_s) = replay_origin_s {
-                select_audio_after_replay_origin(
-                    track.pts_start_s,
-                    &track.samples,
-                    track.data.len(),
-                    origin_s,
-                )
-            } else {
-                Ok(SampleSelection {
-                    first_sample: 0,
-                    first_byte: 0,
-                    pts_start_s: track.pts_start_s,
-                })
-            }
-        })
-        .collect()
+        .copied()
+        .chain(std::iter::once((samples.len(), 0.0)))
+    {
+        let run = &samples[first_sample..end_sample];
+        let run_bytes = run.iter().try_fold(0usize, |total, sample| {
+            total.checked_add(sample.size as usize).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "sample byte range overflow")
+            })
+        })?;
+        let mut selection = select_audio_after_replay_origin(start_s, run, run_bytes, origin_s)?;
+        selection.first_sample += first_sample;
+        selection.end_sample = end_sample;
+        selection.first_byte = selection
+            .first_byte
+            .checked_add(first_byte)
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "sample byte range overflow")
+            })?;
+        if selection.first_sample < end_sample {
+            runs.push(selection);
+        }
+        first_byte = first_byte.checked_add(run_bytes).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "sample byte range overflow")
+        })?;
+        first_sample = end_sample;
+        start_s = Some(next_start_s);
+    }
+    if first_byte > payload_len {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "sample metadata exceeds declared track data",
+        ));
+    }
+    Ok(runs)
 }
 
 pub(crate) fn write_memory_replay_segment<W: Write + Seek>(
@@ -103,24 +141,44 @@ pub(crate) fn write_memory_replay_segment<W: Write + Seek>(
     audio_cfgs: &[AudioTrackConfig],
     timeline_origin_s: f64,
 ) -> io::Result<()> {
-    let audio_selections = segment_audio_selections(segment, Some(timeline_origin_s))?;
-    let timelines = set_segment_decode_times(
-        writer,
-        segment.pts_start_s,
-        &audio_selections,
-        video_cfg,
-        audio_cfgs,
-        timeline_origin_s,
-    )?;
-    let per_track = segment_fragment_refs(
-        segment,
-        &audio_selections,
-        video_cfg,
-        audio_cfgs,
-        &timelines,
-    )?;
-    let slices: Vec<&[FragSampleRef<'_>]> = per_track.iter().map(Vec::as_slice).collect();
-    writer.write_fragment_multi_borrowed(&slices)
+    let audio_runs: Vec<_> = segment
+        .audio
+        .iter()
+        .map(|track| {
+            select_audio_runs(
+                track.pts_start_s,
+                &track.samples,
+                &track.discontinuities,
+                track.data.len(),
+                timeline_origin_s,
+            )
+        })
+        .collect::<io::Result<_>>()?;
+    for run_index in 0..audio_runs.iter().map(Vec::len).max().unwrap_or(0).max(1) {
+        let audio_selections: Vec<_> = audio_runs
+            .iter()
+            .map(|runs| runs.get(run_index).copied().unwrap_or_default())
+            .collect();
+        let timelines = set_segment_decode_times(
+            writer,
+            segment.pts_start_s,
+            &audio_selections,
+            video_cfg,
+            audio_cfgs,
+            timeline_origin_s,
+        )?;
+        let per_track = segment_fragment_refs(
+            segment,
+            &audio_selections,
+            video_cfg,
+            audio_cfgs,
+            &timelines,
+            run_index == 0,
+        )?;
+        let slices: Vec<&[FragSampleRef<'_>]> = per_track.iter().map(Vec::as_slice).collect();
+        writer.write_fragment_multi_borrowed(&slices)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn write_disk_replay_segment<W: Write + Seek>(
@@ -131,65 +189,78 @@ pub(crate) fn write_disk_replay_segment<W: Write + Seek>(
     timeline_origin_s: f64,
 ) -> io::Result<()> {
     let audio_tracks: Vec<_> = segment.audio_tracks().collect();
-    let audio_selections: Vec<_> = audio_tracks
+    let audio_runs: Vec<_> = audio_tracks
         .iter()
         .map(|track| {
-            select_audio_after_replay_origin(
+            select_audio_runs(
                 track.pts_start_s,
                 track.samples,
+                track.discontinuities,
                 track.byte_len,
                 timeline_origin_s,
             )
         })
         .collect::<io::Result<_>>()?;
-    let timelines = set_segment_decode_times(
-        writer,
-        segment.pts_start_s,
-        &audio_selections,
-        video_cfg,
-        audio_cfgs,
-        timeline_origin_s,
-    )?;
-    let video = segment.video_track();
-    let video_timeline = timelines.first().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "video fragment timeline is missing",
-        )
-    })?;
-    let mut per_track = vec![quantized_source_samples(
-        video,
-        SampleSelection {
-            first_sample: 0,
-            first_byte: 0,
-            pts_start_s: video.pts_start_s,
-        },
-        video_cfg.timescale,
-        *video_timeline,
-    )?];
-    for (index, ((track, selection), cfg)) in audio_tracks
-        .iter()
-        .zip(&audio_selections)
-        .zip(audio_cfgs)
-        .enumerate()
-    {
-        let timeline = timelines.get(index + 1).ok_or_else(|| {
+    let mut source = segment.open_payload()?;
+    for run_index in 0..audio_runs.iter().map(Vec::len).max().unwrap_or(0).max(1) {
+        let audio_selections: Vec<_> = audio_runs
+            .iter()
+            .map(|runs| runs.get(run_index).copied().unwrap_or_default())
+            .collect();
+        let timelines = set_segment_decode_times(
+            writer,
+            segment.pts_start_s,
+            &audio_selections,
+            video_cfg,
+            audio_cfgs,
+            timeline_origin_s,
+        )?;
+        let video = segment.video_track();
+        let video_timeline = timelines.first().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                "audio fragment timeline is missing",
+                "video fragment timeline is missing",
             )
         })?;
-        per_track.push(quantized_source_samples(
-            *track,
-            *selection,
-            cfg.sample_rate,
-            *timeline,
-        )?);
+        let mut per_track = vec![if run_index == 0 {
+            quantized_source_samples(
+                video,
+                SampleSelection {
+                    first_sample: 0,
+                    end_sample: video.samples.len(),
+                    first_byte: 0,
+                    pts_start_s: video.pts_start_s,
+                },
+                video_cfg.timescale,
+                *video_timeline,
+            )?
+        } else {
+            Vec::new()
+        }];
+        for (index, ((track, selection), cfg)) in audio_tracks
+            .iter()
+            .zip(&audio_selections)
+            .zip(audio_cfgs)
+            .enumerate()
+        {
+            let timeline = timelines.get(index + 1).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "audio fragment timeline is missing",
+                )
+            })?;
+            per_track.push(quantized_source_samples(
+                *track,
+                *selection,
+                cfg.sample_rate,
+                *timeline,
+            )?);
+        }
+        per_track.resize_with(1 + audio_cfgs.len(), Vec::new);
+        let slices: Vec<&[SourceSample]> = per_track.iter().map(Vec::as_slice).collect();
+        writer.write_fragment_multi_from_source(&mut source, &slices)?;
     }
-    per_track.resize_with(1 + audio_cfgs.len(), Vec::new);
-    let slices: Vec<&[SourceSample]> = per_track.iter().map(Vec::as_slice).collect();
-    let mut source = segment.open_payload()?;
-    writer.write_fragment_multi_from_source(&mut source, &slices)
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -204,6 +275,7 @@ pub(crate) fn segment_fragment_refs<'a>(
     video_cfg: &VideoTrackConfig,
     audio_cfgs: &[AudioTrackConfig],
     timelines: &[FragmentTimeline],
+    include_video: bool,
 ) -> io::Result<Vec<Vec<FragSampleRef<'a>>>> {
     let video_timeline = timelines.first().ok_or_else(|| {
         io::Error::new(
@@ -211,12 +283,16 @@ pub(crate) fn segment_fragment_refs<'a>(
             "video fragment timeline is missing",
         )
     })?;
-    let video = quantized_fragment_refs(
-        seg.sample_slices(),
-        &seg.samples,
-        video_cfg.timescale,
-        *video_timeline,
-    )?;
+    let video = if include_video {
+        quantized_fragment_refs(
+            seg.sample_slices(),
+            &seg.samples,
+            video_cfg.timescale,
+            *video_timeline,
+        )?
+    } else {
+        Vec::new()
+    };
     let mut per_track: Vec<Vec<FragSampleRef<'a>>> = vec![video];
     for (index, (track, cfg)) in seg.audio.iter().zip(audio_cfgs).enumerate() {
         let selection = audio_selections.get(index).ok_or_else(|| {
@@ -225,12 +301,15 @@ pub(crate) fn segment_fragment_refs<'a>(
                 "audio sample selection is missing",
             )
         })?;
-        let samples = track.samples.get(selection.first_sample..).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "audio sample selection exceeds track metadata",
-            )
-        })?;
+        let samples = track
+            .samples
+            .get(selection.first_sample..selection.end_sample)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "audio sample selection exceeds track metadata",
+                )
+            })?;
         let timeline = timelines.get(index + 1).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -282,12 +361,15 @@ fn quantized_source_samples(
             "sample metadata exceeds declared track data",
         ));
     }
-    let samples = track.samples.get(selection.first_sample..).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "sample selection exceeds track metadata",
-        )
-    })?;
+    let samples = track
+        .samples
+        .get(selection.first_sample..selection.end_sample)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "sample selection exceeds track metadata",
+            )
+        })?;
     let durations = quantized_sample_durations(samples, timescale, timeline)?;
     let track_end = track
         .offset

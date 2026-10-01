@@ -55,14 +55,24 @@ pub(crate) fn export_clip_file(
             return Err(e.to_string());
         }
     };
-    let target = unique_export_path(
+    // Keep the reserved final path and its sidecars owned by this job through
+    // publication or rollback, excluding rename/delete/GC and other exports.
+    let _guard = crate::gc::lock_clip_mutations();
+    let target = match unique_export_path(
         &source,
         info.aligned_start_s,
         info.aligned_end_s,
         title.clone(),
-    )?;
+    ) {
+        Ok(target) => target,
+        Err(error) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(error);
+        }
+    };
     if let Err(error) = std::fs::rename(&tmp, &target) {
         let _ = std::fs::remove_file(&tmp);
+        let _ = std::fs::remove_file(&target);
         return Err(error.to_string());
     }
 
@@ -74,7 +84,7 @@ pub(crate) fn export_clip_file(
     ) {
         Ok(markers) => markers,
         Err(error) => {
-            let _ = remove_clip_files(&target, media_root);
+            let _ = remove_clip_files_unlocked(&target, media_root);
             return Err(error);
         }
     };
@@ -85,23 +95,28 @@ pub(crate) fn export_clip_file(
                 .map_err(|e| e.to_string())?;
         }
         write_clip_metadata(
-                &target,
-                &ClipMetadata {
-                    title,
-                    kind: Some("trim".to_string()),
-                    group: group.clone(),
-                    source_group: None,
-                    source_group_fingerprint: None,
-                },
+            &target,
+            &ClipMetadata {
+                title,
+                kind: Some("trim".to_string()),
+                group: group.clone(),
+                source_group: None,
+                source_group_fingerprint: None,
+            },
         )?;
         Ok::<(), String>(())
     })();
     if let Err(error) = sidecars {
-        let _ = remove_clip_files(&target, media_root);
+        let _ = remove_clip_files_unlocked(&target, media_root);
         return Err(error);
     }
-    let meta =
-        std::fs::metadata(&target).map_err(|e| format!("read exported clip metadata: {e}"))?;
+    let meta = match std::fs::metadata(&target) {
+        Ok(meta) => meta,
+        Err(error) => {
+            let _ = remove_clip_files_unlocked(&target, media_root);
+            return Err(format!("read exported clip metadata: {error}"));
+        }
+    };
     let modified_unix = meta
         .modified()
         .ok()
@@ -199,10 +214,9 @@ pub(crate) fn export_markers_for_range(
     end_s: f64,
     include_markers: bool,
 ) -> Result<Option<ClipMarkers>, String> {
-    let Some(mut markers) = util::markers_with_inferred_audio_tracks(
-        source,
-        util::read_markers_checked(source)?,
-    ) else {
+    let Some(mut markers) =
+        util::markers_with_inferred_audio_tracks(source, util::read_markers_checked(source)?)
+    else {
         return Ok(None);
     };
     if include_markers {
@@ -217,6 +231,7 @@ pub(crate) fn export_markers_for_range(
     Ok(has_marker_sidecar_content(&cropped).then_some(cropped))
 }
 
+/// Atomically reserve a pending path before the inner trim can replace it.
 pub(crate) fn unique_temp_export_path(source: &Path) -> Result<PathBuf, String> {
     let parent = source
         .parent()
@@ -228,13 +243,20 @@ pub(crate) fn unique_temp_export_path(source: &Path) -> Result<PathBuf, String> 
     for suffix in 0..1000u32 {
         let name = format!("{stem}_trim_pending_{suffix:03}.mp4.tmp");
         let candidate = parent.join(name);
-        if !candidate.exists() {
-            return Ok(candidate);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(_) => return Ok(candidate),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("reserve temporary export filename: {error}")),
         }
     }
     Err("could not choose an unused temporary export filename".into())
 }
 
+/// Reserve the final destination; only its owner may replace this placeholder.
 pub(crate) fn unique_export_path(
     source: &Path,
     start_s: f64,
@@ -264,8 +286,25 @@ pub(crate) fn unique_export_path(
             format!("{stem}_trim_{start_ms:06}_{end_ms:06}_{suffix}.mp4")
         };
         let candidate = parent.join(name);
-        if !candidate.exists() {
-            return Ok(candidate);
+        // Orphaned sidecars belong to someone else even when the MP4 is absent.
+        if clip_sidecar_paths(&candidate)
+            .iter()
+            .any(|path| path.symlink_metadata().is_ok())
+            || clip_metadata_path(&candidate)
+                .with_extension("clipline.json.tmp")
+                .symlink_metadata()
+                .is_ok()
+        {
+            continue;
+        }
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(_) => return Ok(candidate),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("reserve export filename: {error}")),
         }
     }
     Err("could not choose an unused export filename".into())
@@ -296,8 +335,321 @@ pub(crate) fn export_title_stem(title: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clipline_test_utils::TestDir;
     use clipline_events::{ClipAudioTrack, ClipMarkers, EventKind, PlayerSummary};
+    use clipline_test_utils::TestDir;
+
+    fn video_only_mp4() -> Vec<u8> {
+        use clipline_mp4::{FragSample, HybridMp4Writer, VideoTrackConfig};
+        let mut writer = HybridMp4Writer::new(
+            std::io::Cursor::new(Vec::new()),
+            VideoTrackConfig::h264(
+                128,
+                72,
+                90_000,
+                vec![0x67, 0x64, 0x00, 0x0A, 0xAC],
+                vec![0x68, 0xEE, 0x38, 0x80],
+            ),
+        )
+        .unwrap();
+        let samples: Vec<_> = (0..20)
+            .map(|i| FragSample {
+                data: format!("V{i:05}").into_bytes(),
+                duration: 9_000,
+                is_sync: i % 5 == 0,
+            })
+            .collect();
+        writer.write_fragment(&samples).unwrap();
+        writer.finalize().unwrap().into_inner()
+    }
+
+    #[test]
+    fn bh02_overlapping_pending_exports_preserve_each_range() {
+        let dir = TestDir::new("clipline-library", "bh02-pending");
+        let source = dir.path().join("import.mp4");
+        let input = video_only_mp4();
+        std::fs::write(&source, &input).unwrap();
+        let barrier = std::sync::Barrier::new(2);
+        let (first, second) = std::thread::scope(|scope| {
+            let reserve = || {
+                barrier.wait();
+                unique_temp_export_path(&source).unwrap()
+            };
+            let first = scope.spawn(reserve);
+            let second = scope.spawn(reserve);
+            (first.join().unwrap(), second.join().unwrap())
+        });
+        // Both jobs have chosen their paths before either inner trim publishes.
+        trim_keyframe_aligned_file(&source, &first, 0.0, 0.5).unwrap();
+        trim_keyframe_aligned_file(&source, &second, 0.5, 1.5).unwrap();
+        for (path, start, end) in [(&first, 0.0, 0.5), (&second, 0.5, 1.5)] {
+            let (expected, _) = clipline_mp4::trim_keyframe_aligned(&input, start, end).unwrap();
+            assert!(
+                std::fs::read(path).unwrap() == expected,
+                "job's pending MP4 was overwritten"
+            );
+        }
+        assert_ne!(first, second);
+        assert_eq!(std::fs::read(&source).unwrap(), input);
+    }
+
+    #[test]
+    fn bh02_overlapping_final_names_preserve_each_range() {
+        for title in [None, Some("Highlight".to_string())] {
+            let dir = TestDir::new("clipline-library", "bh02-publication");
+            let source = dir.path().join("import.mp4");
+            let input = video_only_mp4();
+            std::fs::write(&source, &input).unwrap();
+            let first = unique_temp_export_path(&source).unwrap();
+            trim_keyframe_aligned_file(&source, &first, 0.0, 0.5).unwrap();
+            let second = unique_temp_export_path(&source).unwrap();
+            trim_keyframe_aligned_file(&source, &second, 0.5, 1.5).unwrap();
+            let barrier = std::sync::Barrier::new(2);
+            let (first_target, second_target) = std::thread::scope(|scope| {
+                // Equal name inputs exercise both titled and untitled collisions.
+                let choose = || {
+                    barrier.wait();
+                    unique_export_path(&source, 0.0, 0.5, title.clone()).unwrap()
+                };
+                let first = scope.spawn(choose);
+                let second = scope.spawn(choose);
+                (first.join().unwrap(), second.join().unwrap())
+            });
+            std::fs::rename(&first, &first_target).unwrap();
+            std::fs::rename(&second, &second_target).unwrap();
+            assert_ne!(
+                first_target, second_target,
+                "jobs published to the same final path"
+            );
+            for (path, start, end) in [(&first_target, 0.0, 0.5), (&second_target, 0.5, 1.5)] {
+                let (expected, _) =
+                    clipline_mp4::trim_keyframe_aligned(&input, start, end).unwrap();
+                assert_eq!(std::fs::read(path).unwrap(), expected);
+            }
+            assert_eq!(std::fs::read(&source).unwrap(), input);
+        }
+    }
+
+    #[test]
+    fn bh09_marker_and_audio_free_exports_rescan_as_owned_trims() {
+        let dir = TestDir::new("clipline-library", "bh09-trim-identity");
+        let source = dir.path().join("import.mp4");
+        let input = video_only_mp4();
+        std::fs::write(&source, &input).unwrap();
+        for title in [None, Some("Highlight".to_string())] {
+            let exported = export_clip_file(
+                source.clone(),
+                0.0,
+                0.5,
+                title.clone(),
+                false,
+                None,
+                dir.path(),
+            )
+            .unwrap();
+            let path = Path::new(&exported.path);
+            assert!(exported.markers.is_none());
+            assert!(!path.with_extension("markers.json").exists());
+            assert!(clipline_storage::is_clip_owned(path));
+            let scan = list_clips_from_dir(dir.path().to_path_buf()).unwrap();
+            let clip = scan
+                .clips
+                .iter()
+                .find(|clip| clip.path == exported.path)
+                .unwrap();
+            assert_eq!(clip.kind, "trim");
+            assert_eq!(clip.title, title);
+            assert!(clip.group.is_none());
+            clipline_storage::delete_all_managed_media(dir.path()).unwrap();
+            assert!(!path.exists());
+            assert_eq!(std::fs::read(&source).unwrap(), input);
+            assert!(!clipline_storage::is_clip_owned(&source));
+        }
+    }
+
+    #[test]
+    fn bh02_exhausted_final_names_clean_only_the_failed_jobs_pending_file() {
+        let dir = TestDir::new("clipline-library", "bh02-exhaustion");
+        let source = dir.path().join("import.mp4");
+        let input = video_only_mp4();
+        std::fs::write(&source, &input).unwrap();
+        let other = unique_temp_export_path(&source).unwrap();
+        trim_keyframe_aligned_file(&source, &other, 0.5, 1.5).unwrap();
+        let other_bytes = std::fs::read(&other).unwrap();
+        for suffix in 0..1000 {
+            let name = if suffix == 0 {
+                "Highlight.mp4".to_string()
+            } else {
+                format!("Highlight_{suffix}.mp4")
+            };
+            std::fs::write(dir.path().join(name), &input).unwrap();
+        }
+        let error = export_clip_file(
+            source.clone(),
+            0.0,
+            0.5,
+            Some("Highlight".into()),
+            false,
+            None,
+            dir.path(),
+        )
+        .err()
+        .unwrap();
+        assert!(error.contains("export filename"));
+        assert_eq!(std::fs::read(&source).unwrap(), input);
+        assert_eq!(std::fs::read(&other).unwrap(), other_bytes);
+        let pending: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "tmp"))
+            .collect();
+        assert_eq!(pending, [other], "failed export leaked its pending MP4");
+    }
+
+    #[test]
+    fn bh02_concurrent_exports_preserve_video_markers_and_group_metadata() {
+        let dir = TestDir::new("clipline-library", "bh02-complete-exports");
+        let source = dir.path().join("import.mp4");
+        let input = video_only_mp4();
+        std::fs::write(&source, &input).unwrap();
+        let markers = ClipMarkers {
+            recording_start_s: 10.0,
+            duration_s: 2.0,
+            player_summary: None,
+            audio_tracks: Vec::new(),
+            selected_audio_track_ids: None,
+            plays: Vec::new(),
+            markers: vec![marker(0.25), marker(0.75), marker(1.25)],
+            bookmarks: vec![ClipBookmark { t_s: 0.75 }],
+        };
+        std::fs::write(
+            source.with_extension("markers.json"),
+            util::serialize_json_sidecar(&markers).unwrap(),
+        )
+        .unwrap();
+        let barrier = std::sync::Barrier::new(2);
+        let exports = std::thread::scope(|scope| {
+            let jobs: Vec<_> = (0..2)
+                .map(|i| {
+                    let source = &source;
+                    let barrier = &barrier;
+                    let root = dir.path();
+                    scope.spawn(move || {
+                        let group = ClipGroup {
+                            name: "Highlights".into(),
+                            order: i,
+                        };
+                        barrier.wait();
+                        export_clip_file(
+                            source.clone(),
+                            i as f64 * 0.5,
+                            0.5 + i as f64,
+                            Some("Highlight".into()),
+                            true,
+                            Some(group),
+                            root,
+                        )
+                        .unwrap()
+                    })
+                })
+                .collect();
+            jobs.into_iter()
+                .map(|job| job.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_ne!(exports[0].path, exports[1].path);
+        for (i, exported) in exports.iter().enumerate() {
+            let path = Path::new(&exported.path);
+            let (expected, info) =
+                clipline_mp4::trim_keyframe_aligned(&input, i as f64 * 0.5, 0.5 + i as f64)
+                    .unwrap();
+            assert_eq!(std::fs::read(path).unwrap(), expected);
+            assert_eq!(exported.aligned_start_s, info.aligned_start_s);
+            assert_eq!(exported.duration_s, info.duration_s);
+            let metadata = read_clip_metadata(path).unwrap();
+            assert_eq!(metadata.kind.as_deref(), Some("trim"));
+            assert_eq!(metadata.title.as_deref(), Some("Highlight"));
+            assert_eq!(metadata.group, exported.group);
+            assert_eq!(metadata.group.unwrap().order, i as u32);
+            assert_eq!(
+                serde_json::to_value(util::read_markers_checked(path).unwrap().unwrap()).unwrap(),
+                serde_json::to_value(crop_markers(
+                    &markers,
+                    info.aligned_start_s,
+                    info.aligned_end_s
+                ))
+                .unwrap()
+            );
+        }
+        assert_eq!(std::fs::read(&source).unwrap(), input);
+        assert!(!clipline_storage::is_clip_owned(&source));
+        assert!(std::fs::read_dir(dir.path()).unwrap().all(|entry| entry
+            .unwrap()
+            .path()
+            .extension()
+            .is_none_or(|ext| ext != "tmp")));
+    }
+
+    #[test]
+    fn bh02_failed_export_preserves_existing_clip_and_orphan_sidecars() {
+        let dir = TestDir::new("clipline-library", "bh02-rollback");
+        let source = dir.path().join("import.mp4");
+        let input = video_only_mp4();
+        std::fs::write(&source, &input).unwrap();
+        let orphan = dir.path().join("Highlight.mp4");
+        for path in clip_sidecar_paths(&orphan) {
+            std::fs::write(path, b"unowned sidecar").unwrap();
+        }
+        let exported = export_clip_file(
+            source.clone(),
+            0.0,
+            0.5,
+            Some("Highlight".into()),
+            false,
+            None,
+            dir.path(),
+        )
+        .unwrap();
+        assert_eq!(exported.name, "Highlight_1.mp4");
+        let exported_bytes = std::fs::read(&exported.path).unwrap();
+        let exported_metadata =
+            std::fs::read(clip_metadata_path(Path::new(&exported.path))).unwrap();
+        std::fs::write(
+            source.with_extension("markers.json"),
+            b"invalid source markers",
+        )
+        .unwrap();
+        let error = export_clip_file(
+            source.clone(),
+            0.5,
+            1.5,
+            Some("Highlight".into()),
+            false,
+            None,
+            dir.path(),
+        )
+        .err()
+        .unwrap();
+        assert!(error.contains("parse sidecar"));
+        assert_eq!(std::fs::read(&exported.path).unwrap(), exported_bytes);
+        assert_eq!(
+            std::fs::read(clip_metadata_path(Path::new(&exported.path))).unwrap(),
+            exported_metadata
+        );
+        assert_eq!(std::fs::read(&source).unwrap(), input);
+        assert_eq!(
+            std::fs::read(source.with_extension("markers.json")).unwrap(),
+            b"invalid source markers"
+        );
+        assert!(!dir.path().join("Highlight_2.mp4").exists());
+        for path in clip_sidecar_paths(&orphan) {
+            assert_eq!(std::fs::read(path).unwrap(), b"unowned sidecar");
+        }
+        assert!(std::fs::read_dir(dir.path()).unwrap().all(|entry| entry
+            .unwrap()
+            .path()
+            .extension()
+            .is_none_or(|ext| ext != "tmp")));
+    }
 
     #[test]
     fn security_scan_ungrouped_exports_are_managed_and_imports_are_preserved() {

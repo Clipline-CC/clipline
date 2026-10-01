@@ -425,11 +425,17 @@ impl<C: CaptureEngine, E: Encoder> Recorder<C, E> {
             });
             let mut track = TrackSamples {
                 pts_start_s: None,
+                discontinuities: Vec::new(),
                 data: Vec::with_capacity(selected_bytes),
                 samples: Vec::with_capacity(split),
             };
+            let mut next_pts_s: Option<f64> = None;
             for p in pending.drain(..split) {
                 track.pts_start_s.get_or_insert(p.pts_s);
+                if next_pts_s.is_some_and(|next| (p.pts_s - next).abs() > 1e-9) {
+                    track.discontinuities.push((track.samples.len(), p.pts_s));
+                }
+                next_pts_s = Some(p.pts_s + p.duration_s);
                 track.samples.push(SampleInfo {
                     size: p.data.len() as u32,
                     duration_s: p.duration_s,

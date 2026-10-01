@@ -30,8 +30,18 @@ pub async fn list_clips<R: Runtime>(
 }
 
 pub(crate) fn list_clips_from_dir(dir: PathBuf) -> Result<LocalClipScan, String> {
-    groups::recover_group_order_transaction(&dir)?;
-    list_clips_from_dir_with_child_reader(dir, push_clips_from)
+    list_clips_from_dir_with_recovery(dir, push_clips_from)
+}
+
+fn list_clips_from_dir_with_recovery(
+    dir: PathBuf,
+    read_child: impl FnMut(&Path, Option<String>, &mut Vec<ClipInfo>) -> Result<(), String>,
+) -> Result<LocalClipScan, String> {
+    // Match export publication so reservations and partial sidecars stay hidden.
+    // ponytail: scans hold the global mutation lock; use per-library locks if scans delay saves.
+    let _guard = crate::gc::lock_clip_mutations();
+    groups::recover_group_order_transaction_unlocked(&dir)?;
+    list_clips_from_dir_with_child_reader(dir, read_child)
 }
 
 pub(crate) fn list_clips_from_dir_with_child_reader(
@@ -163,6 +173,117 @@ mod tests {
     use super::*;
     use clipline_test_utils::TestDir;
     use clipline_events::ClipMarkers;
+
+    #[test]
+    fn library_scan_excludes_in_progress_export_reservations() {
+        use std::sync::mpsc;
+
+        for publish in [true, false] {
+            let dir = TestDir::new("clipline-library", "scan-export-reservation");
+            let session = dir.path().join("session");
+            std::fs::create_dir(&session).unwrap();
+            let source = session.join("import.mp4");
+            let input = two_real_opus_audio_mp4();
+            std::fs::write(&source, &input).unwrap();
+            let pending = unique_temp_export_path(&source).unwrap();
+            let info = trim_keyframe_aligned_file(&source, &pending, 0.0, 0.5).unwrap();
+            let expected = std::fs::read(&pending).unwrap();
+            let (scanning_tx, scanning_rx) = mpsc::channel();
+            let (resume_scan_tx, resume_scan_rx) = mpsc::channel();
+            let (attempting_tx, attempting_rx) = mpsc::channel();
+            let (reserved_tx, reserved_rx) = mpsc::channel();
+            let (finish_tx, finish_rx) = mpsc::channel();
+
+            let (scan, reserved_during_scan, target) = std::thread::scope(|scope| {
+                let root = dir.path();
+                let scan = scope.spawn(move || {
+                    list_clips_from_dir_with_recovery(root.to_path_buf(), |path, session, clips| {
+                        // Recovery has completed; stop before enumerating this
+                        // session so an export can try to reserve its final MP4.
+                        scanning_tx.send(()).unwrap();
+                        resume_scan_rx.recv().unwrap();
+                        push_clips_from(path, session, clips)
+                    })
+                    .unwrap()
+                });
+                scanning_rx.recv().unwrap();
+                let source = &source;
+                let pending = &pending;
+                let export = scope.spawn(move || {
+                    attempting_tx.send(()).unwrap();
+                    let _guard = crate::gc::lock_clip_mutations();
+                    let target = unique_export_path(
+                        source,
+                        info.aligned_start_s,
+                        info.aligned_end_s,
+                        Some("Highlight".into()),
+                    )
+                    .unwrap();
+                    assert_eq!(std::fs::metadata(&target).unwrap().len(), 0);
+                    reserved_tx.send(()).unwrap();
+                    finish_rx.recv().unwrap();
+                    if publish {
+                        std::fs::rename(pending, &target).unwrap();
+                        write_clip_metadata(
+                            &target,
+                            &ClipMetadata {
+                                title: Some("Highlight".into()),
+                                kind: Some("trim".into()),
+                                group: Some(ClipGroup {
+                                    name: "Highlights".into(),
+                                    order: 0,
+                                }),
+                                ..ClipMetadata::default()
+                            },
+                        )
+                        .unwrap();
+                    } else {
+                        remove_clip_files_unlocked(&target, root).unwrap();
+                        std::fs::remove_file(pending).unwrap();
+                    }
+                    target
+                });
+                attempting_rx.recv().unwrap();
+                let reserved_during_scan =
+                    reserved_rx.recv_timeout(Duration::from_millis(200)).is_ok();
+                resume_scan_tx.send(()).unwrap();
+                let scan = scan.join().unwrap();
+                finish_tx.send(()).unwrap();
+                (scan, reserved_during_scan, export.join().unwrap())
+            });
+
+            assert!(
+                !scan.clips.iter().any(|clip| clip.size_mb == 0.0),
+                "Library exposed the export's zero-byte final reservation"
+            );
+            assert!(
+                !reserved_during_scan,
+                "export publication overlapped Library enumeration"
+            );
+            assert_eq!(scan.clips.len(), 1);
+            assert_eq!(Path::new(&scan.clips[0].path), source.as_path());
+            let completed = list_clips_from_dir(dir.path().to_path_buf()).unwrap();
+            assert_eq!(completed.clips.len(), if publish { 2 } else { 1 });
+            if publish {
+                let clip = completed
+                    .clips
+                    .iter()
+                    .find(|clip| Path::new(&clip.path) == target)
+                    .unwrap();
+                assert_eq!(std::fs::read(&target).unwrap(), expected);
+                assert_eq!(clip.title.as_deref(), Some("Highlight"));
+                assert_eq!(clip.kind, "trim");
+                assert_eq!(clip.group.as_ref().unwrap().name, "Highlights");
+                assert!(clipline_storage::is_clip_owned(&target));
+            } else {
+                assert!(!target.exists());
+            }
+            assert_eq!(std::fs::read(&source).unwrap(), input);
+            assert!(!clipline_storage::is_clip_owned(&source));
+            assert!(!pending.exists());
+        }
+    }
+
         #[test]
         fn list_clips_uses_marker_duration_without_parsing_mp4() {
             let dir = TestDir::new("clipline-library", "list-marker-duration");

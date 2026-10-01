@@ -26,6 +26,7 @@ pub(crate) fn clip_sidecar_paths(
         .map(|suffix| clipline_storage::clip_sidecar_path(target, suffix))
 }
 
+#[cfg(test)]
 pub(crate) fn remove_clip_files(target: &Path, media_root: &Path) -> Result<(), String> {
     let _guard = crate::gc::lock_clip_mutations();
     remove_clip_files_unlocked(target, media_root)

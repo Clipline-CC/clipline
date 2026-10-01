@@ -283,6 +283,7 @@ function cloudAccountKey() {
 }
 
 function resetCloudClipsCache() {
+  if (deckStatusAccountKey && deckStatusAccountKey !== cloudAccountKey()) setDeckStatus("");
   cloudClipsRequestGate.invalidate();
   cloudClipsCache = [];
   cloudClipsLoaded = false;
@@ -543,6 +544,7 @@ function applyCloudClipSyncResult(
 
 async function syncCloudClipStatus(clip) {
   if (!clip || !cloudConnected()) return;
+  const accountKey = cloudAccountKey();
   const record = clipCloudRecord(clip);
   if (!record || !record.remote_clip_id) return;
   const expectedRecord = record;
@@ -550,6 +552,7 @@ async function syncCloudClipStatus(clip) {
   const expectedUpdatedAtUnix = record.updated_at_unix || 0;
   try {
     const result = await invoke("sync_cloud_clip_status", { request: { path: clip.path } });
+    if (accountKey !== cloudAccountKey()) return;
     applyCloudClipSyncResult(result, { expectedRecord, expectedLocalClipId, expectedUpdatedAtUnix });
   } catch (_) {
     // Keep the last known cloud state if the status check is unavailable.
@@ -726,11 +729,13 @@ async function uploadClipToCloud(clip, request = {}) {
     syncUploadClipButton();
     return;
   }
-  setDeckStatus("uploading to cloud...");
+  const accountKey = cloudAccountKey();
+  setDeckStatus("uploading to cloud...", { accountKey });
   setNotice("cloud upload started", { transient: true });
   $("error").textContent = "";
   try {
     await flushAudioSelectionSave(clip.path);
+    if (accountKey !== cloudAccountKey()) return;
     const result = await invoke("upload_clip_to_cloud", {
       request: {
         path: clip.path,
@@ -740,6 +745,7 @@ async function uploadClipToCloud(clip, request = {}) {
         audioTrackIds: request.audioTrackIds || null,
       },
     });
+    if (accountKey !== cloudAccountKey()) return;
     if (result && result.record) {
       upsertCloudUploadRecord(result.record);
       if (result.record.upload_status === "uploaded_private") {
@@ -754,7 +760,7 @@ async function uploadClipToCloud(clip, request = {}) {
         setDeckStatus("");
         $("error").textContent = result.record.error || "cloud upload failed";
       } else {
-        setDeckStatus("cloud upload processing");
+        setDeckStatus("cloud upload processing", { accountKey });
       }
     }
     const uploadStatus = result?.record?.upload_status || "";
@@ -771,6 +777,7 @@ async function uploadClipToCloud(clip, request = {}) {
         console.warn("cloud link could not be copied:", error);
       }
     }
+    if (accountKey !== cloudAccountKey()) return;
     const completionParts = ["cloud upload finished"];
     if (linkCopied) completionParts.push("link copied");
     if (clipboardNotice) completionParts.push(clipboardNotice);
@@ -780,7 +787,9 @@ async function uploadClipToCloud(clip, request = {}) {
       && currentClip
       && PlayerCore.sameClipPath(currentClip.path, clip.path);
     const refreshCompleted = await refresh();
+    if (accountKey !== cloudAccountKey()) return;
     finishPostRefreshFeedback(refreshCompleted, {
+      accountKey,
       error: result?.record?.error || "",
       notice: uploadStatus === "uploaded_processing"
         ? "cloud upload processing"
@@ -795,6 +804,7 @@ async function uploadClipToCloud(clip, request = {}) {
     }
     loadCloudClips({ force: true });
   } catch (e) {
+    if (accountKey !== cloudAccountKey()) return;
     setDeckStatus("");
     $("error").textContent = String(e);
     renderClips();

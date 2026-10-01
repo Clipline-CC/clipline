@@ -1,7 +1,11 @@
 //! Local upload-record lookup, replacement, and post-upload cleanup.
 use super::*;
 
-pub(crate) fn existing_retry_status(cloud: &CloudSettings, local_clip_id: &str, path: &str) -> String {
+pub(crate) fn existing_retry_status(
+    cloud: &CloudSettings,
+    local_clip_id: &str,
+    path: &str,
+) -> String {
     let existing = cloud.uploads.get(local_clip_id).or_else(|| {
         cloud
             .uploads
@@ -63,7 +67,10 @@ pub(crate) fn existing_uploaded_record(
         .cloned()
 }
 
-pub(crate) fn cloud_record_for_path(cloud: &CloudSettings, path: &str) -> Option<CloudUploadRecord> {
+pub(crate) fn cloud_record_for_path(
+    cloud: &CloudSettings,
+    path: &str,
+) -> Option<CloudUploadRecord> {
     cloud
         .uploads
         .values()
@@ -85,17 +92,58 @@ pub(crate) fn remove_upload_record(cloud: &mut CloudSettings, record: &CloudUplo
     });
 }
 
-pub(crate) fn persist_record(state: &RuntimeState, record: &CloudUploadRecord) -> Result<(), String> {
-    state.update_cloud(|cloud| {
+pub(crate) fn persist_record(
+    state: &RuntimeState,
+    account: &CloudSettings,
+    record: &CloudUploadRecord,
+) -> Result<(), String> {
+    state.update_cloud_for_account(account, |cloud| {
         replace_upload_record(cloud, record.clone());
     })?;
     Ok(())
 }
 
-pub(crate) fn delete_uploaded_local_files(target: &Path, media_root: &Path) -> std::io::Result<()> {
+pub(crate) fn reconcile_upload_record(
+    cloud: &mut CloudSettings,
+    expected: &CloudUploadRecord,
+    updated: Option<&CloudUploadRecord>,
+) {
+    if cloud.uploads.get(&expected.local_clip_id) != Some(expected) {
+        return; // A retry or newer sync superseded this response.
+    }
+    if let Some(updated) = updated {
+        replace_upload_record(cloud, updated.clone());
+    } else {
+        remove_upload_record(cloud, expected);
+    }
+}
+
+pub(crate) fn persist_record_sync(
+    state: &RuntimeState,
+    account: &CloudSettings,
+    expected: &CloudUploadRecord,
+    updated: Option<&CloudUploadRecord>,
+) -> Result<Option<CloudUploadRecord>, String> {
+    let settings = state.update_cloud_for_account(account, |cloud| {
+        reconcile_upload_record(cloud, expected, updated);
+    })?;
+    Ok(cloud_record_for_path(&settings.cloud, &expected.path))
+}
+
+pub(crate) fn delete_uploaded_local_files(
+    target: &Path,
+    media_root: &Path,
+    source_lease: Option<crate::cloud_upload::UploadSourceLease>,
+) -> std::io::Result<()> {
     crate::library::groups::recover_group_order_transaction(media_root)
         .map_err(std::io::Error::other)?;
     let _guard = crate::gc::lock_clip_mutations();
+    // Release only this command's protection, after remote verification, while
+    // GC and other mutations are excluded. Another upload still vetoes deletion.
+    drop(source_lease);
+    if let Some(error) = crate::cloud_upload::active_upload_source_error(target) {
+        return Err(std::io::Error::other(error));
+    }
     std::fs::remove_file(target).map_err(|error| {
         std::io::Error::new(
             error.kind(),
@@ -131,6 +179,23 @@ pub(crate) fn delete_uploaded_local_files(target: &Path, media_root: &Path) -> s
 mod tests {
     use super::*;
     use clipline_test_utils::TestDir;
+
+    #[test]
+    fn obsolete_status_reconciliation_preserves_successful_retry() {
+        let mut original = upload_record("local", "clip.mp4", "failed", 10);
+        original.remote_clip_id = Some("old-remote".into());
+        let mut retry = original.clone();
+        retry.remote_clip_id = Some("new-remote".into());
+        retry.upload_status = "uploaded_private".into();
+        let mut cloud = CloudSettings::default();
+        replace_upload_record(&mut cloud, retry.clone());
+        reconcile_upload_record(&mut cloud, &original, Some(&original));
+        assert_eq!(cloud.uploads.get("local"), Some(&retry));
+        reconcile_upload_record(&mut cloud, &original, None);
+        assert_eq!(cloud.uploads.get("local"), Some(&retry));
+        reconcile_upload_record(&mut cloud, &retry, None);
+        assert!(cloud.uploads.is_empty());
+    }
 
     #[test]
     fn upload_record_supersedes_older_record_for_same_path() {
@@ -253,7 +318,7 @@ mod tests {
         std::fs::write(&pending_osu, b"{}").unwrap();
         std::fs::write(&poster, b"jpg").unwrap();
 
-        delete_uploaded_local_files(&clip, &dir).unwrap();
+        delete_uploaded_local_files(&clip, &dir, None).unwrap();
 
         assert!(!clip.exists());
         assert!(!markers.exists());
@@ -274,7 +339,7 @@ mod tests {
         std::fs::write(clip.with_extension("clipline.json"), b"{}").unwrap();
         std::fs::write(session.join("clipline-session.json"), b"{}").unwrap();
 
-        delete_uploaded_local_files(&clip, &media).unwrap();
+        delete_uploaded_local_files(&clip, &media, None).unwrap();
 
         assert!(!clip.exists());
         assert!(
@@ -292,11 +357,25 @@ mod tests {
         std::fs::create_dir(&clip).unwrap();
         std::fs::write(&markers, b"{}").unwrap();
 
-        delete_uploaded_local_files(&clip, dir.path())
+        delete_uploaded_local_files(&clip, dir.path(), None)
             .expect_err("a directory is not a removable MP4 file");
 
         assert!(clip.exists());
         assert!(markers.exists());
+    }
+
+    #[test]
+    fn verified_upload_cleanup_releases_only_its_own_original_lease() {
+        let dir = TestDir::new("clipline-cloud", "delete-upload-leases");
+        let clip = dir.path().join("clip.mp4");
+        std::fs::write(&clip, b"original").unwrap();
+        let first = crate::cloud_upload::UploadSourceLease::acquire(&clip).unwrap();
+        let second = crate::cloud_upload::UploadSourceLease::acquire(&clip).unwrap();
+        let error = delete_uploaded_local_files(&clip, dir.path(), Some(first)).unwrap_err();
+        assert!(error.to_string().contains("uploading"));
+        assert_eq!(std::fs::read(&clip).unwrap(), b"original");
+        delete_uploaded_local_files(&clip, dir.path(), Some(second)).unwrap();
+        assert!(!clip.exists());
     }
 
     #[test]
@@ -307,12 +386,11 @@ mod tests {
         std::fs::write(&clip, b"mp4").unwrap();
         std::fs::create_dir(&markers).unwrap();
 
-        let error = delete_uploaded_local_files(&clip, dir.path())
+        let error = delete_uploaded_local_files(&clip, dir.path(), None)
             .expect_err("sidecar directory must fail");
 
         assert!(!clip.exists(), "primary deletion happens before sidecars");
         assert!(markers.exists());
         assert!(error.to_string().contains("sidecar"), "{error}");
     }
-
 }

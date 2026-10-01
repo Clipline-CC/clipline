@@ -259,7 +259,11 @@ fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
 }
 
 pub fn write_pending_for_saved_clip(saved: &OsuSavedClip) -> Result<Option<PathBuf>, String> {
-    if !saved.full_session || !clip_session_is_osu(&saved.path) {
+    let _guard = crate::gc::lock_clip_mutations();
+    if !saved.full_session
+        || !regular_unlinked_file(&saved.path)
+        || !clip_session_is_osu(&saved.path)
+    {
         return Ok(None);
     }
     let end = saved.recording_end_unix.unwrap_or_else(unix_now_i64);
@@ -278,19 +282,16 @@ pub fn write_pending_for_saved_clip(saved: &OsuSavedClip) -> Result<Option<PathB
         message: None,
     };
     let path = pending_path(&saved.path);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("create osu! enrichment sidecar dir {parent:?}: {e}"))?;
-    }
     write_json_atomically(&path, &record, "osu! enrichment sidecar")?;
     let title_plays = map_title_events_to_clip_plays(&record);
     if !title_plays.is_empty() {
-        write_plays_sidecar(&saved.path, &record, title_plays)?;
+        write_plays_sidecar_unlocked(&saved.path, &record, title_plays)?;
     }
     Ok(Some(path))
 }
 
 pub fn discover_pending(media_root: &Path) -> Result<Vec<DiscoveredPendingEnrichment>, String> {
+    let _guard = crate::gc::lock_clip_mutations();
     crate::settings::persistence::require_local_path(media_root)?;
     if path_is_link_or_reparse(media_root)? {
         return Err(format!(
@@ -324,6 +325,28 @@ pub fn discover_pending(media_root: &Path) -> Result<Vec<DiscoveredPendingEnrich
     Ok(out)
 }
 
+fn regular_unlinked_file(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .is_ok_and(|metadata| metadata.is_file() && !metadata_is_link_or_reparse(&metadata))
+}
+
+/// Caller holds the clip mutation lock. Use only discovery-bound paths, including
+/// when a configured root alias or the serialized path no longer exists.
+fn pending_is_current(pending: &DiscoveredPendingEnrichment) -> Result<bool, String> {
+    for path in [&pending.clip_path, &pending.sidecar_path] {
+        if !regular_unlinked_file(path)
+            || !path.canonicalize().is_ok_and(|canonical| {
+                crate::settings::validation::same_or_nested_path(&canonical, path)
+                    && crate::settings::validation::same_or_nested_path(path, &canonical)
+            })
+        {
+            return Ok(false);
+        }
+    }
+    let current: Option<OsuPendingEnrichment> = crate::util::read_json_sidecar(&pending.sidecar_path)?;
+    Ok(current.as_ref() == Some(&pending.record))
+}
+
 pub fn apply_scores_to_pending(
     pending: &DiscoveredPendingEnrichment,
     scores: &[OsuProxyScore],
@@ -338,7 +361,14 @@ pub fn apply_scores_to_pending(
         )?;
         return Ok(mapped);
     }
-    write_plays_sidecar(&pending.clip_path, &pending.record, mapped.plays.clone())?;
+    let _guard = crate::gc::lock_clip_mutations();
+    if !pending_is_current(pending)? {
+        return Ok(OsuMappedPlays {
+            plays: Vec::new(),
+            pagination_ceiling_reached,
+        });
+    }
+    write_plays_sidecar_unlocked(&pending.clip_path, &pending.record, mapped.plays.clone())?;
     if let Err(e) = std::fs::remove_file(&pending.sidecar_path) {
         if e.kind() != std::io::ErrorKind::NotFound {
             return Err(format!(
@@ -354,6 +384,10 @@ pub fn mark_pending_retry(
     pending: &DiscoveredPendingEnrichment,
     message: &str,
 ) -> Result<(), String> {
+    let _guard = crate::gc::lock_clip_mutations();
+    if !pending_is_current(pending)? {
+        return Ok(());
+    }
     let mut next = pending.record.clone();
     next.status = OsuEnrichmentStatus::Pending;
     next.attempts = next.attempts.saturating_add(1);
@@ -369,6 +403,10 @@ pub fn mark_pending_failed(
     pending: &DiscoveredPendingEnrichment,
     message: &str,
 ) -> Result<(), String> {
+    let _guard = crate::gc::lock_clip_mutations();
+    if !pending_is_current(pending)? {
+        return Ok(());
+    }
     let mut next = pending.record.clone();
     next.status = OsuEnrichmentStatus::Failed;
     next.attempts = next.attempts.saturating_add(1);
@@ -380,12 +418,12 @@ pub fn mark_pending_failed(
     )
 }
 
-fn write_plays_sidecar(
+/// Caller holds the clip mutation lock and has validated the source/pending job.
+fn write_plays_sidecar_unlocked(
     clip_path: &Path,
     pending: &OsuPendingEnrichment,
     plays: Vec<ClipPlay>,
 ) -> Result<(), String> {
-    let _guard = crate::gc::lock_clip_mutations();
     let mut markers = crate::util::read_markers_checked(clip_path)?.unwrap_or(ClipMarkers {
         bookmarks: Vec::new(),
         recording_start_s: 0.0,
@@ -402,10 +440,6 @@ fn write_plays_sidecar(
     markers.plays = plays;
 
     let path = clip_path.with_extension("markers.json");
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("create marker sidecar dir {parent:?}: {e}"))?;
-    }
     write_json_atomically(&path, &markers, "osu! marker sidecar")
 }
 
@@ -877,3 +911,128 @@ fn unix_to_rfc3339(value: i64) -> String {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod mutation_tests {
+    use super::*;
+    use clipline_test_utils::TestDir;
+
+    fn create_directory_alias(alias: &Path, target: &Path) {
+        #[cfg(windows)]
+        {
+            let output = std::process::Command::new("cmd")
+                .args(["/c", "mklink", "/J"])
+                .arg(alias)
+                .arg(target)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, alias).unwrap();
+    }
+
+    fn remove_directory_alias(alias: &Path) {
+        #[cfg(windows)]
+        std::fs::remove_dir(alias).unwrap();
+        #[cfg(unix)]
+        std::fs::remove_file(alias).unwrap();
+    }
+
+    fn saved_clip(session: &Path) -> OsuSavedClip {
+        std::fs::create_dir_all(session).unwrap();
+        std::fs::write(session.join(SESSION_META_FILE), br#"{"id":"osu"}"#).unwrap();
+        let path = session.join("session.mp4");
+        std::fs::write(&path, b"mp4").unwrap();
+        OsuSavedClip {
+            path,
+            seconds: 30.0,
+            full_session: true,
+            recording_start_unix: Some(100),
+            recording_end_unix: Some(130),
+            title_events: Vec::new(),
+        }
+    }
+
+    fn scores() -> Vec<OsuProxyScore> {
+        vec![serde_json::from_value(serde_json::json!({
+            "id": "score", "title": "Blue Zenith", "artist": "xi",
+            "difficulty": "Hard", "passed": true,
+            "started_at_unix": 101, "ended_at_unix": 120
+        }))
+        .unwrap()]
+    }
+
+    #[test]
+    fn current_worker_finishes_using_bound_paths_after_root_alias_disappears() {
+        let dir = TestDir::new("clipline-osu", "worker-root-alias");
+        let target = dir.path().join("target");
+        let alias = dir.path().join("alias");
+        std::fs::create_dir(&target).unwrap();
+        create_directory_alias(&alias, &target);
+        let root = alias.join("media");
+        let saved = saved_clip(&root.join("session"));
+        write_pending_for_saved_clip(&saved).unwrap().unwrap();
+        let job = discover_pending(&root).unwrap().remove(0);
+        remove_directory_alias(&alias);
+
+        let mapped = apply_scores_to_pending(&job, &scores(), false).unwrap();
+
+        assert_eq!(mapped.plays.len(), 1);
+        assert!(!job.sidecar_path.exists());
+        let markers = crate::util::read_markers_checked(&job.clip_path)
+            .unwrap()
+            .unwrap();
+        assert_eq!(markers.plays, mapped.plays);
+        assert!(discover_pending(&target.join("media")).unwrap().is_empty());
+        mark_pending_retry(&job, "old retry").unwrap();
+        mark_pending_failed(&job, "old failure").unwrap();
+        assert!(
+            !job.sidecar_path.exists(),
+            "completed jobs must stay finished"
+        );
+    }
+
+    #[test]
+    fn stale_worker_rejects_redirected_session_directory() {
+        let dir = TestDir::new("clipline-osu", "worker-linked-session");
+        let root = dir.path().join("media");
+        let session = root.join("session");
+        let saved = saved_clip(&session);
+        write_pending_for_saved_clip(&saved).unwrap().unwrap();
+        let job = discover_pending(&root).unwrap().remove(0);
+        let moved = dir.path().join("moved-session");
+        {
+            let _guard = crate::gc::lock_clip_mutations();
+            std::fs::rename(&session, &moved).unwrap();
+            create_directory_alias(&session, &moved);
+        }
+        let path = moved.join("session.mp4");
+        let before = std::fs::read(pending_path(&path)).unwrap();
+        let result = apply_scores_to_pending(&job, &scores(), false);
+        let retry = mark_pending_retry(&job, "old retry");
+        let failure = mark_pending_failed(&job, "old failure");
+        // Remove the junction before temporary-directory cleanup or assertions.
+        remove_directory_alias(&session);
+
+        assert!(result.unwrap().plays.is_empty());
+        retry.unwrap();
+        failure.unwrap();
+        assert_eq!(std::fs::read(pending_path(&path)).unwrap(), before);
+        assert!(!path.with_extension("markers.json").exists());
+    }
+
+    #[test]
+    fn delayed_save_event_does_not_queue_a_deleted_source() {
+        let dir = TestDir::new("clipline-osu", "queue-deleted-source");
+        let saved = saved_clip(&dir.path().join("session"));
+        std::fs::remove_file(&saved.path).unwrap();
+
+        assert!(write_pending_for_saved_clip(&saved).unwrap().is_none());
+        assert!(!pending_path(&saved.path).exists());
+    }
+}

@@ -56,6 +56,7 @@ pub struct CloudUserProfile {
 
 #[derive(Debug, Serialize, Clone)]
 pub struct CloudUploadProgressEvent {
+    pub account_key: String,
     pub local_clip_id: String,
     pub path: String,
     pub upload_status: String,
@@ -186,6 +187,7 @@ mod tests {
     #[test]
     fn upload_progress_omits_absent_share_url() {
         let event = CloudUploadProgressEvent {
+            account_key: "host|user|credential".into(),
             local_clip_id: "local-1".into(),
             path: "D:\\Videos\\clip.mp4".into(),
             upload_status: "processing".into(),
@@ -215,5 +217,4 @@ mod tests {
         let value = serde_json::to_value(result).unwrap();
         assert_eq!(value["local_deleted"], true);
     }
-
 }

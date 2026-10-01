@@ -94,6 +94,29 @@ pub(crate) fn should_reconcile_native_window_event(event: &WindowEvent) -> bool 
     matches!(event, WindowEvent::Focused(_) | WindowEvent::Resized(_))
 }
 
+impl RuntimeState {
+    pub(crate) fn accept_service_media_root(
+        &self,
+        generation: u64,
+        event: &Event,
+        publish: impl FnOnce(PathBuf),
+    ) -> bool {
+        let Event::MediaRootResolved { path, .. } = event else {
+            return false;
+        };
+        let Ok(inner) = self.0.lock() else {
+            return false;
+        };
+        if inner.recording_generation != generation || inner.tx.is_none() {
+            return false;
+        }
+        // Keep runtime ownership through publication: a replacement must not
+        // install its sender between this check and the library root update.
+        publish(PathBuf::from(path));
+        true
+    }
+}
+
 pub(crate) fn pump_events<R: Runtime>(handle: AppHandle<R>, event_rx: Receiver<Event>, generation: u64) {
     std::thread::spawn(move || {
         for event in event_rx {
@@ -107,11 +130,18 @@ pub(crate) fn pump_events<R: Runtime>(handle: AppHandle<R>, event_rx: Receiver<E
             } else {
                 handle.state::<RuntimeState>().observe_runtime_event(&event);
             }
-            if let Event::MediaRootResolved { path, .. } = &event {
-                let media_root = PathBuf::from(path);
-                handle
-                    .state::<crate::library::StorageSettings>()
-                    .set_media_dir(media_root);
+            if matches!(&event, Event::MediaRootResolved { .. })
+                && !handle.state::<RuntimeState>().accept_service_media_root(
+                    generation,
+                    &event,
+                    |root| {
+                        handle
+                            .state::<crate::library::StorageSettings>()
+                            .set_media_dir(root)
+                    },
+                )
+            {
+                continue;
             }
             if let Event::Status { recording, .. } = &event {
                 let accepted = handle
@@ -188,6 +218,106 @@ pub(crate) fn pump_events<R: Runtime>(handle: AppHandle<R>, event_rx: Receiver<E
 mod tests {
     use super::*;
     use crate::app::{detected_game};
+
+    #[test]
+    fn media_root_old_service_cannot_replace_committed_replacement_root() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let state = RuntimeState::with_sender(tx, crate::settings::AppSettings::default(), None);
+        let storage = crate::library::StorageSettings::new(None, PathBuf::from("initial"));
+        let old_generation = state.0.lock().unwrap().recording_generation;
+        let prepared = state.prepare_settings_restart(state.settings()).unwrap();
+        let committed = {
+            let mut inner = state.0.lock().unwrap();
+            RuntimeState::commit_prepared_restart_with(&mut inner, prepared, |_| {
+                (std::sync::mpsc::channel().0, ())
+            })
+            .unwrap()
+        };
+        let (_, generation) = committed.replacement.unwrap();
+        let root_b = Event::MediaRootResolved {
+            path: "replacement-B".into(),
+            fell_back: false,
+        };
+        assert!(state
+            .accept_service_media_root(generation, &root_b, |root| storage.set_media_dir(root)));
+        let root_a = Event::MediaRootResolved {
+            path: "old-A".into(),
+            fell_back: true,
+        };
+        state
+            .accept_service_media_root(old_generation, &root_a, |root| storage.set_media_dir(root));
+        assert_eq!(storage.media_dir(), PathBuf::from("replacement-B"));
+    }
+
+    #[test]
+    fn media_root_publication_serializes_with_runtime_replacement() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let state = RuntimeState::with_sender(tx, crate::settings::AppSettings::default(), None);
+        let storage = crate::library::StorageSettings::new(None, PathBuf::from("initial"));
+        let generation = state.0.lock().unwrap().recording_generation;
+        let prepared = state.prepare_settings_restart(state.settings()).unwrap();
+        let (publishing_tx, publishing_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let state = &state;
+            let storage = &storage;
+            let replacement = scope.spawn(move || {
+                publishing_rx.recv().unwrap();
+                let committed = {
+                    let mut inner = state.0.lock().unwrap();
+                    RuntimeState::commit_prepared_restart_with(&mut inner, prepared, |_| {
+                        (std::sync::mpsc::channel().0, ())
+                    })
+                    .unwrap()
+                };
+                let (_, generation) = committed.replacement.unwrap();
+                state.accept_service_media_root(
+                    generation,
+                    &Event::MediaRootResolved {
+                        path: "replacement-B".into(),
+                        fell_back: false,
+                    },
+                    |root| storage.set_media_dir(root),
+                );
+            });
+            state.accept_service_media_root(
+                generation,
+                &Event::MediaRootResolved {
+                    path: "old-A".into(),
+                    fell_back: false,
+                },
+                |root| {
+                    let owns_runtime =
+                        matches!(state.0.try_lock(), Err(std::sync::TryLockError::WouldBlock));
+                    publishing_tx.send(()).unwrap();
+                    storage.set_media_dir(root);
+                    assert!(
+                        owns_runtime,
+                        "generation validation and root mutation must share the runtime lock"
+                    );
+                },
+            );
+            replacement.join().unwrap();
+        });
+        assert_eq!(storage.media_dir(), PathBuf::from("replacement-B"));
+    }
+
+    #[test]
+    fn media_root_retired_service_cannot_publish_during_restart_gap() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let state = RuntimeState::with_sender(tx, crate::settings::AppSettings::default(), None);
+        let storage = crate::library::StorageSettings::new(None, PathBuf::from("initial"));
+        let generation = state.0.lock().unwrap().recording_generation;
+        let _restart = RuntimeState::prepare_service_restart(&mut state.0.lock().unwrap()).unwrap();
+        state.accept_service_media_root(
+            generation,
+            &Event::MediaRootResolved {
+                path: "old-A".into(),
+                fell_back: false,
+            },
+            |root| storage.set_media_dir(root),
+        );
+        assert_eq!(storage.media_dir(), PathBuf::from("initial"));
+    }
 
     #[test]
     fn elevated_game_warning_requires_lower_privilege_clipline() {

@@ -243,14 +243,7 @@ impl WgcCapture {
 
     /// `next_frame` with an explicit wait bound.
     pub fn next_frame_timeout(&mut self, timeout: Duration) -> Result<Option<Frame>, CaptureError> {
-        match self.rx.recv_timeout(timeout) {
-            Ok(q) => Ok(Some(Frame {
-                pts_s: self.clock.pts_s(q.ticks_100ns),
-                data: FrameData::Gpu(q.texture),
-            })),
-            Err(RecvTimeoutError::Disconnected) => Ok(None), // session closed
-            Err(RecvTimeoutError::Timeout) => Err(CaptureError::Timeout(timeout)),
-        }
+        self.rx.next_frame_timeout(self.clock, timeout)
     }
 }
 
@@ -301,13 +294,16 @@ fn on_frame_arrived(
         // ID3D11Texture2D; GetInterface AddRefs it.
         let source: ID3D11Texture2D = unsafe { access.GetInterface()? };
         let (source_w, source_h) = d3d11::texture_size(&source);
-        if content_size_exceeds_source(content_size, source_w, source_h) {
-            recreate_frame_pool_if_needed(pool, &device, &state, content_size)?;
-            return Ok(());
-        }
-        let Some(crop) = copy_rect_for_frame(&copy_mode, content_size, source_w, source_h) else {
-            recreate_frame_pool_if_needed(pool, &device, &state, content_size)?;
-            return Ok(());
+        let crop = match copy_rect_for_frame(&copy_mode, content_size, source_w, source_h) {
+            Ok(Some(crop)) => crop,
+            Ok(None) => {
+                recreate_frame_pool_if_needed(pool, &device, &state, content_size)?;
+                return Ok(());
+            }
+            Err(error) => {
+                tx.send_drop_oldest(Err(error));
+                return Ok(());
+            }
         };
         let copy = d3d11::create_bgra_texture(&device, crop.width, crop.height)?;
         d3d11::copy_texture_region(
@@ -320,10 +316,10 @@ fn on_frame_arrived(
             crop.height,
         );
         recreate_frame_pool_if_needed(pool, &device, &state, content_size)?;
-        tx.send_drop_oldest(QueuedFrame {
+        tx.send_drop_oldest(Ok(QueuedFrame {
             texture: copy,
             ticks_100ns,
-        });
+        }));
         Ok(())
     }
 }
@@ -356,10 +352,24 @@ fn copy_rect_for_frame(
     content_size: SizeInt32,
     source_w: u32,
     source_h: u32,
-) -> Option<CropRect> {
+) -> Result<Option<CropRect>, CaptureError> {
+    if let FrameCopyMode::StaticRegion(crop) = mode {
+        // Pool textures can still have the old dimensions after a resize.
+        crate::capture_geometry::validate_fixed_capture_region(
+            u32::try_from(content_size.Width).unwrap_or(0),
+            u32::try_from(content_size.Height).unwrap_or(0),
+            crop.x,
+            crop.y,
+            crop.width,
+            crop.height,
+        )?;
+    }
+    if content_size_exceeds_source(content_size, source_w, source_h) {
+        return Ok(None); // wait for the resized frame pool
+    }
     match mode {
-        FrameCopyMode::Full => content_crop(content_size, source_w, source_h),
-        FrameCopyMode::StaticRegion(crop) => crop.in_frame(source_w, source_h),
+        FrameCopyMode::Full => Ok(content_crop(content_size, source_w, source_h)),
+        FrameCopyMode::StaticRegion(crop) => Ok(crop.in_frame(source_w, source_h)),
         FrameCopyMode::WindowClient { hwnd, cache } => {
             let geometry = FrameGeometry {
                 content_width: content_size.Width,
@@ -370,20 +380,22 @@ fn copy_rect_for_frame(
             if let Ok(guard) = cache.lock() {
                 if let Some(cached) = *guard {
                     if cached.geometry == geometry {
-                        return Some(cached.crop);
+                        return Ok(Some(cached.crop));
                     }
                 }
             }
 
             let hwnd = HWND(*hwnd as *mut core::ffi::c_void);
-            let crop = match window_client_crop_state(hwnd)? {
-                WindowClientCrop::Client(crop) => crop.in_frame(source_w, source_h)?,
-                WindowClientCrop::FullFrame => content_crop(content_size, source_w, source_h)?,
-            };
-            if let Ok(mut guard) = cache.lock() {
-                *guard = Some(ClientCropCache { geometry, crop });
+            let crop = window_client_crop_state(hwnd).and_then(|client| match client {
+                WindowClientCrop::Client(crop) => crop.in_frame(source_w, source_h),
+                WindowClientCrop::FullFrame => content_crop(content_size, source_w, source_h),
+            });
+            if let Some(crop) = crop {
+                if let Ok(mut guard) = cache.lock() {
+                    *guard = Some(ClientCropCache { geometry, crop });
+                }
             }
-            Some(crop)
+            Ok(crop)
         }
     }
 }
@@ -430,7 +442,7 @@ struct FrameQueueInner {
 }
 
 struct FrameQueueState {
-    queue: VecDeque<QueuedFrame>,
+    queue: VecDeque<Result<QueuedFrame, CaptureError>>,
     closed: bool,
 }
 
@@ -452,14 +464,17 @@ fn bounded_frame_channel(capacity: usize) -> (FrameSender, FrameReceiver) {
 }
 
 impl FrameSender {
-    fn send_drop_oldest(&self, frame: QueuedFrame) {
+    fn send_drop_oldest(&self, frame: Result<QueuedFrame, CaptureError>) {
         let Ok(mut state) = self.inner.state.lock() else {
             return;
         };
-        if state.closed {
+        // A source error must reach the next pull, even if newer frames arrive.
+        if state.closed || state.queue.front().is_some_and(Result::is_err) {
             return;
         }
-        if state.queue.len() >= self.inner.capacity {
+        if frame.is_err() {
+            state.queue.clear();
+        } else if state.queue.len() >= self.inner.capacity {
             state.queue.pop_front();
         }
         state.queue.push_back(frame);
@@ -484,7 +499,26 @@ impl Drop for FrameSender {
 }
 
 impl FrameReceiver {
-    fn recv_timeout(&self, timeout: Duration) -> Result<QueuedFrame, RecvTimeoutError> {
+    fn next_frame_timeout(
+        &self,
+        clock: RelativeClock,
+        timeout: Duration,
+    ) -> Result<Option<Frame>, CaptureError> {
+        match self.recv_timeout(timeout) {
+            Ok(Ok(q)) => Ok(Some(Frame {
+                pts_s: clock.pts_s(q.ticks_100ns),
+                data: FrameData::Gpu(q.texture),
+            })),
+            Ok(Err(error)) => Err(error),
+            Err(RecvTimeoutError::Disconnected) => Ok(None), // session closed
+            Err(RecvTimeoutError::Timeout) => Err(CaptureError::Timeout(timeout)),
+        }
+    }
+
+    fn recv_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<Result<QueuedFrame, CaptureError>, RecvTimeoutError> {
         let deadline = Instant::now() + timeout;
         let mut state = self
             .inner
@@ -565,6 +599,178 @@ mod tests {
     use super::*;
     use crate::traits::FrameData;
     use std::time::Duration;
+
+    #[test]
+    fn static_region_rejects_shrunken_content_before_pool_resize() {
+        let crop = CropRect {
+            x: 0,
+            y: 0,
+            width: 1280,
+            height: 720,
+        };
+        let mode = FrameCopyMode::StaticRegion(crop);
+        assert_eq!(
+            copy_rect_for_frame(
+                &mode,
+                SizeInt32 {
+                    Width: 1280,
+                    Height: 720
+                },
+                1280,
+                720,
+            )
+            .unwrap(),
+            Some(crop)
+        );
+        for (source_w, source_h) in [(1280, 720), (720, 480)] {
+            let error = copy_rect_for_frame(
+                &mode,
+                SizeInt32 {
+                    Width: 720,
+                    Height: 480,
+                },
+                source_w,
+                source_h,
+            )
+            .unwrap_err();
+            assert!(matches!(error, CaptureError::SourceChanged(_)));
+            assert!(!error.is_timeout());
+            assert!(error.to_string().contains("720x480"));
+        }
+    }
+
+    #[test]
+    fn fitting_static_region_survives_content_resize() {
+        let crop = CropRect {
+            x: 20,
+            y: 30,
+            width: 200,
+            height: 100,
+        };
+        assert_eq!(
+            copy_rect_for_frame(
+                &FrameCopyMode::StaticRegion(crop),
+                SizeInt32 {
+                    Width: 720,
+                    Height: 480
+                },
+                1280,
+                720,
+            )
+            .unwrap(),
+            Some(crop)
+        );
+    }
+
+    #[test]
+    fn content_growth_waits_for_pool_resize_without_source_error() {
+        let crop = CropRect {
+            x: 0,
+            y: 0,
+            width: 1280,
+            height: 720,
+        };
+        for mode in [FrameCopyMode::Full, FrameCopyMode::StaticRegion(crop)] {
+            assert_eq!(
+                copy_rect_for_frame(
+                    &mode,
+                    SizeInt32 {
+                        Width: 1280,
+                        Height: 720
+                    },
+                    720,
+                    480,
+                )
+                .unwrap(),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn full_and_cached_window_client_crops_follow_content_geometry() {
+        let content_size = SizeInt32 {
+            Width: 720,
+            Height: 480,
+        };
+        assert_eq!(
+            copy_rect_for_frame(&FrameCopyMode::Full, content_size, 1280, 720).unwrap(),
+            Some(CropRect {
+                x: 0,
+                y: 0,
+                width: 720,
+                height: 480
+            })
+        );
+        let crop = CropRect {
+            x: 8,
+            y: 31,
+            width: 640,
+            height: 400,
+        };
+        let mode = FrameCopyMode::WindowClient {
+            hwnd: 0,
+            cache: Arc::new(Mutex::new(Some(ClientCropCache {
+                geometry: FrameGeometry {
+                    content_width: 720,
+                    content_height: 480,
+                    source_width: 1280,
+                    source_height: 720,
+                },
+                crop,
+            }))),
+        };
+        assert_eq!(
+            copy_rect_for_frame(&mode, content_size, 1280, 720).unwrap(),
+            Some(crop)
+        );
+        // Growing content still waits for the pool even with a cached client crop.
+        assert_eq!(
+            copy_rect_for_frame(&mode, content_size, 640, 400).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn source_change_reaches_next_pull_before_queued_or_newer_frames() {
+        let (device, _) = d3d11::create_device_for_tests().expect("device");
+        let texture = d3d11::create_bgra_texture(&device, 2, 2).expect("texture");
+        let (tx, rx) = bounded_frame_channel(FRAME_QUEUE_CAPACITY);
+        tx.send_drop_oldest(Ok(QueuedFrame {
+            texture: texture.clone(),
+            ticks_100ns: 1,
+        }));
+        let error = copy_rect_for_frame(
+            &FrameCopyMode::StaticRegion(CropRect {
+                x: 0,
+                y: 0,
+                width: 1280,
+                height: 720,
+            }),
+            SizeInt32 {
+                Width: 720,
+                Height: 480,
+            },
+            1280,
+            720,
+        )
+        .unwrap_err();
+        tx.send_drop_oldest(Err(error));
+        tx.send_drop_oldest(Ok(QueuedFrame {
+            texture,
+            ticks_100ns: 2,
+        }));
+
+        let error = rx
+            .next_frame_timeout(RelativeClock::new(0), Duration::ZERO)
+            .unwrap_err();
+        assert!(matches!(error, CaptureError::SourceChanged(_)));
+        assert!(!error.is_timeout());
+        assert!(matches!(
+            rx.next_frame_timeout(RelativeClock::new(0), Duration::ZERO),
+            Err(CaptureError::Timeout(_))
+        ));
+    }
 
     /// Real WGC against the primary monitor. Self-skips on CI and when
     /// capture init fails — the skip-if-absent pattern the ffprobe e2e
@@ -649,21 +855,23 @@ mod tests {
         let tex = crate::windows::d3d11::create_bgra_texture(&device, 2, 2).expect("texture");
         let (tx, rx) = bounded_frame_channel(2);
         for ticks_100ns in [1, 2, 3] {
-            tx.send_drop_oldest(QueuedFrame {
+            tx.send_drop_oldest(Ok(QueuedFrame {
                 texture: tex.clone(),
                 ticks_100ns,
-            });
+            }));
         }
 
         assert_eq!(
             rx.recv_timeout(Duration::from_millis(1))
                 .expect("second frame")
+                .expect("valid frame")
                 .ticks_100ns,
             2
         );
         assert_eq!(
             rx.recv_timeout(Duration::from_millis(1))
                 .expect("third frame")
+                .expect("valid frame")
                 .ticks_100ns,
             3
         );
@@ -679,15 +887,16 @@ mod tests {
         let texture = crate::windows::d3d11::create_bgra_texture(&device, 2, 2).expect("texture");
         let (tx, rx) = bounded_frame_channel(FRAME_QUEUE_CAPACITY);
         for ticks_100ns in [1, 2] {
-            tx.send_drop_oldest(QueuedFrame {
+            tx.send_drop_oldest(Ok(QueuedFrame {
                 texture: texture.clone(),
                 ticks_100ns,
-            });
+            }));
         }
 
         assert_eq!(
             rx.recv_timeout(Duration::from_millis(1))
                 .expect("latest frame")
+                .expect("valid frame")
                 .ticks_100ns,
             2
         );
@@ -714,16 +923,16 @@ mod tests {
         let texture = crate::windows::d3d11::create_bgra_texture(&device, 2, 2).expect("texture");
         let (tx, rx) = bounded_frame_channel(2);
         let callback_sender = tx.clone();
-        tx.send_drop_oldest(QueuedFrame {
+        tx.send_drop_oldest(Ok(QueuedFrame {
             texture: texture.clone(),
             ticks_100ns: 1,
-        });
+        }));
 
         tx.close();
-        callback_sender.send_drop_oldest(QueuedFrame {
+        callback_sender.send_drop_oldest(Ok(QueuedFrame {
             texture,
             ticks_100ns: 2,
-        });
+        }));
 
         assert!(matches!(
             rx.recv_timeout(Duration::from_millis(50)),

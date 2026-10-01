@@ -279,7 +279,14 @@ async fn retry_pending_enrichment_with_settings(
         .iter()
         .map(|job| job.record().recording_start_unix)
         .min();
-    let fetch = match fetch_recent_scores(&config, earliest).await {
+    apply_pending_fetch(pending, fetch_recent_scores(&config, earliest)).await
+}
+
+async fn apply_pending_fetch(
+    pending: Vec<crate::osu_enrichment::DiscoveredPendingEnrichment>,
+    fetch: impl std::future::Future<Output = Result<OsuRecentFetch, String>>,
+) -> Result<bool, String> {
+    let fetch = match fetch.await {
         Ok(fetch) => fetch,
         Err(error) => {
             for job in &pending {
@@ -879,3 +886,185 @@ fn osu_setup_guide_html() -> &'static str {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod stale_worker_tests {
+    use super::*;
+    use crate::osu_enrichment::{
+        discover_pending, pending_path, write_pending_for_saved_clip, OsuPendingEnrichment,
+        OsuSavedClip, OsuTitleEvent,
+    };
+    use clipline_test_utils::TestDir;
+
+    async fn delayed_worker(mutation: &str) {
+        for outcome in ["scores", "empty", "fetch_error", "marker_error"] {
+            let dir = TestDir::new("clipline-osu", &format!("stale-{mutation}-{outcome}"));
+            let session = dir.path().join("2026-09-30 12-00");
+            std::fs::create_dir(&session).unwrap();
+            std::fs::write(session.join("clipline-session.json"), br#"{"id":"osu"}"#).unwrap();
+            let clip = session.join("session.mp4");
+            std::fs::write(&clip, b"mp4").unwrap();
+            write_pending_for_saved_clip(&OsuSavedClip {
+                path: clip.clone(),
+                seconds: 30.0,
+                full_session: true,
+                recording_start_unix: Some(100),
+                recording_end_unix: Some(130),
+                title_events: vec![OsuTitleEvent {
+                    unix_s: 101,
+                    title: "osu! - xi - Blue Zenith [Hard]".into(),
+                }],
+            })
+            .unwrap()
+            .expect("pending record");
+            if outcome == "marker_error" {
+                std::fs::write(clip.with_extension("markers.json"), b"invalid JSON").unwrap();
+            }
+            let pending = discover_pending(dir.path()).unwrap();
+            assert_eq!(pending.len(), 1);
+            let stale_job = pending[0].clone();
+            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+            let (fetch_tx, fetch_rx) = tokio::sync::oneshot::channel();
+            let worker = tokio::spawn(async move {
+                apply_pending_fetch(pending, async {
+                    ready_tx.send(()).unwrap();
+                    fetch_rx.await.unwrap()
+                })
+                .await
+            });
+            ready_rx.await.unwrap();
+
+            let current_clip = match mutation {
+                "deleted" => {
+                    let report = crate::library::delete_clips_impl(
+                        dir.path().into(),
+                        vec![(clip.display().to_string(), clip.clone())],
+                        Vec::new(),
+                    );
+                    assert!(report.failed.is_empty());
+                    assert!(!session.exists(), "last-clip deletion removes its session");
+                    None
+                }
+                "renamed" => {
+                    crate::library::rename_clip_files(
+                        clip.clone(),
+                        clip.display().to_string(),
+                        "renamed.mp4".into(),
+                    )
+                    .unwrap();
+                    Some(session.join("renamed.mp4"))
+                }
+                "replaced" => {
+                    let _guard = crate::gc::lock_clip_mutations();
+                    let mut next: OsuPendingEnrichment =
+                        crate::util::read_json_sidecar(&pending_path(&clip))
+                            .unwrap()
+                            .unwrap();
+                    next.recording_start_unix += 1;
+                    std::fs::write(pending_path(&clip), serde_json::to_vec(&next).unwrap())
+                        .unwrap();
+                    Some(clip.clone())
+                }
+                "nonregular" => {
+                    let _guard = crate::gc::lock_clip_mutations();
+                    std::fs::remove_file(&clip).unwrap();
+                    std::fs::create_dir(&clip).unwrap();
+                    Some(clip.clone())
+                }
+                _ => panic!("unknown mutation"),
+            };
+            let before = current_clip.as_ref().map(|path| {
+                (
+                    std::fs::read(pending_path(path)).unwrap(),
+                    std::fs::read(path.with_extension("markers.json")).unwrap(),
+                )
+            });
+            let fetch = if outcome == "fetch_error" {
+                Err("delayed test fetch failed".into())
+            } else {
+                let scores = if outcome == "empty" {
+                    Vec::new()
+                } else {
+                    vec![serde_json::from_value(serde_json::json!({
+                        "id": "score", "title": "Blue Zenith", "artist": "xi",
+                        "difficulty": "Hard", "passed": true,
+                        "started_at_unix": 101, "ended_at_unix": 120
+                    }))
+                    .unwrap()]
+                };
+                Ok(OsuRecentFetch {
+                    user_id: "1".into(),
+                    scores,
+                    failed_count: 0,
+                    started_at_count: 0,
+                    ended_at_count: 0,
+                    pagination_ceiling_reached: false,
+                    username: None,
+                })
+            };
+            fetch_tx.send(fetch).unwrap();
+            let result = worker.await.unwrap();
+            // A marker write can fail before another clip mutation wins the lock
+            // for the worker's subsequent failure-journal update.
+            crate::osu_enrichment::mark_pending_failed(&stale_job, "delayed marker write failed")
+                .unwrap();
+            if outcome == "fetch_error" {
+                assert_eq!(result.unwrap_err(), "delayed test fetch failed");
+            } else {
+                assert!(
+                    !result.unwrap(),
+                    "stale {mutation}/{outcome} must not report an update"
+                );
+            }
+            if let (Some(path), Some((pending_before, markers_before))) = (current_clip, before) {
+                assert_eq!(
+                    std::fs::read(pending_path(&path)).unwrap(),
+                    pending_before,
+                    "stale {mutation}/{outcome} changed the pending record"
+                );
+                assert_eq!(
+                    std::fs::read(path.with_extension("markers.json")).unwrap(),
+                    markers_before,
+                    "stale {mutation}/{outcome} changed the marker sidecar"
+                );
+            }
+            if mutation == "deleted" {
+                assert!(
+                    !session.exists(),
+                    "stale {outcome} resurrected the deleted session"
+                );
+            }
+            if mutation == "renamed" {
+                assert!(!clip.exists());
+                assert!(!pending_path(&clip).exists());
+                assert!(!clip.with_extension("markers.json").exists());
+                let restarted = discover_pending(dir.path()).unwrap();
+                assert_eq!(restarted.len(), 1);
+                assert_eq!(
+                    restarted[0].clip_path(),
+                    session.join("renamed.mp4").canonicalize().unwrap()
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_worker_does_not_resurrect_deleted_session() {
+        delayed_worker("deleted").await;
+    }
+
+    #[tokio::test]
+    async fn stale_worker_does_not_recreate_renamed_paths() {
+        delayed_worker("renamed").await;
+    }
+
+    #[tokio::test]
+    async fn stale_worker_does_not_overwrite_replacement_job() {
+        delayed_worker("replaced").await;
+    }
+
+    #[tokio::test]
+    async fn stale_worker_requires_a_regular_source_mp4() {
+        delayed_worker("nonregular").await;
+    }
+}

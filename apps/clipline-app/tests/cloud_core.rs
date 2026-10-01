@@ -12,6 +12,70 @@ fn context() -> Context {
     context
 }
 
+#[test]
+fn queued_upload_progress_from_another_account_is_ignored() {
+    let mut context = context();
+    let main =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/main.js")).unwrap();
+    let handler = main
+        .split("listen(\"cloud-upload-progress\", (e) => {")
+        .nth(1)
+        .unwrap()
+        .split("\n});")
+        .next()
+        .unwrap();
+    context
+        .eval(Source::from_bytes(&format!(
+            "let applied = 0; const cloudAccountKey = () => 'host|b|credential-b';\n\
+         const upsertCloudProgress = () => {{ applied++; return {{renderRequired: false}}; }};\n\
+         const onProgress = (e) => {{{handler}}};"
+        )))
+        .unwrap();
+    assert_eq!(
+        eval(
+            &mut context,
+            "onProgress({payload: {account_key: 'host|a|credential-a'}});\
+         onProgress({payload: {account_key: 'host|b|credential-b'}}); applied"
+        ),
+        "1"
+    );
+}
+
+#[test]
+fn deferred_upload_feedback_keeps_its_account() {
+    let mut context = context();
+    let core =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/app-core.js")).unwrap();
+    let feedback = core
+        .split("function showPostRefreshFeedback(")
+        .nth(1)
+        .unwrap()
+        .split("function clipDuration()")
+        .next()
+        .unwrap();
+    let source = format!("let key = 'account-a'; const cloudAccountKey = () => key;\n\
+        var pendingPostRefreshFeedback = null; let errorNode = {{textContent: ''}};\n\
+        const $ = () => errorNode; let notices = []; const setNotice = text => notices.push(text);\n\
+        function showPostRefreshFeedback({feedback}");
+    context.eval(Source::from_bytes(&source)).unwrap();
+    assert_eq!(eval(&mut context,
+        "finishPostRefreshFeedback(false, {accountKey: key, error: 'A failed', notice: 'A finished'});\
+         key = 'account-b'; flushDeferredPostRefreshFeedback();\
+         JSON.stringify([errorNode.textContent, notices])"), "[\"\",[]]");
+    assert_eq!(
+        eval(
+            &mut context,
+            "key = 'account-a';\
+         finishPostRefreshFeedback(false, {accountKey: key, error: 'A failed'});\
+         key = 'account-b';\
+         finishPostRefreshFeedback(false, {accountKey: key, notice: 'B finished'});\
+         flushDeferredPostRefreshFeedback();\
+         JSON.stringify([errorNode.textContent, notices])"
+        ),
+        "[\"\",[\"B finished\"]]"
+    );
+}
+
 fn eval(context: &mut Context, expression: &str) -> String {
     context
         .eval(Source::from_bytes(expression))

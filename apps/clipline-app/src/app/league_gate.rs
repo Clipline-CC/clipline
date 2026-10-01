@@ -97,6 +97,15 @@ impl RuntimeState {
         let event = GameDetectionEvent::from_detected(detected.as_ref());
         record_osu_title_event(inner, detected.as_ref(), unix_now_i64());
         if same_game_window(inner.active_game.as_ref(), detected.as_ref()) {
+            // A settings commit can invalidate a resolved verdict without
+            // changing the HWND. Only kick a lookup when none is outstanding.
+            if inner.league_gate == Some(LeagueGateVerdict::Pending)
+                && inner.league_gate_rx.is_none()
+            {
+                inner.league_gate_rx = league_lookup.map(|lookup| {
+                    lookup(inner.active_game.as_ref().expect("pending gate has a game"))
+                });
+            }
             if game_recording_mode_changed(inner.active_game.as_ref(), detected.as_ref()) {
                 inner.active_game = detected;
                 Ok((
@@ -114,21 +123,12 @@ impl RuntimeState {
             inner.active_game = detected;
             if league_gate_applies(&inner.settings, inner.active_game.as_ref()) {
                 // The factory comes from a settings snapshot taken before the
-                // runtime lock; settings may have changed in between. Without a
-                // factory, fall back to today's behavior instead of panicking
-                // the only game-detector thread.
-                if let Some(lookup) = league_lookup {
-                    inner.league_gate = Some(LeagueGateVerdict::Pending);
-                    inner.league_gate_rx = Some(lookup(
-                        inner
-                            .active_game
-                            .as_ref()
-                            .expect("gated detection always has a game"),
-                    ));
-                } else {
-                    inner.league_gate = None;
-                    inner.league_gate_rx = None;
-                }
+                // runtime lock. If policy tightened meanwhile, stay pending
+                // until the next detection supplies a factory.
+                inner.league_gate = Some(LeagueGateVerdict::Pending);
+                inner.league_gate_rx = league_lookup.map(|lookup| {
+                    lookup(inner.active_game.as_ref().expect("gated detection has a game"))
+                });
             } else {
                 inner.league_gate = None;
                 inner.league_gate_rx = None;
@@ -160,6 +160,12 @@ impl RuntimeState {
             // Resolver vanished without a verdict: treat as unknown.
             Err(TryRecvError::Disconnected) => None,
         };
+        if !league_gate_applies(&inner.settings, inner.active_game.as_ref()) {
+            // All categories may have been enabled while this lookup ran.
+            // Drain it without restarting an ungated or manual recorder.
+            inner.league_gate = None;
+            return Ok(None);
+        }
         if inner
             .settings
             .league
@@ -213,7 +219,7 @@ mod tests {
     use std::sync::mpsc::{Sender, TryRecvError};
     use std::sync::mpsc;
     use std::time::Duration;
-    use crate::service::Cmd;
+    use crate::service::{Cmd, RecordingMode};
 
     fn league_game(hwnd: isize) -> DetectedGame {
         detected_built_in_game(
@@ -245,6 +251,247 @@ mod tests {
             rx
         }) as LeagueGateLookup;
         (tx, factory, called)
+    }
+
+    #[test]
+    fn league_policy_change_all_categories_resumes_denied_game() {
+        let (tx, _rx) = mpsc::channel();
+        let state = RuntimeState::with_sender(tx, gated_settings(false), None);
+        let (gate_tx, lookup, _) = held_lookup();
+        {
+            let mut inner = state.0.lock().unwrap();
+            RuntimeState::plan_detection_transition(
+                &mut inner,
+                Some(league_game(41)),
+                Some(lookup),
+            )
+            .unwrap();
+            gate_tx.send(Some(LeagueQueue::from_id(430))).unwrap();
+            assert!(matches!(
+                RuntimeState::resolve_league_gate(&mut inner).unwrap(),
+                Some(LeagueGateResolution::Denied)
+            ));
+        }
+        let prepared = state
+            .prepare_settings_restart(AppSettings::default())
+            .unwrap();
+        let mut inner = state.0.lock().unwrap();
+        let committed = RuntimeState::commit_prepared_restart_with(&mut inner, prepared, |_| {
+            (mpsc::channel().0, ())
+        })
+        .unwrap();
+        assert!(
+            committed.replacement.is_some(),
+            "enabling every category must discard the previous denial"
+        );
+        assert_eq!(inner.league_gate, None);
+        assert!(inner.league_gate_rx.is_none());
+    }
+
+    #[test]
+    fn league_policy_change_tightening_ungated_game_defers_recording() {
+        let (tx, _rx) = mpsc::channel();
+        let state = RuntimeState::with_sender(tx, AppSettings::default(), None);
+        state.0.lock().unwrap().active_game = Some(league_game(41));
+        let prepared = state
+            .prepare_settings_restart(gated_settings(false))
+            .unwrap();
+        let mut inner = state.0.lock().unwrap();
+        let committed = RuntimeState::commit_prepared_restart_with(&mut inner, prepared, |_| {
+            (mpsc::channel().0, ())
+        })
+        .unwrap();
+        assert!(committed.old_tx.is_some());
+        assert!(
+            committed.replacement.is_none(),
+            "a newly gated game must wait for a fresh queue verdict"
+        );
+        assert_eq!(inner.league_gate, Some(LeagueGateVerdict::Pending));
+        let (gate_tx, lookup, called) = held_lookup();
+        RuntimeState::plan_detection_transition(&mut inner, Some(league_game(41)), Some(lookup))
+            .unwrap();
+        assert!(
+            called.load(Ordering::SeqCst),
+            "same-HWND detection must start the missing lookup"
+        );
+        gate_tx.send(Some(LeagueQueue::from_id(430))).unwrap();
+        assert!(matches!(
+            RuntimeState::resolve_league_gate(&mut inner).unwrap(),
+            Some(LeagueGateResolution::Denied)
+        ));
+    }
+
+    #[test]
+    fn league_policy_change_resolved_verdict_gets_a_fresh_lookup() {
+        for initially_allowed in [false, true] {
+            let state = RuntimeState::new(gated_settings(false), None);
+            let (gate_tx, lookup, _) = held_lookup();
+            {
+                let mut inner = state.0.lock().unwrap();
+                inner.recording_desired = true;
+                RuntimeState::plan_detection_transition(
+                    &mut inner,
+                    Some(league_game(41)),
+                    Some(lookup),
+                )
+                .unwrap();
+                gate_tx
+                    .send(Some(LeagueQueue::from_id(if initially_allowed {
+                        420
+                    } else {
+                        430
+                    })))
+                    .unwrap();
+                RuntimeState::resolve_league_gate(&mut inner).unwrap();
+            }
+            let mut changed = state.settings();
+            changed.league.record_normal = true;
+            changed.league.record_ranked_solo_duo = false;
+            let prepared = state.prepare_settings_restart(changed).unwrap();
+            let mut inner = state.0.lock().unwrap();
+            let committed =
+                RuntimeState::commit_prepared_restart_with(&mut inner, prepared, |_| {
+                    (mpsc::channel().0, ())
+                })
+                .unwrap();
+            assert!(committed.replacement.is_none());
+            assert_eq!(
+                inner.league_gate,
+                Some(LeagueGateVerdict::Pending),
+                "changed categories invalidate resolved {initially_allowed} verdict"
+            );
+            let (gate_tx, lookup, called) = held_lookup();
+            RuntimeState::plan_detection_transition(
+                &mut inner,
+                Some(league_game(41)),
+                Some(lookup),
+            )
+            .unwrap();
+            assert!(called.load(Ordering::SeqCst));
+            gate_tx
+                .send(Some(LeagueQueue::from_id(if initially_allowed {
+                    420
+                } else {
+                    430
+                })))
+                .unwrap();
+            let resolution = RuntimeState::resolve_league_gate(&mut inner).unwrap();
+            assert!(if initially_allowed {
+                matches!(resolution, Some(LeagueGateResolution::Denied))
+            } else {
+                matches!(resolution, Some(LeagueGateResolution::Allowed(_)))
+            });
+        }
+    }
+
+    #[test]
+    fn league_policy_change_keeps_pending_lookup_and_manual_bypass() {
+        let state = RuntimeState::new(gated_settings(false), None);
+        let (gate_tx, lookup, _) = held_lookup();
+        {
+            let mut inner = state.0.lock().unwrap();
+            RuntimeState::plan_detection_transition(
+                &mut inner,
+                Some(league_game(41)),
+                Some(lookup),
+            )
+            .unwrap();
+            inner.recording_desired = true;
+            inner.manual_full_session_desired = true;
+        }
+        let mut changed = state.settings();
+        changed.league.record_ranked_solo_duo = false;
+        let prepared = state.prepare_settings_restart(changed).unwrap();
+        let mut inner = state.0.lock().unwrap();
+        let (manual_tx, manual_rx) = mpsc::channel();
+        let committed =
+            RuntimeState::commit_prepared_restart_with(&mut inner, prepared, |options| {
+                assert_eq!(options.recording_mode, RecordingMode::FullSession);
+                (manual_tx, ())
+            })
+            .unwrap();
+        assert!(committed.replacement.is_some());
+        let (_, duplicate, called_again) = held_lookup();
+        let (restart, _, _) = RuntimeState::plan_detection_transition(
+            &mut inner,
+            Some(league_game(41)),
+            Some(duplicate),
+        )
+        .unwrap();
+        assert!(restart.is_none());
+        assert!(!called_again.load(Ordering::SeqCst));
+        gate_tx.send(Some(LeagueQueue::from_id(420))).unwrap();
+        assert!(matches!(
+            RuntimeState::resolve_league_gate(&mut inner).unwrap(),
+            Some(LeagueGateResolution::Denied)
+        ));
+        assert!(inner.tx.as_ref().unwrap().send(Cmd::Save).is_ok());
+        assert!(matches!(manual_rx.try_recv(), Ok(Cmd::Save)));
+    }
+
+    #[test]
+    fn league_policy_change_disabling_gate_preserves_outstanding_lookup() {
+        for enable_gate_again in [false, true] {
+            let state = RuntimeState::new(gated_settings(false), None);
+            let (gate_tx, lookup, _) = held_lookup();
+            {
+                let mut inner = state.0.lock().unwrap();
+                inner.recording_desired = true;
+                RuntimeState::plan_detection_transition(
+                    &mut inner,
+                    Some(league_game(41)),
+                    Some(lookup),
+                )
+                .unwrap();
+            }
+            let prepared = state
+                .prepare_settings_restart(AppSettings::default())
+                .unwrap();
+            {
+                let mut inner = state.0.lock().unwrap();
+                RuntimeState::commit_prepared_restart_with(&mut inner, prepared, |_| {
+                    (mpsc::channel().0, ())
+                })
+                .unwrap();
+                assert_eq!(inner.league_gate, None);
+                assert!(inner.league_gate_rx.is_some());
+            }
+            if enable_gate_again {
+                let prepared = state
+                    .prepare_settings_restart(gated_settings(false))
+                    .unwrap();
+                let mut inner = state.0.lock().unwrap();
+                let committed: CommittedRuntimeRestart<()> =
+                    RuntimeState::commit_prepared_restart_with(&mut inner, prepared, |_| {
+                        panic!("a pending gate must defer automatic recording")
+                    })
+                    .unwrap();
+                assert!(committed.replacement.is_none());
+            }
+            let mut inner = state.0.lock().unwrap();
+            let (_, duplicate, called_again) = held_lookup();
+            RuntimeState::plan_detection_transition(
+                &mut inner,
+                Some(league_game(41)),
+                Some(duplicate),
+            )
+            .unwrap();
+            assert!(!called_again.load(Ordering::SeqCst));
+            let generation = inner.recording_generation;
+            gate_tx.send(Some(LeagueQueue::from_id(430))).unwrap();
+            let resolution = RuntimeState::resolve_league_gate(&mut inner).unwrap();
+            if enable_gate_again {
+                assert!(matches!(resolution, Some(LeagueGateResolution::Denied)));
+            } else {
+                assert!(
+                    resolution.is_none(),
+                    "an obsolete lookup must not restart ungated capture"
+                );
+                assert!(inner.tx.is_some());
+                assert_eq!(inner.recording_generation, generation);
+                assert_eq!(inner.league_gate, None);
+            }
+        }
     }
 
     #[test]
@@ -394,7 +641,7 @@ mod tests {
 
             let changed = AppSettings {
                 fps: 120,
-                ..AppSettings::default()
+                ..state.settings()
             };
             let prepared = state.prepare_settings_restart(changed).unwrap();
             let committed: CommittedRuntimeRestart<()> = {
@@ -415,7 +662,9 @@ mod tests {
 
     #[test]
     fn league_gate_toggle_mid_lookup_is_honored_at_resolution() {
-        let state = RuntimeState::new(gated_settings(false), None);
+        let mut settings = gated_settings(false);
+        settings.league.record_aram = false;
+        let state = RuntimeState::new(settings, None);
         let (gate_tx, lookup, _) = held_lookup();
         {
             let mut inner = state.0.lock().unwrap();
@@ -640,10 +889,10 @@ mod tests {
     }
 
     #[test]
-    fn detection_without_factory_falls_back_to_immediate_start() {
+    fn detection_without_factory_stays_pending_until_next_detection() {
         // Simulates the settings snapshot race: the detector decided no gate
         // and passed no factory, but the live settings are gated by the time
-        // the runtime checks. Must not panic the detector thread.
+        // the runtime checks. Defer recording and retry on the next tick.
         let (tx, _rx) = mpsc::channel();
         let state = RuntimeState::with_sender(tx, gated_settings(false), None);
         let (prepared, _, _) = {
@@ -651,12 +900,21 @@ mod tests {
             RuntimeState::plan_detection_transition(&mut inner, Some(league_game(41)), None)
                 .unwrap()
         };
-        let prepared = prepared.expect("fallback must start immediately");
-        assert!(prepared.replacement.is_some());
+        let prepared = prepared.expect("new detection must prepare a restart");
+        assert!(prepared.replacement.is_none());
         {
-            let inner = state.0.lock().unwrap();
-            assert_eq!(inner.league_gate, None);
+            let mut inner = state.0.lock().unwrap();
+            assert_eq!(inner.league_gate, Some(LeagueGateVerdict::Pending));
             assert!(inner.league_gate_rx.is_none());
+            let (_, lookup, called) = held_lookup();
+            RuntimeState::plan_detection_transition(
+                &mut inner,
+                Some(league_game(41)),
+                Some(lookup),
+            )
+            .unwrap();
+            assert!(called.load(Ordering::SeqCst));
+            assert!(inner.league_gate_rx.is_some());
         }
     }
 

@@ -1,6 +1,15 @@
 //! Cloud connection state, credentials, and bounded API request helpers.
 use super::*;
 
+pub(crate) fn cloud_account_key(cloud: &CloudSettings) -> String {
+    format!(
+        "{}|{}|{}",
+        cloud.host_url,
+        cloud.connected_user_id.as_deref().unwrap_or_default(),
+        cloud.credential_target.as_deref().unwrap_or_default()
+    )
+}
+
 #[tauri::command]
 pub fn cloud_status(state: tauri::State<RuntimeState>) -> CloudConnectionStatus {
     if let Err(error) = reconcile_cloud_credential_cleanup(&state) {
@@ -362,5 +371,4 @@ mod tests {
         assert_eq!(status.display_name.as_deref(), Some("Dain"));
         assert_eq!(status.username.as_deref(), Some("dain98"));
     }
-
 }

@@ -277,10 +277,11 @@ fn retry_writes_only_the_path_bound_to_the_discovered_job() {
         message: None,
     };
     std::fs::write(&safe_sidecar, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+    // Discovery canonicalizes these paths, including Windows temp-root aliases.
     let job = DiscoveredPendingEnrichment {
         record,
-        clip_path: safe_clip.clone(),
-        sidecar_path: safe_sidecar.clone(),
+        clip_path: safe_clip.canonicalize().unwrap(),
+        sidecar_path: safe_sidecar.canonicalize().unwrap(),
     };
 
     mark_pending_retry(&job, "retry safely").unwrap();

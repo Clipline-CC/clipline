@@ -94,12 +94,12 @@ pub async fn sync_cloud_clip_status(
 
     match bounded_cloud_get_clip(&client, &token, &remote_clip_id).await {
         Ok(clip) => {
-            let mut updated = record;
+            let mut updated = record.clone();
             apply_remote_clip_to_record(&mut updated, &clip);
-            persist_record(&state, &updated)?;
+            let current = persist_record_sync(&state, &cloud, &record, Some(&updated))?;
             Ok(CloudClipStatusSyncResult {
                 path: request.path,
-                record: Some(updated),
+                record: current,
                 removed: false,
             })
         }
@@ -111,23 +111,21 @@ pub async fn sync_cloud_clip_status(
                 removed: false,
             }),
             MissingRemoteSyncAction::ConfirmMissing => {
-                let mut updated = record;
+                let mut updated = record.clone();
                 mark_remote_not_found_once(&mut updated);
-                persist_record(&state, &updated)?;
+                let current = persist_record_sync(&state, &cloud, &record, Some(&updated))?;
                 Ok(CloudClipStatusSyncResult {
                     path: request.path,
-                    record: Some(updated),
+                    record: current,
                     removed: false,
                 })
             }
             MissingRemoteSyncAction::Remove => {
-                state.update_cloud(|cloud| {
-                    remove_upload_record(cloud, &record);
-                })?;
+                let current = persist_record_sync(&state, &cloud, &record, None)?;
                 Ok(CloudClipStatusSyncResult {
                     path: request.path,
-                    record: None,
-                    removed: true,
+                    removed: current.is_none(),
+                    record: current,
                 })
             }
         },
@@ -135,8 +133,10 @@ pub async fn sync_cloud_clip_status(
     }
 }
 
-
-pub(crate) fn apply_remote_clip_to_record(record: &mut CloudUploadRecord, clip: &ClipDetailResponse) {
+pub(crate) fn apply_remote_clip_to_record(
+    record: &mut CloudUploadRecord,
+    clip: &ClipDetailResponse,
+) {
     record.visibility = clip.visibility.clone();
     record.remote_clip_id = Some(clip.id.clone());
     record.remote_url = if clip.visibility == "private" {
@@ -145,7 +145,8 @@ pub(crate) fn apply_remote_clip_to_record(record: &mut CloudUploadRecord, clip: 
         clip.public_url.clone()
     };
     record.upload_status = upload_status_for_remote_clip(clip);
-    record.error = None;
+    record.error = (clip.status == "failed")
+        .then(|| "cloud media processing failed; retry the upload".to_string());
     record.updated_at_unix = unix_now();
 }
 
@@ -176,12 +177,11 @@ pub(crate) fn cloud_library_clip_from_summary(
 }
 
 pub(crate) fn upload_status_for_remote_clip(clip: &ClipDetailResponse) -> String {
-    if clip.status != "ready" {
-        "uploaded_processing".to_string()
-    } else if clip.visibility == "private" {
-        "uploaded_private".to_string()
-    } else {
-        "uploaded_public".to_string()
+    match clip.status.as_str() {
+        "failed" => "failed".to_string(),
+        "ready" if clip.visibility == "private" => "uploaded_private".to_string(),
+        "ready" => "uploaded_public".to_string(),
+        _ => "uploaded_processing".to_string(),
     }
 }
 
@@ -219,7 +219,26 @@ pub(crate) fn mark_remote_not_found_once(record: &mut CloudUploadRecord) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+    #[test]
+    fn failed_detail_reconciliation_allows_upload_retry() {
+        let mut record = upload_record("local", "clip.mp4", "uploaded_processing", 10);
+        apply_remote_clip_to_record(
+            &mut record,
+            &clip_detail("remote", "private", "failed", None),
+        );
+        assert_eq!(record.upload_status, "failed");
+        assert!(record
+            .error
+            .as_deref()
+            .is_some_and(|message| message.contains("processing failed")));
+        let mut cloud = CloudSettings::default();
+        replace_upload_record(&mut cloud, record);
+        assert!(existing_uploaded_record(&cloud, Some("local"), "clip.mp4").is_none());
+        assert_eq!(
+            existing_retry_status(&cloud, "local", "clip.mp4"),
+            "retrying"
+        );
+    }
 
     #[test]
     fn cloud_clip_detail_updates_record_visibility_status_and_url() {
@@ -332,5 +351,4 @@ mod tests {
             MissingRemoteSyncAction::Remove
         );
     }
-
 }

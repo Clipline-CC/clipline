@@ -107,11 +107,44 @@ mod tests {
         let cloud = MockServer::start();
         cloud.mock(|when, then| {
             when.method(POST).path("/api/v1/uploads");
-            then.status(200).body("a".repeat(crate::bounded_http::CONTROL_JSON_MAX_BYTES + 1));
+            then.status(200).json_body(json!({
+                "clip_id": "clip", "upload_id": "upload", "mode": "chunked",
+                "part_size_bytes": 3,
+                "parts_url_template": "/api/v1/uploads/upload/parts/{part_number}",
+                "padding": "a".repeat(crate::bounded_http::CONTROL_JSON_MAX_BYTES)
+            }));
         });
         let client = test_client(&cloud);
-        let error = create_upload(&client, crate::bounded_http::control_client().unwrap(), TOKEN, &upload_request(b"abc"), None)
-            .await.unwrap_err();
+        let error = create_upload(
+            &client,
+            crate::bounded_http::control_client().unwrap(),
+            TOKEN,
+            &upload_request(b"abc"),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("limit"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn upload_creation_caps_error_response_bodies() {
+        let cloud = MockServer::start();
+        cloud.mock(|when, then| {
+            when.method(POST).path("/api/v1/uploads");
+            then.status(500).json_body(
+                json!({ "error": "a".repeat(crate::bounded_http::ERROR_BODY_MAX_BYTES) }),
+            );
+        });
+        let error = create_upload(
+            &test_client(&cloud),
+            crate::bounded_http::control_client().unwrap(),
+            TOKEN,
+            &upload_request(b"abc"),
+            None,
+        )
+        .await
+        .unwrap_err();
         assert!(error.to_string().contains("limit"), "{error}");
     }
 
@@ -139,5 +172,4 @@ mod tests {
         assert!(error.to_string().contains("302"), "{error}");
         redirected.assert_hits(0);
     }
-
 }

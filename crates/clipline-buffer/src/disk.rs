@@ -30,6 +30,7 @@ pub struct DiskSegment {
 #[derive(Debug, Clone)]
 struct DiskTrack {
     pts_start_s: Option<f64>,
+    discontinuities: Vec<(usize, f64)>,
     offset: usize,
     len: usize,
     samples: Vec<SampleInfo>,
@@ -43,6 +44,7 @@ struct DiskTrack {
 #[derive(Debug, Clone, Copy)]
 pub struct DiskTrackRef<'a> {
     pub pts_start_s: Option<f64>,
+    pub discontinuities: &'a [(usize, f64)],
     pub offset: u64,
     pub byte_len: usize,
     pub samples: &'a [SampleInfo],
@@ -89,6 +91,7 @@ impl DiskReplayRing {
             file.write_all(&track.data)?;
             audio.push(DiskTrack {
                 pts_start_s: track.pts_start_s,
+                discontinuities: track.discontinuities.clone(),
                 offset,
                 len: track.data.len(),
                 samples: track.samples.clone(),
@@ -205,6 +208,7 @@ impl DiskSegment {
     pub fn video_track(&self) -> DiskTrackRef<'_> {
         DiskTrackRef {
             pts_start_s: Some(self.pts_start_s),
+            discontinuities: &[],
             offset: 0,
             byte_len: self.video_len,
             samples: &self.samples,
@@ -214,6 +218,7 @@ impl DiskSegment {
     pub fn audio_tracks(&self) -> impl ExactSizeIterator<Item = DiskTrackRef<'_>> {
         self.audio.iter().map(|track| DiskTrackRef {
             pts_start_s: track.pts_start_s,
+            discontinuities: &track.discontinuities,
             offset: track.offset as u64,
             byte_len: track.len,
             samples: &track.samples,
@@ -259,6 +264,7 @@ mod tests {
             }],
             audio: vec![TrackSamples {
                 pts_start_s: Some(pts),
+                discontinuities: Vec::new(),
                 data: vec![b'a'; bytes / 2],
                 samples: vec![SampleInfo {
                     size: (bytes / 2) as u32,
@@ -288,6 +294,7 @@ mod tests {
         let mut segment = seg(3.0, 1.0, 100, true);
         segment.audio.push(TrackSamples {
             pts_start_s: Some(3.25),
+            discontinuities: Vec::new(),
             data: vec![b'b'; 25],
             samples: vec![SampleInfo {
                 size: 25,
