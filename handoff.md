@@ -28,6 +28,8 @@ in the clipboard. No new dependency, schema, updater trust, or release change.
 Local gates: 1,661 workspace tests pass, with two intentional ignores and one
 additional isolated-child invocation for the native clipboard regression.
 Warning-denied workspace Clippy passes with fresh caches for changed crates.
+Windows CI exposed existing cadence assertions that assumed no scheduler stalls;
+tests now inject missed slots, assert the cadence grid, and retain payload/deadline checks.
 Evidence: ignored `target/bug-hunt-workspace-{tests,clippy}.log`. Ubuntu/Windows CI
 and PR review are tracked in PR #217. Manual acceptance: export
 two different play ranges concurrently; copy a file after a cloud link; toggle
