@@ -67,6 +67,7 @@ function requestSettingsClose({ allowDiscard = true } = {}) {
 function toggleSettings(open = !settingsOpen) {
   const wasOpen = settingsOpen;
   settingsOpen = open;
+  if (settingsOpen) endDrag({ resume: false });
   // The clip survives the round-trip; just don't play behind the page.
   if (settingsOpen && !video.paused) video.pause();
   if (settingsOpen && !wasOpen) {
@@ -147,6 +148,7 @@ function timelineZoomEnabled() {
 }
 
 function setSimpleTrimMode(active) {
+  endDrag({ resume: false });
   if (activeGroup()) {
     simpleTrimMode = false;
     scheduleTrimBoundaryCheck();
@@ -177,6 +179,7 @@ function timelineView() {
 }
 
 function resetZoom() {
+  endDrag({ resume: false });
   zoomStart = 0;
   zoomSpan = 0;
 }
@@ -663,6 +666,9 @@ var resumeAfterDrag = false;
 // Snap targets snapshotted at pointerdown so a drag never snaps to its own
 // moving position (the dragged edge and the playhead are excluded up front).
 var dragCandidates = [];
+var dragPointer = null;
+var dragPanFrame = 0;
+var dragPanLastMs = 0;
 // Sliding the whole selection: offset from pointer to selection start, the click
 // time, and whether the pointer moved enough to count as a drag (vs a seek).
 var slideGrab = 0;
@@ -679,7 +685,7 @@ function clearSnapFeedback() {
 }
 
 function startDrag(kind, ev) {
-  if (!currentClip) return;
+  if (!currentClip || dragging) return;
   dragging = kind;
   // Scrub paused so every pointer position shows its frame, then restore.
   resumeAfterDrag = !video.paused;
@@ -720,6 +726,40 @@ function startDrag(kind, ev) {
 }
 
 function moveDrag(ev) {
+  if (!dragging || (dragPointer && ev.pointerId !== dragPointer.pointerId)) return;
+  dragPointer = { clientX: ev.clientX, altKey: ev.altKey, pointerId: ev.pointerId };
+  updateDrag(dragPointer);
+  if (simpleTrimMode && (dragging === "in" || dragging === "out") && !dragPanFrame) {
+    dragPanLastMs = performance.now();
+    dragPanFrame = requestAnimationFrame(panDragFrame);
+  }
+}
+
+function panDragFrame() {
+  dragPanFrame = 0;
+  if (!dragPointer || !currentClip || !simpleTrimMode || settingsOpen || document.hidden
+      || (dragging !== "in" && dragging !== "out")) {
+    endDrag({ resume: false });
+    return;
+  }
+  const rect = $("timeline").getBoundingClientRect();
+  const view = timelineView();
+  const dur = clipDuration();
+  const now = performance.now();
+  const next = PlayerCore.edgePanView(dragPointer.clientX, rect.left, rect.width,
+    view.start, view.span, dur, (now - dragPanLastMs) / 1000);
+  dragPanLastMs = now;
+  if (next.start === view.start) return;
+  const time = timelineTimeView(dragPointer.clientX, rect.left, rect.width, next.start, next.span, dur);
+  const trim = trimDrag(dragging, time, trimStart, trimEnd, dur);
+  if (dragging === "in" ? trim.start === trimStart : trim.end === trimEnd) return;
+  noteViewActivity();
+  applyView(next);
+  updateDrag(dragPointer);
+  dragPanFrame = requestAnimationFrame(panDragFrame);
+}
+
+function updateDrag(ev) {
   if (!dragging) return;
   const rect = $("timeline").getBoundingClientRect();
   const view = timelineView();
@@ -771,7 +811,13 @@ function moveDrag(ev) {
   }
 }
 
-function endDrag() {
+function endDrag({ resume = true, pointerId } = {}) {
+  if (dragPointer && pointerId != null && pointerId !== dragPointer.pointerId) return;
+  const pointer = dragPointer;
+  if (dragPanFrame) cancelAnimationFrame(dragPanFrame);
+  dragPanFrame = 0;
+  dragPanLastMs = 0;
+  dragPointer = null;
   if (!dragging) return;
   // A press-and-release on the selection without dragging just seeks there.
   const clickSeek = dragging === "slide" && !slideMoved;
@@ -779,9 +825,12 @@ function endDrag() {
   dragCandidates = [];
   clearSnapFeedback();
   $("trim-band").classList.remove("grabbing");
-  if (clickSeek) seekTo(slideClickT);
-  if (resumeAfterDrag) {
-    resumeAfterDrag = false;
+  const shouldResume = resume && resumeAfterDrag;
+  resumeAfterDrag = false;
+  const timeline = $("timeline");
+  if (pointer && timeline.hasPointerCapture(pointer.pointerId)) timeline.releasePointerCapture(pointer.pointerId);
+  if (clickSeek && resume) seekTo(slideClickT);
+  if (shouldResume) {
     video.play().catch(() => syncPlayState());
   }
 }

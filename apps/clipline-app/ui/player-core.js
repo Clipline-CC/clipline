@@ -477,6 +477,20 @@ const PlayerCore = (() => {
       duration
     );
 
+  // A held pointer scrolls up to half a visible window per second. Ease into
+  // the 32px edge zones, and cap elapsed time so a stalled frame cannot jump.
+  const edgePanView = (clientX, rectLeft, rectWidth, viewStart, viewSpan, duration, elapsedSeconds) => {
+    const cur = clampView(viewStart, viewSpan, duration);
+    if (!(rectWidth > 0) || !Number.isFinite(clientX) || !Number.isFinite(rectLeft)
+        || !(elapsedSeconds > 0) || !Number.isFinite(elapsedSeconds)) return cur;
+    const edge = Math.min(32, rectWidth / 4);
+    const x = clientX - rectLeft;
+    const strength = x < edge ? -Math.min(1, (edge - x) / edge)
+      : x > rectWidth - edge ? Math.min(1, (x - rectWidth + edge) / edge) : 0;
+    return panView(cur.start, cur.span, duration,
+      strength * cur.span * 0.5 * Math.min(elapsedSeconds, 0.05));
+  };
+
   // A window that frames [startS, endS] with padding on each side, floored to the
   // min span and clamped to the clip — the "zoom to selection" target.
   const viewForRange = (startS, endS, duration, paddingFrac = 0.05, minSpan = MIN_VIEW_SPAN_S) => {
@@ -2193,6 +2207,7 @@ const PlayerCore = (() => {
     clampView,
     zoomView,
     panView,
+    edgePanView,
     viewForRange,
     followView,
     snapTime,

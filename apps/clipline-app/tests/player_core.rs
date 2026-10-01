@@ -2388,6 +2388,120 @@ fn view_for_range_frames_the_selection() {
 }
 
 #[test]
+fn trim_edge_pan_preserves_zoom_and_scales_with_elapsed_time() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(r#"
+      const pan = (x, start=40, span=20, dt=0.05) => PlayerCore.edgePanView(x, 100, 200, start, span, 120, dt);
+    "#)).unwrap();
+    assert_eq!(eval_json(&mut ctx, "pan(100)"), r#"{"start":39.5,"span":20}"#);
+    assert_eq!(eval_json(&mut ctx, "pan(300)"), r#"{"start":40.5,"span":20}"#);
+    assert_eq!(eval_json(&mut ctx, "pan(200)"), r#"{"start":40,"span":20}"#);
+    assert_eq!(eval(&mut ctx, "pan(120).start > pan(100).start && pan(120).start < 40"), "true", "scroll slower near the inner edge of the hot zone");
+    assert_eq!(eval_json(&mut ctx, "pan(-100)"), eval_json(&mut ctx, "pan(100)"), "outside pointers do not accelerate without limit");
+    assert_eq!(eval_json(&mut ctx, "pan(100, 0.2)"), r#"{"start":0,"span":20}"#);
+    assert_eq!(eval_json(&mut ctx, "pan(300, 99.8)"), r#"{"start":100,"span":20}"#);
+    assert_eq!(eval_json(&mut ctx, "pan(300, 0, 0)"), r#"{"start":0,"span":120}"#);
+    assert_eq!(eval_json(&mut ctx, "pan(300, 40, 20, 5)"), eval_json(&mut ctx, "pan(300)"), "a stalled animation frame must not jump the selection");
+    for expression in ["pan(NaN)", "pan(300, 40, 20, 0)", "pan(300, 40, 20, -1)", "pan(300, 40, 20, Infinity)", "PlayerCore.edgePanView(300,100,0,40,20,120,0.05)"] {
+        assert_eq!(eval_json(&mut ctx, expression), r#"{"start":40,"span":20}"#);
+    }
+    assert_eq!(eval(&mut ctx, r#"(()=>{
+      const run = (count, dt) => { let start=40; for(let i=0;i<count;i++) start=pan(300,start,20,dt).start; return start; };
+      return Math.abs(run(10,0.01)-run(2,0.05)) < 1e-8;
+    })()"#), "true", "scrolling speed is independent of refresh rate");
+}
+
+#[test]
+fn trim_edge_drag_scrolls_while_held_and_stops_on_release_or_teardown() {
+    let mut ctx = player_core_context();
+    ctx.eval(Source::from_bytes(r#"
+      var {clampView,panView,timelineTimeView,snapTime,snapCandidates,trimDrag,resolveTrim,slideTrim,trimSummary,SNAP_THRESHOLD_PX} = PlayerCore;
+      var currentClip = {duration_s:120}, simpleTrimMode=true, dragging=null, zoomStart=40, zoomSpan=20, trimStart=40, trimEnd=60;
+      var clock=0, frameId=0, frames=new Map(), markers=[];
+      var performance={now:()=>clock};
+      var requestAnimationFrame=cb=>{frames.set(++frameId,cb);return frameId;};
+      var cancelAnimationFrame=id=>frames.delete(id);
+      var advance=ms=>{clock+=ms;const batch=[...frames.values()];frames.clear();for(const cb of batch) cb(clock);};
+      class Node {
+        constructor(){this.listeners={};this.classList={add(){},remove(){}};this.style={};this.capture=null;}
+        getBoundingClientRect(){return {left:100,width:200};}
+        addEventListener(name,cb){this.listeners[name]=cb;}
+        setPointerCapture(id){this.capture=id;}
+        hasPointerCapture(id){return this.capture===id;}
+        releasePointerCapture(){this.capture=null;}
+      }
+      var fields=Object.fromEntries(['timeline','playhead','handle-in','handle-out','trim-band','trim-summary'].map(id=>[id,new Node()]));
+      var $=id=>fields[id];
+      var document={hidden:false};
+      var window={listeners:{},addEventListener(name,cb){this.listeners[name]=cb;}};
+      var video={currentTime:60,paused:true,plays:0,addEventListener(){},pause(){this.paused=true;},play(){this.plays++;this.paused=false;return {catch(){}};}};
+      var clipDuration=()=>currentClip ? currentClip.duration_s : 0;
+      var timelineMarkers=()=>markers;
+      var seekTo=t=>{video.currentTime=t;};
+      var activeGroup=()=>null;
+      var pointer=x=>({clientX:x,pointerId:1,altKey:true});
+    "#)).unwrap();
+    let ui = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui");
+    let timeline = fs::read_to_string(ui.join("review-timeline.js")).unwrap();
+    ctx.eval(Source::from_bytes(&timeline)).unwrap();
+    ctx.eval(Source::from_bytes(r#"
+      renderRuler=()=>{};renderPlayBlocks=()=>{};renderMarkers=()=>{};paintTimeline=()=>{};
+      applyTimelineEditorPreference=()=>{};
+      seekTo=t=>{video.currentTime=t;};
+      var setup=(kind,x,alt=true,eventMarkers=[])=>{
+        endDrag({resume:false});currentClip={duration_s:120};simpleTrimMode=true;settingsOpen=false;document.hidden=false;
+        zoomStart=40;zoomSpan=20;trimStart=40;trimEnd=60;video.currentTime=kind==='in'?40:60;video.paused=true;markers=eventMarkers;
+        startDrag(kind,{...pointer(x),altKey:alt});
+      };
+    "#)).unwrap();
+    let main = fs::read_to_string(ui.join("main.js")).unwrap();
+    let start = main.find("$(\"timeline\").addEventListener(\"pointerup\"").unwrap();
+    let end = main[start..].find("document.addEventListener(\"keydown\"").unwrap() + start;
+    ctx.eval(Source::from_bytes(&main[start..end])).unwrap();
+
+    ctx.eval(Source::from_bytes("setup('out',300);advance(50);advance(50);")).unwrap();
+    assert_eq!(eval_json(&mut ctx, "[zoomStart,zoomSpan,trimStart,trimEnd,video.currentTime]"), "[41,20,40,61,61]", "stationary edge hold keeps extending the out point");
+    ctx.eval(Source::from_bytes("setup('in',100);advance(50);advance(50);")).unwrap();
+    assert_eq!(eval_json(&mut ctx, "[zoomStart,trimStart,trimEnd]"), "[39,39,60]");
+    ctx.eval(Source::from_bytes("moveDrag(pointer(200));const stoppedStart=zoomStart;advance(50);")).unwrap();
+    assert_eq!(eval(&mut ctx, "zoomStart===stoppedStart && frames.size===0"), "true", "moving away from the edge stops scrolling");
+    ctx.eval(Source::from_bytes("moveDrag(pointer(100));advance(50);")).unwrap();
+    assert_eq!(eval(&mut ctx, "zoomStart<stoppedStart"), "true", "returning to the edge restarts scrolling");
+    ctx.eval(Source::from_bytes("setup('out',300,false,[{t_s:61,kind:'Bookmark'}]);advance(50);")).unwrap();
+    assert_eq!(eval(&mut ctx, "trimEnd"), "61", "existing snapping follows the shifted view");
+    ctx.eval(Source::from_bytes("setup('out',300,true,[{t_s:61,kind:'Bookmark'}]);advance(50);")).unwrap();
+    assert_eq!(eval(&mut ctx, "trimEnd"), "60.5", "Alt still bypasses snapping");
+    for (kind, x) in [("in", 300), ("out", 100)] {
+        ctx.eval(Source::from_bytes(&format!("setup('{kind}',{x});advance(50);"))).unwrap();
+        assert_eq!(eval(&mut ctx, "zoomStart===40 && frames.size===0 && (trimEnd-trimStart).toFixed(1)==='0.1'"), "true", "do not scroll past the other handle");
+    }
+    ctx.eval(Source::from_bytes("setup('out',300);zoomStart=99.8;trimStart=99.8;trimEnd=119.8;moveDrag(pointer(300));advance(50);advance(50);")).unwrap();
+    assert_eq!(eval_json(&mut ctx, "[zoomStart,trimEnd,frames.size]"), "[100,120,0]");
+    ctx.eval(Source::from_bytes("setup('in',100);zoomStart=0.2;trimStart=0.2;moveDrag(pointer(100));advance(50);advance(50);")).unwrap();
+    assert_eq!(eval_json(&mut ctx, "[zoomStart,trimStart,frames.size]"), "[0,0,0]");
+    for event in ["pointerup", "pointercancel", "lostpointercapture"] {
+        ctx.eval(Source::from_bytes(&format!("setup('out',300);advance(50);fields.timeline.listeners.{event}();const before{event}=trimEnd;advance(50);"))).unwrap();
+        assert_eq!(eval(&mut ctx, &format!("dragging===null && frames.size===0 && trimEnd===before{event} && fields.timeline.capture===null")), "true");
+    }
+    for action in ["resetZoom();", "setSimpleTrimMode(false);", "window.listeners.blur();", "settingsOpen=true;advance(50);", "document.hidden=true;advance(50);", "currentClip=null;advance(50);"] {
+        ctx.eval(Source::from_bytes(&format!("setup('out',300);{action}"))).unwrap();
+        assert_eq!(eval(&mut ctx, "dragging===null && frames.size===0"), "true", "cancel obsolete drag work: {action}");
+    }
+    for kind in ["scrub", "slide"] {
+        ctx.eval(Source::from_bytes(&format!("setup('{kind}',300);advance(50);"))).unwrap();
+        assert_eq!(eval(&mut ctx, "zoomStart===40 && frames.size===0"), "true", "edge pan is limited to handles");
+    }
+    ctx.eval(Source::from_bytes("setup('out',300);zoomStart=0;zoomSpan=0;moveDrag(pointer(300));advance(50);")).unwrap();
+    assert_eq!(eval_json(&mut ctx, "[zoomStart,zoomSpan,trimEnd,frames.size]"), "[0,0,120,0]");
+    ctx.eval(Source::from_bytes("setup('out',300);moveDrag({...pointer(100),pointerId:2});endDrag({pointerId:2});advance(50);")).unwrap();
+    assert_eq!(eval_json(&mut ctx, "[dragging,zoomStart,trimEnd]"), r#"["out",40.5,60.5]"#, "another pointer cannot redirect or release the active drag");
+    ctx.eval(Source::from_bytes("endDrag({resume:false});video.paused=false;startDrag('out',pointer(300));window.listeners.blur();")).unwrap();
+    assert_eq!(eval(&mut ctx, "video.paused && video.plays===0 && !resumeAfterDrag"), "true", "focus loss must not resume playback");
+    ctx.eval(Source::from_bytes("video.paused=false;startDrag('out',pointer(300));fields.timeline.listeners.pointerup();")).unwrap();
+    assert_eq!(eval(&mut ctx, "video.plays===1 && !resumeAfterDrag"), "true", "normal release preserves playback resumption");
+}
+
+#[test]
 fn follow_view_pages_and_centers() {
     let mut ctx = player_core_context();
     // Page: no change while the playhead is inside the window.

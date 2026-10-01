@@ -888,6 +888,7 @@ new ResizeObserver(updateStageFrame).observe(stage);
 $("timeline").addEventListener("pointerup", endDrag);
 $("timeline").addEventListener("pointercancel", endDrag);
 $("timeline").addEventListener("lostpointercapture", endDrag);
+window.addEventListener("blur", () => endDrag({ resume: false }));
 
 document.addEventListener("keydown", (ev) => {
   if (document.querySelector("dialog[open]")) return; // a dialog owns the keyboard
@@ -1141,5 +1142,6 @@ setInterval(() => {
   if (!document.hidden && captureForegroundWork()) refreshMemoryUsage();
 }, 2000);
 document.addEventListener("visibilitychange", () => {
+  if (document.hidden) endDrag({ resume: false });
   if (!document.hidden && captureForegroundWork()) refreshMemoryUsage();
 });
