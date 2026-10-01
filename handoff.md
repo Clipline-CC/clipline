@@ -4,10 +4,10 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
-## Checkpoint (2026-10-01): Nightly 1.0.9 preparation
+## Checkpoint (2026-10-01): Protected signing fix and Nightly 1.0.10 preparation
 
-Release metadata advances the current Nightly 1.0.8 to 1.0.9 from `develop`
-merge `e1425dee`. This includes PRs #216–#220: security remediation, the twelve
+Release metadata advances the current Nightly 1.0.8 to 1.0.10 from `develop`
+merge `2b2d12ce`. This includes PRs #216–#220: security remediation, the twelve
 bug-hunt fixes, MP4/process-query performance work, player metadata/marker menus,
 and the accepted trim-handle edge scrolling. Cargo, Cargo.lock and Tauri agree.
 
@@ -17,9 +17,19 @@ passed. Review dates are 2026-10-01 through 2026-10-31. Workspace tests report
 1,671 passing checks, and fresh-app-cache warning-denied workspace Clippy passes.
 The standalone-config debug harness used the staged Fixed Version executable:
 H.264/Opus, HEVC and AV1 each played through ended with 60 frames, matching the
-HEVC/AV1 `probably` capability probes. Only release metadata/docs changed.
+HEVC/AV1 `probably` capability probes. Capture/player code is unchanged; this
+follow-up changes release workflows, their security regression and release metadata/docs.
 
-Publication follows the release PR, green OS CI, and immutable `nightly-v1.0.9`
+Nightly 1.0.9 run `36826589986` built both installers, but the protected signer
+received an empty key in two attempts; no release was published. The verified
+existing local key still matches committed updater trust. Explicit named routing
+at both release calls and optional callee declarations enable environment-secret
+resolution without broad inheritance or repository-level keys. Quoting the
+password argument also fixes a reproduced CLI failure when the password is unset.
+The security regression failed before the routing fix. Keep `nightly-v1.0.9`
+immutable; source changes require the next patch version.
+
+Publication follows the fix/release PR, green OS CI, and immutable `nightly-v1.0.10`
 on its merged develop commit. The Nightly workflow owns builds, protected signing
 and public-download verification; publication is not yet complete at this checkpoint.
 Local evidence is under ignored `target/nightly-20261001/`.
