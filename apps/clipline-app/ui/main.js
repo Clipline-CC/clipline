@@ -619,6 +619,23 @@ $("seek-back").addEventListener("click", () => seekBy(-5));
 $("seek-forward").addEventListener("click", () => seekBy(5));
 $("prev-marker").addEventListener("click", () => jumpMarker(-1));
 $("next-marker").addEventListener("click", () => jumpMarker(1));
+$("timeline-marker-list").addEventListener("change", (ev) => {
+  const category = ev.target.dataset.category;
+  if (!category) return;
+  timelineMarkerFilter.categories.set(category, ev.target.checked);
+  renderMarkers();
+});
+$("timeline-markers-visibility").addEventListener("click", () => {
+  setTimelineMarkerMode(timelineMarkers().length ? "none" : "all");
+});
+$("timeline-markers-bookmarks").addEventListener("click", () => {
+  setTimelineMarkerMode($("timeline-markers-bookmarks").getAttribute("aria-pressed") === "true" ? "all" : "bookmarks");
+});
+document.addEventListener("pointerdown", (ev) => {
+  for (const panel of [$("timeline-marker-panel"), $("audio-track-panel")]) {
+    if (!panel.contains(ev.target)) panel.open = false;
+  }
+}, true);
 $("game-event-rail-toggle").addEventListener("click", () => {
   setGameEventRailCollapsed(!gameEventRailCollapsed);
 });
@@ -880,6 +897,17 @@ document.addEventListener("keydown", (ev) => {
     return;
   }
   if (settingsOpen) return; // player shortcuts are inert behind the page
+  for (const panel of [$("timeline-marker-panel"), $("audio-track-panel")]) {
+    if (ev.code === "Escape" && panel.open) {
+      ev.preventDefault();
+      panel.open = false;
+      panel.querySelector("summary").focus();
+      return;
+    }
+    // Keep menu activation native; resume other player shortcuts after dismissal.
+    if (panel.contains(ev.target)
+        && (panel.open || ev.code === "Space" || ev.code === "Enter")) return;
+  }
   const tag = ev.target && ev.target.tagName;
   if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
   // "?" opens the shortcuts guide from anywhere in the player (clip or not).

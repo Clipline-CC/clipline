@@ -4,6 +4,43 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-10-01): Player header and marker filters
+
+`feat/player-metadata-marker-filters` starts at `develop` merge `a3885f12`.
+League champion/spells/KDA/items now use the existing metadata renderer in the
+player header beside the title/file details. The header wraps without reserving
+the former metadata row below the video.
+
+The timeline's Markers menu has native category checkboxes plus an eye button
+for hide/show all and a bookmark button for bookmarks-only/all. Pressed styling,
+accessible toggle states and action tooltips follow selection; the eye is crossed
+out when no markers are visible. Selection stays across clip switches within the current webview;
+a new webview starts with all markers visible. Category defaults and overrides apply
+after existing game-review settings/bookmark merging. Pins, counts, marker/edit jumps
+and snapping share the player-only accessor; gallery counts, event rails and saved
+sidecars keep their existing behavior. Hidden categories remain selectable, checkbox
+focus survives repainting, and Escape/outside clicks/review teardown dismiss the menu.
+Audio tracks uses the same bounded popup and narrow summary hitbox. Native details
+grouping keeps only one popup open; both use the same keyboard/dismissal behavior.
+Audio checkboxes also retain focus during repaint, with callbacks refreshed for
+current clip/track metadata; review/upload selection and persistence stay intact.
+After dismissal, the focused summary keeps native activation keys while other
+player shortcuts resume; a second Escape can close review.
+
+Validation: regression tests failed before implementation; 1,669 reported workspace
+test checks pass (including the isolated clipboard child), with two intentional
+ignores. Warning-denied workspace Clippy passes after cleaning `clipline-app`.
+Live WebView checks cover League/osu!, 1200px and the supported 960px minimum layout,
+filter toggles, all-hidden restoration, keyboard Space/Escape and pin dismissal.
+Bookmarks-only uses temporary in-memory bookmarks; no recording/sidecar was edited.
+Native Computer Use was unavailable, so layout inspection used WebView screenshots
+and viewport emulation. Logs/screenshots remain in ignored `target/player-*` artifacts.
+
+Manual acceptance: open a League clip and check the header; expand Markers, toggle
+categories or the bookmark icon, then use Previous/Next marker; toggle the eye off/on.
+Open Audio tracks and use Space on a focused checkbox; Escape returns to its summary.
+Try another clip, switch between menus and narrow the window to check the layout.
+
 ## Checkpoint (2026-09-30): Performance first pass
 
 `perf/mp4-batching-process-query-reuse` starts at merged bug-hunt commit

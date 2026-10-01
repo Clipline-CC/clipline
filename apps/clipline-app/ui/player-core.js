@@ -1046,6 +1046,29 @@ const PlayerCore = (() => {
     return { glyph: String(configured.glyph || category.glyph), cls };
   };
 
+  const timelineCategoryVisible = (category, filter) => !filter
+    || (filter.categories.has(category) ? filter.categories.get(category) : filter.defaultVisible);
+
+  const filterTimelineMarkers = (markers, filter, presentation = null) =>
+    markers.filter((marker) => timelineCategoryVisible(markerCategory(marker.kind, presentation), filter));
+
+  const timelineMarkerOptions = (markers, filter, presentation = null) => {
+    const options = new Map();
+    for (const marker of markers) {
+      const category = markerCategory(marker.kind, presentation);
+      if (!options.has(category)) {
+        options.set(category, {
+          category,
+          label: markerCategoryMeta(category, presentation).plural,
+          count: 0,
+          selected: timelineCategoryVisible(category, filter),
+        });
+      }
+      options.get(category).count++;
+    }
+    return [...options.values()];
+  };
+
   const markerDigest = (markers, presentation = null) => {
     const counts = {};
     for (const m of markers) {
@@ -2206,6 +2229,8 @@ const PlayerCore = (() => {
     audioTrackSelectedRowCount,
     markerStyle,
     markerDigest,
+    filterTimelineMarkers,
+    timelineMarkerOptions,
     ownObjectValue,
     markerKindConfig,
     safeMarkerImage,

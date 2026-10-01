@@ -16,6 +16,10 @@ function updateViews() {
   $("review-viewer").hidden = !currentClip;
   // Settings is an overlay; gallery/review visibility follows only clip state.
   $("gallery-view").hidden = !!currentClip;
+  if (!currentClip) {
+    $("timeline-marker-panel").open = false;
+    $("audio-track-panel").open = false;
+  }
   syncSettingsModalBackground();
 }
 
@@ -256,7 +260,7 @@ function stepFrame(dir) {
 
 // Jump to the previous/next edit point (clip ends, trim edges, markers).
 function jumpEdit(direction) {
-  const points = editPoints(clipMarkers(), trimStart, trimEnd, clipDuration());
+  const points = editPoints(timelineMarkers(), trimStart, trimEnd, clipDuration());
   const current = reviewPlayheadTime();
   const target = direction > 0 ? nextMarker(points, current) : prevMarker(points, current);
   if (target) seekTo(target.t_s);
@@ -370,11 +374,58 @@ function renderPlayBlocks() {
   });
 }
 
+function renderTimelineMarkerPanel() {
+  const panel = $("timeline-marker-panel");
+  const list = $("timeline-marker-list");
+  const options = PlayerCore.timelineMarkerOptions(clipMarkers(), timelineMarkerFilter, currentPluginPresentation());
+  panel.hidden = !options.length;
+  if (panel.hidden) panel.open = false;
+  // Preserve checkbox focus when toggling filters or repainting the zoomed timeline.
+  const key = JSON.stringify(options.map(({ category, label, count }) => [category, label, count]));
+  if (list.dataset.optionsKey !== key) {
+    list.dataset.optionsKey = key;
+    list.replaceChildren();
+    for (const option of options) {
+      const row = document.createElement("label");
+      row.className = "timeline-marker-row";
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.dataset.category = option.category;
+      const label = document.createElement("span");
+      label.textContent = `${option.label} (${option.count})`;
+      row.append(input, label);
+      list.appendChild(row);
+    }
+  }
+  for (const [index, input] of [...list.querySelectorAll("input")].entries()) {
+    input.checked = options[index].selected;
+  }
+  const selected = options.filter((option) => option.selected).length;
+  $("timeline-marker-summary").textContent = `${selected}/${options.length} types`;
+  const visibility = $("timeline-markers-visibility");
+  visibility.setAttribute("aria-pressed", String(selected > 0));
+  visibility.title = selected ? "Hide all markers" : "Show all markers";
+  const bookmarksOnly = !timelineMarkerFilter.defaultVisible
+    && timelineMarkerFilter.categories.get("bookmark") === true
+    && [...timelineMarkerFilter.categories].every(([category, visible]) => category === "bookmark" || !visible);
+  const bookmarks = $("timeline-markers-bookmarks");
+  bookmarks.setAttribute("aria-pressed", String(bookmarksOnly));
+  bookmarks.title = bookmarksOnly ? "Show all markers" : "Show bookmarks only";
+}
+
+function setTimelineMarkerMode(mode) {
+  timelineMarkerFilter.defaultVisible = mode === "all";
+  timelineMarkerFilter.categories.clear();
+  if (mode === "bookmarks") timelineMarkerFilter.categories.set("bookmark", true);
+  renderMarkers();
+}
+
 function renderMarkers() {
+  renderTimelineMarkerPanel();
   const layer = $("marker-layer");
   layer.replaceChildren();
   const view = timelineView();
-  const markers = clipMarkers();
+  const markers = timelineMarkers();
   const presentation = currentPluginPresentation();
   for (const m of markers) {
     const left = percentForView(m.t_s, view.start, view.span);
@@ -600,7 +651,7 @@ function toggleMute() {
 }
 
 function jumpMarker(direction) {
-  const markers = clipMarkers();
+  const markers = timelineMarkers();
   const current = video.currentTime || 0;
   const target = direction > 0 ? nextMarker(markers, current) : prevMarker(markers, current);
   if (target) seekTo(target.t_s);
@@ -653,7 +704,7 @@ function startDrag(kind, ev) {
     const edge = kind === "in" ? trimStart : trimEnd;
     if (Math.abs(playhead - edge) <= tol) exclude.push("playhead");
   }
-  dragCandidates = snapCandidates(clipDuration(), clipMarkers(), playhead, trimStart, trimEnd, exclude);
+  dragCandidates = snapCandidates(clipDuration(), timelineMarkers(), playhead, trimStart, trimEnd, exclude);
   if (kind === "slide") {
     const rect = $("timeline").getBoundingClientRect();
     const v = timelineView();
@@ -765,4 +816,3 @@ function onTimelineWheel(ev) {
   const factor = Math.max(0.5, Math.min(2, Math.exp(ev.deltaY * unit * ZOOM_SENSITIVITY)));
   applyView(zoomView(view.start, view.span, dur, anchorFrac, factor, MIN_VIEW_SPAN_S));
 }
-
