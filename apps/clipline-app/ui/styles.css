@@ -5013,7 +5013,7 @@ button.primary.settings-save-glow {
 .timeline-marker-actions button { padding: 4px 8px; font-size: 11px; }
 .audio-track-panel summary,
 .timeline-marker-panel summary {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   gap: 8px;
   cursor: pointer;
