@@ -219,8 +219,27 @@ fn updater_keys_are_confined_to_artifact_only_protected_signing() {
         assert!(!build.contains("TAURI_SIGNING_PRIVATE_KEY"));
         assert!(build.contains("tauri.unsigned.conf.json"));
         assert!(workflow.contains("uses: ./.github/workflows/_sign-release.yml"));
+        let sign = workflow
+            .split_once("\n  sign:")
+            .unwrap()
+            .1
+            .split_once("\n  publish:")
+            .unwrap()
+            .0;
+        assert!(!sign.contains("secrets: inherit"));
+        for secret in ["TAURI_SIGNING_PRIVATE_KEY", "TAURI_SIGNING_PRIVATE_KEY_PASSWORD"] {
+            assert!(
+                sign.contains(&format!("{secret}: ${{{{ secrets.{secret} }}}}")),
+                "{channel} signing must explicitly route {secret}"
+            );
+        }
     }
     let signer = fs::read_to_string(root.join(".github/workflows/_sign-release.yml")).unwrap();
+    let call = signer.split_once("\njobs:").unwrap().0;
+    for secret in ["TAURI_SIGNING_PRIVATE_KEY", "TAURI_SIGNING_PRIVATE_KEY_PASSWORD"] {
+        assert!(call.contains(&format!("{secret}:\n        required: false")));
+    }
+    assert!(signer.contains("signer sign -p \"$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD\" $installer"));
     assert!(signer.contains("environment: release-signing"));
     assert!(signer.contains("runs-on: windows-latest"));
     assert!(!signer.contains("actions/checkout@"));

@@ -6,6 +6,11 @@ on:
       channel:
         required: true
         type: string
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY:
+        required: false
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
+        required: false
 
 permissions:
   contents: read
@@ -66,7 +71,7 @@ jobs:
             $path = "dist/$manifestName"
             $manifest = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
             $installer = "dist/$([Uri]::UnescapeDataString(([Uri]$manifest.platforms.'windows-x86_64'.url).Segments[-1]))"
-            & $env:RELEASE_SIGNER signer sign -p $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD $installer
+            & $env:RELEASE_SIGNER signer sign -p "$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD" $installer
             if ($LASTEXITCODE -ne 0) { throw 'Installer signing failed.' }
             $manifest.platforms.'windows-x86_64'.signature = (Get-Content -LiteralPath "$installer.sig" -Raw).Trim()
             if ([string]::IsNullOrWhiteSpace($manifest.platforms.'windows-x86_64'.signature)) { throw 'Empty updater signature.' }
