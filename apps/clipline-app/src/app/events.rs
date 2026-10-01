@@ -130,8 +130,8 @@ pub(crate) fn pump_events<R: Runtime>(handle: AppHandle<R>, event_rx: Receiver<E
             } else {
                 handle.state::<RuntimeState>().observe_runtime_event(&event);
             }
-            if matches!(&event, Event::MediaRootResolved { .. }) {
-                if !handle.state::<RuntimeState>().accept_service_media_root(
+            if matches!(&event, Event::MediaRootResolved { .. })
+                && !handle.state::<RuntimeState>().accept_service_media_root(
                     generation,
                     &event,
                     |root| {
@@ -139,9 +139,9 @@ pub(crate) fn pump_events<R: Runtime>(handle: AppHandle<R>, event_rx: Receiver<E
                             .state::<crate::library::StorageSettings>()
                             .set_media_dir(root)
                     },
-                ) {
-                    continue;
-                }
+                )
+            {
+                continue;
             }
             if let Event::Status { recording, .. } = &event {
                 let accepted = handle
