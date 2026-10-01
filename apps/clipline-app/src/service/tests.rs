@@ -1018,7 +1018,9 @@ fn clips_dir_resolved_with_probe(
                 data: FrameData::Cpu(vec![3]),
             })),
         ]);
+        let retry_started = Instant::now();
         let skipped = cap.next_frame();
+        let retry_elapsed = retry_started.elapsed();
 
         assert_cadence_advance(1.0, duplicate.pts_s, interval_s);
         let skipped_for = match skipped {
@@ -1039,6 +1041,14 @@ fn clips_dir_resolved_with_probe(
         let pts_remaining_s = scheduled_pts_s - stale_pts_s;
         assert!(remaining_s <= pts_remaining_s + 1e-9);
         assert!(remaining_s <= cap.inner.requested_timeouts[1].as_secs_f64() + 1e-9);
+        // Account for all observed call time, including scheduler stalls.
+        let minimum_remaining = cap.inner.requested_timeouts[1]
+            .saturating_sub(retry_elapsed)
+            .min(Duration::from_secs_f64(pts_remaining_s));
+        assert!(
+            skipped_for >= minimum_remaining,
+            "stale retry lost its deadline: remaining={skipped_for:?} minimum={minimum_remaining:?}"
+        );
     }
 
     #[test]
