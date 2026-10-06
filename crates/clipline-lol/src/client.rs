@@ -146,7 +146,7 @@ fn normalize_loopback_base(base: &str) -> Result<reqwest::Url, Error> {
         return Err(reject());
     }
 
-    let host = url.host_str().ok_or_else(&reject)?;
+    let host = url.host_str().ok_or_else(reject)?;
     if host.eq_ignore_ascii_case("localhost") {
         url.set_host(Some("127.0.0.1")).map_err(|_| reject())?;
         return Ok(url);

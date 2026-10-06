@@ -150,6 +150,9 @@ pub(crate) fn write_full_session_segment(
     write_memory_replay_segment(writer, &seg, &video_cfg, &audio_cfgs, origin_s)
 }
 
+// `fetch_update` is deprecated in favor of `try_update` (stable in Rust 1.99);
+// keep the old name until every dev toolchain is on 1.99.
+#[allow(deprecated)]
 pub(crate) fn try_reserve_queue_bytes(queued: &AtomicUsize, bytes: usize, max_bytes: usize) -> bool {
     queued
         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
