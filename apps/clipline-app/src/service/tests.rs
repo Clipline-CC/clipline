@@ -882,6 +882,55 @@ fn clips_dir_resolved_with_probe(
         }
     }
 
+    /// A poll with the local Neeko on CHAOS plus `(name, team, champion)` rows.
+    fn poll_with_rows(rows: &[(&str, &str, &str)]) -> PlayerSummary {
+        PlayerSummary {
+            player_name: "dain#png".into(),
+            team: "CHAOS".into(),
+            participants: std::iter::once(chaos_participant("dain#png", "Neeko"))
+                .chain(rows.iter().map(|(name, team, champion)| PlayerParticipant {
+                    player_name: (*name).into(),
+                    champion_name: (*champion).into(),
+                    team: (*team).into(),
+                }))
+                .collect(),
+            ..player_summary("Neeko", 0, 0, 0)
+        }
+    }
+
+    #[test]
+    fn player_summary_state_drops_a_lock_when_its_name_changes_team() {
+        let mut state = PlayerSummaryState::default();
+        state.match_started();
+        state.update(poll_with_rows(&[("Sam", "ORDER", "Ahri")]));
+        // Zed duplicates a CHAOS teammate, so only the team shows this is
+        // another Sam rather than a disguise.
+        let other_sam = poll_with_rows(&[("Sam", "CHAOS", "Zed"), ("Kai", "CHAOS", "Zed")]);
+        state.update(other_sam.clone());
+
+        assert_eq!(
+            state.full_session_summary().unwrap().participants,
+            other_sam.participants
+        );
+    }
+
+    #[test]
+    fn player_summary_state_keeps_a_contradicted_name_unlocked_for_the_match() {
+        let mut state = PlayerSummaryState::default();
+        state.match_started();
+        state.update(poll_with_rows(&[("Sam", "ORDER", "Ahri")]));
+        state.update(poll_with_rows(&[("Sam", "ORDER", "Zed")]));
+        state.update(poll_with_rows(&[("Sam", "ORDER", "Ahri")]));
+        // Had Sam re-locked to Ahri, this duplicate Zed would read as a disguise.
+        let latest = poll_with_rows(&[("Sam", "ORDER", "Zed"), ("Kai", "ORDER", "Zed")]);
+        state.update(latest.clone());
+
+        assert_eq!(
+            state.full_session_summary().unwrap().participants,
+            latest.participants
+        );
+    }
+
     #[test]
     fn player_summary_state_does_not_lock_the_local_champion_without_its_row() {
         // The local row can be missing from participants (filtered out) while the
