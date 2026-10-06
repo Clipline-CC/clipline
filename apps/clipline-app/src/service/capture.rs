@@ -243,10 +243,15 @@ pub(super) struct PlayerSummaryState {
 #[derive(Default)]
 struct ChampionLocks {
     local: Option<String>,
-    participants: HashMap<String, String>,
-    /// Names seen on more than one row this match. Those rows can't be told
-    /// apart, so they never lock.
+    participants: HashMap<String, LockedChampion>,
+    /// Names seen on more than one row, or contradicting their lock, this match.
+    /// Those rows can't be told apart, so they never lock.
     ambiguous_names: HashSet<String>,
+}
+
+struct LockedChampion {
+    team: String,
+    champion: String,
 }
 
 impl ChampionLocks {
@@ -288,14 +293,34 @@ impl ChampionLocks {
         }
 
         for participant in &mut summary.participants {
-            if self.ambiguous_names.contains(&participant.player_name) {
+            let name = participant.player_name.clone();
+            if self.ambiguous_names.contains(&name) {
                 continue;
             }
-            if let Some(champion) = self.participants.get(&participant.player_name) {
-                participant.champion_name = champion.clone();
-            } else if team_count(&participant.team, &participant.champion_name) == 1 {
-                self.participants
-                    .insert(participant.player_name.clone(), participant.champion_name.clone());
+            let unique = team_count(&participant.team, &participant.champion_name) == 1;
+            match self.participants.get(&name) {
+                Some(lock)
+                    if lock.team == participant.team
+                        && (lock.champion == participant.champion_name || !unique) =>
+                {
+                    participant.champion_name = lock.champion.clone();
+                }
+                // Another team, or another champion that duplicates no teammate
+                // and so isn't a disguise: this name now belongs to someone else.
+                Some(_) => {
+                    self.participants.remove(&name);
+                    self.ambiguous_names.insert(name);
+                }
+                None if unique => {
+                    self.participants.insert(
+                        name,
+                        LockedChampion {
+                            team: participant.team.clone(),
+                            champion: participant.champion_name.clone(),
+                        },
+                    );
+                }
+                None => {}
             }
         }
     }

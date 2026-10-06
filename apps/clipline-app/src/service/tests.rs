@@ -847,6 +847,42 @@ fn clips_dir_resolved_with_probe(
     }
 
     #[test]
+    fn player_summary_state_drops_a_lock_contradicted_by_another_player() {
+        // Two different players named Sam who never appear in the same poll.
+        let poll = |team: &str, champion: &str| PlayerSummary {
+            player_name: "dain#png".into(),
+            team: "CHAOS".into(),
+            participants: vec![
+                chaos_participant("dain#png", "Neeko"),
+                PlayerParticipant {
+                    player_name: "Sam".into(),
+                    champion_name: champion.into(),
+                    team: team.into(),
+                },
+            ],
+            ..player_summary("Neeko", 0, 0, 0)
+        };
+
+        for other_sam_team in ["ORDER", "CHAOS"] {
+            let mut state = PlayerSummaryState::default();
+            state.match_started();
+            for (team, champion) in [
+                ("ORDER", "Ahri"),
+                (other_sam_team, "Zed"),
+                ("ORDER", "Ahri"),
+                (other_sam_team, "Zed"),
+            ] {
+                state.update(poll(team, champion));
+                assert_eq!(
+                    state.full_session_summary().unwrap().participants,
+                    poll(team, champion).participants,
+                    "{champion} on {team} after Ahri on ORDER"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn player_summary_state_does_not_lock_the_local_champion_without_its_row() {
         // The local row can be missing from participants (filtered out) while the
         // summary still finds the player, so a disguise looks unique on the team.
