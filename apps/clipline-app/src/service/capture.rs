@@ -1,6 +1,6 @@
 //! Screen-capture engine, marker sources, and audio-source builders.
 use super::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub(super) trait TimedFrameSource {
     fn next_frame_timeout(&mut self, timeout: Duration) -> Result<Option<Frame>, CaptureError>;
@@ -243,13 +243,27 @@ pub(super) struct PlayerSummaryState {
 #[derive(Default)]
 struct ChampionLocks {
     local: Option<String>,
-    /// Keyed by player name and its occurrence in the player list, so players
-    /// who share a name keep separate champions.
-    participants: HashMap<(String, usize), String>,
+    participants: HashMap<String, String>,
+    /// Names seen on more than one row this match. Those rows can't be told
+    /// apart, so they never lock.
+    ambiguous_names: HashSet<String>,
 }
 
 impl ChampionLocks {
     fn apply(&mut self, summary: &mut PlayerSummary) {
+        let mut name_counts: HashMap<&str, usize> = HashMap::new();
+        for participant in &summary.participants {
+            *name_counts.entry(&participant.player_name).or_default() += 1;
+        }
+        for (name, _) in name_counts.iter().filter(|(_, count)| **count > 1) {
+            self.participants.remove(*name);
+            self.ambiguous_names.insert((*name).to_string());
+        }
+        let local_rows = name_counts
+            .get(summary.player_name.as_str())
+            .copied()
+            .unwrap_or(0);
+
         let observed: Vec<(String, String)> = summary
             .participants
             .iter()
@@ -262,23 +276,26 @@ impl ChampionLocks {
                 .count()
         };
 
-        // The local player is normally among the participants, so a count of
-        // one is just themself.
+        // Only trust the duplicate check when the local player's own row is in
+        // the count; otherwise a disguise can look unique on the team.
         if let Some(champion) = &self.local {
             summary.champion_name = champion.clone();
-        } else if team_count(&summary.team, &summary.champion_name) <= 1 {
+        } else if local_rows == 1
+            && !self.ambiguous_names.contains(&summary.player_name)
+            && team_count(&summary.team, &summary.champion_name) == 1
+        {
             self.local = Some(summary.champion_name.clone());
         }
 
-        let mut occurrences: HashMap<String, usize> = HashMap::new();
         for participant in &mut summary.participants {
-            let occurrence = occurrences.entry(participant.player_name.clone()).or_default();
-            let key = (participant.player_name.clone(), *occurrence);
-            *occurrence += 1;
-            if let Some(champion) = self.participants.get(&key) {
+            if self.ambiguous_names.contains(&participant.player_name) {
+                continue;
+            }
+            if let Some(champion) = self.participants.get(&participant.player_name) {
                 participant.champion_name = champion.clone();
             } else if team_count(&participant.team, &participant.champion_name) == 1 {
-                self.participants.insert(key, participant.champion_name.clone());
+                self.participants
+                    .insert(participant.player_name.clone(), participant.champion_name.clone());
             }
         }
     }

@@ -816,27 +816,52 @@ fn clips_dir_resolved_with_probe(
     }
 
     #[test]
-    fn player_summary_state_keeps_same_named_participants_apart() {
-        let poll = || PlayerSummary {
+    fn player_summary_state_never_locks_names_shared_by_several_rows() {
+        let poll = |sams: &[&str]| PlayerSummary {
             player_name: "dain#png".into(),
             team: "CHAOS".into(),
-            participants: vec![
-                chaos_participant("dain#png", "Neeko"),
-                chaos_participant("Sam", "Ahri"),
-                chaos_participant("Sam", "Zed"),
-            ],
+            participants: std::iter::once(chaos_participant("dain#png", "Neeko"))
+                .chain(sams.iter().map(|champion| chaos_participant("Sam", champion)))
+                .collect(),
             ..player_summary("Neeko", 0, 0, 0)
         };
 
         let mut state = PlayerSummaryState::default();
         state.match_started();
-        state.update(poll());
-        state.update(poll());
+        // One Sam is briefly missing, then both appear, reorder, and one drops
+        // out again. Rows sharing a name can't be told apart, so none may carry
+        // another row's lock.
+        for sams in [
+            &["Zed"][..],
+            &["Ahri", "Zed"],
+            &["Zed", "Ahri"],
+            &["Ahri"],
+        ] {
+            state.update(poll(sams));
+            assert_eq!(
+                state.full_session_summary().unwrap().participants,
+                poll(sams).participants,
+                "after {sams:?}"
+            );
+        }
+    }
 
-        assert_eq!(
-            state.full_session_summary().unwrap().participants,
-            poll().participants
-        );
+    #[test]
+    fn player_summary_state_does_not_lock_the_local_champion_without_its_row() {
+        // The local row can be missing from participants (filtered out) while the
+        // summary still finds the player, so a disguise looks unique on the team.
+        let without_local_row = PlayerSummary {
+            participants: vec![chaos_participant("Nyanmushroom#meow", "Tahm Kench")],
+            ..neeko_poll("Tahm Kench", 1)
+        };
+
+        let mut state = PlayerSummaryState::default();
+        state.match_started();
+        state.update(without_local_row);
+        state.update(neeko_poll("Neeko", 2));
+        state.update(neeko_poll("Tahm Kench", 3));
+
+        assert_eq!(state.full_session_summary().unwrap().champion_name, "Neeko");
     }
 
     #[test]
