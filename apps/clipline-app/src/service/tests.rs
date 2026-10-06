@@ -740,25 +740,32 @@ fn clips_dir_resolved_with_probe(
         assert_eq!(state.full_session_summary(), None);
     }
 
+    fn chaos_participant(player_name: &str, champion_name: &str) -> PlayerParticipant {
+        PlayerParticipant {
+            player_name: player_name.into(),
+            champion_name: champion_name.into(),
+            team: "CHAOS".into(),
+        }
+    }
+
+    /// A poll from the Neeko session: the local player on CHAOS with Tahm Kench
+    /// as an ally, so a disguised Neeko shows up as a second Tahm Kench.
+    fn neeko_poll(local_champion: &str, kills: u32) -> PlayerSummary {
+        PlayerSummary {
+            player_name: "dain#png".into(),
+            team: "CHAOS".into(),
+            participants: vec![
+                chaos_participant("dain#png", local_champion),
+                chaos_participant("Nyanmushroom#meow", "Tahm Kench"),
+            ],
+            ..player_summary(local_champion, kills, 0, 0)
+        }
+    }
+
     #[test]
     fn player_summary_state_ignores_mid_match_champion_disguises() {
-        fn participant(player_name: &str, champion_name: &str) -> PlayerParticipant {
-            PlayerParticipant {
-                player_name: player_name.into(),
-                champion_name: champion_name.into(),
-                team: "CHAOS".into(),
-            }
-        }
-        fn poll(local_champion: &str, kills: u32) -> PlayerSummary {
-            PlayerSummary {
-                player_name: "dain#png".into(),
-                participants: vec![
-                    participant("dain#png", local_champion),
-                    participant("Nyanmushroom#meow", "Tahm Kench"),
-                ],
-                ..player_summary(local_champion, kills, 0, 0)
-            }
-        }
+        let participant = chaos_participant;
+        let poll = neeko_poll;
 
         let mut state = PlayerSummaryState::default();
         state.match_started();
@@ -785,6 +792,50 @@ fn clips_dir_resolved_with_probe(
             state.full_session_summary().unwrap().champion_name,
             "Tahm Kench",
             "a new match picks its champions afresh"
+        );
+    }
+
+    #[test]
+    fn player_summary_state_does_not_lock_a_disguise_seen_first() {
+        let mut state = PlayerSummaryState::default();
+        state.match_started();
+        // Recording began while Neeko was already disguised as her ally.
+        state.update(neeko_poll("Tahm Kench", 1));
+        state.update(neeko_poll("Neeko", 2));
+        state.update(neeko_poll("Tahm Kench", 3));
+
+        let summary = state.full_session_summary().unwrap();
+        assert_eq!(summary.champion_name, "Neeko");
+        assert_eq!(
+            summary.participants,
+            vec![
+                chaos_participant("dain#png", "Neeko"),
+                chaos_participant("Nyanmushroom#meow", "Tahm Kench"),
+            ]
+        );
+    }
+
+    #[test]
+    fn player_summary_state_keeps_same_named_participants_apart() {
+        let poll = || PlayerSummary {
+            player_name: "dain#png".into(),
+            team: "CHAOS".into(),
+            participants: vec![
+                chaos_participant("dain#png", "Neeko"),
+                chaos_participant("Sam", "Ahri"),
+                chaos_participant("Sam", "Zed"),
+            ],
+            ..player_summary("Neeko", 0, 0, 0)
+        };
+
+        let mut state = PlayerSummaryState::default();
+        state.match_started();
+        state.update(poll());
+        state.update(poll());
+
+        assert_eq!(
+            state.full_session_summary().unwrap().participants,
+            poll().participants
         );
     }
 

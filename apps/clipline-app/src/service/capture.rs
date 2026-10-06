@@ -232,10 +232,56 @@ pub(super) struct PlayerSummaryState {
     in_match: bool,
     active_replay: Option<PlayerSummary>,
     full_session: Option<PlayerSummary>,
-    /// Champions as first seen this match. Champions never change mid-match, but
-    /// the Live Client API reports a disguised Neeko as the ally she copies.
-    local_champion: Option<String>,
-    participant_champions: HashMap<String, String>,
+    champion_locks: ChampionLocks,
+}
+
+/// Pins each player's champion for the match. Champions never change mid-match,
+/// but the Live Client API reports a disguised Neeko as the ally she copies. A
+/// disguise therefore always duplicates a teammate's champion, so only a
+/// champion unique on its team is trusted enough to lock; until then the latest
+/// poll wins.
+#[derive(Default)]
+struct ChampionLocks {
+    local: Option<String>,
+    /// Keyed by player name and its occurrence in the player list, so players
+    /// who share a name keep separate champions.
+    participants: HashMap<(String, usize), String>,
+}
+
+impl ChampionLocks {
+    fn apply(&mut self, summary: &mut PlayerSummary) {
+        let observed: Vec<(String, String)> = summary
+            .participants
+            .iter()
+            .map(|participant| (participant.team.clone(), participant.champion_name.clone()))
+            .collect();
+        let team_count = |team: &str, champion: &str| {
+            observed
+                .iter()
+                .filter(|(t, c)| t == team && c == champion)
+                .count()
+        };
+
+        // The local player is normally among the participants, so a count of
+        // one is just themself.
+        if let Some(champion) = &self.local {
+            summary.champion_name = champion.clone();
+        } else if team_count(&summary.team, &summary.champion_name) <= 1 {
+            self.local = Some(summary.champion_name.clone());
+        }
+
+        let mut occurrences: HashMap<String, usize> = HashMap::new();
+        for participant in &mut summary.participants {
+            let occurrence = occurrences.entry(participant.player_name.clone()).or_default();
+            let key = (participant.player_name.clone(), *occurrence);
+            *occurrence += 1;
+            if let Some(champion) = self.participants.get(&key) {
+                participant.champion_name = champion.clone();
+            } else if team_count(&participant.team, &participant.champion_name) == 1 {
+                self.participants.insert(key, participant.champion_name.clone());
+            }
+        }
+    }
 }
 
 impl PlayerSummaryState {
@@ -243,25 +289,14 @@ impl PlayerSummaryState {
         self.in_match = true;
         self.active_replay = None;
         self.full_session = None;
-        self.local_champion = None;
-        self.participant_champions.clear();
+        self.champion_locks = ChampionLocks::default();
     }
 
     pub(super) fn update(&mut self, mut summary: PlayerSummary) {
         if !self.in_match && self.full_session.is_none() {
             return;
         }
-        summary.champion_name = self
-            .local_champion
-            .get_or_insert_with(|| summary.champion_name.clone())
-            .clone();
-        for participant in &mut summary.participants {
-            participant.champion_name = self
-                .participant_champions
-                .entry(participant.player_name.clone())
-                .or_insert_with(|| participant.champion_name.clone())
-                .clone();
-        }
+        self.champion_locks.apply(&mut summary);
         if self.in_match {
             self.active_replay = Some(summary.clone());
         }
