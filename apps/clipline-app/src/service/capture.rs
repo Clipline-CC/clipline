@@ -1,5 +1,6 @@
 //! Screen-capture engine, marker sources, and audio-source builders.
 use super::*;
+use std::collections::HashMap;
 
 pub(super) trait TimedFrameSource {
     fn next_frame_timeout(&mut self, timeout: Duration) -> Result<Option<Frame>, CaptureError>;
@@ -231,6 +232,10 @@ pub(super) struct PlayerSummaryState {
     in_match: bool,
     active_replay: Option<PlayerSummary>,
     full_session: Option<PlayerSummary>,
+    /// Champions as first seen this match. Champions never change mid-match, but
+    /// the Live Client API reports a disguised Neeko as the ally she copies.
+    local_champion: Option<String>,
+    participant_champions: HashMap<String, String>,
 }
 
 impl PlayerSummaryState {
@@ -238,15 +243,29 @@ impl PlayerSummaryState {
         self.in_match = true;
         self.active_replay = None;
         self.full_session = None;
+        self.local_champion = None;
+        self.participant_champions.clear();
     }
 
-    pub(super) fn update(&mut self, summary: PlayerSummary) {
+    pub(super) fn update(&mut self, mut summary: PlayerSummary) {
+        if !self.in_match && self.full_session.is_none() {
+            return;
+        }
+        summary.champion_name = self
+            .local_champion
+            .get_or_insert_with(|| summary.champion_name.clone())
+            .clone();
+        for participant in &mut summary.participants {
+            participant.champion_name = self
+                .participant_champions
+                .entry(participant.player_name.clone())
+                .or_insert_with(|| participant.champion_name.clone())
+                .clone();
+        }
         if self.in_match {
             self.active_replay = Some(summary.clone());
         }
-        if self.in_match || self.full_session.is_some() {
-            self.full_session = Some(summary);
-        }
+        self.full_session = Some(summary);
     }
 
     pub(super) fn match_ended(&mut self) {

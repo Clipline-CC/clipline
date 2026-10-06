@@ -13,6 +13,7 @@ fn clips_dir_resolved_with_probe(
         quota_would_be_exceeded, storage_quota_full_event, Event, FullSessionRecording,
     };
     use clipline_capture::{Codec, EncoderApi, EncoderBackend, EncoderCapability};
+    use clipline_events::PlayerParticipant;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
@@ -737,6 +738,54 @@ fn clips_dir_resolved_with_probe(
         state.match_started();
         assert_eq!(state.active_replay_summary(), None);
         assert_eq!(state.full_session_summary(), None);
+    }
+
+    #[test]
+    fn player_summary_state_ignores_mid_match_champion_disguises() {
+        fn participant(player_name: &str, champion_name: &str) -> PlayerParticipant {
+            PlayerParticipant {
+                player_name: player_name.into(),
+                champion_name: champion_name.into(),
+                team: "CHAOS".into(),
+            }
+        }
+        fn poll(local_champion: &str, kills: u32) -> PlayerSummary {
+            PlayerSummary {
+                player_name: "dain#png".into(),
+                participants: vec![
+                    participant("dain#png", local_champion),
+                    participant("Nyanmushroom#meow", "Tahm Kench"),
+                ],
+                ..player_summary(local_champion, kills, 0, 0)
+            }
+        }
+
+        let mut state = PlayerSummaryState::default();
+        state.match_started();
+        state.update(poll("Neeko", 1));
+        // The Live Client API reports a disguised Neeko as the ally she copies.
+        state.update(poll("Tahm Kench", 9));
+        state.match_ended();
+        state.update(poll("Tahm Kench", 9));
+
+        let summary = state.full_session_summary().unwrap();
+        assert_eq!(summary.champion_name, "Neeko");
+        assert_eq!(summary.kills, 9, "stats still follow the latest poll");
+        assert_eq!(
+            summary.participants,
+            vec![
+                participant("dain#png", "Neeko"),
+                participant("Nyanmushroom#meow", "Tahm Kench"),
+            ]
+        );
+
+        state.match_started();
+        state.update(poll("Tahm Kench", 0));
+        assert_eq!(
+            state.full_session_summary().unwrap().champion_name,
+            "Tahm Kench",
+            "a new match picks its champions afresh"
+        );
     }
 
     #[test]
