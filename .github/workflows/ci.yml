@@ -23,6 +23,32 @@ jobs:
         with:
           persist-credentials: false
 
+      # Real-demuxer validation for the MP4 tests (they self-skip without it).
+      # Runs in the background so the apt download overlaps toolchain setup
+      # and the cache restore; the wait below holds the tests until it is
+      # installed, and fails the job if the install failed. Cap apt at 5
+      # minutes: GitHub Ubuntu mirrors can hang on `apt-get update` with no
+      # default step timeout, which blocked main CI for over an hour on the
+      # 1.0.0 push.
+      - name: Install ffprobe
+        id: install-ffprobe
+        if: runner.os == 'Linux'
+        background: true
+        timeout-minutes: 5
+        run: |
+          # Some GitHub runners cannot reach azure.archive.ubuntu.com, and plain
+          # HTTP to the Ubuntu archives can stall while HTTPS still works
+          # (2026-10-07). Point every Ubuntu mirror at HTTPS on the primary
+          # archive, and give apt short timeouts with retries, so a dead
+          # connection fails fast instead of eating the 5-minute cap.
+          sudo sed -i -E \
+            -e 's#https?://(azure\.)?archive\.ubuntu\.com#https://archive.ubuntu.com#g' \
+            -e 's#http://security\.ubuntu\.com#https://security.ubuntu.com#g' \
+            /etc/apt/apt-mirrors.txt /etc/apt/sources.list /etc/apt/sources.list.d/* 2>/dev/null || true
+          apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20)
+          sudo DEBIAN_FRONTEND=noninteractive apt-get "${apt_opts[@]}" update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get "${apt_opts[@]}" install -y --no-install-recommends ffmpeg
+
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master (stable toolchain)
         with:
           toolchain: stable
@@ -36,35 +62,27 @@ jobs:
           # tags miss despite the dependency set being byte-identical.
           shared-key: clipline-shared
 
-      # Real-demuxer validation for the MP4 tests (they self-skip without it).
-      # Cap apt at 5 minutes: GitHub Ubuntu mirrors can hang on `apt-get update`
-      # with no default step timeout, which blocked main CI for over an hour on
-      # the 1.0.0 push.
-      - name: Install ffprobe
-        if: runner.os == 'Linux'
-        timeout-minutes: 5
-        run: |
-          # Some GitHub runners cannot reach azure.archive.ubuntu.com; the
-          # primary archive mirror works on all of them. Redirect before
-          # update so a dead regional mirror cannot eat the 5-minute cap.
-          sudo sed -i 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' \
-            /etc/apt/apt-mirrors.txt /etc/apt/sources.list /etc/apt/sources.list.d/* 2>/dev/null || true
-          sudo DEBIAN_FRONTEND=noninteractive apt-get update -y
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ffmpeg
+      # Wait steps take no name or `if:`; on Windows the install was skipped,
+      # so this returns immediately.
+      - wait: [install-ffprobe]
 
-      - name: Test DWM probe runner
-        if: runner.os == 'Windows'
-        shell: powershell
-        run: .\scripts\tests\test-dwm-probe-runner.ps1
+      # The script checks need neither Cargo nor the GPU, so they run beside
+      # the workspace tests instead of after them. The group fails if any
+      # member fails.
+      - parallel:
+          - name: Test
+            run: cargo test --workspace
 
-      - name: Test
-        run: cargo test --workspace
+          - name: Test DWM probe runner
+            if: runner.os == 'Windows'
+            shell: powershell
+            run: .\scripts\tests\test-dwm-probe-runner.ps1
 
-      - name: Test isolated release signing
-        if: runner.os == 'Windows'
-        timeout-minutes: 5
-        shell: pwsh
-        run: .\scripts\tests\test-release-signing.ps1
+          - name: Test isolated release signing
+            if: runner.os == 'Windows'
+            timeout-minutes: 5
+            shell: pwsh
+            run: .\scripts\tests\test-release-signing.ps1
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
