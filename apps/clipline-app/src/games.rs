@@ -1,7 +1,9 @@
 //! Custom game detection. This layer only consumes visible window/process
 //! metadata exposed by Win32; it never opens game memory or injects code.
 
-use clipline_capture::windows::{enumerate_capturable_windows, CapturableWindow};
+use clipline_capture::windows::{
+    enumerate_capturable_windows, enumerate_pickable_windows, CapturableWindow,
+};
 
 use crate::game_identity::GameIdentity;
 use crate::game_plugins::{self, GamePluginInfo};
@@ -12,10 +14,14 @@ use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct GameWindowInfo {
+    /// Identifies the window for preview requests; always re-validated
+    /// together with `process_id`, since handles are recycled.
+    pub handle: isize,
     pub title: String,
     pub process_id: u32,
     pub exe_name: String,
     pub exe_path: Option<String>,
+    pub minimized: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,14 +42,16 @@ pub fn game_plugin_catalog() -> Vec<GamePluginInfo> {
 
 pub fn list_game_windows() -> Vec<GameWindowInfo> {
     let current_pid = std::process::id();
-    let mut windows: Vec<_> = enumerate_capturable_windows()
+    let mut windows: Vec<_> = enumerate_pickable_windows()
         .into_iter()
-        .filter(|window| window.process_id != current_pid)
-        .map(|window| GameWindowInfo {
-            title: window.title,
-            process_id: window.process_id,
-            exe_name: window.exe_name,
-            exe_path: window.exe_path,
+        .filter(|pickable| pickable.window.process_id != current_pid)
+        .map(|pickable| GameWindowInfo {
+            handle: pickable.window.handle,
+            title: pickable.window.title,
+            process_id: pickable.window.process_id,
+            exe_name: pickable.window.exe_name,
+            exe_path: pickable.window.exe_path,
+            minimized: pickable.minimized,
         })
         .collect();
     windows.sort_by(|a, b| {
@@ -57,6 +65,14 @@ pub fn list_game_windows() -> Vec<GameWindowInfo> {
             })
     });
     windows
+}
+
+/// Whether a renderer preview request names a window the picker lists now:
+/// same handle and same owning process, so a recycled handle is refused.
+pub fn listed_for_preview(windows: &[GameWindowInfo], handle: isize, process_id: u32) -> bool {
+    windows
+        .iter()
+        .any(|window| window.handle == handle && window.process_id == process_id)
 }
 
 /// `skipped_launches` are `(app_id, process_id)` Steam launches the user
@@ -541,6 +557,23 @@ fn is_browser_process(window: &CapturableWindow) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preview_requests_must_match_a_listed_handle_and_owner() {
+        let listed = GameWindowInfo {
+            handle: 0x1234,
+            title: "Deadlock".into(),
+            process_id: 42,
+            exe_name: "project8.exe".into(),
+            exe_path: None,
+            minimized: false,
+        };
+        let windows = [listed];
+        assert!(listed_for_preview(&windows, 0x1234, 42));
+        assert!(!listed_for_preview(&windows, 0x1234, 43), "recycled handle, new owner");
+        assert!(!listed_for_preview(&windows, 0x9999, 42), "not listed");
+        assert!(!listed_for_preview(&[], 0x1234, 42));
+    }
 
     fn game() -> CustomGameSettings {
         CustomGameSettings {

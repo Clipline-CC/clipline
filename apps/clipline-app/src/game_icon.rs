@@ -68,6 +68,32 @@ fn has_local_disk_prefix(path: &Path, allow_verbatim: bool) -> bool {
 }
 
 /// Wrap PNG bytes as a `data:` URL the webview can use directly in `<img src>`.
+/// Initialises COM on this thread for the Shell icon APIs and undoes it on
+/// drop. A thread already in another apartment keeps it and is left alone.
+pub struct ComApartment {
+    initialized: bool,
+}
+
+impl ComApartment {
+    pub fn enter() -> Self {
+        use windows_sys::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+        // SAFETY: balanced by CoUninitialize in Drop when it succeeds.
+        let result = unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32) };
+        Self {
+            initialized: result >= 0,
+        }
+    }
+}
+
+impl Drop for ComApartment {
+    fn drop(&mut self) {
+        if self.initialized {
+            // SAFETY: pairs with the successful CoInitializeEx in `enter`.
+            unsafe { windows_sys::Win32::System::Com::CoUninitialize() };
+        }
+    }
+}
+
 pub fn png_data_url(png: &[u8]) -> String {
     let b64 = base64::engine::general_purpose::STANDARD.encode(png);
     format!("data:image/png;base64,{b64}")

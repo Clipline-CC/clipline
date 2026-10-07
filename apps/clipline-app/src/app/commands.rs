@@ -278,14 +278,29 @@ pub(crate) fn detect_installed_games(
 }
 
 /// Extract an executable's icon as a PNG `data:` URL for the custom-games UI.
-/// Returns `None` when the path has no usable icon.
-#[tauri::command]
+/// Returns `None` when the path has no usable icon. Runs off the main thread
+/// (the picker asks for one per listed window) with COM initialised for the
+/// Shell icon APIs.
+#[tauri::command(async)]
 pub(crate) fn extract_window_icon(process_id: u32) -> Option<String> {
     let path = crate::games::list_game_windows()
         .into_iter()
         .find(|window| window.process_id == process_id)?
         .exe_path?;
+    let _com = crate::game_icon::ComApartment::enter();
     crate::game_icon::extract_exe_icon_data_url(&path)
+}
+
+/// A one-frame preview of a listed window for the custom-game picker, or
+/// `None` to show its icon. Acts only on a window listed right now with the
+/// same owner, because window handles are recycled.
+#[tauri::command(async)]
+pub(crate) fn window_preview(handle: isize, process_id: u32) -> Option<String> {
+    let windows = crate::games::list_game_windows();
+    if !crate::games::listed_for_preview(&windows, handle, process_id) {
+        return None;
+    }
+    crate::window_previews::window_preview_data_url(handle, process_id)
 }
 
 #[tauri::command]

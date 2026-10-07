@@ -207,6 +207,7 @@ pub fn run() {
             steam_prompt::ignore_prompted_steam_game,
             steam_prompt::unignore_steam_game,
             commands::extract_window_icon,
+            commands::window_preview,
             webview::memory_status,
             webview::frontend_ready,
             crate::ffmpeg_install::ffmpeg_runtime_status,
