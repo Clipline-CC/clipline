@@ -2530,9 +2530,8 @@ button.primary.settings-save-glow {
 }
 
 .game-profile,
-.custom-game,
 .detected-game,
-.game-window {
+.custom-game {
   display: grid;
   gap: 2px;
   min-width: 0;
@@ -2545,7 +2544,7 @@ button.primary.settings-save-glow {
 .game-profile strong,
 .custom-game strong,
 .detected-game strong,
-.game-window strong {
+.game-window-label strong {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2557,7 +2556,7 @@ button.primary.settings-save-glow {
 .game-profile span,
 .custom-game span,
 .detected-game span,
-.game-window span {
+.game-window-label span {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2969,25 +2968,95 @@ button.primary.settings-save-glow {
   padding: 14px;
 }
 
-.game-window-list {
+.game-window-picker-head .game-window-picker-title {
   display: grid;
-  gap: 6px;
-  max-height: min(420px, calc(72vh - 96px));
-  min-height: 0;
-  overflow-y: auto;
+  gap: 2px;
+  min-width: 0;
 }
 
-.game-window {
+/* Screen-share style grid: a 16:9 preview (or the app icon) over the title. */
+.game-window-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  align-content: start;
+  gap: 10px;
+  max-height: min(560px, calc(80vh - 110px));
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.game-window-list > .hint {
+  grid-column: 1 / -1;
+}
+
+.game-window-card {
+  display: grid;
+  gap: 8px;
   width: 100%;
   height: auto;
   min-width: 0;
-  padding: 9px 10px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--field);
   text-align: left;
 }
 
-.game-window:hover {
-  border-color: var(--line-strong);
-  background: var(--shade-b);
+.game-window-card:hover,
+.game-window-card:focus-visible {
+  border-color: var(--accent);
+  background: var(--hover);
+}
+
+.game-window-preview {
+  position: relative;
+  display: grid;
+  place-items: center;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border-radius: 5px;
+  background: var(--well);
+}
+
+.game-window-preview .game-icon {
+  width: 40px;
+  height: 40px;
+}
+
+.game-window-shot {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.game-window-badge {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(var(--scrim-b-rgb), 0.7);
+  color: var(--text-soft);
+  font-size: 10.5px;
+}
+
+.game-window-label {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.game-window-label > div {
+  display: grid;
+  min-width: 0;
+}
+
+.game-window-icon .game-icon {
+  width: 20px;
+  height: 20px;
 }
 
 .volume-line {
@@ -3977,6 +4046,11 @@ button.primary.settings-save-glow {
   background: var(--panel);
   color: var(--text);
   box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
+}
+
+#game-window-picker-dialog {
+  width: min(840px, calc(100vw - 32px));
+  max-height: min(80vh, 720px);
 }
 
 #detected-games-dialog::backdrop,

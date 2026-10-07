@@ -433,19 +433,96 @@ function renderGameWindows() {
     return;
   }
   for (const win of gameWindows) {
-    const row = document.createElement("button");
-    row.type = "button";
-    row.className = "game-window";
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = "game-window-card";
+    card.dataset.handle = String(win.handle);
+    card.dataset.processId = String(win.process_id);
+    card.title = [win.title, win.exe_path || win.exe_name].filter(Boolean).join("\n");
+
+    // Icon until a preview arrives; minimized windows keep it.
+    const preview = document.createElement("div");
+    preview.className = "game-window-preview";
+    preview.appendChild(gameIconEl(gameWindowIcons.get(win.process_id), ""));
+    if (win.minimized) {
+      const badge = document.createElement("span");
+      badge.className = "game-window-badge";
+      badge.textContent = "Minimized";
+      preview.appendChild(badge);
+    }
+
+    const label = document.createElement("div");
+    label.className = "game-window-label";
+    const icon = document.createElement("span");
+    icon.className = "game-window-icon";
+    icon.appendChild(gameIconEl(gameWindowIcons.get(win.process_id), ""));
+    const text = document.createElement("div");
     const title = document.createElement("strong");
     title.textContent = win.title;
-    const meta = document.createElement("span");
-    meta.textContent =
-      `${win.exe_name || "unknown process"} · PID ${win.process_id}` +
-      (win.exe_path ? ` · ${win.exe_path}` : "");
-    row.append(title, meta);
-    row.addEventListener("click", () => addCustomGameFromWindow(win));
-    root.appendChild(row);
+    const app = document.createElement("span");
+    app.textContent = win.exe_name || "unknown app";
+    text.append(title, app);
+    label.append(icon, text);
+
+    card.append(preview, label);
+    card.addEventListener("click", () => addCustomGameFromWindow(win));
+    root.appendChild(card);
   }
+}
+
+function gameWindowCards(attribute, value) {
+  return [...$("game-window-list").querySelectorAll(".game-window-card")]
+    .filter((card) => card.dataset[attribute] === String(value));
+}
+
+function showGameWindowIcon(processId, url) {
+  for (const card of gameWindowCards("processId", processId)) {
+    card.querySelector(".game-window-icon").replaceChildren(gameIconEl(url, ""));
+    const preview = card.querySelector(".game-window-preview");
+    if (!preview.querySelector(".game-window-shot")) {
+      preview.querySelector(".game-icon").replaceWith(gameIconEl(url, ""));
+    }
+  }
+}
+
+function showGameWindowPreview(handle, url) {
+  for (const card of gameWindowCards("handle", handle)) {
+    const shot = document.createElement("img");
+    shot.className = "game-window-shot";
+    shot.src = url;
+    shot.alt = "";
+    card.querySelector(".game-window-preview").replaceChildren(shot);
+  }
+}
+
+// One icon request per process for this listing.
+function loadGameWindowIcons(scanId) {
+  for (const processId of WindowPickerCore.iconProcessIds(gameWindows)) {
+    invoke("extract_window_icon", { processId })
+      .catch(() => null)
+      .then((url) => {
+        if (scanId !== gameWindowsScanId || !url) return;
+        gameWindowIcons.set(processId, url);
+        showGameWindowIcon(processId, url);
+      });
+  }
+}
+
+// Previews are captured one at a time; results for an abandoned listing are
+// dropped, and the next capture waits for the running one to finish.
+function pumpWindowPreviews() {
+  const step = WindowPickerCore.next(windowPreviews);
+  windowPreviews = step.state;
+  const request = step.request;
+  if (!request) return;
+  invoke("window_preview", { handle: request.handle, processId: request.processId })
+    .catch(() => null)
+    .then((url) => {
+      const done = WindowPickerCore.finish(windowPreviews, request);
+      windowPreviews = done.state;
+      if (done.apply && url) showGameWindowPreview(request.handle, url);
+      pumpWindowPreviews();
+    });
 }
 
 async function refreshGameWindows() {
@@ -466,7 +543,11 @@ async function refreshGameWindows() {
       || !$("game-window-picker-dialog").open
     ) return false;
     gameWindows = windows;
+    gameWindowIcons = new Map();
+    windowPreviews = WindowPickerCore.begin(windowPreviews, windows);
     renderGameWindows();
+    loadGameWindowIcons(scanId);
+    pumpWindowPreviews();
     return true;
   } catch (e) {
     if (
@@ -577,6 +658,7 @@ async function showGameWindowPicker() {
 function hideGameWindowPicker() {
   gameWindowsScanId += 1;
   gameWindows = [];
+  windowPreviews = WindowPickerCore.abandon(windowPreviews);
   $("game-window-list").replaceChildren();
   if ($("game-window-picker-dialog").open) $("game-window-picker-dialog").close();
 }
@@ -596,10 +678,10 @@ async function addCustomGameFromWindow(win) {
     $("settings-status").textContent = "game is already added";
     return;
   }
-  // Pull the executable's icon now, while we still have its path. Best-effort:
-  // a missing path or icon just leaves the game with the placeholder glyph.
-  let icon = null;
-  if (win.exe_path) {
+  // Reuse the card's icon, else pull it now while we still have the path.
+  // Best-effort: a missing path or icon leaves the placeholder glyph.
+  let icon = gameWindowIcons.get(win.process_id) || null;
+  if (!icon && win.exe_path) {
     try {
       icon = await invoke("extract_window_icon", { processId: win.process_id });
     } catch (e) {
@@ -630,6 +712,7 @@ async function addCustomGameFromWindow(win) {
 function releaseBackgroundSettingsUi() {
   gameWindowsScanId += 1;
   gameWindows = [];
+  windowPreviews = WindowPickerCore.abandon(windowPreviews);
   $("game-window-list").replaceChildren();
   if ($("game-window-picker-dialog").open) {
     $("game-window-picker-dialog").close();

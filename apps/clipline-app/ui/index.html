@@ -1336,7 +1336,10 @@
   <dialog id="game-window-picker-dialog" class="game-picker-dialog">
     <div id="game-window-picker" class="game-window-picker">
       <div class="game-window-picker-head">
-        <strong>Running windows</strong>
+        <div class="game-window-picker-title">
+          <strong>Pick a game window</strong>
+          <span class="hint">Start the game first, then pick its window.</span>
+        </div>
         <div>
           <button id="refresh-game-windows" type="button">Refresh</button>
           <button id="cancel-game-picker" type="button">Cancel</button>
@@ -1452,6 +1455,7 @@
   <script src="gallery-search-core.js"></script>
   <script src="window-lifecycle-core.js"></script>
   <script src="support-core.js"></script>
+  <script src="window-picker-core.js"></script>
   <script src="app-core.js"></script>
   <script src="settings.js"></script>
   <script src="settings-capture.js"></script>
