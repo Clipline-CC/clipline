@@ -301,7 +301,7 @@ fn parse_elst(input: &[u8], elst: &BoxInfo) -> Result<Vec<ParsedEdit>, TrimError
     Ok(edits)
 }
 
-fn parse_track_cfg(input: &[u8], trak: &BoxInfo) -> Result<TrackConfig, TrimError> {
+pub(crate) fn parse_track_cfg(input: &[u8], trak: &BoxInfo) -> Result<TrackConfig, TrimError> {
     let mdia = require_child(input, trak, b"mdia")?;
     let mdhd = require_child(input, &mdia, b"mdhd")?;
     let timescale = parse_mdhd_timescale(input, &mdhd)?;
