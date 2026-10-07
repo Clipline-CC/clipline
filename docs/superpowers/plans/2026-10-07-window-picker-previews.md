@@ -41,4 +41,29 @@ failed grabs show an icon card. Nothing may ever flash a border.
   and 1.99, update the handoff, reopen Clipline, and create a PR into develop
   with green OS checks.
 
+Design review (GPT-6.1 Sol) revisions:
+
+- Border gate (blocker): `SetIsBorderRequired(false)` can succeed while
+  borderless access is denied and the border still shows. Before
+  `StartCapture` require Windows 11, `GraphicsCaptureAccess` borderless
+  access returning `Allowed`, and the setter succeeding. The ordering lives
+  in a neutral helper whose tests assert zero starts on every denial. The
+  guarantee covers Clipline's session only.
+- Recycled handles: previews take the listed handle and PID; the worker
+  checks the window still belongs to that PID before creating the capture
+  item and again after the frame, returning nothing on mismatch.
+- Icons: `extract_window_icon` moves off the main thread onto a worker with
+  COM initialised; the UI shares one icon request per PID per scan.
+- Owned windows whose owner is hidden stay listed (gameplay windows owned by
+  a hidden bootstrap window); owned windows with a visible owner do not.
+- Geometry: crop to the frame's positive `ContentSize`, reject content larger
+  than the surface. Windows on an HDR display get an icon (BGRA8 would wash
+  out). Budget ~750 ms per preview including readback; one picker-owned
+  device behind a mutex, so at most one native capture at a time.
+- UI: a DOM-free `window-picker-core.js` (tested through boa like the other
+  cores) owns one preview queue across refreshes: one request in flight,
+  stale results dropped after refresh, close, reopen or selection, and no
+  further requests once abandoned. Selection still works without a preview
+  and still saves the executable icon.
+
 Plan checkboxes remain unticked by repository convention.
