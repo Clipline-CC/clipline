@@ -6839,6 +6839,38 @@ fn frontend_failures_are_forwarded_to_bounded_native_diagnostics() {
 }
 
 #[test]
+fn auto_delete_setting_explains_the_deletion_order_quota_gc_uses() {
+    let html = index_html();
+    let row = html
+        .split(r#"data-settings-key="auto_delete_when_over_quota""#)
+        .nth(1)
+        .and_then(|rest| rest.split("</div>").next())
+        .expect("auto-delete setting row");
+    let gc = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/gc.rs"))
+        .expect("read gc.rs");
+
+    // The copy promises this order, so it must stay the collector's order.
+    for (kind, priority) in [("session", 0), ("replay", 1)] {
+        assert!(
+            gc.contains(&format!("\"{kind}\" => {priority},")),
+            "quota GC no longer deletes {kind} clips at priority {priority}; update the setting copy"
+        );
+    }
+    let position = |needle: &str| {
+        row.find(needle)
+            .unwrap_or_else(|| panic!("auto-delete description must mention {needle:?}"))
+    };
+    assert!(
+        position("full sessions") < position("replays")
+            && position("replays") < position("trims and compilations"),
+        "auto-delete description must list sessions, then replays, then trims"
+    );
+    for promise in ["oldest first", "Favorites", "uploading"] {
+        position(promise);
+    }
+}
+
+#[test]
 fn quota_full_is_a_durable_recording_lock_with_optional_auto_delete() {
     let html = index_html();
     let main = main_js();
