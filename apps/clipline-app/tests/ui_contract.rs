@@ -4785,6 +4785,109 @@ fn rail_profile_identity_change_resets_and_refetches_cloud_library() {
 }
 
 #[test]
+fn every_classic_ui_script_parses() {
+    // String contracts can't see a syntax error, and one broken script
+    // silently drops every function it defines from the page.
+    use boa_engine::{Context, Script, Source};
+    let ui = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui");
+    let mut scripts: Vec<_> = fs::read_dir(&ui)
+        .expect("read ui/")
+        .map(|entry| entry.expect("ui entry").path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "js"))
+        .collect();
+    scripts.sort();
+    assert!(scripts.len() > 10, "found the UI scripts");
+    let mut context = Context::default();
+    for path in scripts {
+        let source = fs::read_to_string(&path).expect("read script");
+        if let Err(error) = Script::parse(Source::from_bytes(&source), None, &mut context) {
+            panic!("{} does not parse: {error}", path.display());
+        }
+    }
+}
+
+#[test]
+fn custom_game_picker_shows_window_cards_with_queued_previews() {
+    let html = index_html();
+    let settings = settings_js();
+    let css = styles_css();
+    let backend = read_src_tree(&["app/commands.rs", "games.rs"]);
+
+    let core = html
+        .find(r#"<script src="window-picker-core.js"></script>"#)
+        .expect("window picker core is loaded");
+    let games = html
+        .find(r#"<script src="settings-ffmpeg-games.js"></script>"#)
+        .expect("games settings script is loaded");
+    assert!(core < games, "the core must load before the code that uses it");
+    assert!(html.contains("Pick a game window"), "picker explains what to pick");
+
+    let render = js_function_body(&settings, "renderGameWindows");
+    for card_part in [
+        r#""game-window-card""#,
+        r#""game-window-preview""#,
+        r#""game-window-icon""#,
+        "win.exe_name",
+    ] {
+        assert!(render.contains(card_part), "window card is missing {card_part}");
+    }
+    assert!(
+        !render.contains("PID ${win.process_id}"),
+        "cards stay readable; process details move to the tooltip"
+    );
+
+    let refresh = js_function_body(&settings, "refreshGameWindows");
+    assert!(refresh.contains("WindowPickerCore.begin(windowPreviews, windows)"));
+    assert!(refresh.contains("loadGameWindowIcons("));
+    assert!(refresh.contains("pumpWindowPreviews()"));
+
+    let pump = js_function_body(&settings, "pumpWindowPreviews");
+    for step in [
+        "WindowPickerCore.next(windowPreviews)",
+        r#"invoke("window_preview", { handle: request.handle, processId: request.processId })"#,
+        "WindowPickerCore.finish(windowPreviews, request)",
+    ] {
+        assert!(pump.contains(step), "preview pump is missing {step}");
+    }
+
+    let icons = js_function_body(&settings, "loadGameWindowIcons");
+    assert!(icons.contains("WindowPickerCore.iconProcessIds("));
+    assert!(icons.contains(r#"invoke("extract_window_icon", { processId })"#));
+
+    // Escape and any other native close go through the same cleanup as
+    // Cancel, and the pump never starts a capture for a closed picker.
+    assert!(main_js().contains(
+        r#"$("game-window-picker-dialog").addEventListener("close", hideGameWindowPicker);"#
+    ));
+    assert!(pump.contains(r#"!$("game-window-picker-dialog").open"#));
+    assert!(
+        refresh.contains("windowPreviews = WindowPickerCore.abandon(windowPreviews);"),
+        "a failed listing abandons the previous queue"
+    );
+
+    for abandon_site in ["hideGameWindowPicker", "releaseBackgroundSettingsUi"] {
+        assert!(
+            js_function_body(&settings, abandon_site)
+                .contains("windowPreviews = WindowPickerCore.abandon(windowPreviews);"),
+            "{abandon_site} must abandon queued previews"
+        );
+    }
+
+    for rule in [".game-window-list", ".game-window-card", ".game-window-preview"] {
+        assert!(css.contains(rule), "missing picker style {rule}");
+    }
+    assert!(
+        backend.contains("pub(crate) fn window_preview(handle: isize, process_id: u32)")
+            && backend.contains("listed_for_preview(&windows, handle, process_id)"),
+        "previews only capture a window listed now with the same owner"
+    );
+    assert!(
+        backend.contains("#[tauri::command(async)]\npub(crate) fn extract_window_icon"),
+        "icon extraction runs off the main thread"
+    );
+}
+
+#[test]
 fn games_ui_wires_detection_commands() {
     let js = main_js();
 
@@ -5020,6 +5123,7 @@ fn account_switch_clears_only_stale_upload_deck_status() {
                     var PlayerCore = {};
                     var WindowLifecycleCore = {initialState() { return {}; }};
                     var GalleryWindowCore = {initialState() { return {}; }};
+                    var WindowPickerCore = {initial() { return {}; }};
                     "#,
                 ))
                 .unwrap();

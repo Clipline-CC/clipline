@@ -20,6 +20,7 @@ pub mod pcm;
 pub mod pipeline;
 pub mod probe;
 pub mod traits;
+pub mod window_picker;
 mod video_layout;
 #[cfg(windows)]
 pub mod windows;

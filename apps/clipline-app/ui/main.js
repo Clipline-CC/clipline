@@ -363,6 +363,7 @@ $("cancel-detected-games").addEventListener("click", hideDetectedGamesDialog);
 $("detected-games-dialog").addEventListener("close", resetDetectedGamesDialog);
 $("refresh-game-windows").addEventListener("click", refreshGameWindows);
 $("cancel-game-picker").addEventListener("click", hideGameWindowPicker);
+$("game-window-picker-dialog").addEventListener("close", hideGameWindowPicker);
 $("choose-media-folder").addEventListener("click", chooseMediaFolder);
 $("choose-replay-cache-folder").addEventListener("click", chooseReplayCacheFolder);
 $("check-updates").addEventListener("click", () => checkForUpdates({ manual: true }));

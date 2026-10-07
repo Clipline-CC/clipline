@@ -12,6 +12,7 @@ pub mod nv12;
 pub mod wasapi;
 pub mod wgc;
 pub mod window;
+pub mod window_preview;
 
 pub use dxgi_dup::DxgiDuplicationCapture;
 pub use fullscreen_fallback::FullscreenFallbackCapture;
@@ -19,7 +20,8 @@ pub use mft::{MftConfig, MftH264Encoder, SoftwareMftH264Encoder};
 pub use wasapi::WasapiLoopback;
 pub use wgc::WgcCapture;
 pub use window::{
-    enumerate_capturable_windows, find_window_by_title, window_from_raw_handle, CapturableWindow,
+    enumerate_capturable_windows, enumerate_pickable_windows, find_window_by_title,
+    window_from_raw_handle, window_process_id, CapturableWindow, PickableWindow,
 };
 
 /// WGC's border suppression is available on Windows 11. Windows 10 uses the

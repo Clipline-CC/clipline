@@ -22,6 +22,32 @@ is the follow-up if needed.
 Sharp edge: device tests that capture a window need it to keep repainting —
 WGC only delivers frames on change — and must not run concurrently.
 
+## Checkpoint (2026-10-07): Screen-share style custom-game picker
+
+"Add Custom Game" already listed windows, but as text rows (title, exe, PID,
+path). It is now a grid of window cards with a preview, the app icon, title
+and exe name.
+
+- Previews are one WGC frame per window, and only where the yellow capture
+  border cannot appear: Windows 11, `GraphicsCaptureAccess` borderless access
+  requested and `Allowed`, and `IsBorderRequired=false` accepted, all before
+  `StartCapture` (`window_picker::start_without_border`, tested for zero
+  starts on any denial). Setter success alone is not enough on Windows 11.
+  Minimized windows, HDR displays, timeouts and owner changes fall back to
+  the icon. Recycled handles are guarded by checking the owning PID before
+  and after capture. ~50 ms per window on the dev machine.
+- The list uses Alt-Tab's rule (`enumerate_pickable_windows`): tool windows
+  and windows with a visible owner need `WS_EX_APPWINDOW`; windows owned by
+  a hidden window stay; non-minimized windows under 64 px are dropped.
+  Game detection still uses the unfiltered `enumerate_capturable_windows`.
+- `window_preview` captures on one worker thread that owns the picker's D3D
+  device. `extract_window_icon` is now async with COM initialised. The UI
+  queue lives in DOM-free `window-picker-core.js` (boa-tested).
+- New contract: every classic UI script must parse (a newline inside a
+  string literal had silently removed all of `settings-ffmpeg-games.js`).
+- GPT-6.1 Sol reviewed the plan; see
+  `docs/superpowers/plans/2026-10-07-window-picker-previews.md`.
+
 ## Checkpoint (2026-10-06): Interrupted recordings are finalized on launch
 
 Five League sessions from 2026-09-30/10-01 showed a broken player. They were
