@@ -24,6 +24,21 @@ pub(super) fn recover_abandoned_recordings(clips_dir: &Path, events: &Sender<Eve
                         ),
                     );
                 }
+                if !report.repaired.is_empty() {
+                    warn_user(
+                        events,
+                        format!(
+                            "repaired {} full-session recording(s) an earlier version left unfinished",
+                            report.repaired.len()
+                        ),
+                    );
+                }
+                for (path, error) in &report.unfinalized {
+                    warn_user(
+                        events,
+                        format!("could not finish recording {}; kept as found: {error}", path.display()),
+                    );
+                }
             }
             Err(e) => warn_user(events, format!("recover unfinished recordings: {e}")),
         }

@@ -1,12 +1,16 @@
 //! Crash recovery and full media wipe.
 
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use clipline_mp4::{
+    finalize_interrupted_recording, has_interrupted_recording_header, InterruptedRecording,
+};
+
 use crate::empty_sessions::sweep_emptied_session_dirs;
-use crate::files::{clip_sidecars, is_link_or_reparse_point, is_recording_mp4, recording_final_path, remove_file_if_exists, visit_media_dirs};
+use crate::files::{clip_sidecars, is_link_or_reparse_point, is_mp4, is_recording_mp4, recording_final_path, remove_file_if_exists, visit_media_dirs};
 use crate::inventory::{collect_clips, delete_inventoried_clip};
 use crate::ownership::{
     clip_ownership_marker_path, ensure_clip_owned, is_managed_clip, remove_clip_ownership_marker,
@@ -16,18 +20,27 @@ use crate::ownership::{
 pub struct RecordingRecoveryReport {
     pub recovered: Vec<PathBuf>,
     pub deleted_empty: usize,
+    /// Owned MP4s an earlier build recovered without finalizing, now finalized.
+    pub repaired: Vec<PathBuf>,
+    /// Recordings that could not be finalized and were kept exactly as found.
+    pub unfinalized: Vec<(PathBuf, String)>,
 }
 
+/// Recover what a killed recorder left behind: finalize each interrupted
+/// full-session recording in place, then publish it under its final name.
 pub fn recover_recording_files(dir: &Path) -> io::Result<RecordingRecoveryReport> {
     let mut report = RecordingRecoveryReport {
         recovered: Vec::new(),
         deleted_empty: 0,
+        repaired: Vec::new(),
+        unfinalized: Vec::new(),
     };
     visit_media_dirs(dir, |media_dir| {
         for entry in fs::read_dir(media_dir)? {
             let entry = entry?;
             let path = entry.path();
-            if !is_recording_mp4(&path) {
+            let recording = is_recording_mp4(&path);
+            if !recording && !is_mp4(&path) {
                 continue;
             }
             if !is_managed_clip(&path) {
@@ -37,11 +50,24 @@ pub fn recover_recording_files(dir: &Path) -> io::Result<RecordingRecoveryReport
             if !meta.is_file() {
                 continue;
             }
+            if !recording {
+                match finalize_in_place(&path) {
+                    Ok(InterruptedRecording::Finalized { .. }) => report.repaired.push(path),
+                    Ok(_) => {}
+                    Err(error) => report.unfinalized.push((path, error.to_string())),
+                }
+                continue;
+            }
             let old_marker = clip_ownership_marker_path(&path)?;
             if !old_marker.is_file() {
                 ensure_clip_owned(&path)?;
             }
-            if meta.len() == 0 {
+            let finalized = if meta.len() == 0 {
+                Ok(InterruptedRecording::Empty)
+            } else {
+                finalize_in_place(&path)
+            };
+            if let Ok(InterruptedRecording::Empty) = finalized {
                 remove_file_if_exists(&path)?;
                 remove_clip_ownership_marker(&path)?;
                 report.deleted_empty += 1;
@@ -67,11 +93,24 @@ pub fn recover_recording_files(dir: &Path) -> io::Result<RecordingRecoveryReport
                     return Err(marker_error);
                 }
             }
+            if let Err(error) = finalized {
+                report.unfinalized.push((final_path.clone(), error.to_string()));
+            }
             report.recovered.push(final_path);
         }
         Ok(())
     })?;
     Ok(report)
+}
+
+/// Finalize `path` if it is an interrupted Hybrid MP4. Only a matching file
+/// is opened for writing.
+fn finalize_in_place(path: &Path) -> io::Result<InterruptedRecording> {
+    if !has_interrupted_recording_header(&mut File::open(path)?)? {
+        return Ok(InterruptedRecording::NotInterrupted);
+    }
+    let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+    finalize_interrupted_recording(&mut file)
 }
 
 /// Delete every Clipline-owned saved or in-progress clip below `dir` while
@@ -278,6 +317,116 @@ fn recovery_moves_ownership_marker_to_a_unique_destination() {
     assert!(recovered.exists());
     assert!(recovered.with_extension("clipline.json").exists());
     assert!(!dir.path().join("session.clipline.json").exists());
+}
+
+/// A full-session recording with `fragments` fragments, finalized or left
+/// as a killed recorder leaves it.
+fn hybrid_recording(fragments: u32, finalize: bool) -> Vec<u8> {
+    use clipline_mp4::{FragSample, HybridMp4Writer, VideoTrackConfig};
+    let cfg = VideoTrackConfig::h264(
+        64,
+        64,
+        90_000,
+        vec![0x67, 0x64, 0x00, 0x0A, 0xAC],
+        vec![0x68, 0xEE, 0x38, 0x80],
+    );
+    let mut writer = HybridMp4Writer::new(io::Cursor::new(Vec::new()), cfg).unwrap();
+    for fragment in 0..fragments {
+        let samples: Vec<FragSample> = (0..3)
+            .map(|i| FragSample {
+                data: format!("fragment-{fragment}-sample-{i}").into_bytes(),
+                duration: 3000,
+                is_sync: i == 0,
+            })
+            .collect();
+        writer.write_fragment(&samples).unwrap();
+    }
+    if finalize {
+        writer.finalize().unwrap().into_inner()
+    } else {
+        writer.into_inner().into_inner()
+    }
+}
+
+fn write_bytes(dir: &TestDir, relative: &str, bytes: &[u8]) -> PathBuf {
+    let path = dir.write(relative, 0);
+    fs::write(&path, bytes).unwrap();
+    path
+}
+
+#[test]
+fn recovery_finalizes_interrupted_recordings_before_renaming_them() {
+    let dir = TestDir::new("clipline-storage", "finalize-interrupted-recording");
+    let recording = write_bytes(
+        &dir,
+        "2026-09-30 18-02/session_1.mp4.recording",
+        &hybrid_recording(3, false),
+    );
+    mark_owned(&recording);
+
+    let report = recover_recording_files(dir.path()).unwrap();
+
+    let recovered = dir.path().join("2026-09-30 18-02/session_1.mp4");
+    assert_eq!(report.recovered, vec![recovered.clone()]);
+    assert!(fs::read(&recovered).unwrap() == hybrid_recording(3, true));
+    assert!(report.unfinalized.is_empty());
+}
+
+#[test]
+fn recovery_deletes_interrupted_recordings_that_hold_no_media() {
+    let dir = TestDir::new("clipline-storage", "interrupted-recording-no-media");
+    let recording = write_bytes(&dir, "session_1.mp4.recording", &hybrid_recording(0, false));
+    mark_owned(&recording);
+
+    let report = recover_recording_files(dir.path()).unwrap();
+
+    assert_eq!(report.deleted_empty, 1);
+    assert!(report.recovered.is_empty());
+    assert!(!recording.exists());
+}
+
+#[test]
+fn recovery_repairs_owned_mp4s_that_older_builds_left_unfinalized() {
+    let dir = TestDir::new("clipline-storage", "repair-unfinalized-mp4");
+    let unfinalized = write_bytes(&dir, "2026-09-30 18-02/session_1.mp4", &hybrid_recording(3, false));
+    mark_owned(&unfinalized);
+    let finalized = write_bytes(&dir, "2026-09-30 18-02/session_2.mp4", &hybrid_recording(2, true));
+    mark_owned(&finalized);
+    let foreign = write_bytes(&dir, "foreign.mp4", &hybrid_recording(3, false));
+
+    let report = recover_recording_files(dir.path()).unwrap();
+
+    assert_eq!(report.repaired, vec![unfinalized.clone()]);
+    assert!(fs::read(&unfinalized).unwrap() == hybrid_recording(3, true));
+    assert!(fs::read(&finalized).unwrap() == hybrid_recording(2, true));
+    assert!(
+        fs::read(&foreign).unwrap() == hybrid_recording(3, false),
+        "unowned MP4s are user files"
+    );
+    assert!(report.recovered.is_empty());
+}
+
+#[test]
+fn recovery_keeps_and_reports_recordings_it_cannot_finalize() {
+    let dir = TestDir::new("clipline-storage", "unfinalizable-recording");
+    let mut bytes = hybrid_recording(3, false);
+    let avc1 = bytes.windows(4).position(|w| w == b"avc1").unwrap();
+    bytes[avc1..avc1 + 4].copy_from_slice(b"xvid");
+    let recording = write_bytes(&dir, "session_1.mp4.recording", &bytes);
+    mark_owned(&recording);
+    let damaged_mp4 = write_bytes(&dir, "session_2.mp4", &bytes);
+    mark_owned(&damaged_mp4);
+
+    let report = recover_recording_files(dir.path()).unwrap();
+
+    let recovered = dir.path().join("session_1.mp4");
+    assert_eq!(report.recovered, vec![recovered.clone()]);
+    assert!(fs::read(&recovered).unwrap() == bytes, "kept exactly as found");
+    assert!(fs::read(&damaged_mp4).unwrap() == bytes);
+    let mut unfinalized: Vec<_> = report.unfinalized.iter().map(|(path, _)| path.clone()).collect();
+    unfinalized.sort();
+    assert_eq!(unfinalized, vec![recovered, damaged_mp4]);
+    assert!(report.repaired.is_empty());
 }
 
 #[test]
