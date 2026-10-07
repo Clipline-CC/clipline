@@ -24,7 +24,10 @@ pub use ownership::{
 };
 pub(crate) use ownership::SESSION_META_FILE;
 pub use quota::{ClipGcPolicy, GcReport, enforce_quota, enforce_quota_with_policy};
-pub use recovery::{RecordingRecoveryReport, delete_all_managed_media, recover_recording_files};
+pub use recovery::{
+    RecordingFinalization, RecordingRecoveryReport, delete_all_managed_media,
+    recover_recording_files,
+};
 pub use replay_cache::{
     REPLAY_CACHE_OWNER_FILE, REPLAY_CACHE_RUN_PREFIX, is_replay_cache_run_name,
     replay_cache_owner_identity, replay_cache_run_identity,

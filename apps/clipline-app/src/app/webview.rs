@@ -234,6 +234,13 @@ impl StartupWarnings {
         Self(Mutex::new(warnings))
     }
 
+    pub(crate) fn extend(&self, warnings: Vec<String>) {
+        match self.0.lock() {
+            Ok(mut current) => current.extend(warnings),
+            Err(poisoned) => poisoned.into_inner().extend(warnings),
+        }
+    }
+
     pub(crate) fn snapshot(&self) -> Vec<String> {
         match self.0.lock() {
             Ok(warnings) => warnings.clone(),

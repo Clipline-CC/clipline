@@ -7,8 +7,13 @@ use crate::fragment::{
 };
 use crate::init::{free_placeholder, ftyp, moov_init_multi, mvhd, TrackConfig, VideoTrackConfig};
 
+mod recover;
 mod track_state;
 
+pub use self::recover::{
+    finalize_interrupted_recording, finalize_interrupted_recording_file,
+    is_interrupted_recording, InterruptedRecording, RecoveryTarget,
+};
 use self::track_state::TrackState;
 
 /// Streaming Hybrid MP4 writer (ddoc §10). While recording the file is a
@@ -253,7 +258,20 @@ impl<W: Write + Seek> HybridMp4Writer<W> {
             buffered.flush()?;
         }
 
-        let mut sample_offset = frag_start + moof.len() as u64 + mdat_header.len() as u64;
+        self.record_fragment(
+            frag_start + moof.len() as u64 + mdat_header.len() as u64,
+            info_storage,
+        )
+    }
+
+    /// Fold one written fragment into the final-moov bookkeeping. Shared with
+    /// recovery, which replays fragments read back from disk.
+    fn record_fragment(
+        &mut self,
+        payload_start: u64,
+        info_storage: &[Vec<FragSampleInfo>],
+    ) -> io::Result<()> {
+        let mut sample_offset = payload_start;
         for (track_index, samples) in info_storage.iter().enumerate() {
             if samples.is_empty() {
                 continue;
@@ -273,10 +291,21 @@ impl<W: Write + Seek> HybridMp4Writer<W> {
     /// Append the full moov, then overwrite the leading free box with a
     /// largesize mdat header spanning init-moov + all fragments — hiding
     /// them so the file parses as ftyp / mdat / moov (ddoc §10).
-    pub fn finalize(mut self) -> io::Result<W> {
+    pub fn finalize(self) -> io::Result<W> {
+        self.finalize_with_sync(|_| Ok(()))
+    }
+
+    /// `finalize()`, calling `sync` once the moov is written and again after
+    /// the header flip, so the header never reaches disk before the moov.
+    fn finalize_with_sync(
+        mut self,
+        mut sync: impl FnMut(&mut W) -> io::Result<()>,
+    ) -> io::Result<W> {
         let moov_offset = self.w.stream_position()?;
         let moov = self.final_moov();
         self.w.write_all(&moov)?;
+        self.w.flush()?;
+        sync(&mut self.w)?;
 
         let hidden_span = moov_offset - self.free_offset;
         self.w.seek(SeekFrom::Start(self.free_offset))?;
@@ -284,6 +313,7 @@ impl<W: Write + Seek> HybridMp4Writer<W> {
         hdr.u32(1).bytes(b"mdat").u64(hidden_span);
         self.w.write_all(&hdr.into_vec())?;
         self.w.flush()?;
+        sync(&mut self.w)?;
         Ok(self.w)
     }
 

@@ -4,7 +4,7 @@ use super::*;
 pub(super) fn recover_abandoned_recordings(clips_dir: &Path, events: &Sender<Event>) {
     static RECOVERED_THIS_PROCESS: AtomicBool = AtomicBool::new(false);
     if !RECOVERED_THIS_PROCESS.swap(true, Ordering::AcqRel) {
-        match recover_recording_files(clips_dir) {
+        match recover_recording_files(clips_dir, finalize_recording) {
             Ok(report) => {
                 if !report.recovered.is_empty() {
                     warn_user(
@@ -24,6 +24,21 @@ pub(super) fn recover_abandoned_recordings(clips_dir: &Path, events: &Sender<Eve
                         ),
                     );
                 }
+                if !report.repaired.is_empty() {
+                    warn_user(
+                        events,
+                        format!(
+                            "repaired {} full-session recording(s) an earlier version left unfinished",
+                            report.repaired.len()
+                        ),
+                    );
+                }
+                for (path, error) in &report.unfinalized {
+                    warn_user(
+                        events,
+                        format!("could not finish recording {}; kept as found: {error}", path.display()),
+                    );
+                }
             }
             Err(e) => warn_user(events, format!("recover unfinished recordings: {e}")),
         }
@@ -31,6 +46,17 @@ pub(super) fn recover_abandoned_recordings(clips_dir: &Path, events: &Sender<Eve
     if let Err(error) = sweep_emptied_session_dirs(clips_dir) {
         warn_user(events, format!("clean empty session folders: {error}"));
     }
+}
+
+/// Startup recovery's finalizer: completes a full session the recorder could
+/// not finalize before the process died.
+fn finalize_recording(path: &Path) -> std::io::Result<RecordingFinalization> {
+    use clipline_mp4::InterruptedRecording;
+    Ok(match clipline_mp4::finalize_interrupted_recording_file(path)? {
+        InterruptedRecording::NotInterrupted => RecordingFinalization::Unchanged,
+        InterruptedRecording::Empty => RecordingFinalization::NoMedia,
+        InterruptedRecording::Finalized { .. } => RecordingFinalization::Finalized,
+    })
 }
 
 pub(super) struct RecorderFinishContext<'a> {

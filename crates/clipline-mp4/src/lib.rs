@@ -17,4 +17,8 @@ pub use trim::{
     remux_with_selected_audio_tracks, remux_with_selected_audio_tracks_file, trim_keyframe_aligned,
     trim_keyframe_aligned_file, MediaTrackCounts, MediaVideoCodec, TrimError, TrimInfo,
 };
-pub use writer::{HybridMp4Writer, ReadSeek, SourceSample};
+pub use writer::{
+    finalize_interrupted_recording, finalize_interrupted_recording_file,
+    is_interrupted_recording, HybridMp4Writer, InterruptedRecording, ReadSeek, RecoveryTarget,
+    SourceSample,
+};

@@ -19,6 +19,7 @@ use self::parse::{
     finalized_movie_track_counts, finalized_movie_video_codecs, media_track_counts_reader,
     parse_movie,
 };
+pub(crate) use self::parse::parse_track_cfg;
 use self::tables::read_finalized_moov_bytes;
 
 pub use self::files::{
@@ -26,6 +27,8 @@ pub use self::files::{
     trim_keyframe_aligned_file,
 };
 pub use self::model::{MediaTrackCounts, MediaVideoCodec, TrimError, TrimInfo};
+#[cfg(test)]
+pub(crate) use self::model::fixtures;
 
 pub fn trim_keyframe_aligned(
     input: &[u8],

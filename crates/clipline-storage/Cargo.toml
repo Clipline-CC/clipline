@@ -5,4 +5,5 @@ edition.workspace = true
 license.workspace = true
 
 [dev-dependencies]
+clipline-mp4 = { path = "../clipline-mp4" }
 clipline-test-utils = { path = "../clipline-test-utils" }

@@ -4,6 +4,40 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-10-06): Interrupted recordings are finalized on launch
+
+Five League sessions from 2026-09-30/10-01 showed a broken player. They were
+recorded by dev builds that were killed mid-session, so the Hybrid MP4 writer
+never ran `finalize()`. Startup recovery then only renamed `.mp4.recording` to
+`.mp4`, publishing fragmented files with an empty index. WebView2 has to walk
+every fragment through the asset protocol to open one: 838 range requests and
+858 MB read for a 432 MB file, versus 2–3 requests once finalized. The media
+was intact.
+
+- `clipline-mp4` `finalize_interrupted_recording[_file]` rebuilds the writer's
+  state from disk and runs the same `finalize()`, byte-identical to a clean
+  stop for the complete fragments. Track configs must re-encode to the exact
+  init moov and every complete moof to its bytes on disk. Only crash
+  artifacts are cut (torn moof, an interrupted finalize's moov, zero fill);
+  anything else is `InvalidData` with no writes. It also recovers a flipped
+  header whose moov never landed. On Windows the file is opened with
+  deny-write sharing, so a live writer is refused.
+- `clipline-storage` recovery takes the finalizer as a callback (no codec
+  dependency). It finalizes owned `.recording` files before publishing them,
+  repairs owned `.mp4` files that earlier builds published unfinished, and
+  leaves anything that can't be finalized exactly as found and reported.
+- The app runs recovery at the start of the setup hook rather than when the
+  recorder first starts (games-only mode waited for a game). On the dev
+  machine it repaired six sessions in under a second, including a 2026-09-18
+  one nobody had noticed. Packet counts match the originals.
+- GPT-6.1 Sol reviewed the plan; see
+  `docs/superpowers/plans/2026-10-06-finalize-interrupted-recordings.md`.
+
+Sharp edge: killing `clipline-app.exe` mid-session (e.g. before a rebuild)
+still leaves an unfinalized recording; it is now repaired on the next launch.
+The recorder's own `finalize()` has no durability barrier, so a power loss
+can lose unsynced payload; recovery is best effort for those bytes.
+
 ## Checkpoint (2026-10-01): Nightly 1.0.10 published
 
 Published [Nightly 1.0.10](https://github.com/Clipline-CC/clipline/releases/tag/nightly)
