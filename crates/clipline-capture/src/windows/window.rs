@@ -8,16 +8,20 @@ use std::path::Path;
 
 use windows::core::{BOOL, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, POINT, RECT};
-use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
+use windows::Win32::Graphics::Dwm::{
+    DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS,
+};
 use windows::Win32::Graphics::Gdi::ClientToScreen;
 use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetClientRect, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsWindow,
-    IsWindowVisible,
+    EnumWindows, GetClientRect, GetWindow, GetWindowLongPtrW, GetWindowRect, GetWindowTextW,
+    GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, GWL_EXSTYLE, GW_OWNER,
+    WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
 };
 
+use crate::window_picker::{has_pickable_size, is_pickable_window, WindowTraits};
 use crate::windows::nv12::CropRect;
 
 struct Search {
@@ -90,6 +94,39 @@ pub fn window_from_raw_handle(raw: isize) -> Option<HWND> {
             None
         }
     }
+}
+
+/// A window the custom-game picker offers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickableWindow {
+    pub window: CapturableWindow,
+    pub minimized: bool,
+}
+
+/// The capturable windows Alt-Tab would offer. Game detection keeps using the
+/// unfiltered [`enumerate_capturable_windows`].
+pub fn enumerate_pickable_windows() -> Vec<PickableWindow> {
+    enumerate_capturable_windows()
+        .into_iter()
+        .filter_map(|window| {
+            let hwnd = HWND(window.handle as *mut core::ffi::c_void);
+            // SAFETY: `hwnd` came from this enumeration; window_traits only
+            // runs read-only window-manager queries, which fail safely if the
+            // window has since closed.
+            let (traits, minimized) = unsafe { window_traits(hwnd) };
+            is_pickable_window(&traits).then_some(PickableWindow { window, minimized })
+        })
+        .collect()
+}
+
+/// The process that owns `raw` right now, or `None` once it is gone. Window
+/// handles are recycled, so callers holding an old handle confirm the owner.
+pub fn window_process_id(raw: isize) -> Option<u32> {
+    let hwnd = window_from_raw_handle(raw)?;
+    let mut process_id = 0u32;
+    // SAFETY: read-only query on a validated window handle.
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut process_id)) };
+    (process_id != 0).then_some(process_id)
 }
 
 pub fn enumerate_capturable_windows() -> Vec<CapturableWindow> {
@@ -182,6 +219,38 @@ unsafe extern "system" fn enum_capturable_proc(hwnd: HWND, lparam: LPARAM) -> BO
         });
     }
     BOOL(1)
+}
+
+/// Picker traits plus whether the window is minimized.
+unsafe fn window_traits(hwnd: HWND) -> (WindowTraits, bool) {
+    let ex_style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32;
+    let owner = unsafe { GetWindow(hwnd, GW_OWNER) }.ok().filter(|owner| !owner.is_invalid());
+    let mut cloaked = 0u32;
+    let cloaked = unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED,
+            &mut cloaked as *mut u32 as *mut core::ffi::c_void,
+            size_of::<u32>() as u32,
+        )
+    }
+    .is_ok()
+        && cloaked != 0;
+    let minimized = unsafe { IsIconic(hwnd) }.as_bool();
+    let mut rect = RECT::default();
+    let has_area = unsafe { GetWindowRect(hwnd, &mut rect) }.is_ok()
+        && has_pickable_size(rect.right - rect.left, rect.bottom - rect.top, minimized);
+    let traits = WindowTraits {
+        visible: unsafe { IsWindowVisible(hwnd) }.as_bool(),
+        cloaked,
+        has_title: true, // enumerate_capturable_windows only keeps titled windows
+        has_area,
+        tool_window: ex_style & WS_EX_TOOLWINDOW.0 != 0,
+        app_window: ex_style & WS_EX_APPWINDOW.0 != 0,
+        owned: owner.is_some(),
+        owner_visible: owner.is_some_and(|owner| unsafe { IsWindowVisible(owner) }.as_bool()),
+    };
+    (traits, minimized)
 }
 
 unsafe fn window_title(hwnd: HWND) -> Option<String> {

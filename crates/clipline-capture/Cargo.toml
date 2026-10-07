@@ -19,6 +19,7 @@ windows = { version = "0.62", features = [
     "Graphics_Capture",
     "Graphics_DirectX",
     "Graphics_DirectX_Direct3D11",
+    "Security_Authorization_AppCapabilityAccess",
     "Win32_Devices_FunctionDiscovery",
     "Win32_Foundation",
     "Win32_Graphics_Direct3D",

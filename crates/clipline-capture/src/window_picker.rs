@@ -67,6 +67,15 @@ pub fn preview_region(
     Some((width, height))
 }
 
+/// Windows smaller than this are launcher stubs and overlays, not games.
+pub const MIN_PICKABLE_SIDE: i32 = 64;
+
+/// Whether a window rect is big enough to be an app. Minimized windows keep
+/// only a stub rect, so they always qualify.
+pub fn has_pickable_size(width: i32, height: i32, minimized: bool) -> bool {
+    minimized || (width >= MIN_PICKABLE_SIDE && height >= MIN_PICKABLE_SIDE)
+}
+
 /// A preview image, tightly packed RGBA.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Thumbnail {
@@ -240,6 +249,16 @@ mod tests {
         let thumb = downscale_bgra_to_rgba(&bgra, 3, 2, pitch, 320, 180).unwrap();
         assert_eq!((thumb.width, thumb.height), (3, 2));
         assert_eq!(&thumb.rgba[..8], &[7, 0, 0, 255, 7, 0, 1, 255]);
+    }
+
+    #[test]
+    fn tiny_windows_are_not_apps_unless_minimized() {
+        assert!(has_pickable_size(1280, 720, false));
+        assert!(has_pickable_size(MIN_PICKABLE_SIDE, MIN_PICKABLE_SIDE, false));
+        for (w, h) in [(2, 2), (63, 400), (400, 63), (0, 0), (-5, 100)] {
+            assert!(!has_pickable_size(w, h, false), "{w}x{h}");
+        }
+        assert!(has_pickable_size(160, 28, true), "minimized windows keep a stub rect");
     }
 
     #[test]
