@@ -557,7 +557,7 @@ impl FrameReceiver {
     }
 }
 
-fn create_item(
+pub(super) fn create_item(
     create: impl FnOnce(&IGraphicsCaptureItemInterop) -> WinResult<GraphicsCaptureItem>,
 ) -> Result<GraphicsCaptureItem, CaptureError> {
     init_winrt()?;
@@ -576,7 +576,7 @@ fn create_item(
 }
 
 /// Wrap the DXGI device for WinRT consumption.
-fn winrt_device(device: &ID3D11Device) -> WinResult<IDirect3DDevice> {
+pub(super) fn winrt_device(device: &ID3D11Device) -> WinResult<IDirect3DDevice> {
     let dxgi: IDXGIDevice = device.cast()?;
     // SAFETY: dxgi is a valid device; the call returns an IInspectable we cast.
     let inspectable = unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi)? };

@@ -46,6 +46,8 @@ mod game_plugins;
 #[cfg(windows)]
 mod games;
 #[cfg(windows)]
+mod window_previews;
+#[cfg(windows)]
 mod gc;
 #[cfg(windows)]
 mod hotkeys;
