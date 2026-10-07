@@ -34,6 +34,26 @@ repairs already-renamed ones that older builds left behind.
   deleted as today), and finalize owned `.mp4` files that still carry the
   Hybrid header. Never touch unowned files. A file that fails to parse is
   left as is and reported, without aborting recovery of the others.
+
+Design review (GPT-6.1 Sol) revisions:
+
+- Storage takes an app-supplied finalizer callback instead of depending on
+  `clipline-mp4`, so storage builds don't pull in native Opus.
+- The file-level entry point opens candidates for writing only after a
+  read-only probe matches, and on Windows denies other writers and deletion:
+  a live writer outside single-instance protection is refused, not truncated.
+- Also recover a flipped header whose final moov never landed (possible on
+  power loss, since `finalize()` has no durability barrier), checking the
+  header's span against the replayed fragments. A finalized `.recording`
+  that was never renamed is still published.
+- Only crash artifacts end the fragments (torn moof, an interrupted
+  finalize's moov, zero fill); anything else is an error with no writes.
+- Bound I/O: a 44-byte probe plus one box header for clean files; bounded
+  init/moof reads that seek over payloads for candidates. Enforced by a
+  read-counting test. Tamper tests prove rejected input stays untouched.
+- Equivalence is defined against the surviving complete-fragment prefix; a
+  power loss can still lose unsynced payload, so historical files are best
+  effort for payload integrity.
 - [ ] Surface the counts through the existing startup warning in
   `service/session.rs`, keeping the internal-restart skip.
 - [ ] Verify on copies of the five real sessions: packet counts match ffprobe
