@@ -36,13 +36,18 @@ jobs:
         background: true
         timeout-minutes: 5
         run: |
-          # Some GitHub runners cannot reach azure.archive.ubuntu.com; the
-          # primary archive mirror works on all of them. Redirect before
-          # update so a dead regional mirror cannot eat the 5-minute cap.
-          sudo sed -i 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' \
+          # Some GitHub runners cannot reach azure.archive.ubuntu.com, and plain
+          # HTTP to the Ubuntu archives can stall while HTTPS still works
+          # (2026-10-07). Point every Ubuntu mirror at HTTPS on the primary
+          # archive, and give apt short timeouts with retries, so a dead
+          # connection fails fast instead of eating the 5-minute cap.
+          sudo sed -i -E \
+            -e 's#https?://(azure\.)?archive\.ubuntu\.com#https://archive.ubuntu.com#g' \
+            -e 's#http://security\.ubuntu\.com#https://security.ubuntu.com#g' \
             /etc/apt/apt-mirrors.txt /etc/apt/sources.list /etc/apt/sources.list.d/* 2>/dev/null || true
-          sudo DEBIAN_FRONTEND=noninteractive apt-get update -y
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ffmpeg
+          apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20)
+          sudo DEBIAN_FRONTEND=noninteractive apt-get "${apt_opts[@]}" update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get "${apt_opts[@]}" install -y --no-install-recommends ffmpeg
 
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master (stable toolchain)
         with:
