@@ -11,8 +11,8 @@ mod recover;
 mod track_state;
 
 pub use self::recover::{
-    finalize_interrupted_recording, has_interrupted_recording_header, InterruptedRecording,
-    RecoveryTarget,
+    finalize_interrupted_recording, finalize_interrupted_recording_file,
+    is_interrupted_recording, InterruptedRecording, RecoveryTarget,
 };
 use self::track_state::TrackState;
 

@@ -18,6 +18,7 @@ pub use trim::{
     trim_keyframe_aligned_file, MediaTrackCounts, MediaVideoCodec, TrimError, TrimInfo,
 };
 pub use writer::{
-    finalize_interrupted_recording, has_interrupted_recording_header, HybridMp4Writer,
-    InterruptedRecording, ReadSeek, RecoveryTarget, SourceSample,
+    finalize_interrupted_recording, finalize_interrupted_recording_file,
+    is_interrupted_recording, HybridMp4Writer, InterruptedRecording, ReadSeek, RecoveryTarget,
+    SourceSample,
 };

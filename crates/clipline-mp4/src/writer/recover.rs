@@ -5,8 +5,9 @@
 //! `finalize()`. Every complete box must re-encode to the exact bytes on disk,
 //! so recovery only ever completes files this writer produced.
 
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
+use std::path::Path;
 
 use super::track_state::TrackState;
 use super::{validate_track_configs, HybridMp4Writer};
@@ -75,15 +76,14 @@ impl RecoveryTarget for Cursor<Vec<u8>> {
 pub fn finalize_interrupted_recording<T: RecoveryTarget>(
     target: &mut T,
 ) -> io::Result<InterruptedRecording> {
-    if !has_interrupted_recording_header(target)? {
+    let Some(header) = probe(target)? else {
         return Ok(InterruptedRecording::NotInterrupted);
-    }
+    };
     let file_len = target.seek(SeekFrom::End(0))?;
     let ftyp = ftyp();
-    let header_len = interrupted_header().len() as u64;
 
     // Everything is read and validated before the first byte is written.
-    let init = match read_box(target, header_len, file_len, MAX_INIT_MOOV_BYTES)? {
+    let init = match read_box(target, HEADER_LEN, file_len, MAX_INIT_MOOV_BYTES)? {
         // Died while writing the init moov: nothing was recorded.
         BoxRead::Torn(None | Some(MOOV)) => return Ok(InterruptedRecording::Empty),
         BoxRead::Complete(init) if init.fourcc == MOOV => init,
@@ -98,7 +98,7 @@ pub fn finalize_interrupted_recording<T: RecoveryTarget>(
         next_sequence: 1,
     };
 
-    let mut end = header_len + init.len;
+    let mut end = HEADER_LEN + init.len;
     let mut fragments = 0_u32;
     while let Some(fragment) = read_fragment(writer.w, end, file_len, track_count, writer.next_sequence)? {
         let mut infos = vec![Vec::new(); track_count];
@@ -118,6 +118,11 @@ pub fn finalize_interrupted_recording<T: RecoveryTarget>(
     if fragments == 0 {
         return Ok(InterruptedRecording::Empty);
     }
+    if let Header::Flipped { moov_offset } = header {
+        if moov_offset != end {
+            return Err(invalid_data("finalized header does not match the fragments"));
+        }
+    }
 
     let discarded_tail_bytes = file_len - end;
     if discarded_tail_bytes > 0 {
@@ -132,17 +137,67 @@ pub fn finalize_interrupted_recording<T: RecoveryTarget>(
     })
 }
 
-/// Whether `r` starts like a Hybrid MP4 that was never finalized. Reads only
-/// the 44-byte header, so it is cheap enough to check every owned MP4.
-pub fn has_interrupted_recording_header<R: Read + Seek>(r: &mut R) -> io::Result<bool> {
-    let expected = interrupted_header();
-    let file_len = r.seek(SeekFrom::End(0))?;
-    Ok(file_len >= expected.len() as u64 && read_at(r, 0, expected.len() as u64)? == expected)
+/// [`finalize_interrupted_recording`] for a file on disk. A file that only
+/// looks interrupted is opened for writing, and on Windows only while no
+/// other process can write to or delete it: a live recorder is refused, not
+/// truncated underneath.
+pub fn finalize_interrupted_recording_file(path: &Path) -> io::Result<InterruptedRecording> {
+    if !is_interrupted_recording(&mut File::open(path)?)? {
+        return Ok(InterruptedRecording::NotInterrupted);
+    }
+    let mut options = OpenOptions::new();
+    options.read(true).write(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 0x1;
+        options.share_mode(FILE_SHARE_READ);
+    }
+    finalize_interrupted_recording(&mut options.open(path)?)
 }
 
-/// ftyp plus the free placeholder that `finalize()` turns into an mdat header.
-fn interrupted_header() -> Vec<u8> {
-    [ftyp(), free_placeholder()].concat()
+/// Whether `r` looks like a Hybrid MP4 whose `finalize()` never completed.
+/// Reads at most two small headers, so it is cheap enough for every owned MP4.
+pub fn is_interrupted_recording<R: Read + Seek>(r: &mut R) -> io::Result<bool> {
+    Ok(probe(r)?.is_some())
+}
+
+const HEADER_LEN: u64 = 44;
+
+enum Header {
+    /// The free placeholder: `finalize()` never started its header flip.
+    Placeholder,
+    /// The header was flipped but the moov it points at never fully landed.
+    Flipped { moov_offset: u64 },
+}
+
+fn probe<R: Read + Seek>(r: &mut R) -> io::Result<Option<Header>> {
+    let file_len = r.seek(SeekFrom::End(0))?;
+    if file_len < HEADER_LEN {
+        return Ok(None);
+    }
+    let head = read_at(r, 0, HEADER_LEN)?;
+    let (ftyp_bytes, rest) = head.split_at(ftyp().len());
+    if ftyp_bytes != ftyp() {
+        return Ok(None);
+    }
+    if rest == free_placeholder() {
+        return Ok(Some(Header::Placeholder));
+    }
+    if rest[..8] != [0, 0, 0, 1, b'm', b'd', b'a', b't'] {
+        return Ok(None);
+    }
+    let span = u64::from_be_bytes(rest[8..].try_into().expect("16-byte mdat header"));
+    let Some(moov_offset) = span.checked_add(ftyp_bytes.len() as u64) else {
+        return Ok(None);
+    };
+    if moov_offset > file_len {
+        return Ok(None);
+    }
+    match read_box_header(r, moov_offset, file_len)? {
+        Some((MOOV, len)) if len <= file_len - moov_offset => Ok(None),
+        _ => Ok(Some(Header::Flipped { moov_offset })),
+    }
 }
 
 /// Rebuild the track list, insisting it re-encodes to the same init moov so
@@ -292,21 +347,16 @@ enum BoxRead {
 }
 
 fn read_box<R: Read + Seek>(r: &mut R, pos: u64, file_len: u64, max_len: u64) -> io::Result<BoxRead> {
-    let remaining = file_len - pos;
-    if remaining < 8 {
+    let Some((fourcc, len)) = read_box_header(r, pos, file_len)? else {
         return Ok(BoxRead::Torn(None));
-    }
-    let head = read_at(r, pos, 8)?;
-    let fourcc: [u8; 4] = head[4..8].try_into().expect("8-byte header");
-    let len = match u32::from_be_bytes(head[..4].try_into().expect("8-byte header")) {
-        1 if remaining < 16 => return Ok(BoxRead::Torn(Some(fourcc))),
-        1 => u64::from_be_bytes(read_at(r, pos + 8, 8)?.try_into().expect("8-byte size")),
-        len => u64::from(len),
     };
+    if len == u64::MAX {
+        return Ok(BoxRead::Torn(Some(fourcc)));
+    }
     if len < 8 || len > max_len {
         return Ok(BoxRead::Foreign);
     }
-    if len > remaining {
+    if len > file_len - pos {
         return Ok(BoxRead::Torn(Some(fourcc)));
     }
     Ok(BoxRead::Complete(ReadBox {
@@ -314,6 +364,28 @@ fn read_box<R: Read + Seek>(r: &mut R, pos: u64, file_len: u64, max_len: u64) ->
         len,
         bytes: read_at(r, pos, len)?,
     }))
+}
+
+/// The fourcc and total size of the box at `pos`, or `None` when fewer than
+/// 8 bytes remain. A large-size header cut off by the end of the file reports
+/// `u64::MAX`, which is longer than any file.
+fn read_box_header<R: Read + Seek>(
+    r: &mut R,
+    pos: u64,
+    file_len: u64,
+) -> io::Result<Option<([u8; 4], u64)>> {
+    let remaining = file_len - pos;
+    if remaining < 8 {
+        return Ok(None);
+    }
+    let head = read_at(r, pos, 8)?;
+    let fourcc: [u8; 4] = head[4..8].try_into().expect("8-byte header");
+    let len = match u32::from_be_bytes(head[..4].try_into().expect("8-byte header")) {
+        1 if remaining < 16 => u64::MAX,
+        1 => u64::from_be_bytes(read_at(r, pos + 8, 8)?.try_into().expect("8-byte size")),
+        len => u64::from(len),
+    };
+    Ok(Some((fourcc, len)))
 }
 
 /// A crash can leave a zero-filled tail where the OS extended the file
@@ -369,7 +441,8 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 mod tests {
     use super::super::track_state::support::{all_sync_gop, audio_cfg, gop, read_u32_at, video_cfg};
     use super::*;
-    use crate::init::{TrackConfig, VideoCodecParams, VideoTrackConfig};
+    use crate::fragment::FragSample;
+    use crate::init::{AudioTrackConfig, TrackConfig, VideoCodecParams, VideoTrackConfig};
     use crate::trim::fixtures::{AV1_SEQ_OBU, HEVC_PPS, HEVC_SPS, HEVC_VPS};
     use crate::HybridMp4Writer;
 
@@ -459,6 +532,186 @@ mod tests {
             assert_eq!(outcome.unwrap(), finalized(5, appended as u64));
             assert!(bytes == clean, "{appended} moov bytes appended");
         }
+    }
+
+    #[test]
+    fn recovers_from_a_cut_inside_any_fragment() {
+        let whole = session(5, false);
+        for complete in 0..5 {
+            // Cut inside fragment `complete + 1`, e.g. one whose tfdt would
+            // otherwise have stretched the preceding sample.
+            let cut = session(complete + 1, false).len() - 1;
+            let (outcome, bytes) = recover(whole[..cut].to_vec());
+            if complete == 0 {
+                assert_eq!(outcome.unwrap(), InterruptedRecording::Empty);
+                continue;
+            }
+            let discarded = (cut - session(complete, false).len()) as u64;
+            assert_eq!(outcome.unwrap(), finalized(complete as u32, discarded));
+            assert!(bytes == session(complete, true), "{complete} complete fragments");
+        }
+    }
+
+    #[test]
+    fn recovers_a_flipped_header_whose_moov_never_landed() {
+        let killed = session(5, false);
+        let clean = session(5, true);
+        let moov_len = clean.len() - killed.len();
+        assert!(!is_interrupted_recording(&mut Cursor::new(clean.clone())).unwrap());
+        for landed in [0, 7, moov_len / 2, moov_len - 1] {
+            let torn = clean[..killed.len() + landed].to_vec();
+            assert!(is_interrupted_recording(&mut Cursor::new(torn.clone())).unwrap());
+            let (outcome, bytes) = recover(torn);
+            assert_eq!(outcome.unwrap(), finalized(5, landed as u64));
+            assert!(bytes == clean, "{landed} moov bytes landed");
+        }
+    }
+
+    #[test]
+    fn recovers_sessions_whose_middle_track_skips_fragments() {
+        let write = |finalize: bool| {
+            let tracks = vec![
+                TrackConfig::Video(video_cfg()),
+                TrackConfig::Audio(audio_cfg()),
+                TrackConfig::Audio(AudioTrackConfig {
+                    channels: 1,
+                    ..audio_cfg()
+                }),
+            ];
+            let mut w = HybridMp4Writer::new_multi(Cursor::new(Vec::new()), tracks).unwrap();
+            w.write_fragment_multi(&[&gop(0), &[], &all_sync_gop()]).unwrap();
+            w.write_fragment_multi(&[&gop(3), &all_sync_gop(), &all_sync_gop()]).unwrap();
+            w.write_fragment_multi(&[&gop(6), &[], &all_sync_gop()]).unwrap();
+            if finalize {
+                w.finalize().unwrap().into_inner()
+            } else {
+                w.into_inner().into_inner()
+            }
+        };
+        let (outcome, bytes) = recover(write(false));
+        assert_eq!(outcome.unwrap(), finalized(3, 0));
+        assert!(bytes == write(true));
+    }
+
+    #[test]
+    fn rejects_an_init_moov_whose_tracks_do_not_round_trip() {
+        let killed = session(3, false);
+        let dops = killed.windows(4).position(|w| w == b"dOps").unwrap();
+        let rate = dops + 4 + 4; // dOps payload: version, channels, pre-skip, rate
+        for tampered_rate in [0_u32, 24_000] {
+            let mut input = killed.clone();
+            input[rate..rate + 4].copy_from_slice(&tampered_rate.to_be_bytes());
+            let (outcome, bytes) = recover(input.clone());
+            assert_eq!(outcome.unwrap_err().kind(), io::ErrorKind::InvalidData, "{tampered_rate}");
+            assert!(bytes == input, "rejected input must stay untouched");
+        }
+    }
+
+    /// Counts bytes read so tests can bound recovery's I/O.
+    struct CountingCursor {
+        inner: Cursor<Vec<u8>>,
+        bytes_read: u64,
+    }
+
+    impl Read for CountingCursor {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let n = self.inner.read(buf)?;
+            self.bytes_read += n as u64;
+            Ok(n)
+        }
+    }
+
+    impl Write for CountingCursor {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.inner.write(buf)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Seek for CountingCursor {
+        fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+            self.inner.seek(pos)
+        }
+    }
+
+    impl RecoveryTarget for CountingCursor {
+        fn set_len(&mut self, len: u64) -> io::Result<()> {
+            self.inner.set_len(len)
+        }
+
+        fn sync_data(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn recovery_reads_headers_and_skips_sample_payloads() {
+        let big_samples = |finalize: bool| {
+            let mut w = HybridMp4Writer::new(Cursor::new(Vec::new()), video_cfg()).unwrap();
+            for _ in 0..8 {
+                let samples: Vec<FragSample> = (0..3)
+                    .map(|i| FragSample {
+                        data: vec![0xAB; 256 * 1024],
+                        duration: 3000,
+                        is_sync: i == 0,
+                    })
+                    .collect();
+                w.write_fragment(&samples).unwrap();
+            }
+            if finalize {
+                w.finalize().unwrap().into_inner()
+            } else {
+                w.into_inner().into_inner()
+            }
+        };
+        let killed = big_samples(false);
+        let mut target = CountingCursor {
+            inner: Cursor::new(killed.clone()),
+            bytes_read: 0,
+        };
+        assert_eq!(finalize_interrupted_recording(&mut target).unwrap(), finalized(8, 0));
+        assert!(
+            target.bytes_read < 16 * 1024,
+            "read {} of {} bytes",
+            target.bytes_read,
+            killed.len()
+        );
+
+        let mut clean = CountingCursor {
+            inner: Cursor::new(big_samples(true)),
+            bytes_read: 0,
+        };
+        assert!(!is_interrupted_recording(&mut clean).unwrap());
+        assert!(clean.bytes_read <= 64, "probe read {} bytes", clean.bytes_read);
+    }
+
+    #[test]
+    fn file_recovery_finalizes_on_disk_and_refuses_a_file_still_being_written() {
+        let path = std::env::temp_dir().join(format!(
+            "clipline-mp4-recover-{}-{:?}.mp4",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&path, session(3, false)).unwrap();
+
+        #[cfg(windows)]
+        {
+            let live_writer = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+            assert!(finalize_interrupted_recording_file(&path).is_err());
+            drop(live_writer);
+            assert!(std::fs::read(&path).unwrap() == session(3, false));
+        }
+
+        assert_eq!(finalize_interrupted_recording_file(&path).unwrap(), finalized(3, 0));
+        assert!(std::fs::read(&path).unwrap() == session(3, true));
+        assert_eq!(
+            finalize_interrupted_recording_file(&path).unwrap(),
+            InterruptedRecording::NotInterrupted
+        );
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
