@@ -54,6 +54,14 @@ Design review (GPT-6.1 Sol) revisions:
 - Equivalence is defined against the surviving complete-fragment prefix; a
   power loss can still lose unsynced payload, so historical files are best
   effort for payload integrity.
+
+Found while verifying in the app:
+
+- Recovery only ran when the recorder started, which games-only mode defers
+  until a game launches. Run it at the start of the Tauri setup hook instead
+  (after single-instance, before anything can record).
+- A `.recording` that fails to finalize stays unpublished under its own name
+  and is retried next launch, rather than renamed into a broken `.mp4`.
 - [ ] Surface the counts through the existing startup warning in
   `service/session.rs`, keeping the internal-restart skip.
 - [ ] Verify on copies of the five real sessions: packet counts match ffprobe
