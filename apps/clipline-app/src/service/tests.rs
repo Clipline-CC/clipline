@@ -13,6 +13,7 @@ fn clips_dir_resolved_with_probe(
         quota_would_be_exceeded, storage_quota_full_event, Event, FullSessionRecording,
     };
     use clipline_capture::{Codec, EncoderApi, EncoderBackend, EncoderCapability};
+    use clipline_events::PlayerParticipant;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
@@ -737,6 +738,215 @@ fn clips_dir_resolved_with_probe(
         state.match_started();
         assert_eq!(state.active_replay_summary(), None);
         assert_eq!(state.full_session_summary(), None);
+    }
+
+    fn chaos_participant(player_name: &str, champion_name: &str) -> PlayerParticipant {
+        PlayerParticipant {
+            player_name: player_name.into(),
+            champion_name: champion_name.into(),
+            team: "CHAOS".into(),
+        }
+    }
+
+    /// A poll from the Neeko session: the local player on CHAOS with Tahm Kench
+    /// as an ally, so a disguised Neeko shows up as a second Tahm Kench.
+    fn neeko_poll(local_champion: &str, kills: u32) -> PlayerSummary {
+        PlayerSummary {
+            player_name: "dain#png".into(),
+            team: "CHAOS".into(),
+            participants: vec![
+                chaos_participant("dain#png", local_champion),
+                chaos_participant("Nyanmushroom#meow", "Tahm Kench"),
+            ],
+            ..player_summary(local_champion, kills, 0, 0)
+        }
+    }
+
+    #[test]
+    fn player_summary_state_ignores_mid_match_champion_disguises() {
+        let participant = chaos_participant;
+        let poll = neeko_poll;
+
+        let mut state = PlayerSummaryState::default();
+        state.match_started();
+        state.update(poll("Neeko", 1));
+        // The Live Client API reports a disguised Neeko as the ally she copies.
+        state.update(poll("Tahm Kench", 9));
+        state.match_ended();
+        state.update(poll("Tahm Kench", 9));
+
+        let summary = state.full_session_summary().unwrap();
+        assert_eq!(summary.champion_name, "Neeko");
+        assert_eq!(summary.kills, 9, "stats still follow the latest poll");
+        assert_eq!(
+            summary.participants,
+            vec![
+                participant("dain#png", "Neeko"),
+                participant("Nyanmushroom#meow", "Tahm Kench"),
+            ]
+        );
+
+        state.match_started();
+        state.update(poll("Tahm Kench", 0));
+        assert_eq!(
+            state.full_session_summary().unwrap().champion_name,
+            "Tahm Kench",
+            "a new match picks its champions afresh"
+        );
+    }
+
+    #[test]
+    fn player_summary_state_does_not_lock_a_disguise_seen_first() {
+        let mut state = PlayerSummaryState::default();
+        state.match_started();
+        // Recording began while Neeko was already disguised as her ally.
+        state.update(neeko_poll("Tahm Kench", 1));
+        state.update(neeko_poll("Neeko", 2));
+        state.update(neeko_poll("Tahm Kench", 3));
+
+        let summary = state.full_session_summary().unwrap();
+        assert_eq!(summary.champion_name, "Neeko");
+        assert_eq!(
+            summary.participants,
+            vec![
+                chaos_participant("dain#png", "Neeko"),
+                chaos_participant("Nyanmushroom#meow", "Tahm Kench"),
+            ]
+        );
+    }
+
+    #[test]
+    fn player_summary_state_never_locks_names_shared_by_several_rows() {
+        let poll = |sams: &[&str]| PlayerSummary {
+            player_name: "dain#png".into(),
+            team: "CHAOS".into(),
+            participants: std::iter::once(chaos_participant("dain#png", "Neeko"))
+                .chain(sams.iter().map(|champion| chaos_participant("Sam", champion)))
+                .collect(),
+            ..player_summary("Neeko", 0, 0, 0)
+        };
+
+        let mut state = PlayerSummaryState::default();
+        state.match_started();
+        // One Sam is briefly missing, then both appear, reorder, and one drops
+        // out again. Rows sharing a name can't be told apart, so none may carry
+        // another row's lock.
+        for sams in [
+            &["Zed"][..],
+            &["Ahri", "Zed"],
+            &["Zed", "Ahri"],
+            &["Ahri"],
+        ] {
+            state.update(poll(sams));
+            assert_eq!(
+                state.full_session_summary().unwrap().participants,
+                poll(sams).participants,
+                "after {sams:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn player_summary_state_drops_a_lock_contradicted_by_another_player() {
+        // Two different players named Sam who never appear in the same poll.
+        let poll = |team: &str, champion: &str| PlayerSummary {
+            player_name: "dain#png".into(),
+            team: "CHAOS".into(),
+            participants: vec![
+                chaos_participant("dain#png", "Neeko"),
+                PlayerParticipant {
+                    player_name: "Sam".into(),
+                    champion_name: champion.into(),
+                    team: team.into(),
+                },
+            ],
+            ..player_summary("Neeko", 0, 0, 0)
+        };
+
+        for other_sam_team in ["ORDER", "CHAOS"] {
+            let mut state = PlayerSummaryState::default();
+            state.match_started();
+            for (team, champion) in [
+                ("ORDER", "Ahri"),
+                (other_sam_team, "Zed"),
+                ("ORDER", "Ahri"),
+                (other_sam_team, "Zed"),
+            ] {
+                state.update(poll(team, champion));
+                assert_eq!(
+                    state.full_session_summary().unwrap().participants,
+                    poll(team, champion).participants,
+                    "{champion} on {team} after Ahri on ORDER"
+                );
+            }
+        }
+    }
+
+    /// A poll with the local Neeko on CHAOS plus `(name, team, champion)` rows.
+    fn poll_with_rows(rows: &[(&str, &str, &str)]) -> PlayerSummary {
+        PlayerSummary {
+            player_name: "dain#png".into(),
+            team: "CHAOS".into(),
+            participants: std::iter::once(chaos_participant("dain#png", "Neeko"))
+                .chain(rows.iter().map(|(name, team, champion)| PlayerParticipant {
+                    player_name: (*name).into(),
+                    champion_name: (*champion).into(),
+                    team: (*team).into(),
+                }))
+                .collect(),
+            ..player_summary("Neeko", 0, 0, 0)
+        }
+    }
+
+    #[test]
+    fn player_summary_state_drops_a_lock_when_its_name_changes_team() {
+        let mut state = PlayerSummaryState::default();
+        state.match_started();
+        state.update(poll_with_rows(&[("Sam", "ORDER", "Ahri")]));
+        // Zed duplicates a CHAOS teammate, so only the team shows this is
+        // another Sam rather than a disguise.
+        let other_sam = poll_with_rows(&[("Sam", "CHAOS", "Zed"), ("Kai", "CHAOS", "Zed")]);
+        state.update(other_sam.clone());
+
+        assert_eq!(
+            state.full_session_summary().unwrap().participants,
+            other_sam.participants
+        );
+    }
+
+    #[test]
+    fn player_summary_state_keeps_a_contradicted_name_unlocked_for_the_match() {
+        let mut state = PlayerSummaryState::default();
+        state.match_started();
+        state.update(poll_with_rows(&[("Sam", "ORDER", "Ahri")]));
+        state.update(poll_with_rows(&[("Sam", "ORDER", "Zed")]));
+        state.update(poll_with_rows(&[("Sam", "ORDER", "Ahri")]));
+        // Had Sam re-locked to Ahri, this duplicate Zed would read as a disguise.
+        let latest = poll_with_rows(&[("Sam", "ORDER", "Zed"), ("Kai", "ORDER", "Zed")]);
+        state.update(latest.clone());
+
+        assert_eq!(
+            state.full_session_summary().unwrap().participants,
+            latest.participants
+        );
+    }
+
+    #[test]
+    fn player_summary_state_does_not_lock_the_local_champion_without_its_row() {
+        // The local row can be missing from participants (filtered out) while the
+        // summary still finds the player, so a disguise looks unique on the team.
+        let without_local_row = PlayerSummary {
+            participants: vec![chaos_participant("Nyanmushroom#meow", "Tahm Kench")],
+            ..neeko_poll("Tahm Kench", 1)
+        };
+
+        let mut state = PlayerSummaryState::default();
+        state.match_started();
+        state.update(without_local_row);
+        state.update(neeko_poll("Neeko", 2));
+        state.update(neeko_poll("Tahm Kench", 3));
+
+        assert_eq!(state.full_session_summary().unwrap().champion_name, "Neeko");
     }
 
     #[test]
