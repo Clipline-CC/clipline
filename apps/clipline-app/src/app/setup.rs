@@ -265,6 +265,13 @@ pub fn run() {
             crate::library::storage_status
         ])
         .setup(move |app| {
+            // Single-instance has already rejected a duplicate launch, and
+            // nothing can record until setup returns.
+            let recovery_warnings = service::recover_media_at_launch(&media_dir_for_setup);
+            for warning in &recovery_warnings {
+                log_diagnostic(format!("recording recovery: {warning}"));
+            }
+            app.state::<StartupWarnings>().extend(recovery_warnings);
             configure_bundled_ffmpeg(app);
             let osu_app = app.handle().clone();
             let osu_media_root = media_dir_for_setup.clone();

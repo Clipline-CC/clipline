@@ -818,6 +818,26 @@ pub(crate) fn default_clips_dir() -> PathBuf {
     media_root::default_clips_dir()
 }
 
+/// Finish what a killed recorder left behind as soon as Clipline starts,
+/// rather than at the first recording, which games-only mode defers until a
+/// game launches. Call before anything can record. Returns user warnings.
+pub(crate) fn recover_media_at_launch(media_dir: &Path) -> Vec<String> {
+    let Ok((clips_dir, _)) = clips_dir_resolved(media_dir, default_clips_dir) else {
+        // The recorder reports an unusable media folder when it starts.
+        return Vec::new();
+    };
+    let (events, warnings) = mpsc::channel();
+    recover_abandoned_recordings(&clips_dir, &events);
+    drop(events);
+    warnings
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::Error { message } => Some(message),
+            _ => None,
+        })
+        .collect()
+}
+
 pub(crate) fn clips_dir(media_dir: &Path) -> Result<PathBuf, String> {
     media_root::clips_dir(media_dir)
 }
