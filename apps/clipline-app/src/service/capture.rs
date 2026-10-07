@@ -1,5 +1,6 @@
 //! Screen-capture engine, marker sources, and audio-source builders.
 use super::*;
+use std::collections::{HashMap, HashSet};
 
 pub(super) trait TimedFrameSource {
     fn next_frame_timeout(&mut self, timeout: Duration) -> Result<Option<Frame>, CaptureError>;
@@ -231,6 +232,98 @@ pub(super) struct PlayerSummaryState {
     in_match: bool,
     active_replay: Option<PlayerSummary>,
     full_session: Option<PlayerSummary>,
+    champion_locks: ChampionLocks,
+}
+
+/// Pins each player's champion for the match. Champions never change mid-match,
+/// but the Live Client API reports a disguised Neeko as the ally she copies. A
+/// disguise therefore always duplicates a teammate's champion, so only a
+/// champion unique on its team is trusted enough to lock; until then the latest
+/// poll wins.
+#[derive(Default)]
+struct ChampionLocks {
+    local: Option<String>,
+    participants: HashMap<String, LockedChampion>,
+    /// Names seen on more than one row, or contradicting their lock, this match.
+    /// Those rows can't be told apart, so they never lock.
+    ambiguous_names: HashSet<String>,
+}
+
+struct LockedChampion {
+    team: String,
+    champion: String,
+}
+
+impl ChampionLocks {
+    fn apply(&mut self, summary: &mut PlayerSummary) {
+        let mut name_counts: HashMap<&str, usize> = HashMap::new();
+        for participant in &summary.participants {
+            *name_counts.entry(&participant.player_name).or_default() += 1;
+        }
+        for (name, _) in name_counts.iter().filter(|(_, count)| **count > 1) {
+            self.participants.remove(*name);
+            self.ambiguous_names.insert((*name).to_string());
+        }
+        let local_rows = name_counts
+            .get(summary.player_name.as_str())
+            .copied()
+            .unwrap_or(0);
+
+        let observed: Vec<(String, String)> = summary
+            .participants
+            .iter()
+            .map(|participant| (participant.team.clone(), participant.champion_name.clone()))
+            .collect();
+        let team_count = |team: &str, champion: &str| {
+            observed
+                .iter()
+                .filter(|(t, c)| t == team && c == champion)
+                .count()
+        };
+
+        // Only trust the duplicate check when the local player's own row is in
+        // the count; otherwise a disguise can look unique on the team.
+        if let Some(champion) = &self.local {
+            summary.champion_name = champion.clone();
+        } else if local_rows == 1
+            && !self.ambiguous_names.contains(&summary.player_name)
+            && team_count(&summary.team, &summary.champion_name) == 1
+        {
+            self.local = Some(summary.champion_name.clone());
+        }
+
+        for participant in &mut summary.participants {
+            let name = participant.player_name.clone();
+            if self.ambiguous_names.contains(&name) {
+                continue;
+            }
+            let unique = team_count(&participant.team, &participant.champion_name) == 1;
+            match self.participants.get(&name) {
+                Some(lock)
+                    if lock.team == participant.team
+                        && (lock.champion == participant.champion_name || !unique) =>
+                {
+                    participant.champion_name = lock.champion.clone();
+                }
+                // Another team, or another champion that duplicates no teammate
+                // and so isn't a disguise: this name now belongs to someone else.
+                Some(_) => {
+                    self.participants.remove(&name);
+                    self.ambiguous_names.insert(name);
+                }
+                None if unique => {
+                    self.participants.insert(
+                        name,
+                        LockedChampion {
+                            team: participant.team.clone(),
+                            champion: participant.champion_name.clone(),
+                        },
+                    );
+                }
+                None => {}
+            }
+        }
+    }
 }
 
 impl PlayerSummaryState {
@@ -238,15 +331,18 @@ impl PlayerSummaryState {
         self.in_match = true;
         self.active_replay = None;
         self.full_session = None;
+        self.champion_locks = ChampionLocks::default();
     }
 
-    pub(super) fn update(&mut self, summary: PlayerSummary) {
+    pub(super) fn update(&mut self, mut summary: PlayerSummary) {
+        if !self.in_match && self.full_session.is_none() {
+            return;
+        }
+        self.champion_locks.apply(&mut summary);
         if self.in_match {
             self.active_replay = Some(summary.clone());
         }
-        if self.in_match || self.full_session.is_some() {
-            self.full_session = Some(summary);
-        }
+        self.full_session = Some(summary);
     }
 
     pub(super) fn match_ended(&mut self) {
