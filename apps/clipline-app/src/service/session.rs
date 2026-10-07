@@ -311,6 +311,24 @@ pub(super) fn preserve_full_session_recording(
     cleanup_discarded_session(&recording.temp_path, clips_dir);
 }
 
+/// Drop a full session that only recorded a game's startup: stop the writer
+/// and delete the file instead of publishing it.
+pub(super) fn discard_full_session_recording(
+    rec: &mut LiveRecorder,
+    recording: &mut Option<FullSessionRecording>,
+    clips_dir: &Path,
+    events: &Sender<Event>,
+) {
+    let Some(recording) = recording.take() else {
+        return;
+    };
+    if let Err(e) = rec.finish_full_session() {
+        warn_user(events, format!("stop full-session writer: {e}"));
+    }
+    remove_discarded_clip(&recording.temp_path);
+    cleanup_discarded_session(&recording.temp_path, clips_dir);
+}
+
 pub(super) fn remove_discarded_clip(path: &Path) {
     let _ = std::fs::remove_file(path);
     let _ = remove_clip_ownership_marker(path);

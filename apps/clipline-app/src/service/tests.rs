@@ -1850,3 +1850,144 @@ fn clips_dir_resolved_with_probe(
         assert!(message.starts_with("replay cache disk is low"), "{message}");
         assert!(message.contains("finish: writer failed"), "{message}");
     }
+
+    /// A real top-level window on its own message loop, for device tests.
+    struct ProbeWindow {
+        hwnd: isize,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl ProbeWindow {
+        fn open(width: i32, height: i32) -> Self {
+            use windows_sys::Win32::UI::WindowsAndMessaging::{
+                CreateWindowExW, DestroyWindow, DispatchMessageW, PeekMessageW, TranslateMessage,
+                MSG, PM_REMOVE, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+            };
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (tx, rx) = std::sync::mpsc::channel();
+            let thread_stop = stop.clone();
+            let thread = std::thread::spawn(move || {
+                let class: Vec<u16> = "STATIC ".encode_utf16().collect();
+                let title: Vec<u16> = "Clipline resize probe ".encode_utf16().collect();
+                // SAFETY: the predefined STATIC class needs no registration;
+                // the window lives and dies on this thread.
+                let hwnd = unsafe {
+                    CreateWindowExW(
+                        0,
+                        class.as_ptr(),
+                        title.as_ptr(),
+                        WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                        80,
+                        80,
+                        width,
+                        height,
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        std::ptr::null(),
+                    )
+                };
+                tx.send(hwnd as isize).unwrap();
+                let mut msg: MSG = unsafe { std::mem::zeroed() };
+                while !thread_stop.load(Ordering::Acquire) {
+                    // SAFETY: standard message pump for this thread's window.
+                    while unsafe { PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) } != 0 {
+                        unsafe {
+                            TranslateMessage(&msg);
+                            DispatchMessageW(&msg);
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                // SAFETY: destroyed on the thread that created it.
+                unsafe { DestroyWindow(hwnd) };
+            });
+            let hwnd = rx.recv().unwrap();
+            assert_ne!(hwnd, 0, "create probe window");
+            Self { hwnd, stop, thread: Some(thread) }
+        }
+
+        fn resize(&self, width: i32, height: i32) {
+            use windows_sys::Win32::UI::WindowsAndMessaging::{SetWindowPos, SWP_NOMOVE, SWP_NOZORDER};
+            // SAFETY: SetWindowPos marshals to the window's own thread.
+            unsafe {
+                SetWindowPos(
+                    self.hwnd as _,
+                    std::ptr::null_mut(),
+                    0,
+                    0,
+                    width,
+                    height,
+                    SWP_NOMOVE | SWP_NOZORDER,
+                )
+            };
+        }
+    }
+
+    impl Drop for ProbeWindow {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    #[test]
+    fn a_window_resized_during_startup_restarts_and_discards_the_startup_session() {
+        if std::env::var_os("CI").is_some() || !clipline_capture::windows::is_windows_11_or_later() {
+            eprintln!("skipping device test (CI or pre-Windows 11 fallback capture)");
+            return;
+        }
+        let media = clipline_test_utils::TestDir::new("clipline-service", "startup-resize");
+        let window = ProbeWindow::open(1280, 720);
+        let opts = super::ServiceOptions {
+            capture_source: super::CaptureSource::WindowHandle {
+                hwnd: window.hwnd,
+                title: "Clipline resize probe".into(),
+            },
+            media_dir: media.path().to_path_buf(),
+            recording_mode: super::RecordingMode::FullSession,
+            recover_abandoned_recordings: false,
+            ..super::ServiceOptions::default()
+        };
+        let (cmd_tx, cmd_rx) = std::sync::mpsc::channel();
+        let (event_tx, _events) = std::sync::mpsc::channel();
+        let recorder = std::thread::spawn(move || super::run(opts, &cmd_rx, &event_tx, true));
+
+        std::thread::sleep(Duration::from_millis(1500));
+        window.resize(800, 600);
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while !recorder.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        if !recorder.is_finished() {
+            let _ = cmd_tx.send(super::Cmd::Stop { announce: false });
+        }
+        let outcome = recorder.join().unwrap();
+        assert_eq!(outcome, Ok(super::RunEnd::StartupResize));
+
+        let leftovers: Vec<_> = walk_files(media.path())
+            .into_iter()
+            .filter(|path| {
+                let name = path.to_string_lossy().to_ascii_lowercase();
+                name.ends_with(".mp4") || name.ends_with(".recording")
+            })
+            .collect();
+        assert!(leftovers.is_empty(), "startup session must be discarded: {leftovers:?}");
+    }
+
+    fn walk_files(dir: &Path) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                files.extend(walk_files(&path));
+            } else {
+                files.push(path);
+            }
+        }
+        files
+    }
+
