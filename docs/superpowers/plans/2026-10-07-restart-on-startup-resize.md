@@ -32,4 +32,15 @@ keep today's behaviour for now.
   and 1.99, update the handoff, and create a PR into develop with green OS
   checks.
 
+Review (GPT-6.1 Sol) revisions:
+
+- Carry the live full-session state into the restarted run, so a full
+  session started or stopped during startup stays that way.
+- Restart only after the iteration's commands, so a queued Save, Stop or
+  full-session change applies to the recording it was meant for.
+- If the startup file can't be deleted, keep its ownership marker, retry,
+  then empty it so the next launch's recovery removes it; warn.
+- Start the 10 s window when recording begins (after encoder setup).
+- Device tests drive the real service thread and inspect saved MP4 sizes.
+
 Plan checkboxes remain unticked by repository convention.
