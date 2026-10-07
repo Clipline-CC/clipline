@@ -32,7 +32,7 @@ use clipline_storage::{
     clip_ownership_marker_path, ensure_clip_owned, ensure_session_clip_owned,
     recover_recording_files, remove_clip_ownership_marker, remove_emptied_session_dir_after_clip,
     reserve_session_recording_file, storage_status, sweep_emptied_session_dirs,
-    write_session_metadata, StorageStatus,
+    write_session_metadata, RecordingFinalization, StorageStatus,
 };
 use clipline_storage::{session_label, SessionTracker};
 

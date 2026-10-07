@@ -1,13 +1,9 @@
 //! Crash recovery and full media wipe.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs;
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
-
-use clipline_mp4::{
-    finalize_interrupted_recording, has_interrupted_recording_header, InterruptedRecording,
-};
 
 use crate::empty_sessions::sweep_emptied_session_dirs;
 use crate::files::{clip_sidecars, is_link_or_reparse_point, is_mp4, is_recording_mp4, recording_final_path, remove_file_if_exists, visit_media_dirs};
@@ -26,9 +22,25 @@ pub struct RecordingRecoveryReport {
     pub unfinalized: Vec<(PathBuf, String)>,
 }
 
-/// Recover what a killed recorder left behind: finalize each interrupted
-/// full-session recording in place, then publish it under its final name.
-pub fn recover_recording_files(dir: &Path) -> io::Result<RecordingRecoveryReport> {
+/// What a recovery finalizer did with one owned recording.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordingFinalization {
+    /// Not an interrupted recording; left as it was.
+    Unchanged,
+    /// An interrupted recording that holds no media.
+    NoMedia,
+    /// Finalized in place.
+    Finalized,
+}
+
+/// Recover what a killed recorder left behind. `finalize` completes an
+/// interrupted recording in place; each owned `.recording` goes through it
+/// before being published under its final name, and owned `.mp4` files go
+/// through it so recordings earlier builds published unfinished get repaired.
+pub fn recover_recording_files(
+    dir: &Path,
+    mut finalize: impl FnMut(&Path) -> io::Result<RecordingFinalization>,
+) -> io::Result<RecordingRecoveryReport> {
     let mut report = RecordingRecoveryReport {
         recovered: Vec::new(),
         deleted_empty: 0,
@@ -51,8 +63,8 @@ pub fn recover_recording_files(dir: &Path) -> io::Result<RecordingRecoveryReport
                 continue;
             }
             if !recording {
-                match finalize_in_place(&path) {
-                    Ok(InterruptedRecording::Finalized { .. }) => report.repaired.push(path),
+                match finalize(&path) {
+                    Ok(RecordingFinalization::Finalized) => report.repaired.push(path),
                     Ok(_) => {}
                     Err(error) => report.unfinalized.push((path, error.to_string())),
                 }
@@ -63,11 +75,11 @@ pub fn recover_recording_files(dir: &Path) -> io::Result<RecordingRecoveryReport
                 ensure_clip_owned(&path)?;
             }
             let finalized = if meta.len() == 0 {
-                Ok(InterruptedRecording::Empty)
+                Ok(RecordingFinalization::NoMedia)
             } else {
-                finalize_in_place(&path)
+                finalize(&path)
             };
-            if let Ok(InterruptedRecording::Empty) = finalized {
+            if let Ok(RecordingFinalization::NoMedia) = finalized {
                 remove_file_if_exists(&path)?;
                 remove_clip_ownership_marker(&path)?;
                 report.deleted_empty += 1;
@@ -101,16 +113,6 @@ pub fn recover_recording_files(dir: &Path) -> io::Result<RecordingRecoveryReport
         Ok(())
     })?;
     Ok(report)
-}
-
-/// Finalize `path` if it is an interrupted Hybrid MP4. Only a matching file
-/// is opened for writing.
-fn finalize_in_place(path: &Path) -> io::Result<InterruptedRecording> {
-    if !has_interrupted_recording_header(&mut File::open(path)?)? {
-        return Ok(InterruptedRecording::NotInterrupted);
-    }
-    let mut file = OpenOptions::new().read(true).write(true).open(path)?;
-    finalize_interrupted_recording(&mut file)
 }
 
 /// Delete every Clipline-owned saved or in-progress clip below `dir` while
@@ -241,7 +243,7 @@ fn recover_recording_files_renames_non_empty_and_deletes_empty() {
     mark_owned(&recording);
     mark_owned(&empty);
 
-    let report = recover_recording_files(dir.path()).unwrap();
+    let report = recover_recording_files(dir.path(), finalize_with_mp4).unwrap();
 
     assert_eq!(report.deleted_empty, 1);
     assert!(!recording.exists());
@@ -263,7 +265,7 @@ fn recovery_ignores_unmarked_recording_files() {
     let owned = dir.write("2026-07-18 12-00/session_1.mp4.recording", 10);
     dir.write("2026-07-18 12-00/session_1.clipline.json", 2);
 
-    let report = recover_recording_files(dir.path()).unwrap();
+    let report = recover_recording_files(dir.path(), finalize_with_mp4).unwrap();
 
     assert!(unrelated.exists());
     assert!(!owned.exists());
@@ -281,7 +283,7 @@ fn recovery_adopts_unmarked_legacy_clipline_recording() {
     let dir = TestDir::new("clipline-storage", "legacy-recording-recovery");
     let recording = dir.write("2026-07-20 01-31/session_1784525638.mp4.recording", 10);
 
-    let report = recover_recording_files(dir.path()).unwrap();
+    let report = recover_recording_files(dir.path(), finalize_with_mp4).unwrap();
 
     let recovered = dir.path().join("2026-07-20 01-31/session_1784525638.mp4");
     assert!(!recording.exists());
@@ -296,7 +298,7 @@ fn recovery_handles_mixed_case_recording_suffixes() {
     let recording = dir.write("Session.MP4.RECORDING", 10);
     dir.write("Session.clipline.json", 2);
 
-    let report = recover_recording_files(dir.path()).unwrap();
+    let report = recover_recording_files(dir.path(), finalize_with_mp4).unwrap();
 
     assert!(!recording.exists());
     assert_eq!(report.recovered, vec![dir.path().join("Session.MP4")]);
@@ -310,13 +312,23 @@ fn recovery_moves_ownership_marker_to_a_unique_destination() {
     mark_owned(&recording);
     dir.write("session.mp4", 5);
 
-    let report = recover_recording_files(dir.path()).unwrap();
+    let report = recover_recording_files(dir.path(), finalize_with_mp4).unwrap();
 
     let recovered = dir.path().join("session_recovered.mp4");
     assert_eq!(report.recovered, vec![recovered.clone()]);
     assert!(recovered.exists());
     assert!(recovered.with_extension("clipline.json").exists());
     assert!(!dir.path().join("session.clipline.json").exists());
+}
+
+/// The finalizer the app supplies.
+fn finalize_with_mp4(path: &Path) -> io::Result<RecordingFinalization> {
+    use clipline_mp4::InterruptedRecording;
+    Ok(match clipline_mp4::finalize_interrupted_recording_file(path)? {
+        InterruptedRecording::NotInterrupted => RecordingFinalization::Unchanged,
+        InterruptedRecording::Empty => RecordingFinalization::NoMedia,
+        InterruptedRecording::Finalized { .. } => RecordingFinalization::Finalized,
+    })
 }
 
 /// A full-session recording with `fragments` fragments, finalized or left
@@ -364,7 +376,7 @@ fn recovery_finalizes_interrupted_recordings_before_renaming_them() {
     );
     mark_owned(&recording);
 
-    let report = recover_recording_files(dir.path()).unwrap();
+    let report = recover_recording_files(dir.path(), finalize_with_mp4).unwrap();
 
     let recovered = dir.path().join("2026-09-30 18-02/session_1.mp4");
     assert_eq!(report.recovered, vec![recovered.clone()]);
@@ -378,7 +390,7 @@ fn recovery_deletes_interrupted_recordings_that_hold_no_media() {
     let recording = write_bytes(&dir, "session_1.mp4.recording", &hybrid_recording(0, false));
     mark_owned(&recording);
 
-    let report = recover_recording_files(dir.path()).unwrap();
+    let report = recover_recording_files(dir.path(), finalize_with_mp4).unwrap();
 
     assert_eq!(report.deleted_empty, 1);
     assert!(report.recovered.is_empty());
@@ -394,7 +406,7 @@ fn recovery_repairs_owned_mp4s_that_older_builds_left_unfinalized() {
     mark_owned(&finalized);
     let foreign = write_bytes(&dir, "foreign.mp4", &hybrid_recording(3, false));
 
-    let report = recover_recording_files(dir.path()).unwrap();
+    let report = recover_recording_files(dir.path(), finalize_with_mp4).unwrap();
 
     assert_eq!(report.repaired, vec![unfinalized.clone()]);
     assert!(fs::read(&unfinalized).unwrap() == hybrid_recording(3, true));
@@ -416,17 +428,42 @@ fn recovery_keeps_and_reports_recordings_it_cannot_finalize() {
     mark_owned(&recording);
     let damaged_mp4 = write_bytes(&dir, "session_2.mp4", &bytes);
     mark_owned(&damaged_mp4);
+    // Failures must not stop recovery of the files around them.
+    let healthy_recording =
+        write_bytes(&dir, "session_3.mp4.recording", &hybrid_recording(2, false));
+    mark_owned(&healthy_recording);
+    let healthy_mp4 = write_bytes(&dir, "session_4.mp4", &hybrid_recording(2, false));
+    mark_owned(&healthy_mp4);
 
-    let report = recover_recording_files(dir.path()).unwrap();
+    let report = recover_recording_files(dir.path(), finalize_with_mp4).unwrap();
 
     let recovered = dir.path().join("session_1.mp4");
-    assert_eq!(report.recovered, vec![recovered.clone()]);
+    let healthy_recovered = dir.path().join("session_3.mp4");
+    let mut published = report.recovered.clone();
+    published.sort();
+    assert_eq!(published, vec![recovered.clone(), healthy_recovered.clone()]);
     assert!(fs::read(&recovered).unwrap() == bytes, "kept exactly as found");
     assert!(fs::read(&damaged_mp4).unwrap() == bytes);
     let mut unfinalized: Vec<_> = report.unfinalized.iter().map(|(path, _)| path.clone()).collect();
     unfinalized.sort();
     assert_eq!(unfinalized, vec![recovered, damaged_mp4]);
-    assert!(report.repaired.is_empty());
+    assert!(fs::read(&healthy_recovered).unwrap() == hybrid_recording(2, true));
+    assert_eq!(report.repaired, vec![healthy_mp4.clone()]);
+    assert!(fs::read(&healthy_mp4).unwrap() == hybrid_recording(2, true));
+}
+
+#[test]
+fn recovery_publishes_a_recording_finalized_just_before_a_crash() {
+    let dir = TestDir::new("clipline-storage", "finalized-recording-not-renamed");
+    let recording = write_bytes(&dir, "session_1.mp4.recording", &hybrid_recording(2, true));
+    mark_owned(&recording);
+
+    let report = recover_recording_files(dir.path(), finalize_with_mp4).unwrap();
+
+    let recovered = dir.path().join("session_1.mp4");
+    assert_eq!(report.recovered, vec![recovered.clone()]);
+    assert!(fs::read(&recovered).unwrap() == hybrid_recording(2, true));
+    assert!(report.unfinalized.is_empty() && report.repaired.is_empty());
 }
 
 #[test]
