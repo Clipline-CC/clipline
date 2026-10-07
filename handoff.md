@@ -4,6 +4,36 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-10-07): Nightly 1.0.11 published
+
+Published [Nightly 1.0.11](https://github.com/Clipline-CC/clipline/releases/tag/nightly)
+from `develop` commit `a59086d8bc5841968c93a9a790eb3f94c83e26a5` (PR #233), with
+immutable tag `nightly-v1.0.11`. It ships PRs #227 (League champion locks across
+Neeko disguises), #229 (interrupted recordings finalized on launch), #230
+(auto-delete order copy), #231 (screen-share style custom-game picker) and #232
+(restart when a game resizes during startup). Cargo, Cargo.lock and Tauri agree.
+
+Standalone WebView2 moved to Fixed Version 154.0.4258.62 (Edge Stable Update 3,
+October 5: bug and security fixes). Its x64 CAB is 308,020,625 bytes with SHA-256
+`e8f55a4bde27c7f82512402b56a58539b5ec8928be4e500e077b6f66c9ef4668`; the CAB and
+staged `msedgewebview2.exe` carry valid Microsoft signatures, and both runtime
+preflights passed. Review window: 2026-10-07 to 2026-11-06. The standalone-config
+debug smoke ran on the staged runtime: HEVC/AV1 probes returned `probably`, and
+H.264/Opus, HEVC and AV1 each played through `ended` with 60 frames. Workspace
+tests (1,732) and warning-denied Clippy on Rust 1.98 (fresh cache) and 1.99 passed.
+
+[Nightly Release run 37586656732](https://github.com/Clipline-CC/clipline/actions/runs/37586656732)
+passed build, protected artifact-only signing (approved after reviewing the five
+unsigned files, installer versions, empty manifest signatures and release commit)
+and publication with its public-download byte comparison. The rolling release
+targets the exact commit above with seven assets. Independent public downloads
+match every GitHub size/digest, both installers are byte-identical to the
+reviewed unsigned builds, and both updater manifests verify under the committed
+public key. Regular installer: 10,343,841 bytes; standalone: 285,157,391 bytes.
+The live `latest.json` / `latest-standalone.json` advertise 1.0.11.
+
+Evidence: `target/nightly-1.0.11-smoke/` and `target/nightly-20261007/`.
+
 ## Checkpoint (2026-10-07): Restart recording when a game resizes during startup
 
 On Windows 11 the encoder size comes from the first captured frame and later
