@@ -4854,6 +4854,17 @@ fn custom_game_picker_shows_window_cards_with_queued_previews() {
     assert!(icons.contains("WindowPickerCore.iconProcessIds("));
     assert!(icons.contains(r#"invoke("extract_window_icon", { processId })"#));
 
+    // Escape and any other native close go through the same cleanup as
+    // Cancel, and the pump never starts a capture for a closed picker.
+    assert!(main_js().contains(
+        r#"$("game-window-picker-dialog").addEventListener("close", hideGameWindowPicker);"#
+    ));
+    assert!(pump.contains(r#"!$("game-window-picker-dialog").open"#));
+    assert!(
+        refresh.contains("windowPreviews = WindowPickerCore.abandon(windowPreviews);"),
+        "a failed listing abandons the previous queue"
+    );
+
     for abandon_site in ["hideGameWindowPicker", "releaseBackgroundSettingsUi"] {
         assert!(
             js_function_body(&settings, abandon_site)

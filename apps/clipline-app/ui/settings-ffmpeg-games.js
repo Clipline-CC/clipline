@@ -511,6 +511,10 @@ function loadGameWindowIcons(scanId) {
 // Previews are captured one at a time; results for an abandoned listing are
 // dropped, and the next capture waits for the running one to finish.
 function pumpWindowPreviews() {
+  if (!$("game-window-picker-dialog").open) {
+    windowPreviews = WindowPickerCore.abandon(windowPreviews);
+    return;
+  }
   const step = WindowPickerCore.next(windowPreviews);
   windowPreviews = step.state;
   const request = step.request;
@@ -557,6 +561,7 @@ async function refreshGameWindows() {
     ) return false;
     $("error").textContent = e;
     gameWindows = [];
+    windowPreviews = WindowPickerCore.abandon(windowPreviews);
     renderGameWindows();
     return true;
   }
