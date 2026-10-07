@@ -25,7 +25,7 @@ jobs:
 
       # Real-demuxer validation for the MP4 tests (they self-skip without it).
       # Runs in the background so the apt download overlaps toolchain setup
-      # and the cache restore; "Wait for ffprobe" holds the tests until it is
+      # and the cache restore; the wait below holds the tests until it is
       # installed, and fails the job if the install failed. Cap apt at 5
       # minutes: GitHub Ubuntu mirrors can hang on `apt-get update` with no
       # default step timeout, which blocked main CI for over an hour on the
@@ -57,9 +57,9 @@ jobs:
           # tags miss despite the dependency set being byte-identical.
           shared-key: clipline-shared
 
-      - name: Wait for ffprobe
-        if: runner.os == 'Linux'
-        wait: [install-ffprobe]
+      # Wait steps take no name or `if:`; on Windows the install was skipped,
+      # so this returns immediately.
+      - wait: [install-ffprobe]
 
       # The script checks need neither Cargo nor the GPU, so they run beside
       # the workspace tests instead of after them. The group fails if any
