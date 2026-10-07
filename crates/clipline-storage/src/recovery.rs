@@ -18,7 +18,8 @@ pub struct RecordingRecoveryReport {
     pub deleted_empty: usize,
     /// Owned MP4s an earlier build recovered without finalizing, now finalized.
     pub repaired: Vec<PathBuf>,
-    /// Recordings that could not be finalized and were kept exactly as found.
+    /// Recordings that could not be finalized; kept exactly as found, and a
+    /// `.recording` keeps its name so the next launch retries it.
     pub unfinalized: Vec<(PathBuf, String)>,
 }
 
@@ -79,11 +80,20 @@ pub fn recover_recording_files(
             } else {
                 finalize(&path)
             };
-            if let Ok(RecordingFinalization::NoMedia) = finalized {
-                remove_file_if_exists(&path)?;
-                remove_clip_ownership_marker(&path)?;
-                report.deleted_empty += 1;
-                continue;
+            match finalized {
+                Ok(RecordingFinalization::NoMedia) => {
+                    remove_file_if_exists(&path)?;
+                    remove_clip_ownership_marker(&path)?;
+                    report.deleted_empty += 1;
+                    continue;
+                }
+                // Never publish what couldn't be finalized: it may be damaged
+                // or still in use. Keep it exactly as found and retry later.
+                Err(error) => {
+                    report.unfinalized.push((path, error.to_string()));
+                    continue;
+                }
+                Ok(_) => {}
             }
             let final_path = recording_final_path(&path)
                 .map(|candidate| unique_recovered_path(&candidate, &old_marker))
@@ -104,9 +114,6 @@ pub fn recover_recording_files(
                     }
                     return Err(marker_error);
                 }
-            }
-            if let Err(error) = finalized {
-                report.unfinalized.push((final_path.clone(), error.to_string()));
             }
             report.recovered.push(final_path);
         }
@@ -437,16 +444,14 @@ fn recovery_keeps_and_reports_recordings_it_cannot_finalize() {
 
     let report = recover_recording_files(dir.path(), finalize_with_mp4).unwrap();
 
-    let recovered = dir.path().join("session_1.mp4");
     let healthy_recovered = dir.path().join("session_3.mp4");
-    let mut published = report.recovered.clone();
-    published.sort();
-    assert_eq!(published, vec![recovered.clone(), healthy_recovered.clone()]);
-    assert!(fs::read(&recovered).unwrap() == bytes, "kept exactly as found");
+    assert_eq!(report.recovered, vec![healthy_recovered.clone()]);
+    assert!(fs::read(&recording).unwrap() == bytes, "kept exactly as found, unpublished");
+    assert!(!dir.path().join("session_1.mp4").exists());
     assert!(fs::read(&damaged_mp4).unwrap() == bytes);
     let mut unfinalized: Vec<_> = report.unfinalized.iter().map(|(path, _)| path.clone()).collect();
     unfinalized.sort();
-    assert_eq!(unfinalized, vec![recovered, damaged_mp4]);
+    assert_eq!(unfinalized, vec![recording, damaged_mp4]);
     assert!(fs::read(&healthy_recovered).unwrap() == hybrid_recording(2, true));
     assert_eq!(report.repaired, vec![healthy_mp4.clone()]);
     assert!(fs::read(&healthy_mp4).unwrap() == hybrid_recording(2, true));
