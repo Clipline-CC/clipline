@@ -1850,3 +1850,310 @@ fn clips_dir_resolved_with_probe(
         assert!(message.starts_with("replay cache disk is low"), "{message}");
         assert!(message.contains("finish: writer failed"), "{message}");
     }
+
+    /// A real top-level window on its own message loop, for device tests.
+    struct ProbeWindow {
+        hwnd: isize,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl ProbeWindow {
+        fn open(width: i32, height: i32) -> Self {
+            use windows_sys::Win32::UI::WindowsAndMessaging::{
+                CreateWindowExW, DestroyWindow, DispatchMessageW, PeekMessageW, SetWindowTextW,
+                TranslateMessage, MSG, PM_REMOVE, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+            };
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (tx, rx) = std::sync::mpsc::channel();
+            let thread_stop = stop.clone();
+            let thread = std::thread::spawn(move || {
+                let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
+                let title: Vec<u16> = "Clipline resize probe\0".encode_utf16().collect();
+                // SAFETY: the predefined STATIC class needs no registration;
+                // the window lives and dies on this thread.
+                let hwnd = unsafe {
+                    CreateWindowExW(
+                        0,
+                        class.as_ptr(),
+                        title.as_ptr(),
+                        WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                        80,
+                        80,
+                        width,
+                        height,
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        std::ptr::null(),
+                    )
+                };
+                tx.send(hwnd as isize).unwrap();
+                let mut msg: MSG = unsafe { std::mem::zeroed() };
+                let mut tick = 0u64;
+                while !thread_stop.load(Ordering::Acquire) {
+                    // Keep painting like a game does: capture only delivers
+                    // frames when the content changes.
+                    tick += 1;
+                    let text: Vec<u16> = format!("Clipline resize probe {tick}\0").encode_utf16().collect();
+                    // SAFETY: the window belongs to this thread.
+                    unsafe { SetWindowTextW(hwnd, text.as_ptr()) };
+                    // SAFETY: standard message pump for this thread's window.
+                    while unsafe { PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) } != 0 {
+                        unsafe {
+                            TranslateMessage(&msg);
+                            DispatchMessageW(&msg);
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                // SAFETY: destroyed on the thread that created it.
+                unsafe { DestroyWindow(hwnd) };
+            });
+            let hwnd = rx.recv().unwrap();
+            assert_ne!(hwnd, 0, "create probe window");
+            Self { hwnd, stop, thread: Some(thread) }
+        }
+
+        fn resize(&self, width: i32, height: i32) {
+            use windows_sys::Win32::UI::WindowsAndMessaging::{SetWindowPos, SWP_NOMOVE, SWP_NOZORDER};
+            // SAFETY: SetWindowPos marshals to the window's own thread.
+            unsafe {
+                SetWindowPos(
+                    self.hwnd as _,
+                    std::ptr::null_mut(),
+                    0,
+                    0,
+                    width,
+                    height,
+                    SWP_NOMOVE | SWP_NOZORDER,
+                )
+            };
+        }
+    }
+
+    impl Drop for ProbeWindow {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    /// Width and height from the first `avc1` sample entry of an MP4.
+    fn avc1_dimensions(path: &Path) -> (u16, u16) {
+        let bytes = std::fs::read(path).unwrap();
+        let fourcc = bytes
+            .windows(4)
+            .position(|window| window == b"avc1")
+            .expect("H.264 sample entry");
+        // VisualSampleEntry: 6 reserved, data-ref index, 16 bytes of
+        // pre_defined/reserved, then width and height.
+        let at = fourcc + 28;
+        (
+            u16::from_be_bytes([bytes[at], bytes[at + 1]]),
+            u16::from_be_bytes([bytes[at + 2], bytes[at + 3]]),
+        )
+    }
+
+    struct ResizeRun {
+        /// Keeps the media folder alive while the test inspects it.
+        _media: clipline_test_utils::TestDir,
+        published: Vec<PathBuf>,
+        media_files: Vec<PathBuf>,
+    }
+
+    /// Records a probe window through the real service thread, resizing it
+    /// from 1280x720 to 800x600 1.5 s in: the full sessions it published and
+    /// every MP4 or recording left in the media folder.
+    fn record_through_startup_resize(
+        mode: super::RecordingMode,
+        early_command: Option<super::Cmd>,
+    ) -> ResizeRun {
+        let media = clipline_test_utils::TestDir::new("clipline-service", "startup-resize");
+        let window = ProbeWindow::open(1280, 720);
+        let (cmd_tx, events) = super::spawn(super::ServiceOptions {
+            capture_source: super::CaptureSource::WindowHandle {
+                hwnd: window.hwnd,
+                title: "Clipline resize probe".into(),
+            },
+            media_dir: media.path().to_path_buf(),
+            recording_mode: mode,
+            recover_abandoned_recordings: false,
+            ..super::ServiceOptions::default()
+        });
+        let mut seen = SeenEvents::default();
+        // Time everything from the first recording status, not from spawn,
+        // so device and encoder start-up can't eat the startup window.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            match events.recv_timeout(Duration::from_millis(200)) {
+                Ok(event) => {
+                    if seen.take(event) {
+                        break;
+                    }
+                }
+                Err(_) => assert!(
+                    Instant::now() < deadline,
+                    "never started recording: {:?}",
+                    seen.errors
+                ),
+            }
+        }
+        let started = Instant::now();
+        let wait_until = |offset_ms: u64| {
+            let at = started + Duration::from_millis(offset_ms);
+            std::thread::sleep(at.saturating_duration_since(Instant::now()));
+        };
+        if let Some(command) = early_command {
+            // After a couple of seconds there is footage to finish.
+            wait_until(2500);
+            cmd_tx.send(command).unwrap();
+        }
+        wait_until(3500);
+        window.resize(800, 600);
+        // Settle (1 s), restart, and record a little at the new size.
+        wait_until(8000);
+        cmd_tx.send(super::Cmd::Stop { announce: true }).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            match events.recv_timeout(Duration::from_millis(200)) {
+                Ok(super::Event::Status { recording: false, .. }) => break,
+                Ok(event) => {
+                    seen.take(event);
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "recorder never stopped: {:?}",
+                        seen.errors
+                    );
+                }
+            }
+        }
+        if !seen.errors.is_empty() {
+            eprintln!("recorder errors: {:?}", seen.errors);
+        }
+        let media_files: Vec<PathBuf> = walk_files(media.path())
+            .into_iter()
+            .filter(|path| {
+                let name = path.to_string_lossy().to_ascii_lowercase();
+                name.ends_with(".mp4") || name.ends_with(".recording")
+            })
+            .collect();
+        drop(window);
+        ResizeRun {
+            _media: media,
+            published: seen.published,
+            media_files,
+        }
+    }
+
+    #[derive(Default)]
+    struct SeenEvents {
+        published: Vec<PathBuf>,
+        errors: Vec<String>,
+    }
+
+    impl SeenEvents {
+        /// Record one event; true for a "recording" status.
+        fn take(&mut self, event: super::Event) -> bool {
+            match event {
+                super::Event::Saved { path, full_session: true, .. } => {
+                    self.published.push(PathBuf::from(path))
+                }
+                super::Event::Error { message } => self.errors.push(message),
+                super::Event::Status { recording, .. } => return recording,
+                _ => {}
+            }
+            false
+        }
+    }
+
+    fn file_names(paths: &[PathBuf]) -> Vec<String> {
+        paths
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// Device scenarios own a real window, capture session and hardware
+    /// encoder each; overlapping windows and encoder sessions make them
+    /// flaky, so they run one at a time.
+    fn device_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn device_tests_skipped() -> bool {
+        let skip =
+            std::env::var_os("CI").is_some() || !clipline_capture::windows::is_windows_11_or_later();
+        if skip {
+            eprintln!("skipping device test (CI or pre-Windows 11 fallback capture)");
+        }
+        skip
+    }
+
+    #[test]
+    fn a_full_session_resized_during_startup_is_replaced_at_the_new_size() {
+        if device_tests_skipped() {
+            return;
+        }
+        let _device = device_test_lock();
+        let run = record_through_startup_resize(super::RecordingMode::FullSession, None);
+        assert_eq!(run.published.len(), 1, "only the replacement session: {:?}", run.published);
+        assert_eq!(
+            file_names(&run.media_files),
+            file_names(&run.published),
+            "the startup session left nothing behind"
+        );
+        let (width, height) = avc1_dimensions(&run.published[0]);
+        assert!(width <= 800 && height <= 600, "recorded at the new size: {width}x{height}");
+    }
+
+    #[test]
+    fn a_full_session_started_during_startup_survives_the_restart() {
+        if device_tests_skipped() {
+            return;
+        }
+        let _device = device_test_lock();
+        let run = record_through_startup_resize(
+            super::RecordingMode::ReplaysOnly,
+            Some(super::Cmd::StartFullSession),
+        );
+        assert_eq!(run.published.len(), 1, "{:?}", run.published);
+        let (width, height) = avc1_dimensions(&run.published[0]);
+        assert!(width <= 800 && height <= 600, "{width}x{height}");
+    }
+
+    #[test]
+    fn a_full_session_stopped_during_startup_stays_stopped() {
+        if device_tests_skipped() {
+            return;
+        }
+        let _device = device_test_lock();
+        let run = record_through_startup_resize(
+            super::RecordingMode::FullSession,
+            Some(super::Cmd::StopFullSession),
+        );
+        assert_eq!(run.published.len(), 1, "only the session the user stopped: {:?}", run.published);
+        let (width, _) = avc1_dimensions(&run.published[0]);
+        assert!(width > 800, "that session was recorded before the resize");
+    }
+
+    fn walk_files(dir: &Path) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                files.extend(walk_files(&path));
+            } else {
+                files.push(path);
+            }
+        }
+        files
+    }
+

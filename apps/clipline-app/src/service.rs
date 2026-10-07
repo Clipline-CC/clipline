@@ -61,6 +61,8 @@ mod encoders;
 mod replay;
 #[path = "service/session.rs"]
 mod session;
+#[path = "service/startup_resize.rs"]
+mod startup_resize;
 #[cfg(test)]
 #[path = "service/tests.rs"]
 mod tests;
@@ -151,6 +153,7 @@ pub enum Event {
     },
 }
 
+#[derive(Clone)]
 pub struct ServiceOptions {
     pub capture_source: CaptureSource,
     /// Screen-capture backend preference for display/region capture.
@@ -222,22 +225,61 @@ pub fn spawn(opts: ServiceOptions) -> (Sender<Cmd>, Receiver<Event>) {
     std::thread::Builder::new()
         .name("clipline-recorder".into())
         .spawn(move || {
-            if let Err(e) = run(opts, cmd_rx, &event_tx) {
-                let _ = event_tx.send(Event::Error { message: e });
-                send_stopped(&event_tx);
+            let mut opts = opts;
+            let mut restarts = 0;
+            loop {
+                let can_restart = restarts < startup_resize::MAX_STARTUP_RESTARTS;
+                let first_run = restarts == 0;
+                match run(opts.clone(), &cmd_rx, &event_tx, can_restart, first_run) {
+                    Ok(RunEnd::Stopped) => break,
+                    Ok(RunEnd::StartupResize { full_session }) => {
+                        restarts += 1;
+                        // Recovery already ran for this process; a restart
+                        // must never treat its own files as abandoned.
+                        opts.recover_abandoned_recordings = false;
+                        // Keep a full session the user started or stopped
+                        // during startup in the state they left it.
+                        opts.recording_mode = if full_session {
+                            RecordingMode::FullSession
+                        } else {
+                            RecordingMode::ReplaysOnly
+                        };
+                    }
+                    Err(e) => {
+                        let _ = event_tx.send(Event::Error { message: e });
+                        send_stopped(&event_tx);
+                        break;
+                    }
+                }
             }
         })
         .expect("spawn recorder thread");
     (cmd_tx, event_rx)
 }
 
-fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> Result<(), String> {
+/// How one recorder run ended.
+#[derive(Debug, PartialEq, Eq)]
+enum RunEnd {
+    Stopped,
+    /// The source resized during startup: record again at the new size,
+    /// with a full session if one was running.
+    StartupResize { full_session: bool },
+}
+
+fn run(
+    opts: ServiceOptions,
+    cmd_rx: &Receiver<Cmd>,
+    events: &Sender<Event>,
+    can_restart: bool,
+    // False for a startup-resize restart: its setup warnings were shown once.
+    announce_setup: bool,
+) -> Result<RunEnd, String> {
     let (clips_dir, fell_back) = clips_dir_resolved(&opts.media_dir, default_clips_dir)?;
     let _ = events.send(Event::MediaRootResolved {
         path: clips_dir.display().to_string(),
         fell_back,
     });
-    if fell_back {
+    if fell_back && announce_setup {
         warn_user(
             events,
             format!(
@@ -246,7 +288,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
             ),
         );
     }
-    if is_within_temp(&clips_dir, &std::env::temp_dir()) {
+    if announce_setup && is_within_temp(&clips_dir, &std::env::temp_dir()) {
         warn_user(
             events,
             format!(
@@ -271,7 +313,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
     ) {
         let _ = events.send(event);
         send_stopped(events);
-        return Ok(());
+        return Ok(RunEnd::Stopped);
     }
     let mut saved_media_baseline_bytes =
         storage_status_or_warn(&clips_dir, opts.disk_quota_bytes).map(|status| status.total_bytes);
@@ -314,6 +356,15 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
         .set_video_fit(video_fit)
         .map_err(|e| format!("init: {e}"))?;
     let encoder_status = encoder_label(active);
+    // Only stretched sources distort when the game resizes after its first
+    // frame; the Windows 10 fallback already letterboxes into a fixed canvas.
+    // The startup window opens once the encoder exists and recording begins:
+    // encoder setup can take seconds and records nothing.
+    let mut startup_resize = startup_resize::StartupResizeWatch::new(
+        (in_w, in_h),
+        Instant::now(),
+        can_restart && video_fit == VideoFit::Stretch,
+    );
     // `encoder_label` intentionally shows only backend and codec, so an MFT and
     // an FFmpeg path render identically ("AMD AMF · H.264"). Log the API too:
     // the two have very different memory and readback behaviour, and telling
@@ -374,7 +425,19 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
     );
 
     loop {
-        match rec.step_with_frame(|_frame| {}) {
+        let mut resized_to = None;
+        let step = rec.step_with_frame(|frame| {
+            if let FrameData::Gpu(texture) = &frame.data {
+                let size = d3d11::texture_size(texture);
+                if startup_resize.observe(size, Instant::now()) {
+                    resized_to = Some(size);
+                }
+            }
+        });
+        // Restart only after this iteration's commands: a Save, Stop or
+        // full-session change queued meanwhile applies to this recording.
+        let restart_at = resized_to;
+        match step {
             Ok(true) => {}
             Ok(false) => break,
             // Idle screen: WGC delivers nothing — keep serving commands.
@@ -480,7 +543,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                         },
                     );
                     send_stopped(events);
-                    return Ok(());
+                    return Ok(RunEnd::Stopped);
                 }
             }
             if full_session.is_none() {
@@ -547,7 +610,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                                 },
                             );
                             send_stopped(events);
-                            return Ok(());
+                            return Ok(RunEnd::Stopped);
                         }
                     }
                     let session_dir = clips_dir.join(session.current());
@@ -623,7 +686,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                                     },
                                 );
                                 send_stopped(events);
-                                return Ok(());
+                                return Ok(RunEnd::Stopped);
                             }
                         }
                         Err(e) => {
@@ -669,7 +732,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                                 },
                             );
                             send_stopped(events);
-                            return Ok(());
+                            return Ok(RunEnd::Stopped);
                         }
                         full_session = begin_full_session_recording(
                             &mut rec,
@@ -737,7 +800,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                     if announce {
                         send_stopped(events);
                     }
-                    return Ok(());
+                    return Ok(RunEnd::Stopped);
                 }
                 Err(TryRecvError::Disconnected) => {
                     let _ = shutdown_recorder(
@@ -753,10 +816,25 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
                         },
                     );
                     send_stopped(events);
-                    return Ok(());
+                    return Ok(RunEnd::Stopped);
                 }
                 Err(TryRecvError::Empty) => break,
             }
+        }
+
+        if let Some((width, height)) = restart_at {
+            tracing::info!(
+                event = "recording_restarted_for_startup_resize",
+                from_width = in_w,
+                from_height = in_h,
+                width,
+                height,
+            );
+            let full_session_running = full_session.is_some();
+            discard_full_session_recording(&mut rec, &mut full_session, &clips_dir, events);
+            return Ok(RunEnd::StartupResize {
+                full_session: full_session_running,
+            });
         }
     }
     if let Some(err) = shutdown_recorder(
@@ -774,7 +852,7 @@ fn run(opts: ServiceOptions, cmd_rx: Receiver<Cmd>, events: &Sender<Event>) -> R
         return Err(err);
     }
     send_stopped(events);
-    Ok(())
+    Ok(RunEnd::Stopped)
 }
 
 fn warn_user(events: &Sender<Event>, message: String) {

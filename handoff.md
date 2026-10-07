@@ -4,6 +4,24 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-10-07): Restart recording when a game resizes during startup
+
+On Windows 11 the encoder size comes from the first captured frame and later
+frames are stretched to fill it. Abiotic Factor and Ready or Not open
+fullscreen and then switch to the player's window size, so recordings were
+upscaled or distorted. For stretched sources (WGC window and full display),
+a size change first seen within 10 s of recording starting that holds for
+1 s now ends the run: the startup full-session file is deleted, the replay
+buffer dropped, and the service thread starts a fresh run at the new size
+(at most 3 per recorder start, no second recovery pass). Commands queued at
+that moment apply to the old recording first, and a full session started or
+stopped during startup keeps that state. Later resizes still stretch;
+fitting with bars on a monitor-sized canvas (as the Windows 10 fallback does)
+is the follow-up if needed.
+
+Sharp edge: device tests that capture a window need it to keep repainting —
+WGC only delivers frames on change — and must not run concurrently.
+
 ## Checkpoint (2026-10-07): Screen-share style custom-game picker
 
 "Add Custom Game" already listed windows, but as text rows (title, exe, PID,
