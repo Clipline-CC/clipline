@@ -229,13 +229,21 @@ pub fn spawn(opts: ServiceOptions) -> (Sender<Cmd>, Receiver<Event>) {
             let mut restarts = 0;
             loop {
                 let can_restart = restarts < startup_resize::MAX_STARTUP_RESTARTS;
-                match run(opts.clone(), &cmd_rx, &event_tx, can_restart) {
+                let first_run = restarts == 0;
+                match run(opts.clone(), &cmd_rx, &event_tx, can_restart, first_run) {
                     Ok(RunEnd::Stopped) => break,
-                    Ok(RunEnd::StartupResize) => {
+                    Ok(RunEnd::StartupResize { full_session }) => {
                         restarts += 1;
                         // Recovery already ran for this process; a restart
                         // must never treat its own files as abandoned.
                         opts.recover_abandoned_recordings = false;
+                        // Keep a full session the user started or stopped
+                        // during startup in the state they left it.
+                        opts.recording_mode = if full_session {
+                            RecordingMode::FullSession
+                        } else {
+                            RecordingMode::ReplaysOnly
+                        };
                     }
                     Err(e) => {
                         let _ = event_tx.send(Event::Error { message: e });
@@ -253,8 +261,9 @@ pub fn spawn(opts: ServiceOptions) -> (Sender<Cmd>, Receiver<Event>) {
 #[derive(Debug, PartialEq, Eq)]
 enum RunEnd {
     Stopped,
-    /// The source resized during startup: record again at the new size.
-    StartupResize,
+    /// The source resized during startup: record again at the new size,
+    /// with a full session if one was running.
+    StartupResize { full_session: bool },
 }
 
 fn run(
@@ -262,13 +271,15 @@ fn run(
     cmd_rx: &Receiver<Cmd>,
     events: &Sender<Event>,
     can_restart: bool,
+    // False for a startup-resize restart: its setup warnings were shown once.
+    announce_setup: bool,
 ) -> Result<RunEnd, String> {
     let (clips_dir, fell_back) = clips_dir_resolved(&opts.media_dir, default_clips_dir)?;
     let _ = events.send(Event::MediaRootResolved {
         path: clips_dir.display().to_string(),
         fell_back,
     });
-    if fell_back {
+    if fell_back && announce_setup {
         warn_user(
             events,
             format!(
@@ -277,7 +288,7 @@ fn run(
             ),
         );
     }
-    if is_within_temp(&clips_dir, &std::env::temp_dir()) {
+    if announce_setup && is_within_temp(&clips_dir, &std::env::temp_dir()) {
         warn_user(
             events,
             format!(
@@ -327,7 +338,6 @@ fn run(
         opts.capture_backend,
         events,
     )?;
-    let first_frame_at = Instant::now();
     let capture_backend_status = cap.diagnostic_label();
     // Output resolution caps scale down while preserving the captured aspect ratio.
     let FrameData::Gpu(tex) = &first.data else {
@@ -348,9 +358,11 @@ fn run(
     let encoder_status = encoder_label(active);
     // Only stretched sources distort when the game resizes after its first
     // frame; the Windows 10 fallback already letterboxes into a fixed canvas.
+    // The startup window opens once the encoder exists and recording begins:
+    // encoder setup can take seconds and records nothing.
     let mut startup_resize = startup_resize::StartupResizeWatch::new(
         (in_w, in_h),
-        first_frame_at,
+        Instant::now(),
         can_restart && video_fit == VideoFit::Stretch,
     );
     // `encoder_label` intentionally shows only backend and codec, so an MFT and
@@ -422,17 +434,9 @@ fn run(
                 }
             }
         });
-        if let Some((width, height)) = resized_to {
-            tracing::info!(
-                event = "recording_restarted_for_startup_resize",
-                from_width = in_w,
-                from_height = in_h,
-                width,
-                height,
-            );
-            discard_full_session_recording(&mut rec, &mut full_session, &clips_dir, events);
-            return Ok(RunEnd::StartupResize);
-        }
+        // Restart only after this iteration's commands: a Save, Stop or
+        // full-session change queued meanwhile applies to this recording.
+        let restart_at = resized_to;
         match step {
             Ok(true) => {}
             Ok(false) => break,
@@ -816,6 +820,21 @@ fn run(
                 }
                 Err(TryRecvError::Empty) => break,
             }
+        }
+
+        if let Some((width, height)) = restart_at {
+            tracing::info!(
+                event = "recording_restarted_for_startup_resize",
+                from_width = in_w,
+                from_height = in_h,
+                width,
+                height,
+            );
+            let full_session_running = full_session.is_some();
+            discard_full_session_recording(&mut rec, &mut full_session, &clips_dir, events);
+            return Ok(RunEnd::StartupResize {
+                full_session: full_session_running,
+            });
         }
     }
     if let Some(err) = shutdown_recorder(

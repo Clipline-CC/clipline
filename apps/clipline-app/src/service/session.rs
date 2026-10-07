@@ -325,8 +325,49 @@ pub(super) fn discard_full_session_recording(
     if let Err(e) = rec.finish_full_session() {
         warn_user(events, format!("stop full-session writer: {e}"));
     }
-    remove_discarded_clip(&recording.temp_path);
-    cleanup_discarded_session(&recording.temp_path, clips_dir);
+    let path = &recording.temp_path;
+    match delete_with_retry(path) {
+        Ok(()) => {
+            let _ = remove_clip_ownership_marker(path);
+            cleanup_discarded_session(path, clips_dir);
+        }
+        Err(error) => {
+            // Keep the ownership marker: next launch's recovery deletes an
+            // owned, empty recording, so empty it rather than let a later
+            // recovery publish the startup footage.
+            let emptied = std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .and_then(|file| file.set_len(0))
+                .is_ok();
+            let follow_up = if emptied {
+                "; emptied it so the next launch removes it"
+            } else {
+                ""
+            };
+            warn_user(
+                events,
+                format!("could not delete the startup recording {path:?}: {error}{follow_up}"),
+            );
+        }
+    }
+}
+
+/// Another process (a scanner, a preview) can hold a just-closed file open
+/// for a moment; try briefly before giving up.
+fn delete_with_retry(path: &Path) -> std::io::Result<()> {
+    let mut attempt = 0;
+    loop {
+        match std::fs::remove_file(path) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(_) if attempt < 3 => {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 pub(super) fn remove_discarded_clip(path: &Path) {

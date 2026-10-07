@@ -5,7 +5,7 @@
 
 use std::time::{Duration, Instant};
 
-/// How long after a run's first frame a size change still counts as startup.
+/// How long after recording begins a size change still counts as startup.
 pub(super) const STARTUP_RESIZE_WINDOW: Duration = Duration::from_secs(10);
 /// How long the new size must hold before restarting, so a game stepping
 /// through several sizes restarts once.
