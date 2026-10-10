@@ -16,10 +16,11 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clipline_mp4::{VideoCodecParams, VideoTrackConfig};
 
+use crate::app_control::AppControlBlock;
 use crate::ffmpeg::{ChildWait, encoder_name, wait_for_child};
 use crate::probe::{Codec, EncoderBackend};
 use crate::traits::{EncodeError, EncodedPacket, Encoder, Frame, FrameData};
@@ -38,6 +39,8 @@ use reader::{ReaderMsg, ensure_all_output_pts_consumed, pop_output_pts, run_read
 /// flush. Thirty seconds still accommodates slow software AV1 on loaded
 /// machines while placing a finite ceiling on recorder/app shutdown.
 const ENCODER_FLUSH_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a failed frame write waits for the child's exit status.
+const BLOCKED_EXIT_GRACE: Duration = Duration::from_millis(500);
 #[cfg(windows)]
 use crate::cpu_video::{CpuCropRect, CpuVideoConverter};
 #[cfg(windows)]
@@ -175,8 +178,12 @@ fn spawn_process(
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     crate::ffmpeg::suppress_console(&mut command);
-    let mut child = crate::ffmpeg::spawn_verified(&mut command)
-        .map_err(|e| EncodeError::Backend(format!("spawn ffmpeg: {e}")))?;
+    let mut child = crate::ffmpeg::spawn_verified(&mut command).map_err(|e| {
+        match crate::app_control::block_from_io_error(&e) {
+            Some(block) => EncodeError::Backend(block.to_string()),
+            None => EncodeError::Backend(format!("spawn ffmpeg: {e}")),
+        }
+    })?;
 
     let Some(stdin) = child.stdin.take() else {
         let _ = child.kill();
@@ -371,6 +378,9 @@ impl FfmpegVideoEncoder {
         let ChildWait::Exited(status) = wait else {
             unreachable!("timeout handled above")
         };
+        if let Some(block) = crate::app_control::block_from_exit_status(&status) {
+            return Err(EncodeError::Backend(block.to_string()));
+        }
         if !status.success() {
             return Err(EncodeError::Backend(format!("ffmpeg exited with {status}")));
         }
@@ -379,6 +389,24 @@ impl FfmpegVideoEncoder {
         Ok(packets)
     }
 }
+impl FfmpegVideoEncoder {
+    /// After an I/O failure, give the child a short grace period to finish
+    /// exiting and report whether Windows Application Control killed it.
+    /// Never kills the child: `finish`/`Drop` own its shutdown.
+    fn exited_blocked(&mut self, grace: Duration) -> Option<AppControlBlock> {
+        let deadline = Instant::now() + grace;
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) => return crate::app_control::block_from_exit_status(&status),
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Ok(None) | Err(_) => return None,
+            }
+        }
+    }
+}
+
 impl Encoder for FfmpegVideoEncoder {
     fn encode(&mut self, frame: &Frame) -> Result<Vec<EncodedPacket>, EncodeError> {
         let nv12 = self.frame_nv12(frame)?;
@@ -386,9 +414,14 @@ impl Encoder for FfmpegVideoEncoder {
             .stdin
             .as_mut()
             .ok_or_else(|| EncodeError::Backend("ffmpeg stdin already closed".into()))?;
-        stdin
-            .write_all(&nv12)
-            .map_err(|e| EncodeError::Backend(format!("write frame: {e}")))?;
+        if let Err(error) = stdin.write_all(&nv12) {
+            // A child Windows blocked dies in the loader before reading any
+            // input, so the first write is where it surfaces.
+            if let Some(block) = self.exited_blocked(BLOCKED_EXIT_GRACE) {
+                return Err(EncodeError::Backend(block.to_string()));
+            }
+            return Err(EncodeError::Backend(format!("write frame: {error}")));
+        }
         self.pending_pts.push_back(frame.pts_s);
         self.drain_ready()
     }

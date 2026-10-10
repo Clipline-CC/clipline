@@ -30,6 +30,8 @@ use crate::probe::{Codec, EncoderBackend};
                 std::io::stdout().flush().expect("flush encoded tail");
                 std::process::exit(0);
             }
+            // A loader-blocked ffmpeg: dies before reading any input.
+            Ok("blocked") => std::process::exit(0xC0E9_0002_u32 as i32),
             _ => {}
         }
     }
@@ -82,6 +84,43 @@ use crate::probe::{Codec, EncoderBackend};
 
         assert!(error.to_string().contains("encoded tail was discarded"));
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn blocked_encoder_flush_reports_the_app_control_block() {
+        let mut encoder = helper_encoder_for_test("blocked");
+
+        let error = encoder
+            .finish_with_timeout(Duration::from_secs(5))
+            .expect_err("a blocked child cannot flush");
+
+        let message = error.to_string();
+        assert!(
+            message.contains(crate::app_control::BLOCKED_MESSAGE_PREFIX),
+            "{message}"
+        );
+        assert!(message.contains("0xC0E90002"), "{message}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn blocked_encoder_frame_write_reports_the_app_control_block() {
+        use crate::traits::{Encoder, Frame, FrameData};
+        let mut encoder = helper_encoder_for_test("blocked");
+        // Larger than any pipe buffer, so the write fails once the child dies.
+        let frame = Frame {
+            pts_s: 0.0,
+            data: FrameData::Cpu(vec![0; 8 * 1024 * 1024]),
+        };
+
+        let error = encoder.encode(&frame).expect_err("a blocked child cannot encode");
+
+        let message = error.to_string();
+        assert!(
+            message.contains(crate::app_control::BLOCKED_MESSAGE_PREFIX),
+            "{message}"
+        );
     }
 
     #[test]
