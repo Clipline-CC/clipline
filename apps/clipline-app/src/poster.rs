@@ -46,24 +46,27 @@ pub fn ensure_poster(clip: &Path, seek_s: f64) -> Result<PathBuf, String> {
         return Ok(poster);
     }
     let poster = poster_path(clip);
-    let ffmpeg = cached_successful_path(&POSTER_FFMPEG, clipline_capture::ffmpeg::locate)
-        .ok_or_else(|| "ffmpeg is not available for poster extraction".to_string())?;
+    let ffmpeg = cached_successful_path(&POSTER_FFMPEG, || {
+        clipline_capture::ffmpeg::discover()
+            .require("ffmpeg is not available for poster extraction")
+    })
+    .map_err(|error| error.to_string())?;
     generate_poster(&ffmpeg, clip, &poster, seek_s)?;
     Ok(poster)
 }
 
 /// Cache only a successful lookup. A missing executable may be installed or
-/// configured while Clipline is running, so `None` must remain retryable.
-fn cached_successful_path(
+/// configured, and a blocked one allowed, while Clipline is running, so
+/// failures must remain retryable.
+fn cached_successful_path<E>(
     cache: &OnceLock<PathBuf>,
-    locate: impl FnOnce() -> Option<PathBuf>,
-) -> Option<PathBuf> {
+    locate: impl FnOnce() -> Result<PathBuf, E>,
+) -> Result<PathBuf, E> {
     if let Some(path) = cache.get() {
-        return Some(path.clone());
+        return Ok(path.clone());
     }
     let located = locate()?;
-    let _ = cache.set(located);
-    cache.get().cloned()
+    Ok(cache.get_or_init(|| located).clone())
 }
 
 /// A poster is fresh when it exists and is at least as new as its clip, so a
@@ -83,11 +86,18 @@ fn poster_is_fresh(clip: &Path, poster: &Path) -> bool {
 fn generate_poster(ffmpeg: &Path, clip: &Path, poster: &Path, seek_s: f64) -> Result<(), String> {
     let mut cmd = poster_command(ffmpeg, clip, seek_s);
     let output = run_poster_child(&mut cmd, POSTER_EXTRACTION_TIMEOUT)?;
+    publish_poster_output(poster, poster_stdout(output)?)
+}
+
+fn poster_stdout(output: PosterChildOutput) -> Result<BoundedPipeOutput, String> {
+    if let Some(block) = clipline_capture::app_control::block_from_exit_status(&output.status) {
+        return Err(block.to_string());
+    }
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr.bytes);
         return Err(format!("ffmpeg poster failed: {stderr}"));
     }
-    publish_poster_output(poster, output.stdout)
+    Ok(output.stdout)
 }
 
 fn publish_poster_output(poster: &Path, stdout: BoundedPipeOutput) -> Result<(), String> {
@@ -193,8 +203,12 @@ fn run_poster_child_with_limits(
     max_stdout_bytes: usize,
     max_stderr_bytes: usize,
 ) -> Result<PosterChildOutput, String> {
-    let mut child = clipline_capture::ffmpeg::spawn_verified(command)
-        .map_err(|error| format!("spawn ffmpeg poster: {error}"))?;
+    let mut child = clipline_capture::ffmpeg::spawn_verified(command).map_err(|error| {
+        match clipline_capture::app_control::block_from_io_error(&error) {
+            Some(block) => block.to_string(),
+            None => format!("spawn ffmpeg poster: {error}"),
+        }
+    })?;
     let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
         let _ = child.kill();
         let _ = child.wait();
@@ -388,29 +402,29 @@ mod tests {
         assert_eq!(
             cached_successful_path(&cache, || {
                 attempts.set(attempts.get() + 1);
-                None
+                Err("missing")
             }),
-            None
+            Err("missing")
         );
         assert!(
             cache.get().is_none(),
-            "a missing executable must not initialize the cache"
+            "a missing or blocked executable must not initialize the cache"
         );
 
         let expected = PathBuf::from(r"C:\tools\ffmpeg.exe");
         assert_eq!(
             cached_successful_path(&cache, || {
                 attempts.set(attempts.get() + 1);
-                Some(expected.clone())
+                Ok::<_, &str>(expected.clone())
             }),
-            Some(expected.clone())
+            Ok(expected.clone())
         );
         assert_eq!(
             cached_successful_path(&cache, || {
                 attempts.set(attempts.get() + 1);
-                Some(PathBuf::from(r"C:\other\ffmpeg.exe"))
+                Ok::<_, &str>(PathBuf::from(r"C:\other\ffmpeg.exe"))
             }),
-            Some(expected)
+            Ok(expected)
         );
         assert_eq!(attempts.get(), 2, "a success must remain cached");
     }
@@ -581,6 +595,44 @@ mod tests {
             child.try_wait().unwrap().is_some(),
             "timed-out poster child must be reaped"
         );
+    }
+
+    #[test]
+    fn blocked_poster_child_reports_the_app_control_block() {
+        let mut command = Command::new(std::env::current_exe().expect("locate test executable"));
+        command
+            .args([
+                "--ignored",
+                "--exact",
+                "poster::tests::poster_blocked_fixture_exits",
+                "--nocapture",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let output = run_poster_child_with_limits(&mut command, Duration::from_secs(10), 1024, 512)
+            .expect("run blocked fixture");
+
+        let Err(error) = poster_stdout(output) else {
+            panic!("a blocked child produces no poster");
+        };
+
+        assert!(
+            clipline_capture::app_control::is_blocked_message(&error),
+            "{error}"
+        );
+        assert!(!error.starts_with("ffmpeg poster failed"), "{error}");
+        assert_eq!(
+            crate::library::poster_failure_kind(&error),
+            "blocked_by_app_control"
+        );
+    }
+
+    #[test]
+    #[ignore = "subprocess-only App Control fixture"]
+    fn poster_blocked_fixture_exits() {
+        // ffmpeg's exit code when Smart App Control refuses one of its DLLs.
+        std::process::exit(0xC0E9_0002_u32 as i32);
     }
 
     #[test]

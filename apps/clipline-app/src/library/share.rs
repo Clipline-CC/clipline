@@ -163,8 +163,9 @@ pub(crate) fn transcode_share_file_with_ffmpeg(
     has_audio: bool,
     job: &ClipboardExportJob,
 ) -> Result<(), String> {
-    let ffmpeg = clipline_capture::ffmpeg::locate()
-        .ok_or_else(|| "ffmpeg is not available for a shareable clipboard export".to_string())?;
+    let ffmpeg = clipline_capture::ffmpeg::discover()
+        .require("ffmpeg is not available for a shareable clipboard export")
+        .map_err(|error| error.to_string())?;
     let video_modes = share_video_export_modes(source)?;
     let timeout = share_export_timeout(source);
     run_ffmpeg_fallback(
@@ -334,10 +335,22 @@ pub(crate) fn run_ffmpeg_fallback<T>(
         match run_export_ffmpeg(&mut command, remaining, label, &is_cancelled) {
             Ok(output) if output.status.success() => return Ok(()),
             Ok(output) => {
+                // Windows refused to load FFmpeg: every other encoder would
+                // be refused the same way, so stop with one clear error.
+                if let Some(block) =
+                    clipline_capture::app_control::block_from_exit_status(&output.status)
+                {
+                    let _ = std::fs::remove_file(target);
+                    return Err(block.to_string());
+                }
                 last_error = String::from_utf8_lossy(&output.stderr).trim().to_string();
                 if last_error.is_empty() {
                     last_error = format!("ffmpeg exited with {}", output.status);
                 }
+            }
+            Err(error) if error.starts_with(clipline_capture::app_control::BLOCKED_MESSAGE_PREFIX) => {
+                let _ = std::fs::remove_file(target);
+                return Err(error);
             }
             Err(error) => last_error = error,
         }
@@ -362,8 +375,12 @@ pub(crate) fn run_export_ffmpeg(
 ) -> Result<ShareFfmpegOutput, String> {
     const MAX_STDERR_BYTES: usize = 128 * 1024;
 
-    let mut child = clipline_capture::ffmpeg::spawn_verified(command)
-        .map_err(|error| format!("spawn ffmpeg {label}: {error}"))?;
+    let mut child = clipline_capture::ffmpeg::spawn_verified(command).map_err(|error| {
+        match clipline_capture::app_control::block_from_io_error(&error) {
+            Some(block) => block.to_string(),
+            None => format!("spawn ffmpeg {label}: {error}"),
+        }
+    })?;
     let Some(stderr) = child.stderr.take() else {
         let _ = child.kill();
         let _ = child.wait();
@@ -497,8 +514,9 @@ pub(crate) fn extract_audio_sidecars_with_ffmpeg(
     source: &Path,
     outputs: &[AudioTrackSidecarOutput],
 ) -> Result<(), String> {
-    let ffmpeg = clipline_capture::ffmpeg::locate()
-        .ok_or_else(|| "ffmpeg is not available for audio sidecar extraction".to_string())?;
+    let ffmpeg = clipline_capture::ffmpeg::discover()
+        .require("ffmpeg is not available for audio sidecar extraction")
+        .map_err(|error| error.to_string())?;
     let mut cmd = Command::new(ffmpeg);
     suppress_console(&mut cmd);
     cmd.args(ffmpeg_audio_sidecar_args(source, outputs))
@@ -507,7 +525,14 @@ pub(crate) fn extract_audio_sidecars_with_ffmpeg(
         .stderr(Stdio::piped());
     let output = clipline_capture::ffmpeg::spawn_verified(&mut cmd)
         .and_then(|child| child.wait_with_output())
-        .map_err(|e| format!("spawn ffmpeg audio sidecar extraction: {e}"))?;
+        .map_err(|e| match clipline_capture::app_control::block_from_io_error(&e) {
+            Some(block) => block.to_string(),
+            None => format!("spawn ffmpeg audio sidecar extraction: {e}"),
+        })?;
+    if let Some(block) = clipline_capture::app_control::block_from_exit_status(&output.status) {
+        cleanup_audio_sidecar_temps(outputs);
+        return Err(block.to_string());
+    }
     if !output.status.success() {
         cleanup_audio_sidecar_temps(outputs);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -777,5 +802,44 @@ mod tests {
             assert!(!unique.exists());
             assert!(!nested_unique.exists());
             assert!(malformed.exists());
+        }
+        #[test]
+        fn blocked_export_stops_without_trying_other_encoders() {
+            let dir = TestDir::new("clipline-library", "blocked-export");
+            let target = dir.path().join("share-export-blocked.mp4");
+            let mut attempts = 0;
+
+            let error = run_ffmpeg_fallback(
+                &std::env::current_exe().expect("locate test executable"),
+                &target,
+                Duration::from_secs(20),
+                [1, 2, 3],
+                "shareable clipboard export",
+                || false,
+                |_| {
+                    attempts += 1;
+                    [
+                        "--ignored",
+                        "--exact",
+                        "library::share::tests::blocked_ffmpeg_fixture_exits",
+                        "--nocapture",
+                    ]
+                    .map(String::from)
+                    .to_vec()
+                },
+            )
+            .expect_err("a blocked FFmpeg cannot export");
+
+            assert!(
+                clipline_capture::app_control::is_blocked_message(&error),
+                "{error}"
+            );
+            assert!(!error.contains("ffmpeg is not available"), "{error}");
+            assert_eq!(attempts, 1, "other encoders can't help a blocked runtime");
+        }
+        #[test]
+        #[ignore = "subprocess-only App Control fixture"]
+        fn blocked_ffmpeg_fixture_exits() {
+            std::process::exit(0xC0E9_0002_u32 as i32);
         }
 }
