@@ -1,6 +1,7 @@
 //! Safe wrappers for the small Win32 surface owned by the application shell.
 
 mod credential_store;
+mod error_mode;
 mod webview_memory;
 
 use std::ffi::{c_void, OsStr};
@@ -10,6 +11,7 @@ use std::path::Path;
 pub(crate) use credential_store::{
     targets_with_prefixes as credential_targets_with_prefixes, CredentialStore,
 };
+pub(crate) use error_mode::suppress_critical_error_dialogs;
 pub(crate) use webview_memory::{set_memory_target, MemoryTarget};
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_INVALID_PARAMETER, FILETIME, HANDLE,

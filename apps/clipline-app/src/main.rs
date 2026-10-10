@@ -7,6 +7,10 @@ fn main() {
 
 #[cfg(windows)]
 fn main() {
+    // Before any child process exists: ffmpeg children inherit this, so a DLL
+    // blocked by Smart App Control or WDAC exits with a classifiable NTSTATUS
+    // instead of raising a modal "Bad Image" dialog per child.
+    windows::suppress_critical_error_dialogs();
     if uninstall::run_if_requested() {
         return;
     }
