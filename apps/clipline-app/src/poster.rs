@@ -9,8 +9,11 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+use clipline_capture::app_control::AppControlBlock;
+use clipline_capture::ffmpeg::{Discovery, FfmpegUnavailable};
 
 use crate::library::suppress_console;
 
@@ -47,12 +50,37 @@ pub fn ensure_poster(clip: &Path, seek_s: f64) -> Result<PathBuf, String> {
     }
     let poster = poster_path(clip);
     let ffmpeg = cached_successful_path(&POSTER_FFMPEG, || {
-        clipline_capture::ffmpeg::discover()
-            .require("ffmpeg is not available for poster extraction")
+        discover_unless_recently_blocked(
+            &POSTER_FFMPEG_BLOCKED,
+            Instant::now(),
+            clipline_capture::ffmpeg::discover,
+        )
     })
     .map_err(|error| error.to_string())?;
     generate_poster(&ffmpeg, clip, &poster, seek_s)?;
     Ok(poster)
+}
+
+/// When Windows blocks FFmpeg, each gallery card would otherwise rehash the
+/// runtime and spawn a child Windows refuses. Reuse the verdict for a while
+/// instead. Allowing FFmpeg takes effect within one interval.
+const BLOCKED_RECHECK_INTERVAL: Duration = Duration::from_secs(60);
+static POSTER_FFMPEG_BLOCKED: Mutex<Option<(Instant, AppControlBlock)>> = Mutex::new(None);
+
+fn discover_unless_recently_blocked(
+    latch: &Mutex<Option<(Instant, AppControlBlock)>>,
+    now: Instant,
+    discover: impl FnOnce() -> Discovery,
+) -> Result<PathBuf, FfmpegUnavailable> {
+    let mut latch = latch.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some((seen, block)) = *latch {
+        if now.saturating_duration_since(seen) < BLOCKED_RECHECK_INTERVAL {
+            return Err(FfmpegUnavailable::Blocked(block));
+        }
+    }
+    let discovery = discover();
+    *latch = discovery.blocked().map(|block| (now, block));
+    discovery.require("ffmpeg is not available for poster extraction")
 }
 
 /// Cache only a successful lookup. A missing executable may be installed or
@@ -427,6 +455,45 @@ mod tests {
             Ok(expected)
         );
         assert_eq!(attempts.get(), 2, "a success must remain cached");
+    }
+
+    #[test]
+    fn blocked_runtime_is_rechecked_at_most_once_per_window() {
+        let block =
+            clipline_capture::app_control::block_from_exit_code(Some(0xC0E9_0002_u32 as i32))
+                .unwrap();
+        let latch = Mutex::new(None);
+        let discoveries = Cell::new(0);
+        let blocked = || {
+            discoveries.set(discoveries.get() + 1);
+            Discovery::Blocked {
+                path: PathBuf::from(r"C:\ffmpeg\ffmpeg.exe"),
+                block,
+            }
+        };
+        let start = Instant::now();
+
+        let first = discover_unless_recently_blocked(&latch, start, blocked);
+        let soon = discover_unless_recently_blocked(
+            &latch,
+            start + BLOCKED_RECHECK_INTERVAL / 2,
+            blocked,
+        );
+        assert_eq!(first, Err(FfmpegUnavailable::Blocked(block)));
+        assert_eq!(soon, Err(FfmpegUnavailable::Blocked(block)));
+        assert_eq!(discoveries.get(), 1, "no re-spawn inside the window");
+
+        let later = discover_unless_recently_blocked(
+            &latch,
+            start + BLOCKED_RECHECK_INTERVAL,
+            || {
+                discoveries.set(discoveries.get() + 1);
+                Discovery::Found(PathBuf::from(r"C:\ffmpeg\ffmpeg.exe"))
+            },
+        );
+        assert_eq!(later, Ok(PathBuf::from(r"C:\ffmpeg\ffmpeg.exe")));
+        assert_eq!(discoveries.get(), 2, "the block is rechecked after the window");
+        assert!(latch.lock().unwrap().is_none(), "an allowed runtime clears the latch");
     }
 
     #[test]
