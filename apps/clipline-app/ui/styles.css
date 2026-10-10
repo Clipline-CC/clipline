@@ -2358,6 +2358,19 @@ button.primary.settings-save-glow {
   justify-content: flex-end;
   gap: 8px;
 }
+/* Windows blocked FFmpeg: guidance only, never an Install / Repair action. */
+.ffmpeg-runtime-blocked {
+  display: grid;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--warn);
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.ffmpeg-runtime-blocked[hidden] { display: none; }
+.ffmpeg-runtime-blocked p { margin: 0; }
+.ffmpeg-runtime-blocked-code { color: var(--muted); }
 
 .audio-control {
   display: grid;

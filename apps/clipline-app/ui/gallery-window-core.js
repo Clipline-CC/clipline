@@ -189,6 +189,18 @@ var GalleryWindowCore = (() => {
       === "ffmpeg is not available for poster extraction";
   };
 
+  // Windows Application Control refused to load FFmpeg. The backend reports
+  // that message verbatim, so it is recognized by its leading words only.
+  const posterRuntimeBlocked = (error) => {
+    const detail = error && typeof error === "object" && "message" in error
+      ? error.message
+      : error;
+    return String(detail ?? "")
+      .trim()
+      .toLowerCase()
+      .startsWith("windows blocked ffmpeg");
+  };
+
   return Object.freeze({
     DEFAULT_PAGE_SIZE,
     initialState,
@@ -201,6 +213,7 @@ var GalleryWindowCore = (() => {
     cacheSet,
     clipPathKey,
     posterRuntimeUnavailable,
+    posterRuntimeBlocked,
   });
 })();
 

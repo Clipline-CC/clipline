@@ -136,12 +136,25 @@ function markPosterUnavailable(path) {
   posterCacheSet(path, POSTER_UNAVAILABLE);
 }
 
-function showPosterRuntimeWarning(error) {
+const POSTER_RUNTIME_MISSING_TEXT = "Thumbnails need Clipline's optional FFmpeg component.";
+const POSTER_RUNTIME_BLOCKED_TEXT =
+  "Windows blocked FFmpeg, so thumbnails can't be made. See Settings > Optional FFmpeg component.";
+
+function showPosterRuntimeWarning(error, blocked = false) {
   const warning = $("poster-runtime-warning");
   if (warning) warning.hidden = false;
+  const text = $("poster-runtime-warning-text");
+  if (text) text.textContent = blocked ? POSTER_RUNTIME_BLOCKED_TEXT : POSTER_RUNTIME_MISSING_TEXT;
+  // Reinstalling can't help a runtime Windows refuses to load.
+  const install = $("poster-runtime-install");
+  if (install) install.hidden = blocked;
   if (posterRuntimeWarningReported) return;
   posterRuntimeWarningReported = true;
-  reportFrontendDiagnostic("warn", "poster_ffmpeg_unavailable", error);
+  reportFrontendDiagnostic(
+    "warn",
+    blocked ? "poster_ffmpeg_blocked" : "poster_ffmpeg_unavailable",
+    error,
+  );
 }
 
 function clearPosterRuntimeWarning() {
@@ -193,7 +206,9 @@ function loadCardPoster(path, thumb) {
     .catch((error) => {
       if (!isForegroundWorkCurrent(lifecycleWork)) return;
       markPosterUnavailable(path);
-      if (GalleryWindowCore.posterRuntimeUnavailable(error)) {
+      if (GalleryWindowCore.posterRuntimeBlocked(error)) {
+        showPosterRuntimeWarning(error, true);
+      } else if (GalleryWindowCore.posterRuntimeUnavailable(error)) {
         showPosterRuntimeWarning(error);
       }
     });

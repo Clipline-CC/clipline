@@ -271,3 +271,24 @@ fn only_a_missing_ffmpeg_runtime_requests_the_global_poster_warning() {
         "[true,true,false,false,false,false]"
     );
 }
+
+#[test]
+fn a_windows_blocked_ffmpeg_is_its_own_poster_state() {
+    let mut context = context();
+    assert_eq!(
+        eval(
+            &mut context,
+            r#"JSON.stringify([
+              "Windows blocked FFmpeg (Smart App Control or an App Control policy): STATUS_SYSTEM_INTEGRITY_POLICY_VIOLATION 0xC0E90002",
+              new Error("windows blocked ffmpeg (x): y"),
+              "ffmpeg is not available for poster extraction",
+              "ffmpeg poster failed: clip named Windows blocked FFmpeg",
+              null
+            ].map((error) => [
+              GalleryWindowCore.posterRuntimeBlocked(error),
+              GalleryWindowCore.posterRuntimeUnavailable(error),
+            ]))"#,
+        ),
+        "[[true,false],[true,false],[false,true],[false,false],[false,false]]"
+    );
+}

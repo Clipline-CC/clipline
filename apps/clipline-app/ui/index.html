@@ -24,7 +24,7 @@
       <div id="notice"></div>
       <div id="error"></div>
       <div id="poster-runtime-warning" class="poster-runtime-warning" role="alert" hidden>
-        <span>Thumbnails need Clipline's optional FFmpeg component.</span>
+        <span id="poster-runtime-warning-text">Thumbnails need Clipline's optional FFmpeg component.</span>
         <button id="poster-runtime-install" type="button">Install FFmpeg</button>
       </div>
     </div>
@@ -633,6 +633,11 @@
                 <div class="ffmpeg-runtime-actions">
                   <button id="ffmpeg-runtime-install" type="button">Install</button>
                   <button id="ffmpeg-runtime-cancel" type="button" hidden>Cancel</button>
+                </div>
+                <div id="ffmpeg-runtime-blocked" class="ffmpeg-runtime-blocked" role="note" hidden>
+                  <p>Windows blocked FFmpeg (Smart App Control or an App Control policy) because its files aren't code-signed. Until Windows allows it, Clipline can't make thumbnails, shareable Copy Clip exports, or multi-track audio previews, or record with FFmpeg encoders. Reinstalling FFmpeg won't change this.</p>
+                  <p>To see which one is responsible, open Windows Security &gt; App &amp; browser control &gt; Smart App Control. If Smart App Control is off, an App Control policy is blocking it: Event Viewer &gt; Applications and Services Logs &gt; Microsoft &gt; Windows &gt; CodeIntegrity &gt; Operational lists the block (event 3077 or 3033).</p>
+                  <p id="ffmpeg-runtime-blocked-code" class="ffmpeg-runtime-blocked-code"></p>
                 </div>
               </div>
             </div>

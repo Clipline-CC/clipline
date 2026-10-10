@@ -17,6 +17,9 @@ function applyFfmpegInstallSnapshot(snapshot) {
   const phase = ffmpegInstallPhase(snapshot);
   const state = snapshot.state || {};
   const managed = snapshot.discovery === "managed_verified";
+  // Windows Application Control refuses to load FFmpeg. Redownloading can't
+  // help, so explain it and offer no Install / Repair.
+  const blocked = Boolean(snapshot.blocked);
   const active = ["checking", "downloading", "verifying", "publishing"].includes(phase);
   const cancellable = ["checking", "downloading", "verifying"].includes(phase);
   const total = Number(state.total) || 0;
@@ -34,6 +37,7 @@ function applyFfmpegInstallSnapshot(snapshot) {
   else if (phase === "publishing") status.textContent = "Finishing installation...";
   else if (phase === "failed") status.textContent = `Install failed: ${state.message || "unknown error"}`;
   else if (phase === "cancelled") status.textContent = "Install cancelled";
+  else if (blocked) status.textContent = "Blocked by Windows";
   else if (managed) status.textContent = "Installed and verified";
   else if (snapshot.discovery === "external_unmanaged") {
     status.textContent = "External FFmpeg found; managed component not installed";
@@ -41,12 +45,17 @@ function applyFfmpegInstallSnapshot(snapshot) {
 
   progress.hidden = phase !== "downloading";
   progress.value = percent;
-  install.hidden = active || managed;
+  install.hidden = active || managed || blocked;
+  $("ffmpeg-runtime-blocked").hidden = !blocked;
+  $("ffmpeg-runtime-blocked-code").textContent = blocked
+    ? `Windows reported ${snapshot.blocked.symbol} (${snapshot.blocked.code}).`
+    : "";
   install.textContent = phase === "failed" || phase === "cancelled"
     ? "Retry Install / Repair"
     : "Install / Repair";
   cancel.hidden = !cancellable;
   posterInstall.disabled = active;
+  posterInstall.hidden = blocked;
   posterInstall.textContent = active
     ? phase === "downloading" ? `Installing... ${percent}%` : "Installing..."
     : "Install FFmpeg";
@@ -65,7 +74,7 @@ async function ensureFfmpegRuntime(retry = null) {
   ffmpegRuntimeInstallPromise = invoke("ensure_ffmpeg_runtime")
     .then((snapshot) => {
       applyFfmpegInstallSnapshot(snapshot);
-      if (snapshot.discovery === "managed_verified") {
+      if (snapshot.discovery === "managed_verified" && !snapshot.blocked) {
         const pendingRetry = ffmpegRuntimeRetry;
         ffmpegRuntimeRetry = null;
         if (pendingRetry) return Promise.resolve(pendingRetry()).then(() => snapshot);

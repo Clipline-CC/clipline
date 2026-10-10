@@ -95,6 +95,47 @@ pub fn ensure_ffmpeg_runtime_is_noop(kind: FfmpegDiscoveryKind) -> bool {
     matches!(kind, FfmpegDiscoveryKind::ManagedVerified)
 }
 
+/// What Install / Repair should do for the current runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnsureAction {
+    AlreadyReady,
+    Install,
+    /// Windows Application Control refuses to load FFmpeg. The bytes are
+    /// fine (managed verification hashes every file), so redownloading can't
+    /// help. Refuse rather than loop on Install / Repair.
+    RefuseBlocked,
+}
+
+pub fn ensure_action(kind: FfmpegDiscoveryKind, blocked: bool) -> EnsureAction {
+    if blocked {
+        EnsureAction::RefuseBlocked
+    } else if ensure_ffmpeg_runtime_is_noop(kind) {
+        EnsureAction::AlreadyReady
+    } else {
+        EnsureAction::Install
+    }
+}
+
+/// UI-facing description of a Windows Application Control block.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FfmpegBlockedDto {
+    /// SDK header name, e.g. `STATUS_SYSTEM_INTEGRITY_POLICY_VIOLATION`.
+    pub symbol: String,
+    /// `0xC0E90002` for a child exit NTSTATUS, decimal for a Win32 error.
+    pub code: String,
+    pub message: String,
+}
+
+impl From<&clipline_capture::app_control::AppControlBlock> for FfmpegBlockedDto {
+    fn from(block: &clipline_capture::app_control::AppControlBlock) -> Self {
+        Self {
+            symbol: block.symbol().to_string(),
+            code: block.code_display(),
+            message: block.to_string(),
+        }
+    }
+}
+
 /// Classify discovery for UI/ensure. `managed_verified` comes from the B2
 /// verifier; `locate_found` is whether `ffmpeg::locate()` returned a path.
 pub fn classify_ffmpeg_discovery(
@@ -692,6 +733,42 @@ mod tests {
             FfmpegDiscoveryKind::ExternalUnmanaged
         ));
         assert!(!ensure_ffmpeg_runtime_is_noop(FfmpegDiscoveryKind::Missing));
+    }
+
+    #[test]
+    fn ensure_never_downloads_while_windows_blocks_ffmpeg() {
+        for kind in [
+            FfmpegDiscoveryKind::ManagedVerified,
+            FfmpegDiscoveryKind::ExternalUnmanaged,
+            FfmpegDiscoveryKind::Missing,
+        ] {
+            assert_eq!(ensure_action(kind, true), EnsureAction::RefuseBlocked);
+        }
+        assert_eq!(
+            ensure_action(FfmpegDiscoveryKind::ManagedVerified, false),
+            EnsureAction::AlreadyReady
+        );
+        assert_eq!(
+            ensure_action(FfmpegDiscoveryKind::ExternalUnmanaged, false),
+            EnsureAction::Install
+        );
+        assert_eq!(
+            ensure_action(FfmpegDiscoveryKind::Missing, false),
+            EnsureAction::Install
+        );
+    }
+
+    #[test]
+    fn blocked_dto_carries_symbol_code_and_message() {
+        let block =
+            clipline_capture::app_control::block_from_exit_code(Some(0xC0E9_0002_u32 as i32))
+                .unwrap();
+        let dto = FfmpegBlockedDto::from(&block);
+        assert_eq!(dto.symbol, "STATUS_SYSTEM_INTEGRITY_POLICY_VIOLATION");
+        assert_eq!(dto.code, "0xC0E90002");
+        assert!(dto.message.starts_with("Windows blocked FFmpeg"));
+        let json = serde_json::to_value(&dto).unwrap();
+        assert_eq!(json["code"], "0xC0E90002");
     }
 
     #[test]
