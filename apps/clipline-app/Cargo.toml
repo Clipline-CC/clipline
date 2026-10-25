@@ -32,7 +32,9 @@ tauri-runtime = "~2.11"
 tauri-plugin-autostart = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-single-instance = "2"
-tauri-plugin-updater = "2"
+# Without the default `zip` feature: Clipline ships the NSIS setup.exe, never a
+# zip-wrapped update, and that feature pulls zip 4 (RUSTSEC-2026-0367..0369).
+tauri-plugin-updater = { version = "2", default-features = false, features = ["rustls-tls"] }
 # Pinned to the version Tauri 2.11 already resolves, so `PlatformWebview::controller`
 # hands back the same `ICoreWebView2Controller` type and no second COM binding
 # enters the dependency tree.
@@ -47,7 +49,7 @@ base64 = "0.22"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json"] }
 uuid = { version = "1", features = ["v4", "serde"] }
-zip = { version = "4", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 rodio = { version = "0.17", default-features = false, features = ["vorbis"] }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",

@@ -487,6 +487,52 @@ fn dependency_exceptions_and_fixed_runtime_are_owned_and_current() {
 }
 
 #[test]
+fn locked_dependencies_avoid_known_vulnerable_releases() {
+    // First patched release for each RustSec advisory Clipline has cleared.
+    // `.cargo/audit.toml` keeps `ignore = []`, so these stay fixed, not ignored.
+    const PATCHED: &[(&str, &str, &str)] = &[
+        ("rustls", "0.23.46", "RUSTSEC-2026-0346..0349"),
+        ("rustls-webpki", "0.103.16", "RUSTSEC-2026-0382"),
+        ("webpki-roots", "1.0.10", "RUSTSEC-2026-0381"),
+        ("webpki-root-certs", "1.0.10", "RUSTSEC-2026-0383"),
+        ("quinn-proto", "0.11.17", "RUSTSEC-2026-0338..0342"),
+        ("zip", "9.0.0", "RUSTSEC-2026-0367..0369"),
+    ];
+    fn numeric(version: &str) -> Vec<u64> {
+        version
+            .split(['.', '-', '+'])
+            .map_while(|part| part.parse().ok())
+            .collect()
+    }
+    let lock = fs::read_to_string(workspace_root().join("Cargo.lock")).expect("read Cargo.lock");
+    let mut vulnerable = Vec::new();
+    for package in lock.split("[[package]]") {
+        let field = |key: &str| {
+            package.lines().find_map(|line| {
+                line.trim()
+                    .strip_prefix(key)?
+                    .strip_prefix(" = \"")?
+                    .strip_suffix('"')
+            })
+        };
+        let (Some(name), Some(version)) = (field("name"), field("version")) else {
+            continue;
+        };
+        if let Some((_, patched, advisory)) =
+            PATCHED.iter().find(|(crate_name, ..)| *crate_name == name)
+        {
+            if numeric(version) < numeric(patched) {
+                vulnerable.push(format!("{name} {version} ({advisory}, fixed in {patched})"));
+            }
+        }
+    }
+    assert!(
+        vulnerable.is_empty(),
+        "Cargo.lock selects releases with known advisories: {vulnerable:?}"
+    );
+}
+
+#[test]
 fn ffmpeg_release_staging_is_pinned_allowlisted_and_attributed() {
     let root = workspace_root();
     let manifest: serde_json::Value = serde_json::from_str(

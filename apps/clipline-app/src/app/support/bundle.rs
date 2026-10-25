@@ -488,7 +488,7 @@ mod tests {
         let file = std::fs::File::open(bundle).unwrap();
         let mut archive = zip::ZipArchive::new(file).unwrap();
         let names = (0..archive.len())
-            .map(|index| archive.by_index(index).unwrap().name().to_string())
+            .map(|index| archive.by_index(index).unwrap().name().unwrap().to_string())
             .collect::<Vec<_>>();
         assert_eq!(names, ["system.json", "settings.redacted.json"]);
     }
