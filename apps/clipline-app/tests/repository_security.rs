@@ -498,12 +498,24 @@ fn locked_dependencies_avoid_known_vulnerable_releases() {
         ("quinn-proto", "0.11.17", "RUSTSEC-2026-0338..0342"),
         ("zip", "9.0.0", "RUSTSEC-2026-0367..0369"),
     ];
-    fn numeric(version: &str) -> Vec<u64> {
-        version
-            .split(['.', '-', '+'])
-            .map_while(|part| part.parse().ok())
-            .collect()
+    // Semver precedence without the label order: build metadata is ignored and
+    // a prerelease sorts below its release, so `0.23.46-rc.1` stays vulnerable.
+    fn precedence(version: &str) -> (Vec<u64>, bool) {
+        let version = version.split_once('+').map_or(version, |(core, _)| core);
+        let (core, prerelease) = match version.split_once('-') {
+            Some((core, _)) => (core, true),
+            None => (version, false),
+        };
+        let numbers = core
+            .split('.')
+            .map(|part| part.parse().expect("numeric version component"))
+            .collect();
+        (numbers, !prerelease)
     }
+    assert!(precedence("0.23.46-rc.1") < precedence("0.23.46"));
+    assert!(precedence("0.23.46-rc.1") > precedence("0.23.45"));
+    assert!(precedence("0.23.46+build.5") == precedence("0.23.46"));
+    assert!(precedence("0.104.0-alpha.8") > precedence("0.103.16"));
     let lock = fs::read_to_string(workspace_root().join("Cargo.lock")).expect("read Cargo.lock");
     let mut vulnerable = Vec::new();
     for package in lock.split("[[package]]") {
@@ -521,7 +533,7 @@ fn locked_dependencies_avoid_known_vulnerable_releases() {
         if let Some((_, patched, advisory)) =
             PATCHED.iter().find(|(crate_name, ..)| *crate_name == name)
         {
-            if numeric(version) < numeric(patched) {
+            if precedence(version) < precedence(patched) {
                 vulnerable.push(format!("{name} {version} ({advisory}, fixed in {patched})"));
             }
         }
