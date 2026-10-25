@@ -488,34 +488,32 @@ fn dependency_exceptions_and_fixed_runtime_are_owned_and_current() {
 
 #[test]
 fn locked_dependencies_avoid_known_vulnerable_releases() {
-    // First patched release for each RustSec advisory Clipline has cleared.
-    // `.cargo/audit.toml` keeps `ignore = []`, so these stay fixed, not ignored.
+    // The release that fixes every listed advisory for each crate: the highest
+    // `patched` floor among them. `.cargo/audit.toml` keeps `ignore = []`, so
+    // these stay fixed, not ignored.
     const PATCHED: &[(&str, &str, &str)] = &[
         ("rustls", "0.23.46", "RUSTSEC-2026-0346..0349"),
         ("rustls-webpki", "0.103.16", "RUSTSEC-2026-0382"),
         ("webpki-roots", "1.0.10", "RUSTSEC-2026-0381"),
         ("webpki-root-certs", "1.0.10", "RUSTSEC-2026-0383"),
-        ("quinn-proto", "0.11.17", "RUSTSEC-2026-0338..0342"),
+        // 0339, 0341 and 0342 are fixed in 0.11.17; 0338 and 0340 need 0.11.18.
+        ("quinn-proto", "0.11.18", "RUSTSEC-2026-0338..0342"),
         ("zip", "9.0.0", "RUSTSEC-2026-0367..0369"),
     ];
-    // Semver precedence without the label order: build metadata is ignored and
-    // a prerelease sorts below its release, so `0.23.46-rc.1` stays vulnerable.
-    fn precedence(version: &str) -> (Vec<u64>, bool) {
+    // Advisory ranges can leave prerelease gaps (rustls-webpki 0.104.0-alpha.1
+    // through alpha.7 stay vulnerable), so a prerelease of a listed crate is
+    // rejected outright instead of being ranked against the floor.
+    fn release(version: &str) -> Option<Vec<u64>> {
         let version = version.split_once('+').map_or(version, |(core, _)| core);
-        let (core, prerelease) = match version.split_once('-') {
-            Some((core, _)) => (core, true),
-            None => (version, false),
-        };
-        let numbers = core
-            .split('.')
-            .map(|part| part.parse().expect("numeric version component"))
-            .collect();
-        (numbers, !prerelease)
+        (!version.contains('-')).then(|| {
+            version
+                .split('.')
+                .map(|part| part.parse().expect("numeric version component"))
+                .collect()
+        })
     }
-    assert!(precedence("0.23.46-rc.1") < precedence("0.23.46"));
-    assert!(precedence("0.23.46-rc.1") > precedence("0.23.45"));
-    assert!(precedence("0.23.46+build.5") == precedence("0.23.46"));
-    assert!(precedence("0.104.0-alpha.8") > precedence("0.103.16"));
+    assert_eq!(release("0.23.46+build.5"), Some(vec![0, 23, 46]));
+    assert_eq!(release("0.104.0-alpha.8"), None);
     let lock = fs::read_to_string(workspace_root().join("Cargo.lock")).expect("read Cargo.lock");
     let mut vulnerable = Vec::new();
     for package in lock.split("[[package]]") {
@@ -533,7 +531,7 @@ fn locked_dependencies_avoid_known_vulnerable_releases() {
         if let Some((_, patched, advisory)) =
             PATCHED.iter().find(|(crate_name, ..)| *crate_name == name)
         {
-            if precedence(version) < precedence(patched) {
+            if release(version).is_none_or(|version| version < release(patched).unwrap()) {
                 vulnerable.push(format!("{name} {version} ({advisory}, fixed in {patched})"));
             }
         }
