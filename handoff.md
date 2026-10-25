@@ -4,6 +4,22 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-10-25): October RustSec advisories cleared
+
+The advisory database update of 2026-10-24 flagged 15 vulnerabilities in
+`Cargo.lock`. The TLS stack (`rustls` 0.23.46, `rustls-webpki` 0.103.16,
+`webpki-roots` / `webpki-root-certs` 1.0.11) and `quinn-proto` 0.11.19 moved
+with a lockfile update. `zip` 4.6.1 (extraction advisories, fixed only in 9)
+had two users. Clipline's own use moved to `zip` 9. `tauri-plugin-updater` is
+now built without its default `zip` feature: that feature only unpacks
+zip-wrapped updates, and Clipline ships the NSIS setup.exe. The FFmpeg
+installer never called `extract()`. With `zip` 9 it still unpacks the pinned
+BtbN 8.1.2 archive with every allowlisted hash matching.
+
+`repository_security::locked_dependencies_avoid_known_vulnerable_releases`
+lists the first patched release for each cleared advisory, so these can't
+quietly come back. `.cargo/audit.toml` still has `ignore = []`.
+
 ## Checkpoint (2026-10-07): Nightly 1.0.11 published
 
 Published [Nightly 1.0.11](https://github.com/Clipline-CC/clipline/releases/tag/nightly)
