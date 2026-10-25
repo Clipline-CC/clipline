@@ -133,11 +133,18 @@ impl RuntimeState {
                 inner.league_gate = None;
                 inner.league_gate_rx = None;
             }
-            Ok((
-                Some(Self::prepare_service_restart(inner)?),
-                true,
-                event,
-            ))
+            let restart = Self::prepare_service_restart(inner)?;
+            tracing::info!(
+                event = "game_detection_changed",
+                game = inner
+                    .active_game
+                    .as_ref()
+                    .map_or("none", |game| game.identity.id()),
+                recorder_starts = restart.replacement.is_some(),
+                waiting_for_game = restart.waiting_for_game,
+                recording_desired = inner.recording_desired,
+            );
+            Ok((Some(restart), true, event))
         }
     }
 
