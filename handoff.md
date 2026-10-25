@@ -4,6 +4,26 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-10-25): Game exits no longer turn automatic recording off
+
+On 1.0.11 Clipline recorded three League games, then silently skipped the next
+four. A detected game is captured by window handle, so closing the game ends
+the WGC capture and the recorder stops itself. If its `recording: false`
+reached `accept_service_status` before the 500 ms detector tick planned the
+restart, it was treated as a user stop and cleared `recording_desired`; every
+later game was detected but never recorded. A recorder that ends on its own
+while serving a detected game now keeps the intent (a manual session still
+ends), and the detector's next transition decides what runs. With no game
+bound, an ended recorder still stays stopped.
+
+The trayed app used to leave no trace of this. `clipline.jsonl` now records
+`recorder_ended_unrequested`, `recorder_error`, `storage_quota_blocked` and
+`game_detection_changed`.
+
+Sharp edge: `repository_security::dependency_exceptions_and_fixed_runtime_are_owned_and_current`
+fails since 2026-10-18 because the `reqwest` duplicate-major exception expired.
+It is date-driven and needs a policy review, separate from this fix.
+
 ## Checkpoint (2026-10-07): Nightly 1.0.11 published
 
 Published [Nightly 1.0.11](https://github.com/Clipline-CC/clipline/releases/tag/nightly)
