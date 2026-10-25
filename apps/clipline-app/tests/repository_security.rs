@@ -487,6 +487,62 @@ fn dependency_exceptions_and_fixed_runtime_are_owned_and_current() {
 }
 
 #[test]
+fn locked_dependencies_avoid_known_vulnerable_releases() {
+    // The release that fixes every listed advisory for each crate: the highest
+    // `patched` floor among them. `.cargo/audit.toml` keeps `ignore = []`, so
+    // these stay fixed, not ignored.
+    const PATCHED: &[(&str, &str, &str)] = &[
+        ("rustls", "0.23.46", "RUSTSEC-2026-0346..0349"),
+        ("rustls-webpki", "0.103.16", "RUSTSEC-2026-0382"),
+        ("webpki-roots", "1.0.10", "RUSTSEC-2026-0381"),
+        ("webpki-root-certs", "1.0.10", "RUSTSEC-2026-0383"),
+        // 0339, 0341 and 0342 are fixed in 0.11.17; 0338 and 0340 need 0.11.18.
+        ("quinn-proto", "0.11.18", "RUSTSEC-2026-0338..0342"),
+        ("zip", "9.0.0", "RUSTSEC-2026-0367..0369"),
+    ];
+    // Advisory ranges can leave prerelease gaps (rustls-webpki 0.104.0-alpha.1
+    // through alpha.7 stay vulnerable), so a prerelease of a listed crate is
+    // rejected outright instead of being ranked against the floor.
+    fn release(version: &str) -> Option<Vec<u64>> {
+        let version = version.split_once('+').map_or(version, |(core, _)| core);
+        (!version.contains('-')).then(|| {
+            version
+                .split('.')
+                .map(|part| part.parse().expect("numeric version component"))
+                .collect()
+        })
+    }
+    assert_eq!(release("0.23.46+build.5"), Some(vec![0, 23, 46]));
+    assert_eq!(release("0.104.0-alpha.8"), None);
+    let lock = fs::read_to_string(workspace_root().join("Cargo.lock")).expect("read Cargo.lock");
+    let mut vulnerable = Vec::new();
+    for package in lock.split("[[package]]") {
+        let field = |key: &str| {
+            package.lines().find_map(|line| {
+                line.trim()
+                    .strip_prefix(key)?
+                    .strip_prefix(" = \"")?
+                    .strip_suffix('"')
+            })
+        };
+        let (Some(name), Some(version)) = (field("name"), field("version")) else {
+            continue;
+        };
+        if let Some((_, patched, advisory)) =
+            PATCHED.iter().find(|(crate_name, ..)| *crate_name == name)
+        {
+            if release(version).is_none_or(|version| version < release(patched).unwrap()) {
+                vulnerable.push(format!("{name} {version} ({advisory}, fixed in {patched})"));
+            }
+        }
+    }
+    assert!(
+        vulnerable.is_empty(),
+        "Cargo.lock selects releases with known advisories: {vulnerable:?}"
+    );
+}
+
+#[test]
 fn ffmpeg_release_staging_is_pinned_allowlisted_and_attributed() {
     let root = workspace_root();
     let manifest: serde_json::Value = serde_json::from_str(

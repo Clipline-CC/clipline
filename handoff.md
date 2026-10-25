@@ -4,6 +4,24 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-10-25): October RustSec advisories cleared
+
+The advisory database update of 2026-10-24 flagged 15 vulnerabilities in
+`Cargo.lock`. The TLS stack (`rustls` 0.23.46, `rustls-webpki` 0.103.16,
+`webpki-roots` / `webpki-root-certs` 1.0.11) and `quinn-proto` 0.11.19 moved
+with a lockfile update. `zip` 4.6.1 (extraction advisories, fixed only in 9)
+had two users. Clipline's own use moved to `zip` 9. `tauri-plugin-updater` is
+now built without its default `zip` feature: that feature only unpacks
+zip-wrapped updates, and Clipline ships the NSIS setup.exe. The FFmpeg
+installer never called `extract()`. With `zip` 9 it still unpacks the pinned
+BtbN 8.1.2 archive with every allowlisted hash matching.
+
+`repository_security::locked_dependencies_avoid_known_vulnerable_releases`
+holds each crate at the highest patched release across its advisories
+(`quinn-proto` needs 0.11.18 for 0338 and 0340) and rejects prereleases of
+those crates, so these can't quietly come back. `.cargo/audit.toml` still
+has `ignore = []`.
+
 ## Checkpoint (2026-10-25): Game exits no longer turn automatic recording off
 
 On 1.0.11 Clipline recorded three League games, then silently skipped the next
@@ -20,9 +38,8 @@ The trayed app used to leave no trace of this. `clipline.jsonl` now records
 `recorder_ended_unrequested`, `recorder_error`, `storage_quota_blocked` and
 `game_detection_changed`.
 
-Sharp edge: `repository_security::dependency_exceptions_and_fixed_runtime_are_owned_and_current`
-fails since 2026-10-18 because the `reqwest` duplicate-major exception expired.
-It is date-driven and needs a policy review, separate from this fix.
+The `repository_security` dependency-exception check that failed after
+2026-10-18 was fixed by renewing both policy reviews (PR #267).
 
 ## Checkpoint (2026-10-07): Nightly 1.0.11 published
 
