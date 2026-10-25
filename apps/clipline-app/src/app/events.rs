@@ -120,14 +120,29 @@ impl RuntimeState {
 pub(crate) fn pump_events<R: Runtime>(handle: AppHandle<R>, event_rx: Receiver<Event>, generation: u64) {
     std::thread::spawn(move || {
         for event in event_rx {
-            if matches!(&event, Event::StorageQuotaFull { .. }) {
+            if let Event::StorageQuotaFull {
+                total_bytes,
+                quota_bytes,
+                required_bytes,
+            } = &event
+            {
                 if !handle
                     .state::<RuntimeState>()
                     .accept_service_quota(generation, &event)
                 {
                     continue;
                 }
+                // The webview is destroyed while trayed; leave a trail.
+                tracing::warn!(
+                    event = "storage_quota_blocked",
+                    total_bytes,
+                    quota_bytes,
+                    required_bytes,
+                );
             } else {
+                if let Event::Error { message } = &event {
+                    tracing::warn!(event = "recorder_error", message = %message);
+                }
                 handle.state::<RuntimeState>().observe_runtime_event(&event);
             }
             if matches!(&event, Event::MediaRootResolved { .. })

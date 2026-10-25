@@ -96,11 +96,23 @@ impl RuntimeState {
             return false;
         }
         if !recording {
+            // A matching stop is one nobody asked for. A game's recorder ends
+            // when its window closes, often before the detector's next tick;
+            // the detector owns the game lifecycle, so keep the intent armed
+            // for the next match instead of treating the exit as a user stop.
+            let game_bound = inner.active_game.is_some();
             inner.tx = None;
             if inner.quota_blocked.is_none() {
-                inner.recording_desired = false;
                 inner.manual_full_session_desired = false;
+                if !game_bound {
+                    inner.recording_desired = false;
+                }
             }
+            tracing::info!(
+                event = "recorder_ended_unrequested",
+                game_bound,
+                recording_desired_kept = inner.recording_desired,
+            );
             inner.recording_generation = inner.recording_generation.wrapping_add(1);
             inner.last_save_request = None;
         }
@@ -556,7 +568,48 @@ mod tests {
         let inner = state.0.lock().unwrap();
         assert!(inner.tx.is_none());
         assert!(inner.last_save_request.is_none());
+        assert!(
+            !inner.recording_desired,
+            "with no game to bring it back, an ended recorder stays stopped"
+        );
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn game_recorder_ending_before_detection_keeps_the_next_game_recording() {
+        // League closes its window: WGC ends the capture and the recorder
+        // reports its stop before the 500 ms detector tick sees the game go.
+        let league = |hwnd| {
+            crate::app::detected_built_in_game(
+                crate::game_identity::LEAGUE_OF_LEGENDS_ID,
+                "League",
+                hwnd,
+            )
+        };
+        let (tx, _rx) = mpsc::channel();
+        let mut settings = AppSettings::default();
+        settings.games.pause_when_no_game = true;
+        let state = RuntimeState::with_sender(tx, settings, None);
+        let generation = {
+            let mut inner = state.0.lock().unwrap();
+            inner.active_game = Some(league(41));
+            inner.recording_generation
+        };
+
+        assert!(state.accept_service_status(generation, false));
+
+        let mut inner = state.0.lock().unwrap();
+        assert!(inner.tx.is_none());
+        assert!(inner.recording_desired, "a game exit is not a user stop");
+        let (game_gone, _, _) =
+            RuntimeState::plan_detection_transition(&mut inner, None, None).unwrap();
+        assert!(game_gone.unwrap().waiting_for_game);
+        let (next_game, _, _) =
+            RuntimeState::plan_detection_transition(&mut inner, Some(league(42)), None).unwrap();
+        assert!(
+            next_game.unwrap().replacement.is_some(),
+            "the next match must start a recorder"
+        );
     }
 
     #[test]
