@@ -4,6 +4,24 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-10-25): Opus fork moved to shiguredo_opus 2026.4.0
+
+The controlled fork in `third-party/shiguredo_opus` now matches the published
+2026.4.0 crate except `build.rs`. Upstream fixed the Windows `opus.lib` name,
+so that patch is gone. The fork still pins per-target archive hashes and
+retries release downloads. Ubuntu 26.04 x86_64 is pinned too, so the move of
+`ubuntu-latest` to 26.04 won't break the build. Each digest matched both
+GitHub's upload-time asset digest and upstream's `.sha256`; upstream publishes
+no attestations. The library API is unchanged. The build dependencies moved to
+bindgen 0.73 and cc 1.10; bindgen 0.72 remains only through macOS-only
+`coreaudio-sys`. Workspace tests (1,732, device tests included) and
+fresh-cache Clippy passed.
+
+Sharp edge: `a_full_session_resized_during_startup_is_replaced_at_the_new_size`
+has a 20 s start-up deadline. It times out when another recorder is busy on the
+GPU, such as an installed Clipline recording, or right after a full test run.
+Alone it takes about 18 s on `develop` and on this branch.
+
 ## Checkpoint (2026-10-07): Nightly 1.0.11 published
 
 Published [Nightly 1.0.11](https://github.com/Clipline-CC/clipline/releases/tag/nightly)
