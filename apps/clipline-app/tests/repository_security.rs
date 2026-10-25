@@ -354,9 +354,9 @@ fn dependency_exceptions_and_fixed_runtime_are_owned_and_current() {
         .collect();
     assert_eq!(opus_packages.len(), 1, "select one maintained Opus binding");
     assert!(
-        opus_packages[0].contains("version = \"2026.1.0\"")
+        opus_packages[0].contains("version = \"2026.4.0\"")
             && !opus_packages[0].contains("source = "),
-        "use Clipline's reviewed shiguredo_opus 2026.1.0 controlled fork"
+        "use Clipline's reviewed shiguredo_opus 2026.4.0 controlled fork"
     );
 
     let mut reqwest_lines: Vec<_> = lock
@@ -422,13 +422,25 @@ fn dependency_exceptions_and_fixed_runtime_are_owned_and_current() {
         opus_fork["review_by"].as_str().expect("fork review date"),
         "controlled Opus fork",
     );
+    let fork_manifest = fs::read_to_string(root.join("third-party/shiguredo_opus/Cargo.toml"))
+        .expect("read controlled Opus manifest");
+    let fork_version = fork_manifest
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("version = \"")?.strip_suffix('"'))
+        .expect("controlled Opus fork version");
+    assert!(
+        opus_fork["upstream"]
+            .as_str()
+            .is_some_and(|upstream| upstream.ends_with(&format!("/tree/{fork_version}"))),
+        "the Opus fork policy must name the upstream release the fork is based on"
+    );
     let fork_build = fs::read_to_string(root.join("third-party/shiguredo_opus/build.rs"))
         .expect("read controlled Opus build script");
     for contract in [
         "windows_x86_64",
         "ubuntu-22.04_x86_64",
         "ubuntu-24.04_x86_64",
-        "228e55adda46e79b7d5be1950283aa2f79f3de8b19081cb1a6ed74fa71f5f602",
+        "19bac44d8e77d6d6d2930338805c88c0fd9346ff959ee2f9644cb66dcbd0ec72",
         "opus.lib",
         "no reviewed prebuilt Opus hash",
         "--retry-all-errors",
