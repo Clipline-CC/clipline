@@ -16,6 +16,9 @@ Clipline carries three build-script changes:
    release assets sometimes return 503 or an empty reply; clippy then rebuilds
    the crate in a fresh `OUT_DIR` and fails even after tests already succeeded.
 
-Review this fork by 2026-10-18. Remove it when an upstream release provides
+Reviewed 2026-10-25 against upstream 2026.4.0: it fixes change 1, but still
+downloads the digest beside the artifact and does not retry, so the fork stays.
+
+Review this fork by 2027-01-25. Remove it when an upstream release provides
 both fixes, or replace it with a better maintained binding after rerunning all
 Opus capture, decode, mix, remux, MP4, and playback checks.
