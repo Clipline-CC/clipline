@@ -5,8 +5,8 @@
       "package": "reqwest",
       "allowed_versions": ["0.12", "0.13"],
       "owner": "Dain",
-      "rationale": "Clipline and the pinned clipline-cloud-api use reqwest 0.12, while tauri-plugin-updater uses reqwest 0.13. Moving either first-party caller alone would retain both stacks and split Clipline from its cloud API; downgrading the updater would give up current security fixes.",
-      "review_by": "2026-10-18",
+      "rationale": "Clipline and the pinned clipline-cloud-api use reqwest 0.12, while tauri-plugin-updater uses reqwest 0.13. Moving either first-party caller alone would retain both stacks and split Clipline from its cloud API; downgrading the updater would give up current security fixes. Reviewed 2026-10-25: clipline-cloud main still selects 0.12, tauri-plugin-updater 2.14.0 still requires ^0.13, 0.12.28 is the newest 0.12 patch, and RustSec lists no reqwest advisories.",
+      "review_by": "2027-01-25",
       "remove_when": "Align as soon as clipline-cloud-api and tauri-plugin-updater support the same reqwest release line; verify cargo tree contains one reqwest package before removing this exception."
     }
   ],
@@ -15,8 +15,8 @@
       "package": "shiguredo_opus",
       "upstream": "https://github.com/shiguredo/opus-rs/tree/2026.1.0",
       "owner": "Dain",
-      "rationale": "The maintained 2026.1.0 binding replaces unmaintained audiopus_sys. Clipline's fork fixes the upstream Windows prebuilt filename mismatch and pins the reviewed Windows and Ubuntu release hashes locally instead of trusting a checksum downloaded beside the artifact.",
-      "review_by": "2026-10-18",
+      "rationale": "The maintained 2026.1.0 binding replaces unmaintained audiopus_sys. Clipline's fork fixes the upstream Windows prebuilt filename mismatch and pins the reviewed Windows and Ubuntu release hashes locally instead of trusting a checksum downloaded beside the artifact. Reviewed 2026-10-25: upstream 2026.4.0 fixes the Windows library name, but it still trusts a checksum downloaded beside the artifact and has no download retry, and RustSec lists no advisories.",
+      "review_by": "2027-01-25",
       "remove_when": "Return to the crates.io release after upstream supports opus.lib on Windows and embeds immutable per-target artifact hashes, or migrate to a stronger maintained binding with equivalent codec tests."
     }
   ]
