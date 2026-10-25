@@ -15,6 +15,13 @@ Clipline carries two build-script changes:
    release assets sometimes return 503 or an empty reply; clippy then rebuilds
    the crate in a fresh `OUT_DIR` and fails even after tests already succeeded.
 
+Prebuilt archives are only accepted for the pinned targets: Windows x86_64
+and Ubuntu 22.04, 24.04 and 26.04 x86_64. Any other prebuilt target, including
+the iOS, Android, macOS and arm64 archives in the upstream README, fails with
+"no reviewed prebuilt Opus hash". Build those with the `source-build` feature,
+or review and pin their archives first. `README.md` stays identical to
+upstream.
+
 The 2026.1.0 fork also selected `opus.lib` on Windows. Upstream fixed that in
 2026.4.0, so the patch was dropped when the fork moved on 2026-10-25.
 
