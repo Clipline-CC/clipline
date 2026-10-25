@@ -11,16 +11,15 @@
 
 [package]
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.93"
 name = "shiguredo_opus"
-version = "2026.1.0"
-authors = ["Shiguredo Inc."]
+version = "2026.4.0"
 build = "build.rs"
 include = [
-    "/src/**/*",
-    "/build.rs",
-    "/README.md",
     "/LICENSE",
+    "/README.md",
+    "/build.rs",
+    "/src/**/*",
 ]
 autolib = false
 autobins = false
@@ -50,10 +49,13 @@ path = "src/lib.rs"
 [dependencies]
 
 [build-dependencies.bindgen]
-version = "0.72"
+version = "0.73"
+
+[build-dependencies.cc]
+version = "1.4"
 
 [build-dependencies.shiguredo_cmake]
-version = "4.3"
+version = "4.4"
 
 [build-dependencies.shiguredo_toml]
-version = "2026.1"
+version = "2026.2"

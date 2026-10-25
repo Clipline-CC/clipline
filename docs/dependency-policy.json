@@ -13,11 +13,11 @@
   "controlled_forks": [
     {
       "package": "shiguredo_opus",
-      "upstream": "https://github.com/shiguredo/opus-rs/tree/2026.1.0",
+      "upstream": "https://github.com/shiguredo/opus-rs/tree/2026.4.0",
       "owner": "Dain",
-      "rationale": "The maintained 2026.1.0 binding replaces unmaintained audiopus_sys. Clipline's fork fixes the upstream Windows prebuilt filename mismatch and pins the reviewed Windows and Ubuntu release hashes locally instead of trusting a checksum downloaded beside the artifact. Reviewed 2026-10-25: upstream 2026.4.0 fixes the Windows library name, but it still trusts a checksum downloaded beside the artifact and has no download retry, and RustSec lists no advisories.",
+      "rationale": "The maintained shiguredo_opus binding replaces unmaintained audiopus_sys. Clipline's fork of 2026.4.0 pins the reviewed Windows and Ubuntu release hashes locally instead of trusting a checksum downloaded beside the artifact, and retries flaky release downloads. Reviewed 2026-10-25: upstream 2026.4.0 fixed the Windows library name the 2026.1.0 fork patched, each pinned digest matches GitHub's upload-time asset digest and upstream's .sha256, and RustSec lists no advisories.",
       "review_by": "2027-01-25",
-      "remove_when": "Return to the crates.io release after upstream supports opus.lib on Windows and embeds immutable per-target artifact hashes, or migrate to a stronger maintained binding with equivalent codec tests."
+      "remove_when": "Return to the crates.io release after upstream embeds immutable per-target artifact hashes, or migrate to a stronger maintained binding with equivalent codec tests."
     }
   ]
 }

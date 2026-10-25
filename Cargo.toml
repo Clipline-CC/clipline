@@ -17,7 +17,7 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
-shiguredo_opus = { path = "third-party/shiguredo_opus", version = "=2026.1.0", default-features = false }
+shiguredo_opus = { path = "third-party/shiguredo_opus", version = "=2026.4.0", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
