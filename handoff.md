@@ -22,6 +22,43 @@ has a 20 s start-up deadline. It times out when another recorder is busy on the
 GPU, such as an installed Clipline recording, or right after a full test run.
 Alone it takes about 18 s on `develop` and on this branch.
 
+## Checkpoint (2026-10-25): October RustSec advisories cleared
+
+The advisory database update of 2026-10-24 flagged 15 vulnerabilities in
+`Cargo.lock`. The TLS stack (`rustls` 0.23.46, `rustls-webpki` 0.103.16,
+`webpki-roots` / `webpki-root-certs` 1.0.11) and `quinn-proto` 0.11.19 moved
+with a lockfile update. `zip` 4.6.1 (extraction advisories, fixed only in 9)
+had two users. Clipline's own use moved to `zip` 9. `tauri-plugin-updater` is
+now built without its default `zip` feature: that feature only unpacks
+zip-wrapped updates, and Clipline ships the NSIS setup.exe. The FFmpeg
+installer never called `extract()`. With `zip` 9 it still unpacks the pinned
+BtbN 8.1.2 archive with every allowlisted hash matching.
+
+`repository_security::locked_dependencies_avoid_known_vulnerable_releases`
+holds each crate at the highest patched release across its advisories
+(`quinn-proto` needs 0.11.18 for 0338 and 0340) and rejects prereleases of
+those crates, so these can't quietly come back. `.cargo/audit.toml` still
+has `ignore = []`.
+
+## Checkpoint (2026-10-25): Game exits no longer turn automatic recording off
+
+On 1.0.11 Clipline recorded three League games, then silently skipped the next
+four. A detected game is captured by window handle, so closing the game ends
+the WGC capture and the recorder stops itself. If its `recording: false`
+reached `accept_service_status` before the 500 ms detector tick planned the
+restart, it was treated as a user stop and cleared `recording_desired`; every
+later game was detected but never recorded. A recorder that ends on its own
+while serving a detected game now keeps the intent (a manual session still
+ends), and the detector's next transition decides what runs. With no game
+bound, an ended recorder still stays stopped.
+
+The trayed app used to leave no trace of this. `clipline.jsonl` now records
+`recorder_ended_unrequested`, `recorder_error`, `storage_quota_blocked` and
+`game_detection_changed`.
+
+The `repository_security` dependency-exception check that failed after
+2026-10-18 was fixed by renewing both policy reviews (PR #267).
+
 ## Checkpoint (2026-10-07): Nightly 1.0.11 published
 
 Published [Nightly 1.0.11](https://github.com/Clipline-CC/clipline/releases/tag/nightly)
