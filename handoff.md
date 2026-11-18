@@ -38,6 +38,12 @@ machine still plays HEVC. Standalone users therefore can't play HEVC clips in
 the app. No listed Fixed Version has both HEVC and the exploit fix. The harness
 is under ignored `target/wv2-157-smoke/` in the PR #285 worktree.
 
+Sharp edge: CI's `stable` toolchain is now Rust 1.100. Its `needless_bool`
+lint failed Ubuntu Clippy on `clipline-storage`'s reparse-point check, which
+became an `if`/`false` pair once the `#[cfg(windows)]` block compiled out. The
+check is now split into cfg-gated helpers. A local `stable` older than CI won't
+catch new lints, so run `cargo +<CI version> clippy` before trusting a local pass.
+
 ## Checkpoint (2026-10-25): Opus fork moved to shiguredo_opus 2026.4.0
 
 The controlled fork in `third-party/shiguredo_opus` now matches the published
