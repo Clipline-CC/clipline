@@ -49,15 +49,14 @@ pub fn ensure_poster(clip: &Path, seek_s: f64) -> Result<PathBuf, String> {
         return Ok(poster);
     }
     let poster = poster_path(clip);
-    let ffmpeg = cached_successful_path(&POSTER_FFMPEG, || {
-        discover_unless_recently_blocked(
-            &POSTER_FFMPEG_BLOCKED,
-            Instant::now(),
-            clipline_capture::ffmpeg::discover,
-        )
-    })
-    .map_err(|error| error.to_string())?;
-    generate_poster(&ffmpeg, clip, &poster, seek_s)?;
+    extract_unless_recently_blocked(
+        &POSTER_FFMPEG_BLOCKED,
+        Instant::now(),
+        &POSTER_FFMPEG,
+        clipline_capture::ffmpeg::discover,
+        |ffmpeg| generate_poster(ffmpeg, clip, &poster, seek_s),
+    )
+    .map_err(|failure| failure.to_string())?;
     Ok(poster)
 }
 
@@ -67,20 +66,66 @@ pub fn ensure_poster(clip: &Path, seek_s: f64) -> Result<PathBuf, String> {
 const BLOCKED_RECHECK_INTERVAL: Duration = Duration::from_secs(60);
 static POSTER_FFMPEG_BLOCKED: Mutex<Option<(Instant, AppControlBlock)>> = Mutex::new(None);
 
-fn discover_unless_recently_blocked(
-    latch: &Mutex<Option<(Instant, AppControlBlock)>>,
-    now: Instant,
-    discover: impl FnOnce() -> Discovery,
-) -> Result<PathBuf, FfmpegUnavailable> {
-    let mut latch = latch.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some((seen, block)) = *latch {
-        if now.saturating_duration_since(seen) < BLOCKED_RECHECK_INTERVAL {
-            return Err(FfmpegUnavailable::Blocked(block));
+/// Why one poster extraction failed. A refusal by Windows Application Control
+/// stays typed so it can pause later spawns.
+#[derive(Debug, PartialEq, Eq)]
+enum PosterFailure {
+    Blocked(AppControlBlock),
+    Failed(String),
+}
+
+impl From<String> for PosterFailure {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
+
+impl From<FfmpegUnavailable> for PosterFailure {
+    fn from(unavailable: FfmpegUnavailable) -> Self {
+        match unavailable {
+            FfmpegUnavailable::Blocked(block) => Self::Blocked(block),
+            FfmpegUnavailable::Missing(message) => Self::Failed(message),
         }
     }
-    let discovery = discover();
-    *latch = discovery.blocked().map(|block| (now, block));
-    discovery.require("ffmpeg is not available for poster extraction")
+}
+
+impl std::fmt::Display for PosterFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Blocked(block) => block.fmt(f),
+            Self::Failed(message) => f.write_str(message),
+        }
+    }
+}
+
+/// Locate FFmpeg and run one poster extraction, unless Windows refused FFmpeg
+/// within the last recheck interval. The pause covers the cached path too, and
+/// a refusal from discovery or from the poster child itself starts it. The
+/// latch is not held while the child runs, so extractions stay concurrent.
+fn extract_unless_recently_blocked(
+    latch: &Mutex<Option<(Instant, AppControlBlock)>>,
+    now: Instant,
+    cache: &OnceLock<PathBuf>,
+    discover: impl FnOnce() -> Discovery,
+    generate: impl FnOnce(&Path) -> Result<(), PosterFailure>,
+) -> Result<(), PosterFailure> {
+    let lock = || latch.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some((seen, block)) = *lock() {
+        if now.saturating_duration_since(seen) < BLOCKED_RECHECK_INTERVAL {
+            return Err(PosterFailure::Blocked(block));
+        }
+    }
+    let result = cached_successful_path(cache, || {
+        discover().require("ffmpeg is not available for poster extraction")
+    })
+    .map_err(PosterFailure::from)
+    .and_then(|ffmpeg| generate(&ffmpeg));
+    match &result {
+        Err(PosterFailure::Blocked(block)) => *lock() = Some((now, *block)),
+        Ok(()) => *lock() = None,
+        Err(PosterFailure::Failed(_)) => {}
+    }
+    result
 }
 
 /// Cache only a successful lookup. A missing executable may be installed or
@@ -111,19 +156,24 @@ fn poster_is_fresh(clip: &Path, poster: &Path) -> bool {
     }
 }
 
-fn generate_poster(ffmpeg: &Path, clip: &Path, poster: &Path, seek_s: f64) -> Result<(), String> {
+fn generate_poster(
+    ffmpeg: &Path,
+    clip: &Path,
+    poster: &Path,
+    seek_s: f64,
+) -> Result<(), PosterFailure> {
     let mut cmd = poster_command(ffmpeg, clip, seek_s);
     let output = run_poster_child(&mut cmd, POSTER_EXTRACTION_TIMEOUT)?;
-    publish_poster_output(poster, poster_stdout(output)?)
+    publish_poster_output(poster, poster_stdout(output)?).map_err(PosterFailure::from)
 }
 
-fn poster_stdout(output: PosterChildOutput) -> Result<BoundedPipeOutput, String> {
+fn poster_stdout(output: PosterChildOutput) -> Result<BoundedPipeOutput, PosterFailure> {
     if let Some(block) = clipline_capture::app_control::block_from_exit_status(&output.status) {
-        return Err(block.to_string());
+        return Err(PosterFailure::Blocked(block));
     }
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr.bytes);
-        return Err(format!("ffmpeg poster failed: {stderr}"));
+        return Err(format!("ffmpeg poster failed: {stderr}").into());
     }
     Ok(output.stdout)
 }
@@ -216,7 +266,10 @@ fn wait_for_poster_child(child: &mut Child, timeout: Duration) -> io::Result<Pos
     }
 }
 
-fn run_poster_child(command: &mut Command, timeout: Duration) -> Result<PosterChildOutput, String> {
+fn run_poster_child(
+    command: &mut Command,
+    timeout: Duration,
+) -> Result<PosterChildOutput, PosterFailure> {
     run_poster_child_with_limits(
         command,
         timeout,
@@ -230,17 +283,19 @@ fn run_poster_child_with_limits(
     timeout: Duration,
     max_stdout_bytes: usize,
     max_stderr_bytes: usize,
-) -> Result<PosterChildOutput, String> {
+) -> Result<PosterChildOutput, PosterFailure> {
     let mut child = clipline_capture::ffmpeg::spawn_verified(command).map_err(|error| {
         match clipline_capture::app_control::block_from_io_error(&error) {
-            Some(block) => block.to_string(),
-            None => format!("spawn ffmpeg poster: {error}"),
+            Some(block) => PosterFailure::Blocked(block),
+            None => format!("spawn ffmpeg poster: {error}").into(),
         }
     })?;
     let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
         let _ = child.kill();
         let _ = child.wait();
-        return Err("spawn ffmpeg poster: stdout or stderr pipe unavailable".to_string());
+        return Err("spawn ffmpeg poster: stdout or stderr pipe unavailable"
+            .to_string()
+            .into());
     };
     let stdout_reader =
         match spawn_bounded_reader("clipline-poster-stdout", stdout, max_stdout_bytes) {
@@ -248,7 +303,7 @@ fn run_poster_child_with_limits(
             Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!("spawn ffmpeg poster stdout reader: {error}"));
+                return Err(format!("spawn ffmpeg poster stdout reader: {error}").into());
             }
         };
     let stderr_reader =
@@ -258,7 +313,7 @@ fn run_poster_child_with_limits(
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = stdout_reader.join();
-                return Err(format!("spawn ffmpeg poster stderr reader: {error}"));
+                return Err(format!("spawn ffmpeg poster stderr reader: {error}").into());
             }
         };
 
@@ -279,7 +334,8 @@ fn run_poster_child_with_limits(
         PosterChildWait::TimedOut => Err(format!(
             "ffmpeg poster timed out after {} seconds",
             timeout.as_secs()
-        )),
+        )
+        .into()),
     }
 }
 
@@ -457,43 +513,124 @@ mod tests {
         assert_eq!(attempts.get(), 2, "a success must remain cached");
     }
 
+    fn smart_app_control_block() -> AppControlBlock {
+        clipline_capture::app_control::block_from_exit_code(Some(0xC0E9_0002_u32 as i32)).unwrap()
+    }
+
     #[test]
-    fn blocked_runtime_is_rechecked_at_most_once_per_window() {
-        let block =
-            clipline_capture::app_control::block_from_exit_code(Some(0xC0E9_0002_u32 as i32))
-                .unwrap();
+    fn a_runtime_blocked_at_discovery_is_rechecked_at_most_once_per_window() {
+        let block = smart_app_control_block();
+        let ffmpeg = PathBuf::from(r"C:\ffmpeg\ffmpeg.exe");
         let latch = Mutex::new(None);
+        let cache = OnceLock::new();
         let discoveries = Cell::new(0);
+        let spawns = Cell::new(0);
         let blocked = || {
             discoveries.set(discoveries.get() + 1);
             Discovery::Blocked {
-                path: PathBuf::from(r"C:\ffmpeg\ffmpeg.exe"),
+                path: ffmpeg.clone(),
                 block,
             }
         };
+        let spawn = |_: &Path| {
+            spawns.set(spawns.get() + 1);
+            Ok(())
+        };
         let start = Instant::now();
 
-        let first = discover_unless_recently_blocked(&latch, start, blocked);
-        let soon = discover_unless_recently_blocked(
+        let first = extract_unless_recently_blocked(&latch, start, &cache, blocked, spawn);
+        let soon = extract_unless_recently_blocked(
             &latch,
             start + BLOCKED_RECHECK_INTERVAL / 2,
+            &cache,
             blocked,
+            spawn,
         );
-        assert_eq!(first, Err(FfmpegUnavailable::Blocked(block)));
-        assert_eq!(soon, Err(FfmpegUnavailable::Blocked(block)));
+        assert_eq!(first, Err(PosterFailure::Blocked(block)));
+        assert_eq!(soon, Err(PosterFailure::Blocked(block)));
         assert_eq!(discoveries.get(), 1, "no re-spawn inside the window");
+        assert_eq!(spawns.get(), 0);
 
-        let later = discover_unless_recently_blocked(
+        let later = extract_unless_recently_blocked(
             &latch,
             start + BLOCKED_RECHECK_INTERVAL,
+            &cache,
             || {
                 discoveries.set(discoveries.get() + 1);
-                Discovery::Found(PathBuf::from(r"C:\ffmpeg\ffmpeg.exe"))
+                Discovery::Found(ffmpeg.clone())
             },
+            spawn,
         );
-        assert_eq!(later, Ok(PathBuf::from(r"C:\ffmpeg\ffmpeg.exe")));
+        assert_eq!(later, Ok(()));
         assert_eq!(discoveries.get(), 2, "the block is rechecked after the window");
+        assert_eq!(spawns.get(), 1);
         assert!(latch.lock().unwrap().is_none(), "an allowed runtime clears the latch");
+    }
+
+    #[test]
+    fn a_blocked_poster_child_pauses_later_spawns_even_with_a_cached_path() {
+        let block = smart_app_control_block();
+        let latch = Mutex::new(None);
+        let cache = OnceLock::from(PathBuf::from(r"C:\ffmpeg\ffmpeg.exe"));
+        let spawns = Cell::new(0);
+        let refused = |_: &Path| {
+            spawns.set(spawns.get() + 1);
+            Err(PosterFailure::Blocked(block))
+        };
+        let no_discovery = || -> Discovery { panic!("a cached path needs no discovery") };
+        let start = Instant::now();
+
+        let first = extract_unless_recently_blocked(&latch, start, &cache, no_discovery, refused);
+        let soon = extract_unless_recently_blocked(
+            &latch,
+            start + BLOCKED_RECHECK_INTERVAL / 2,
+            &cache,
+            no_discovery,
+            refused,
+        );
+        assert_eq!(first, Err(PosterFailure::Blocked(block)));
+        assert_eq!(soon, Err(PosterFailure::Blocked(block)));
+        assert_eq!(spawns.get(), 1, "a refused child must pause the next thumbnails");
+
+        let later = extract_unless_recently_blocked(
+            &latch,
+            start + BLOCKED_RECHECK_INTERVAL,
+            &cache,
+            no_discovery,
+            refused,
+        );
+        assert_eq!(later, Err(PosterFailure::Blocked(block)));
+        assert_eq!(spawns.get(), 2, "the block is rechecked once the window passes");
+    }
+
+    #[test]
+    fn a_recent_block_stops_a_cached_path_from_spawning() {
+        let block = smart_app_control_block();
+        let start = Instant::now();
+        let latch = Mutex::new(Some((start, block)));
+        let cache = OnceLock::from(PathBuf::from(r"C:\ffmpeg\ffmpeg.exe"));
+
+        let result = extract_unless_recently_blocked(
+            &latch,
+            start + Duration::from_secs(1),
+            &cache,
+            || -> Discovery { panic!("a recent block skips discovery") },
+            |_: &Path| -> Result<(), PosterFailure> { panic!("a recent block skips the spawn") },
+        );
+
+        assert_eq!(result, Err(PosterFailure::Blocked(block)));
+    }
+
+    #[test]
+    fn ordinary_poster_failures_do_not_pause_spawns() {
+        let latch = Mutex::new(None);
+        let cache = OnceLock::from(PathBuf::from(r"C:\ffmpeg\ffmpeg.exe"));
+        let failed = |_: &Path| Err(PosterFailure::Failed("ffmpeg poster failed: bad clip".into()));
+        let start = Instant::now();
+
+        let _ = extract_unless_recently_blocked(&latch, start, &cache, || Discovery::Missing, failed);
+
+        assert!(latch.lock().unwrap().is_none(), "only an App Control refusal pauses spawns");
     }
 
     #[test]
@@ -680,9 +817,14 @@ mod tests {
         let output = run_poster_child_with_limits(&mut command, Duration::from_secs(10), 1024, 512)
             .expect("run blocked fixture");
 
-        let Err(error) = poster_stdout(output) else {
+        let Err(failure) = poster_stdout(output) else {
             panic!("a blocked child produces no poster");
         };
+        assert!(
+            matches!(failure, PosterFailure::Blocked(_)),
+            "the refusal must stay typed so it can pause later spawns: {failure:?}"
+        );
+        let error = failure.to_string();
 
         assert!(
             clipline_capture::app_control::is_blocked_message(&error),
