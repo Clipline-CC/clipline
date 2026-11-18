@@ -14,9 +14,9 @@ pub use empty_sessions::{
 };
 pub use files::{
     CLIP_OWNERSHIP_MARKER_SUFFIX, CLIP_SIDECAR_SUFFIXES, FAVORITE_MARKER_SUFFIX, MARKERS_SUFFIX,
-    OSU_ENRICHMENT_SUFFIX, POSTER_SUFFIX, clip_sidecar_path,
+    OSU_ENRICHMENT_SUFFIX, POSTER_SUFFIX, clip_sidecar_path, is_link_or_reparse_point,
 };
-pub(crate) use files::{is_link_or_reparse_point, remove_file_if_exists};
+pub(crate) use files::remove_file_if_exists;
 pub use inventory::{StorageStatus, storage_status};
 pub use ownership::{
     clip_ownership_marker_path, ensure_clip_owned, ensure_session_clip_owned, is_clip_owned,

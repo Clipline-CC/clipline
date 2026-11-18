@@ -1,5 +1,6 @@
 //! On-disk cloud clip cache: layout, markers, leases, and eviction.
 use super::*;
+use clipline_storage::is_link_or_reparse_point;
 
 pub(crate) fn cloud_clip_cache_path(
     cloud: &CloudSettings,
@@ -244,12 +245,12 @@ pub(crate) fn collect_cloud_cache_entries(
             continue;
         };
         if metadata.is_dir() {
-            if !metadata_is_link(&metadata) {
+            if !is_link_or_reparse_point(&metadata) {
                 collect_cloud_cache_entries(&path, now, entries)?;
             }
             continue;
         }
-        if !metadata.is_file() || metadata_is_link(&metadata) {
+        if !metadata.is_file() || is_link_or_reparse_point(&metadata) {
             continue;
         }
         let modified = metadata.modified().unwrap_or(std::time::UNIX_EPOCH);
@@ -306,13 +307,6 @@ pub(crate) fn is_owned_cloud_cache_temp(path: &Path) -> bool {
             .next()
             .is_some_and(|part| part.bytes().all(|byte| byte.is_ascii_digit()))
         && parts.next().is_some()
-}
-
-pub(crate) fn metadata_is_link(metadata: &std::fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-    metadata.file_type().is_symlink()
-        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
 
 pub(crate) fn touch_cloud_cache_entry(path: &Path) -> Result<(), String> {

@@ -1,5 +1,6 @@
 //! Legacy cloud-cache layout migration (config_base to local_cache_base).
 use super::*;
+use clipline_storage::is_link_or_reparse_point;
 
 pub(crate) fn legacy_cloud_clip_cache_root_dir() -> PathBuf {
     crate::settings::persistence::config_base().join("cloud-cache")
@@ -11,7 +12,7 @@ pub(crate) fn migrate_legacy_cloud_cache(legacy: &Path, local: &Path) -> Result<
     }
     let metadata = std::fs::symlink_metadata(legacy)
         .map_err(|error| format!("inspect legacy cloud cache: {error}"))?;
-    if !metadata.is_dir() || metadata_is_link(&metadata) {
+    if !metadata.is_dir() || is_link_or_reparse_point(&metadata) {
         return Ok(());
     }
     std::fs::create_dir_all(local).map_err(|error| format!("create local cloud cache: {error}"))?;
@@ -25,7 +26,7 @@ pub(crate) fn migrate_legacy_cloud_cache(legacy: &Path, local: &Path) -> Result<
             continue;
         };
         if !metadata.is_dir()
-            || metadata_is_link(&metadata)
+            || is_link_or_reparse_point(&metadata)
             || namespace.len() != 16
             || !namespace.bytes().all(|byte| byte.is_ascii_hexdigit())
         {
