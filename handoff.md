@@ -4,6 +4,40 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-11-18): WebView2 157 review and quinn-udp advisory
+
+Both checks were failing on `develop` too, and they blocked PR #285. The
+Fixed Version review expired on 2026-11-06, which broke
+`repository_security` on every branch. The Dependency security workflow had
+been failing on `main` since its 2026-11-17 scheduled run.
+
+RUSTSEC-2026-0538: `quinn-udp` 0.5.14 can spin its receive loop after a
+truncated datagram. It is in `Cargo.lock` only through reqwest's optional
+QUIC path and is not compiled, but cargo-audit scans the lockfile. It moved to
+0.5.16, and only that entry changed. A plain `cargo update -p quinn-udp`
+re-resolves the crate's wide `windows-sys`/`socket2` ranges and downgrades
+unrelated crates to `windows-sys` 0.52. Don't accept that diff.
+`.cargo/audit.toml` still has `ignore = []`.
+
+Standalone WebView2 moved from Fixed Version 154.0.4258.62 to 157.0.4341.60
+(Edge Stable Update 3, November 13). 154 was six Stable security releases
+behind, including the fix for in-the-wild CVE-2026-125350 (157.0.4341.46+).
+The x64 CAB is 310,954,844 bytes with SHA-256
+`1bad3df802a4c21f6b271cf3cd640912056291e3915b86fa7577a18899f761b9`. The CAB
+and every staged `.exe`/`.dll` carry valid Microsoft signatures, and both
+runtime preflights passed. Review window: 2026-11-18 to 2026-12-18. Microsoft's
+security notes said on 2026-11-17 that another Chromium security fix is in
+progress. Re-review when that Fixed Version appears.
+
+Sharp edge: the Fixed Version 157 x64 runtime has no HEVC decode. In the
+standalone-config smoke, H.264/Opus and AV1 played through `ended` with 60
+frames. HEVC `canPlayType` returned `""` (154 returned `probably`), so the
+product probe correctly gates it off. Forcing playback anyway failed with
+`DEMUXER_ERROR_NO_SUPPORTED_STREAMS`. Evergreen 157.0.4341.60 on the same
+machine still plays HEVC. Standalone users therefore can't play HEVC clips in
+the app. No listed Fixed Version has both HEVC and the exploit fix. The harness
+is under ignored `target/wv2-157-smoke/` in the PR #285 worktree.
+
 ## Checkpoint (2026-10-25): Opus fork moved to shiguredo_opus 2026.4.0
 
 The controlled fork in `third-party/shiguredo_opus` now matches the published
