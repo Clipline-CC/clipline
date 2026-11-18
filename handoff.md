@@ -29,14 +29,24 @@ runtime preflights passed. Review window: 2026-11-18 to 2026-12-18. Microsoft's
 security notes said on 2026-11-17 that another Chromium security fix is in
 progress. Re-review when that Fixed Version appears.
 
-Sharp edge: the Fixed Version 157 x64 runtime has no HEVC decode. In the
-standalone-config smoke, H.264/Opus and AV1 played through `ended` with 60
-frames. HEVC `canPlayType` returned `""` (154 returned `probably`), so the
-product probe correctly gates it off. Forcing playback anyway failed with
-`DEMUXER_ERROR_NO_SUPPORTED_STREAMS`. Evergreen 157.0.4341.60 on the same
-machine still plays HEVC. Standalone users therefore can't play HEVC clips in
-the app. No listed Fixed Version has both HEVC and the exploit fix. The harness
-is under ignored `target/wv2-157-smoke/` in the PR #285 worktree.
+Sharp edge: the length of the Fixed Version runtime path decides whether the
+GPU works. Fixed 157 decodes HEVC, and so does 154. On the dev machine (AMD RX
+6700 XT, driver 32.0.21045.16010), the sandboxed GPU process crashes at startup
+with `0xC0000409` once the path to `msedgewebview2.exe` reaches 187 characters,
+which is a runtime folder of 168 or more. Chromium then falls back to
+`--use-gl=disabled`. H.264 and AV1 still decode in software, but Chromium has no
+software HEVC decoder. HEVC therefore reports `""` and fails with
+`DEMUXER_ERROR_NO_SUPPORTED_STREAMS`, and every GPU feature reads
+`disabled_software`. The same files work at a folder length of 167 and fail at
+168, for both 154 and 157. The crash needs the long path, the GPU sandbox and the
+AMD hardware driver together (`--disable-gpu-sandbox` or WARP avoids it). The
+default standalone install at `%LOCALAPPDATA%\Clipline\webview2-fixed\…` is far
+below the limit, and HEVC, 1080p60 HEVC+Opus, H.264/Opus and AV1 all play there.
+A deep custom install directory (about 95+ characters) loses HEVC and all GPU
+acceleration. Run standalone smokes from a short path such as
+`%LOCALAPPDATA%\<name>`. A first 157 smoke ran from a 178-character worktree
+path and wrongly concluded that 157 had dropped HEVC. Diagnostic harness and
+logs: ignored `target/wv2-hevc-diag/` in the PR #285 worktree.
 
 Sharp edge: CI's `stable` toolchain is now Rust 1.100. Its `needless_bool`
 lint failed Ubuntu Clippy on `clipline-storage`'s reparse-point check, which
