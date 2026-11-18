@@ -8,9 +8,12 @@ use super::{
     FFMPEG_RUNTIME_MANIFEST_JSON, FfmpegInstallSnapshot, FfmpegInstallState, ManagedRuntimeInfoDto,
     local_app_data_dir,
 };
+use clipline_capture::ffmpeg::Discovery;
+
 use crate::ffmpeg_runtime::{
     parse_ffmpeg_runtime_manifest, verify_managed_ffmpeg_runtime, FfmpegBlockedDto,
-    FfmpegDiscoveryKind, FfmpegRuntimeManifest, FfmpegRuntimeStatus, ManagedRuntimeVerifyError,
+    FfmpegDiscoveryKind, FfmpegRuntimeManifest, FfmpegRuntimeStatus, ManagedRuntimeInfo,
+    ManagedRuntimeVerifyError,
 };
 
 pub fn committed_manifest() -> Result<(FfmpegRuntimeManifest, String), ManagedRuntimeVerifyError> {
@@ -50,6 +53,23 @@ pub fn build_install_snapshot(
             .map(|path| path.display().to_string()),
         blocked,
     }
+}
+
+/// The snapshot reported once an install publishes. Verified bytes are not
+/// enough: Windows Application Control can refuse the new files as well, so
+/// the block comes from a fresh `discovery`, as in the status command. The
+/// job still ends `Ready`; the UI shows `blocked` and offers no reinstall.
+pub(super) fn installed_snapshot(
+    info: ManagedRuntimeInfo,
+    discovery: &Discovery,
+) -> FfmpegInstallSnapshot {
+    let status = FfmpegRuntimeStatus {
+        kind: FfmpegDiscoveryKind::ManagedVerified,
+        locate_path: Some(info.ffmpeg_exe.clone()),
+        managed: Some(info),
+    };
+    let blocked = discovery.blocked().as_ref().map(FfmpegBlockedDto::from);
+    build_install_snapshot(FfmpegInstallState::Ready, &status, blocked)
 }
 
 pub(super) fn status_snapshot_for_state(state: FfmpegInstallState) -> Result<FfmpegInstallSnapshot, String> {
