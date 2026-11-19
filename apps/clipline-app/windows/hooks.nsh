@@ -1,7 +1,67 @@
+!include LogicLib.nsh
+!include WinVer.nsh
+
+; The standalone installer deploys its Fixed Version WebView2 runtime here
+; (`webviewInstallMode.path` in tauri.standalone.conf.json). Keep it short: a
+; long runtime path crashes the sandboxed GPU process on some drivers.
+!define CLIPLINE_WEBVIEW2_DIR "$INSTDIR\wv2"
+
+; From Fixed Version 120, Windows 10 runs the WebView2 renderer in an
+; AppContainer, and Microsoft requires unpackaged apps to grant ALL
+; APPLICATION PACKAGES (S-1-15-2-1) and ALL RESTRICTED APPLICATION PACKAGES
+; (S-1-15-2-2) inherited read/execute on the deployed runtime folder:
+; https://learn.microsoft.com/microsoft-edge/webview2/concepts/distribution
+; Windows 11 is unaffected, so the grant runs everywhere but only a Windows 10
+; failure stops the install. A volume without ACLs (FAT32, exFAT) has nothing
+; to grant.
+!macro CLIPLINE_GRANT_WEBVIEW2_APPCONTAINER_ACCESS dir
+  ${If} ${FileExists} "${dir}\msedgewebview2.exe"
+    Push $0
+    Push $1
+    Push $2
+    StrCpy $2 1
+    System::Call 'kernel32::GetVolumePathNameW(w "${dir}", w .r1, i ${NSIS_MAX_STRLEN}) i .r0'
+    ${If} $0 <> 0
+      System::Call 'kernel32::GetVolumeInformationW(w r1, p 0, i 0, p 0, p 0, *i .r2, p 0, i 0) i .r0'
+      ${If} $0 = 0
+        StrCpy $2 1 ; Unknown: grant anyway.
+      ${Else}
+        IntOp $2 $2 & 0x8 ; FILE_PERSISTENT_ACLS
+      ${EndIf}
+    ${EndIf}
+    ${If} $2 = 0
+      DetailPrint "Clipline: ${dir} is on a volume without permissions; no WebView2 grant needed."
+    ${Else}
+      ${Do}
+        nsExec::ExecToLog '"$SYSDIR\icacls.exe" "${dir}" /grant *S-1-15-2-2:(OI)(CI)(RX) *S-1-15-2-1:(OI)(CI)(RX)'
+        Pop $0
+        ${If} $0 == "0"
+          DetailPrint "Clipline: granted app-sandbox read access to the WebView2 runtime."
+          ${ExitDo}
+        ${EndIf}
+        ${If} ${AtLeastWin11}
+          DetailPrint "Clipline: WebView2 runtime grant failed ($0); not required on Windows 11."
+          ${ExitDo}
+        ${EndIf}
+        DetailPrint "Clipline: WebView2 runtime grant failed ($0)."
+        ${IfNot} ${Cmd} `MessageBox MB_RETRYCANCEL|MB_ICONSTOP "Clipline could not give Windows' app sandbox read access to its bundled WebView2 runtime (icacls result: $0).$\r$\n$\r$\n${dir}$\r$\n$\r$\nOn Windows 10, Clipline's window cannot open without it. Install into a folder on a local NTFS drive that you own, or use the regular Clipline installer." /SD IDCANCEL IDRETRY`
+          Abort "Clipline could not set the WebView2 runtime permissions Windows 10 requires."
+        ${EndIf}
+      ${Loop}
+    ${EndIf}
+    Pop $2
+    Pop $1
+    Pop $0
+  ${EndIf}
+!macroend
+
 !macro NSIS_HOOK_PREINSTALL
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL
+  !ifdef CLIPLINE_STANDALONE_WEBVIEW2
+    !insertmacro CLIPLINE_GRANT_WEBVIEW2_APPCONTAINER_ACCESS "${CLIPLINE_WEBVIEW2_DIR}"
+  !endif
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL

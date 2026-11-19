@@ -43,6 +43,16 @@ directories up to 163 characters keep the GPU; the old
 `webview2-fixed\Microsoft.WebView2.FixedVersionRuntime.<ver>.x64` layout broke
 at 96.
 
+The standalone installer compiles `windows/hooks-standalone.nsh`, which
+enables the Fixed Version parts of the shared `windows/hooks.nsh`. On every
+install, update and reinstall, its postinstall hook runs
+`$SYSDIR\icacls.exe <install dir>\wv2 /grant *S-1-15-2-2:(OI)(CI)(RX) *S-1-15-2-1:(OI)(CI)(RX)`.
+Microsoft requires this on Windows 10 for Fixed Version 120+, whose renderer
+runs in an AppContainer. A failed grant on Windows 10 offers Retry/Cancel and
+then aborts the install (silent installs abort with exit code 2), because the
+app's window cannot open without it. Windows 11 is unaffected, so a failure
+there only logs a warning. Volumes without ACLs (FAT32, exFAT) are skipped.
+
 ### Agent runbook: “make a new Nightly release”
 
 When the user asks for a new Nightly, carry out this entire sequence:

@@ -16,6 +16,9 @@
         "type": "fixedRuntime",
         "path": "wv2",
         "silent": null
+      },
+      "nsis": {
+        "installerHooks": "windows/hooks-standalone.nsh"
       }
     }
   }

@@ -653,6 +653,71 @@ fn windows_uninstaller_runs_cleanup_helper_only_for_interactive_removal() {
     );
 }
 
+fn nsis_macro_body<'a>(hooks: &'a str, name: &str) -> &'a str {
+    let start = hooks
+        .find(&format!("!macro {name}\n"))
+        .unwrap_or_else(|| panic!("hooks define {name}"));
+    let body = &hooks[start..];
+    &body[..body.find("!macroend").expect("macro ends")]
+}
+
+#[test]
+fn standalone_installer_grants_appcontainer_access_to_its_webview2_runtime() {
+    let standalone: serde_json::Value = serde_json::from_str(&tauri_standalone_config())
+        .expect("tauri.standalone.conf.json should parse");
+    assert_eq!(
+        standalone
+            .pointer("/bundle/windows/nsis/installerHooks")
+            .and_then(serde_json::Value::as_str),
+        Some("windows/hooks-standalone.nsh"),
+        "only the standalone installer may compile the Fixed Version runtime hooks"
+    );
+    let standalone_hooks = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("windows/hooks-standalone.nsh"),
+    )
+    .expect("read windows/hooks-standalone.nsh");
+    assert!(standalone_hooks.contains("!define CLIPLINE_STANDALONE_WEBVIEW2\n"));
+    assert!(standalone_hooks.contains("!include \"${__FILEDIR__}\\hooks.nsh\""));
+
+    let hooks = nsis_hooks();
+    assert!(hooks.contains("!define CLIPLINE_WEBVIEW2_DIR \"$INSTDIR\\wv2\""));
+
+    let grant = nsis_macro_body(&hooks, "CLIPLINE_GRANT_WEBVIEW2_APPCONTAINER_ACCESS dir");
+    for required in [
+        // Only a deployed Fixed Version runtime is touched.
+        "${If} ${FileExists} \"${dir}\\msedgewebview2.exe\"",
+        // Absolute tool path and locale-independent SIDs, exactly as documented.
+        "nsExec::ExecToLog '\"$SYSDIR\\icacls.exe\" \"${dir}\" /grant *S-1-15-2-2:(OI)(CI)(RX) *S-1-15-2-1:(OI)(CI)(RX)'",
+        "Pop $0",
+        "${If} $0 == \"0\"",
+        // Volumes without ACLs have nothing to grant.
+        "FILE_PERSISTENT_ACLS",
+        // Windows 11 is unaffected; a Windows 10 failure must not pass silently.
+        "${If} ${AtLeastWin11}",
+        "MB_RETRYCANCEL",
+        "/SD IDCANCEL IDRETRY",
+        "Abort \"",
+    ] {
+        assert!(
+            grant.contains(required),
+            "missing WebView2 grant contract: {required}"
+        );
+    }
+    let icacls_lines: Vec<_> = hooks.lines().filter(|line| line.contains("icacls.exe")).collect();
+    assert_eq!(icacls_lines.len(), 1, "one grant, on the runtime folder only");
+    assert!(!icacls_lines[0].contains("/T") && !icacls_lines[0].contains("/reset"));
+
+    let postinstall = nsis_macro_body(&hooks, "NSIS_HOOK_POSTINSTALL");
+    let standalone_only = postinstall
+        .find("!ifdef CLIPLINE_STANDALONE_WEBVIEW2")
+        .expect("grant is compiled into the standalone installer only");
+    let insert = postinstall
+        .find("!insertmacro CLIPLINE_GRANT_WEBVIEW2_APPCONTAINER_ACCESS \"${CLIPLINE_WEBVIEW2_DIR}\"")
+        .expect("postinstall grants the deployed runtime folder");
+    let end = postinstall.find("!endif").expect("standalone-only block ends");
+    assert!(standalone_only < insert && insert < end);
+}
+
 #[test]
 fn configured_main_window_is_not_created_at_startup() {
     let config: serde_json::Value =
