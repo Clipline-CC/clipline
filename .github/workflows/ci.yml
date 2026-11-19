@@ -40,9 +40,11 @@ jobs:
           # HTTP to the Ubuntu archives can stall while HTTPS still works
           # (2026-10-07). Point every Ubuntu mirror at HTTPS on the primary
           # archive, and give apt short timeouts with retries, so a dead
-          # connection fails fast instead of eating the 5-minute cap.
+          # connection fails fast instead of eating the 5-minute cap. Match any
+          # regional mirror subdomain: from 2026-11-19 some runners use
+          # http://us-east-2.ec2.archive.ubuntu.com, which stalled mid-download.
           sudo sed -i -E \
-            -e 's#https?://(azure\.)?archive\.ubuntu\.com#https://archive.ubuntu.com#g' \
+            -e 's#https?://([a-z0-9-]+\.)*archive\.ubuntu\.com#https://archive.ubuntu.com#g' \
             -e 's#http://security\.ubuntu\.com#https://security.ubuntu.com#g' \
             /etc/apt/apt-mirrors.txt /etc/apt/sources.list /etc/apt/sources.list.d/* 2>/dev/null || true
           apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20)
