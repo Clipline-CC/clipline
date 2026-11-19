@@ -4,6 +4,64 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-11-18): standalone WebView2 deployment fixes
+
+Branch `fix/standalone-webview2-deployment`, based on PR #285. Plan:
+`docs/superpowers/plans/2026-11-18-standalone-webview2-deployment.md`.
+
+- **Short runtime folder.** The standalone runtime now deploys flat to
+  `<install dir>\wv2`. Tauri uses `webviewInstallMode.path` both as the
+  build-time source folder and as the runtime folder relative to the exe, so
+  `scripts/stage-webview2-runtime.ps1` stages the CAB's versioned root into
+  `apps/clipline-app/wv2`. The verifier's `-RequirePayload` checks
+  `msedgewebview2.exe`'s file version against the manifest, since the folder
+  name no longer carries it. The path-length GPU crash below now starts at
+  install directories of 164 characters instead of 96.
+- **Windows 10 AppContainer grant.** `tauri.standalone.conf.json` compiles
+  `windows/hooks-standalone.nsh`, which defines `CLIPLINE_STANDALONE_WEBVIEW2`
+  and includes the shared `windows/hooks.nsh`. Postinstall (fresh, `/UPDATE`
+  and reinstall) runs `$SYSDIR\icacls.exe <dir>\wv2 /grant
+  *S-1-15-2-2:(OI)(CI)(RX) *S-1-15-2-1:(OI)(CI)(RX)` and checks the exit code.
+  On Windows 10 a failure offers Retry/Cancel and then aborts the install
+  (silent: exit code 2); on Windows 11, which Microsoft says is unaffected, it
+  only logs. Volumes without persistent ACLs are skipped.
+- **No orphaned runtimes.** Tauri's `/UPDATE` install never runs the old
+  uninstaller and never deletes dropped resources. The standalone preinstall
+  closes Clipline and empties `wv2`; both variants' postinstall removes the
+  legacy `webview2-fixed` folder; the regular variant also removes a `wv2` left
+  by a standalone install it replaced; the uninstaller removes both.
+
+Sharp edge: NSIS 3.11's `RMDir /r` follows a junction **inside** the tree and
+deletes the target's files (reproduced in the hook harness). The hooks
+therefore walk the tree themselves (`CliplineRemoveTree`) and only unlink
+reparse points. Don't reintroduce `RMDir /r` in `hooks.nsh`.
+
+Verification on the dev machine (Windows 11, RX 6700 XT), with throwaway
+installers built from this branch with product `ClipTest`, identifier
+`io.clipline.installtest` and binary `cliptest-app.exe`, so the real install
+was untouched (Windows Sandbox is not enabled here):
+
+- Update from the old layout with the updater's `/P /UPDATE`: legacy folder
+  removed; `wv2` lists ALL APPLICATION PACKAGES and ALL RESTRICTED APPLICATION
+  PACKAGES `(OI)(CI)(RX)`, inherited `(I)(RX)` by files; the install directory
+  itself is unchanged. Same for a fresh install.
+- A 110-character install directory: the old layout (182-character runtime
+  folder) ran with `video_decode=disabled_software` and failed HEVC; after the
+  update the same directory played HEVC, 1080p60 HEVC+Opus, H.264/Opus and AV1
+  to `ended`. Fresh installs into 163 characters pass and 164 fail, matching
+  the 168-character runtime-folder limit.
+- Same-version reinstall while the app ran: preinstall closed it, removed a
+  planted stale file from `wv2`, reinstalled and re-granted. Uninstall left no
+  install directory.
+- A standalone NSIS harness (`C:\tmp\wv2-hooks-harness`) covered the Windows
+  10 failure path (forced via `AtLeastWin11`), junction safety, regular
+  variant behaviour and read-only files.
+
+Not verified: a real Windows 10 machine (the grant's purpose), FAT32/exFAT
+installs, and the interactive Retry/Cancel dialog. The smoke harness kills the
+app if `frontend_ready` has not arrived 4.3 s after the readiness watchdog
+arms, so a broken test frontend cannot pop the WebView2 repair dialog.
+
 ## Checkpoint (2026-11-18): WebView2 157 review and quinn-udp advisory
 
 Both checks were failing on `develop` too, and they blocked PR #285. The
