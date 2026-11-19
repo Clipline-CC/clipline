@@ -653,6 +653,147 @@ fn windows_uninstaller_runs_cleanup_helper_only_for_interactive_removal() {
     );
 }
 
+fn nsis_macro_body<'a>(hooks: &'a str, name: &str) -> &'a str {
+    let start = hooks
+        .find(&format!("!macro {name}\n"))
+        .unwrap_or_else(|| panic!("hooks define {name}"));
+    let body = &hooks[start..];
+    &body[..body.find("!macroend").expect("macro ends")]
+}
+
+#[test]
+fn standalone_installer_grants_appcontainer_access_to_its_webview2_runtime() {
+    let standalone: serde_json::Value = serde_json::from_str(&tauri_standalone_config())
+        .expect("tauri.standalone.conf.json should parse");
+    assert_eq!(
+        standalone
+            .pointer("/bundle/windows/nsis/installerHooks")
+            .and_then(serde_json::Value::as_str),
+        Some("windows/hooks-standalone.nsh"),
+        "only the standalone installer may compile the Fixed Version runtime hooks"
+    );
+    let standalone_hooks = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("windows/hooks-standalone.nsh"),
+    )
+    .expect("read windows/hooks-standalone.nsh");
+    assert!(standalone_hooks.contains("!define CLIPLINE_STANDALONE_WEBVIEW2\n"));
+    assert!(standalone_hooks.contains("!include \"${__FILEDIR__}\\hooks.nsh\""));
+
+    let hooks = nsis_hooks();
+    assert!(hooks.contains("!define CLIPLINE_WEBVIEW2_DIR \"$INSTDIR\\wv2\""));
+
+    let grant = nsis_macro_body(&hooks, "CLIPLINE_GRANT_WEBVIEW2_APPCONTAINER_ACCESS dir");
+    for required in [
+        // Only a deployed Fixed Version runtime is touched.
+        "${If} ${FileExists} \"${dir}\\msedgewebview2.exe\"",
+        // Absolute tool path and locale-independent SIDs, exactly as documented.
+        "nsExec::ExecToLog '\"$SYSDIR\\icacls.exe\" \"${dir}\" /grant *S-1-15-2-2:(OI)(CI)(RX) *S-1-15-2-1:(OI)(CI)(RX)'",
+        "Pop $0",
+        "${If} $0 == \"0\"",
+        // Volumes without ACLs have nothing to grant.
+        "FILE_PERSISTENT_ACLS",
+        // Windows 11 is unaffected; a Windows 10 failure must not pass silently.
+        "${If} ${AtLeastWin11}",
+        "MB_RETRYCANCEL",
+        "/SD IDCANCEL IDRETRY",
+        "Abort \"",
+    ] {
+        assert!(
+            grant.contains(required),
+            "missing WebView2 grant contract: {required}"
+        );
+    }
+    let icacls_lines: Vec<_> = hooks.lines().filter(|line| line.contains("icacls.exe")).collect();
+    assert_eq!(icacls_lines.len(), 1, "one grant, on the runtime folder only");
+    assert!(!icacls_lines[0].contains("/T") && !icacls_lines[0].contains("/reset"));
+
+    let postinstall = nsis_macro_body(&hooks, "NSIS_HOOK_POSTINSTALL");
+    let standalone_only = postinstall
+        .find("!ifdef CLIPLINE_STANDALONE_WEBVIEW2")
+        .expect("grant is compiled into the standalone installer only");
+    let insert = postinstall
+        .find("!insertmacro CLIPLINE_GRANT_WEBVIEW2_APPCONTAINER_ACCESS \"${CLIPLINE_WEBVIEW2_DIR}\"")
+        .expect("postinstall grants the deployed runtime folder");
+    let regular = postinstall.find("!else").expect("regular variant branch");
+    assert!(standalone_only < insert && insert < regular);
+}
+
+#[test]
+fn installer_hooks_leave_no_stale_or_orphaned_webview2_runtime() {
+    let hooks = nsis_hooks();
+    assert!(hooks.contains("!define CLIPLINE_LEGACY_WEBVIEW2_DIR \"$INSTDIR\\webview2-fixed\""));
+
+    // NSIS's `RMDir /r` follows junctions inside the tree, so removal walks
+    // the tree itself and only unlinks reparse points.
+    let tree = nsis_macro_body(&hooks, "CLIPLINE_DEFINE_REMOVE_TREE un");
+    for required in [
+        "FindFirst $1 $2 \"$0\\*.*\"",
+        "& 0x400 ; FILE_ATTRIBUTE_REPARSE_POINT",
+        "RMDir \"$0\\$2\"",
+        "Call ${un}CliplineRemoveTree",
+    ] {
+        assert!(tree.contains(required), "missing tree removal contract: {required}");
+    }
+    let remove = nsis_macro_body(&hooks, "CLIPLINE_REMOVE_OWN_FOLDER un path");
+    assert!(remove.contains("& 0x400 ; FILE_ATTRIBUTE_REPARSE_POINT"));
+    assert!(remove.contains("Call ${un}CliplineRemoveTree"));
+    for line in hooks.lines().map(str::trim) {
+        if line.starts_with("RMDir") || line.starts_with("Delete") {
+            assert!(!line.contains('*'), "no wildcard removal: {line}");
+            assert!(
+                !line.starts_with("RMDir /r"),
+                "recursive removal must not follow links: {line}"
+            );
+        }
+        if line.starts_with("!insertmacro CLIPLINE_REMOVE_OWN_FOLDER") {
+            assert!(
+                line.ends_with(" \"${CLIPLINE_WEBVIEW2_DIR}\"")
+                    || line.ends_with(" \"${CLIPLINE_LEGACY_WEBVIEW2_DIR}\""),
+                "only Clipline's own runtime folders are removed: {line}"
+            );
+        }
+    }
+
+    // Updates only overwrite files, so the unversioned runtime folder is
+    // emptied first, after Clipline (which holds the runtime) has closed.
+    let preinstall = nsis_macro_body(&hooks, "NSIS_HOOK_PREINSTALL");
+    let standalone_only = preinstall
+        .find("!ifdef CLIPLINE_STANDALONE_WEBVIEW2")
+        .expect("preinstall clearing is standalone-only");
+    let close = preinstall
+        .find("!insertmacro CheckIfAppIsRunning \"${MAINBINARYNAME}.exe\" \"${PRODUCTNAME}\"")
+        .expect("preinstall closes Clipline first");
+    let clear = preinstall
+        .find("!insertmacro CLIPLINE_REMOVE_OWN_FOLDER \"\" \"${CLIPLINE_WEBVIEW2_DIR}\"")
+        .expect("preinstall clears the runtime folder");
+    assert!(standalone_only < close && close < clear);
+
+    // The pre-`wv2` layout is never used again; the regular variant also
+    // drops a runtime left by a standalone install it replaced.
+    let postinstall = nsis_macro_body(&hooks, "NSIS_HOOK_POSTINSTALL");
+    let regular = postinstall.find("!else").expect("regular variant branch");
+    let orphan = postinstall
+        .find("!insertmacro CLIPLINE_REMOVE_OWN_FOLDER \"\" \"${CLIPLINE_WEBVIEW2_DIR}\"")
+        .expect("regular variant removes an orphaned runtime");
+    let endif = postinstall.find("!endif").expect("variant block ends");
+    let legacy = postinstall
+        .find("!insertmacro CLIPLINE_REMOVE_OWN_FOLDER \"\" \"${CLIPLINE_LEGACY_WEBVIEW2_DIR}\"")
+        .expect("both variants remove the legacy runtime");
+    assert!(regular < orphan && orphan < endif && endif < legacy);
+
+    let postuninstall = nsis_macro_body(&hooks, "NSIS_HOOK_POSTUNINSTALL");
+    for required in [
+        "!insertmacro CLIPLINE_REMOVE_OWN_FOLDER \"un.\" \"${CLIPLINE_WEBVIEW2_DIR}\"",
+        "!insertmacro CLIPLINE_REMOVE_OWN_FOLDER \"un.\" \"${CLIPLINE_LEGACY_WEBVIEW2_DIR}\"",
+        "RMDir \"$INSTDIR\"",
+    ] {
+        assert!(
+            postuninstall.contains(required),
+            "missing uninstall contract: {required}"
+        );
+    }
+}
+
 #[test]
 fn configured_main_window_is_not_created_at_startup() {
     let config: serde_json::Value =

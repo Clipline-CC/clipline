@@ -33,6 +33,36 @@ Each variant has its own updater manifest (`latest.json` /
 its baked-in `webviewInstallMode` (see `is_standalone_install` in `app.rs`),
 so standalone installs never update into the Evergreen installer.
 
+The standalone runtime is deployed flat to `<install dir>\wv2`. Tauri uses
+`webviewInstallMode.path` both as the build-time source folder and as the
+runtime folder relative to the executable, so the staging folder name is the
+deployed name. Keep it short: on at least one AMD driver (RX 6700 XT) the
+sandboxed GPU process crashes once the runtime folder reaches 168 characters,
+and Chromium's software fallback cannot decode HEVC. With `wv2`, install
+directories up to 163 characters keep the GPU; the old
+`webview2-fixed\Microsoft.WebView2.FixedVersionRuntime.<ver>.x64` layout broke
+at 96.
+
+The standalone installer compiles `windows/hooks-standalone.nsh`, which
+enables the Fixed Version parts of the shared `windows/hooks.nsh`. On every
+install, update and reinstall, its postinstall hook runs
+`$SYSDIR\icacls.exe <install dir>\wv2 /grant *S-1-15-2-2:(OI)(CI)(RX) *S-1-15-2-1:(OI)(CI)(RX)`.
+Microsoft requires this on Windows 10 for Fixed Version 120+, whose renderer
+runs in an AppContainer. A failed grant on Windows 10 offers Retry/Cancel and
+then aborts the install (silent installs abort with exit code 2), because the
+app's window cannot open without it. Windows 11 is unaffected, so a failure
+there only logs a warning. Volumes without ACLs (FAT32, exFAT) are skipped.
+
+Tauri's updater runs the new installer with `/UPDATE`, which overwrites files
+but never runs the old uninstaller, so resources a release drops stay on disk.
+The hooks therefore own runtime cleanup: the standalone preinstall closes
+Clipline and empties `wv2` so it holds exactly the new runtime; both variants'
+postinstall removes the legacy `webview2-fixed` folder (~700 MB per orphaned
+version), and the regular variant also removes a `wv2` left by a standalone
+install it replaced; the uninstaller removes both folders. Removal never
+follows links (NSIS's `RMDir /r` does, so the hooks walk the tree) and only
+touches those two exact folders inside the install directory.
+
 ### Agent runbook: “make a new Nightly release”
 
 When the user asks for a new Nightly, carry out this entire sequence:
@@ -44,7 +74,8 @@ When the user asks for a new Nightly, carry out this entire sequence:
    `apps/clipline-app/tauri.conf.json` to that exact version.
 4. Re-review the current Microsoft WebView2 Fixed Version release even when the pinned version is
    unchanged. Refresh `reviewed_on` / `review_due_on`; when the runtime changes, update its exact
-   CAB URL, size, SHA-256, and both paths in `tauri.standalone.conf.json` together.
+   CAB URL, size, SHA-256 and archive name together. `tauri.standalone.conf.json` stays on the
+   unversioned `wv2` folder; the verifier checks the staged runtime's file version instead.
 5. Run `scripts/verify-webview2-runtime.ps1`, `cargo test --workspace`, and
    `cargo clippy --workspace --all-targets -- -D warnings`. Confirm the release-only diff contains
    no accidental product changes.
@@ -101,8 +132,10 @@ The release must include both updater metadata assets (`latest.json`,
 `latest-standalone.json`). A WebView2 Fixed Version review is required for
 every standalone release and at least every 30 days. Compare the official
 release notes with the pinned version, update `webview2-fixed-runtime.json`,
-update both paths in `tauri.standalone.conf.json` when the version changes,
-stage the matching runtime, and run the preflight above. Before publication,
+stage the matching runtime (`scripts/stage-webview2-runtime.ps1` extracts the
+CAB's versioned root into `apps/clipline-app/wv2`), and run the preflight
+above with `-RequirePayload`, which also checks `msedgewebview2.exe`'s file
+version against the manifest. Before publication,
 play an H.264/Opus clip through its end in the standalone build and confirm the
 HEVC/AV1 capability probes still enable only codecs that the runtime can play.
 When bumping FFmpeg, select a retained immutable LGPL-shared release, review

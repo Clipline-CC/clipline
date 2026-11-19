@@ -203,10 +203,10 @@ function Write-Snapshot {
     $root = (Resolve-Path -LiteralPath $WorkingDirectory).Path
     $paths = @(
         Get-PathStats (Join-Path $root 'apps/clipline-app/ffmpeg')
-        Get-PathStats (Join-Path $root 'apps/clipline-app/webview2-fixed')
+        Get-PathStats (Join-Path $root 'apps/clipline-app/wv2')
         Get-PathStats (Join-Path $root 'target/release/clipline-app.exe')
         Get-PathStats (Join-Path $root 'target/release/ffmpeg')
-        Get-PathStats (Join-Path $root 'target/release/webview2-fixed')
+        Get-PathStats (Join-Path $root 'target/release/wv2')
         Get-PathStats (Join-Path $root 'target/release/bundle/nsis')
         Get-PathStats (Join-Path $root 'dist')
     )
