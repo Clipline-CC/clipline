@@ -476,11 +476,31 @@ fn dependency_exceptions_and_fixed_runtime_are_owned_and_current() {
         .as_str()
         .is_some_and(|url| url.starts_with("https://developer.microsoft.com/")));
 
-    let config = fs::read_to_string(root.join("apps/clipline-app/tauri.standalone.conf.json"))
-        .expect("read standalone config");
-    let expected_folder =
-        format!("Microsoft.WebView2.FixedVersionRuntime.{version}.{architecture}");
-    assert_eq!(config.matches(&expected_folder).count(), 2);
+    assert_eq!(
+        manifest["archive_name"],
+        format!("Microsoft.WebView2.FixedVersionRuntime.{version}.{architecture}.cab")
+    );
+
+    // Tauri resolves `fixedRuntime.path` against the executable's folder at
+    // run time, so this short relative path is also the deployed folder. A
+    // long runtime path crashes the sandboxed GPU process on some drivers.
+    let config_text =
+        fs::read_to_string(root.join("apps/clipline-app/tauri.standalone.conf.json"))
+            .expect("read standalone config");
+    let config: serde_json::Value =
+        serde_json::from_str(&config_text).expect("valid standalone config JSON");
+    assert_eq!(
+        config.pointer("/bundle/windows/webviewInstallMode"),
+        Some(&serde_json::json!({ "type": "fixedRuntime", "path": "wv2", "silent": null }))
+    );
+    assert!(config["bundle"]["resources"]
+        .as_array()
+        .expect("standalone resources")
+        .contains(&serde_json::json!("wv2/**/*")));
+    assert!(
+        !config_text.contains("FixedVersionRuntime") && !config_text.contains("webview2-fixed"),
+        "the deployed runtime folder must stay short and unversioned"
+    );
 
     let verifier = fs::read_to_string(root.join("scripts/verify-webview2-runtime.ps1"))
         .expect("read WebView2 runtime verifier");
@@ -490,12 +510,17 @@ fn dependency_exceptions_and_fixed_runtime_are_owned_and_current() {
         "Test-Path",
         "RequirePayload",
         "msedgewebview2.exe",
+        "'wv2'",
+        "VersionInfo.FileVersion",
     ] {
         assert!(
             verifier.contains(contract),
             "runtime verifier must enforce {contract}"
         );
     }
+    let stager = fs::read_to_string(root.join("scripts/stage-webview2-runtime.ps1"))
+        .expect("read WebView2 runtime stager");
+    assert!(stager.contains("'wv2'") && !stager.contains("webview2-fixed'"));
 }
 
 #[test]

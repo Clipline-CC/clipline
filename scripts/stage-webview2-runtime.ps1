@@ -43,11 +43,15 @@ if ($archiveHash -cne $manifest.archive_sha256) {
     throw "WebView2 archive SHA-256 mismatch: expected $($manifest.archive_sha256), got $archiveHash."
 }
 
+# The CAB's single root carries the version. It is staged flat as `wv2`, which
+# is also the folder name in the install directory: Tauri resolves the
+# fixedRuntime path against the executable's folder. A long runtime path
+# crashes the sandboxed GPU process on some drivers, and the verifier checks
+# the staged executable's version because the folder name no longer does.
 $runtimeFolder = "Microsoft.WebView2.FixedVersionRuntime.$($manifest.version).$($manifest.architecture)"
-$payloadRoot = [System.IO.Path]::GetFullPath((Join-Path $appRoot 'webview2-fixed'))
-$destination = [System.IO.Path]::GetFullPath((Join-Path $payloadRoot $runtimeFolder))
-if (-not $destination.StartsWith("$payloadRoot\", [System.StringComparison]::OrdinalIgnoreCase)) {
-    throw "Refusing to stage WebView2 outside $payloadRoot."
+$destination = [System.IO.Path]::GetFullPath((Join-Path $appRoot 'wv2'))
+if (-not $destination.StartsWith("$appRoot\", [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "Refusing to stage WebView2 outside $appRoot."
 }
 
 $temporary = Join-Path $appRoot ('.webview2-stage-{0}-{1}' -f $PID, [guid]::NewGuid().ToString('N'))
@@ -71,7 +75,6 @@ try {
         throw 'WebView2 CAB is missing msedgewebview2.exe.'
     }
 
-    New-Item -ItemType Directory -Path $payloadRoot -Force | Out-Null
     if (Test-Path -LiteralPath $destination) {
         Move-Item -LiteralPath $destination -Destination $backup
     }

@@ -31,9 +31,12 @@ if ($AsOf.Date -gt $reviewDueOn.Date) {
     throw "WebView2 Fixed Version runtime review expired on $($manifest.review_due_on)."
 }
 
-$runtimeFolder = "Microsoft.WebView2.FixedVersionRuntime.$($manifest.version).$($manifest.architecture)"
-$expectedResource = "webview2-fixed/$runtimeFolder/**/*"
-$expectedRuntimePath = "./webview2-fixed/$runtimeFolder"
+# Deployed as <install dir>\wv2: Tauri resolves fixedRuntime.path against the
+# executable's folder, and a long runtime path crashes the sandboxed GPU
+# process on some drivers. Keep it short and unversioned.
+$runtimeFolder = 'wv2'
+$expectedResource = "$runtimeFolder/**/*"
+$expectedRuntimePath = $runtimeFolder
 $resources = @($config.bundle.resources)
 if ($resources -notcontains $expectedResource) {
     throw "Standalone resources do not contain exact runtime glob $expectedResource."
@@ -46,10 +49,16 @@ if ($config.bundle.windows.webviewInstallMode.path -ne $expectedRuntimePath) {
 }
 
 if ($RequirePayload) {
-    $payloadRoot = Join-Path (Join-Path $appRoot 'webview2-fixed') $runtimeFolder
+    $payloadRoot = Join-Path $appRoot $runtimeFolder
     $runtimeExecutable = Join-Path $payloadRoot 'msedgewebview2.exe'
     if (-not (Test-Path -LiteralPath $runtimeExecutable -PathType Leaf)) {
         throw "Staged WebView2 payload is missing $runtimeExecutable."
+    }
+    # The folder name no longer carries the version, so a stale staged runtime
+    # would otherwise ship silently.
+    $stagedVersion = (Get-Item -LiteralPath $runtimeExecutable).VersionInfo.FileVersion
+    if ($stagedVersion -cne $manifest.version) {
+        throw "Staged WebView2 runtime is $stagedVersion, expected $($manifest.version)."
     }
 }
 

@@ -11,5 +11,7 @@ paseo.json
 apps/clipline-app/ffmpeg/*
 !apps/clipline-app/ffmpeg/README.md
 # WebView2 Fixed Version runtime for the standalone installer variant
-# (~650 MB, re-downloaded per docs/release-updates.md; never committed)
+# (~700 MB, re-downloaded per docs/release-updates.md; never committed).
+# `webview2-fixed/` is the pre-`wv2` staging folder of older checkouts.
+apps/clipline-app/wv2/
 apps/clipline-app/webview2-fixed/
