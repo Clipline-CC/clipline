@@ -53,6 +53,16 @@ then aborts the install (silent installs abort with exit code 2), because the
 app's window cannot open without it. Windows 11 is unaffected, so a failure
 there only logs a warning. Volumes without ACLs (FAT32, exFAT) are skipped.
 
+Tauri's updater runs the new installer with `/UPDATE`, which overwrites files
+but never runs the old uninstaller, so resources a release drops stay on disk.
+The hooks therefore own runtime cleanup: the standalone preinstall closes
+Clipline and empties `wv2` so it holds exactly the new runtime; both variants'
+postinstall removes the legacy `webview2-fixed` folder (~700 MB per orphaned
+version), and the regular variant also removes a `wv2` left by a standalone
+install it replaced; the uninstaller removes both folders. Removal never
+follows links (NSIS's `RMDir /r` does, so the hooks walk the tree) and only
+touches those two exact folders inside the install directory.
+
 ### Agent runbook: “make a new Nightly release”
 
 When the user asks for a new Nightly, carry out this entire sequence:

@@ -714,8 +714,84 @@ fn standalone_installer_grants_appcontainer_access_to_its_webview2_runtime() {
     let insert = postinstall
         .find("!insertmacro CLIPLINE_GRANT_WEBVIEW2_APPCONTAINER_ACCESS \"${CLIPLINE_WEBVIEW2_DIR}\"")
         .expect("postinstall grants the deployed runtime folder");
-    let end = postinstall.find("!endif").expect("standalone-only block ends");
-    assert!(standalone_only < insert && insert < end);
+    let regular = postinstall.find("!else").expect("regular variant branch");
+    assert!(standalone_only < insert && insert < regular);
+}
+
+#[test]
+fn installer_hooks_leave_no_stale_or_orphaned_webview2_runtime() {
+    let hooks = nsis_hooks();
+    assert!(hooks.contains("!define CLIPLINE_LEGACY_WEBVIEW2_DIR \"$INSTDIR\\webview2-fixed\""));
+
+    // NSIS's `RMDir /r` follows junctions inside the tree, so removal walks
+    // the tree itself and only unlinks reparse points.
+    let tree = nsis_macro_body(&hooks, "CLIPLINE_DEFINE_REMOVE_TREE un");
+    for required in [
+        "FindFirst $1 $2 \"$0\\*.*\"",
+        "& 0x400 ; FILE_ATTRIBUTE_REPARSE_POINT",
+        "RMDir \"$0\\$2\"",
+        "Call ${un}CliplineRemoveTree",
+    ] {
+        assert!(tree.contains(required), "missing tree removal contract: {required}");
+    }
+    let remove = nsis_macro_body(&hooks, "CLIPLINE_REMOVE_OWN_FOLDER un path");
+    assert!(remove.contains("& 0x400 ; FILE_ATTRIBUTE_REPARSE_POINT"));
+    assert!(remove.contains("Call ${un}CliplineRemoveTree"));
+    for line in hooks.lines().map(str::trim) {
+        if line.starts_with("RMDir") || line.starts_with("Delete") {
+            assert!(!line.contains('*'), "no wildcard removal: {line}");
+            assert!(
+                !line.starts_with("RMDir /r"),
+                "recursive removal must not follow links: {line}"
+            );
+        }
+        if line.starts_with("!insertmacro CLIPLINE_REMOVE_OWN_FOLDER") {
+            assert!(
+                line.ends_with(" \"${CLIPLINE_WEBVIEW2_DIR}\"")
+                    || line.ends_with(" \"${CLIPLINE_LEGACY_WEBVIEW2_DIR}\""),
+                "only Clipline's own runtime folders are removed: {line}"
+            );
+        }
+    }
+
+    // Updates only overwrite files, so the unversioned runtime folder is
+    // emptied first, after Clipline (which holds the runtime) has closed.
+    let preinstall = nsis_macro_body(&hooks, "NSIS_HOOK_PREINSTALL");
+    let standalone_only = preinstall
+        .find("!ifdef CLIPLINE_STANDALONE_WEBVIEW2")
+        .expect("preinstall clearing is standalone-only");
+    let close = preinstall
+        .find("!insertmacro CheckIfAppIsRunning \"${MAINBINARYNAME}.exe\" \"${PRODUCTNAME}\"")
+        .expect("preinstall closes Clipline first");
+    let clear = preinstall
+        .find("!insertmacro CLIPLINE_REMOVE_OWN_FOLDER \"\" \"${CLIPLINE_WEBVIEW2_DIR}\"")
+        .expect("preinstall clears the runtime folder");
+    assert!(standalone_only < close && close < clear);
+
+    // The pre-`wv2` layout is never used again; the regular variant also
+    // drops a runtime left by a standalone install it replaced.
+    let postinstall = nsis_macro_body(&hooks, "NSIS_HOOK_POSTINSTALL");
+    let regular = postinstall.find("!else").expect("regular variant branch");
+    let orphan = postinstall
+        .find("!insertmacro CLIPLINE_REMOVE_OWN_FOLDER \"\" \"${CLIPLINE_WEBVIEW2_DIR}\"")
+        .expect("regular variant removes an orphaned runtime");
+    let endif = postinstall.find("!endif").expect("variant block ends");
+    let legacy = postinstall
+        .find("!insertmacro CLIPLINE_REMOVE_OWN_FOLDER \"\" \"${CLIPLINE_LEGACY_WEBVIEW2_DIR}\"")
+        .expect("both variants remove the legacy runtime");
+    assert!(regular < orphan && orphan < endif && endif < legacy);
+
+    let postuninstall = nsis_macro_body(&hooks, "NSIS_HOOK_POSTUNINSTALL");
+    for required in [
+        "!insertmacro CLIPLINE_REMOVE_OWN_FOLDER \"un.\" \"${CLIPLINE_WEBVIEW2_DIR}\"",
+        "!insertmacro CLIPLINE_REMOVE_OWN_FOLDER \"un.\" \"${CLIPLINE_LEGACY_WEBVIEW2_DIR}\"",
+        "RMDir \"$INSTDIR\"",
+    ] {
+        assert!(
+            postuninstall.contains(required),
+            "missing uninstall contract: {required}"
+        );
+    }
 }
 
 #[test]
