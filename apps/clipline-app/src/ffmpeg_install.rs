@@ -15,12 +15,12 @@ mod verify;
 
 pub use controller::FfmpegInstallController;
 pub use download::{has_sufficient_free_space, managed_root, staging_root};
-pub use status::{build_install_snapshot, committed_manifest, runtime_status_for_dirs};
+pub use status::{committed_manifest, runtime_status_for_dirs};
 pub use verify::{
     assert_archive_size, install_managed_runtime_from_archive, verify_archive_sha256,
 };
 use download::download_ffmpeg_archive;
-use status::status_snapshot_async;
+use status::{installed_snapshot, status_snapshot_async};
 
 use std::fs;
 use std::io;
@@ -30,7 +30,8 @@ use serde::Serialize;
 use tauri::{Emitter, Manager};
 
 use crate::ffmpeg_runtime::{
-    free_space_required_bytes, FfmpegDiscoveryKind, FfmpegRuntimeStatus, ManagedRuntimeInfo,
+    ensure_action, free_space_required_bytes, EnsureAction, FfmpegBlockedDto,
+    FfmpegDiscoveryKind, ManagedRuntimeInfo,
 };
 
 pub const FFMPEG_RUNTIME_MANIFEST_JSON: &str = include_str!("../ffmpeg-runtime.json");
@@ -63,6 +64,9 @@ pub struct FfmpegInstallSnapshot {
     pub discovery: FfmpegDiscoveryKind,
     pub managed: Option<ManagedRuntimeInfoDto>,
     pub locate_path: Option<String>,
+    /// Set when Windows Application Control refuses to load FFmpeg. The UI
+    /// explains it and offers no Install / Repair, since redownloading can't help.
+    pub blocked: Option<FfmpegBlockedDto>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -111,6 +115,7 @@ fn install_progress_snapshot(state: FfmpegInstallState) -> FfmpegInstallSnapshot
         discovery: FfmpegDiscoveryKind::Missing,
         managed: None,
         locate_path: None,
+        blocked: None,
     }
 }
 
@@ -127,10 +132,6 @@ fn local_app_data_dir() -> Result<PathBuf, String> {
     std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .ok_or_else(|| "LOCALAPPDATA is not set".to_string())
-}
-
-fn current_locate_path() -> Option<PathBuf> {
-    clipline_capture::ffmpeg::locate()
 }
 
 #[tauri::command]
@@ -157,12 +158,21 @@ pub async fn ensure_ffmpeg_runtime(
 ) -> Result<FfmpegInstallSnapshot, String> {
     let local = local_app_data_dir()?;
     let status = status_snapshot_async(controller.snapshot_state()).await?;
-    if matches!(status.discovery, FfmpegDiscoveryKind::ManagedVerified) {
-        controller.end_job(FfmpegInstallState::Ready);
-        let mut snap = status;
-        snap.state = FfmpegInstallState::Ready;
-        let _ = app.emit(FFMPEG_INSTALL_EVENT, snap.clone());
-        return Ok(snap);
+    match ensure_action(status.discovery, status.blocked.is_some()) {
+        EnsureAction::RefuseBlocked => {
+            // Windows refuses to load these exact bytes. A redownload would
+            // fetch identical files, so report the blocked state instead.
+            let _ = app.emit(FFMPEG_INSTALL_EVENT, status.clone());
+            return Ok(status);
+        }
+        EnsureAction::AlreadyReady => {
+            controller.end_job(FfmpegInstallState::Ready);
+            let mut snap = status;
+            snap.state = FfmpegInstallState::Ready;
+            let _ = app.emit(FFMPEG_INSTALL_EVENT, snap.clone());
+            return Ok(snap);
+        }
+        EnsureAction::Install => {}
     }
 
     let (manifest, manifest_sha256) = committed_manifest().map_err(|e| e.to_string())?;
@@ -258,12 +268,12 @@ pub async fn ensure_ffmpeg_runtime(
             controller.end_job(FfmpegInstallState::Ready);
             let options = crate::service::refresh_ffmpeg_encoder_capabilities();
             let _ = app2.emit("encoders-changed", &options);
-            let status = FfmpegRuntimeStatus {
-                kind: FfmpegDiscoveryKind::ManagedVerified,
-                locate_path: Some(info.ffmpeg_exe.clone()),
-                managed: Some(info),
-            };
-            let snap = build_install_snapshot(FfmpegInstallState::Ready, &status);
+            // Discovery runs FFmpeg, so keep it off the async runtime.
+            let discovery =
+                tauri::async_runtime::spawn_blocking(clipline_capture::ffmpeg::discover)
+                    .await
+                    .map_err(|e| format!("ffmpeg discovery worker join: {e}"))?;
+            let snap = installed_snapshot(info, &discovery);
             let _ = app2.emit(FFMPEG_INSTALL_EVENT, snap.clone());
             Ok(snap)
         }
@@ -326,6 +336,58 @@ mod tests {
             zip.write_all(bytes).unwrap();
         }
         zip.finish().unwrap();
+    }
+
+    fn installed_runtime() -> ManagedRuntimeInfo {
+        ManagedRuntimeInfo {
+            dir: PathBuf::from(r"C:\Users\u\AppData\Local\Clipline\ffmpeg"),
+            ffmpeg_exe: PathBuf::from(r"C:\Users\u\AppData\Local\Clipline\ffmpeg\ffmpeg.exe"),
+            release_tag: "test-tag".into(),
+            archive_sha256: "aa".repeat(32),
+            manifest_sha256: "bb".repeat(32),
+        }
+    }
+
+    #[test]
+    fn a_runtime_windows_blocks_right_after_install_reports_blocked_and_is_not_reinstalled() {
+        let block =
+            clipline_capture::app_control::block_from_exit_code(Some(0xC0E9_0002_u32 as i32))
+                .unwrap();
+        let info = installed_runtime();
+        let discovery = clipline_capture::ffmpeg::Discovery::Blocked {
+            path: info.ffmpeg_exe.clone(),
+            block,
+        };
+
+        let snap = installed_snapshot(info, &discovery);
+
+        assert_eq!(snap.state, FfmpegInstallState::Ready);
+        assert_eq!(snap.discovery, FfmpegDiscoveryKind::ManagedVerified);
+        assert_eq!(
+            snap.blocked,
+            Some(FfmpegBlockedDto::from(&block)),
+            "verified bytes Windows refuses must not read as Installed and verified"
+        );
+        assert_eq!(
+            ensure_action(snap.discovery, snap.blocked.is_some()),
+            EnsureAction::RefuseBlocked,
+            "a blocked fresh install must not trigger another install"
+        );
+    }
+
+    #[test]
+    fn a_runnable_fresh_install_reports_ready_without_a_block() {
+        let info = installed_runtime();
+        let discovery = clipline_capture::ffmpeg::Discovery::Found(info.ffmpeg_exe.clone());
+
+        let snap = installed_snapshot(info, &discovery);
+
+        assert_eq!(snap.state, FfmpegInstallState::Ready);
+        assert_eq!(snap.blocked, None);
+        assert_eq!(
+            ensure_action(snap.discovery, snap.blocked.is_some()),
+            EnsureAction::AlreadyReady
+        );
     }
 
     #[test]

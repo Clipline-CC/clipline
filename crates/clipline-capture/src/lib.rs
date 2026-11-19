@@ -1,4 +1,5 @@
 pub mod annexb;
+pub mod app_control;
 pub mod av1;
 pub mod avsync;
 pub mod clock;

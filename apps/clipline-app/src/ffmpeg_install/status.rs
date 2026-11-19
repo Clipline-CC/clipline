@@ -6,11 +6,14 @@ use sha2::{Digest, Sha256};
 use super::download::managed_root;
 use super::{
     FFMPEG_RUNTIME_MANIFEST_JSON, FfmpegInstallSnapshot, FfmpegInstallState, ManagedRuntimeInfoDto,
-    current_locate_path, local_app_data_dir,
+    local_app_data_dir,
 };
+use clipline_capture::ffmpeg::Discovery;
+
 use crate::ffmpeg_runtime::{
-    parse_ffmpeg_runtime_manifest, verify_managed_ffmpeg_runtime, FfmpegDiscoveryKind,
-    FfmpegRuntimeManifest, FfmpegRuntimeStatus, ManagedRuntimeVerifyError,
+    parse_ffmpeg_runtime_manifest, verify_managed_ffmpeg_runtime, FfmpegBlockedDto,
+    FfmpegDiscoveryKind, FfmpegRuntimeManifest, FfmpegRuntimeStatus, ManagedRuntimeInfo,
+    ManagedRuntimeVerifyError,
 };
 
 pub fn committed_manifest() -> Result<(FfmpegRuntimeManifest, String), ManagedRuntimeVerifyError> {
@@ -38,6 +41,7 @@ pub fn runtime_status_for_dirs(
 pub fn build_install_snapshot(
     state: FfmpegInstallState,
     status: &FfmpegRuntimeStatus,
+    blocked: Option<FfmpegBlockedDto>,
 ) -> FfmpegInstallSnapshot {
     FfmpegInstallSnapshot {
         state,
@@ -47,13 +51,35 @@ pub fn build_install_snapshot(
             .locate_path
             .as_ref()
             .map(|path| path.display().to_string()),
+        blocked,
     }
+}
+
+/// The snapshot reported once an install publishes. Verified bytes are not
+/// enough: Windows Application Control can refuse the new files as well, so
+/// the block comes from a fresh `discovery`, as in the status command. The
+/// job still ends `Ready`; the UI shows `blocked` and offers no reinstall.
+pub(super) fn installed_snapshot(
+    info: ManagedRuntimeInfo,
+    discovery: &Discovery,
+) -> FfmpegInstallSnapshot {
+    let status = FfmpegRuntimeStatus {
+        kind: FfmpegDiscoveryKind::ManagedVerified,
+        locate_path: Some(info.ffmpeg_exe.clone()),
+        managed: Some(info),
+    };
+    let blocked = discovery.blocked().as_ref().map(FfmpegBlockedDto::from);
+    build_install_snapshot(FfmpegInstallState::Ready, &status, blocked)
 }
 
 pub(super) fn status_snapshot_for_state(state: FfmpegInstallState) -> Result<FfmpegInstallSnapshot, String> {
     let local = local_app_data_dir().ok();
     let managed = local.as_ref().map(|path| managed_root(path));
     let (manifest, manifest_sha256) = committed_manifest().map_err(|e| e.to_string())?;
+    // Verified bytes are not enough: Windows Application Control can still
+    // refuse to load them. Only actually running FFmpeg tells the two apart.
+    let discovery = clipline_capture::ffmpeg::discover();
+    let blocked = discovery.blocked().as_ref().map(FfmpegBlockedDto::from);
     if let Some(info) = managed
         .as_deref()
         .and_then(|dir| verify_managed_ffmpeg_runtime(dir, &manifest, &manifest_sha256).ok())
@@ -63,15 +89,15 @@ pub(super) fn status_snapshot_for_state(state: FfmpegInstallState) -> Result<Ffm
             locate_path: Some(info.ffmpeg_exe.clone()),
             managed: Some(info),
         };
-        return Ok(build_install_snapshot(state, &status));
+        return Ok(build_install_snapshot(state, &status, blocked));
     }
     let status = crate::ffmpeg_runtime::ffmpeg_runtime_status(
         None,
         &manifest,
         &manifest_sha256,
-        current_locate_path().as_deref(),
+        discovery.into_path().as_deref(),
     );
-    Ok(build_install_snapshot(state, &status))
+    Ok(build_install_snapshot(state, &status, blocked))
 }
 
 pub(super) async fn status_snapshot_async(state: FfmpegInstallState) -> Result<FfmpegInstallSnapshot, String> {

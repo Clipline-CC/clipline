@@ -254,8 +254,9 @@ pub(crate) fn run_compilation_ffmpeg(
     target: &Path,
     job: &ClipboardExportJob,
 ) -> Result<(), String> {
-    let ffmpeg = clipline_capture::ffmpeg::locate()
-        .ok_or_else(|| "ffmpeg is not available for group compilation export".to_string())?;
+    let ffmpeg = clipline_capture::ffmpeg::discover()
+        .require("ffmpeg is not available for group compilation export")
+        .map_err(|error| error.to_string())?;
     let encoders = available_h264_encoders();
     if encoders.is_empty() {
         return Err(

@@ -1,5 +1,6 @@
 //! Storage quotas and replay-cache management.
 use super::*;
+use clipline_storage::is_link_or_reparse_point;
 
 pub const DEFAULT_DISK_QUOTA_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
@@ -298,13 +299,6 @@ pub(super) fn replay_cache_run_size(path: &Path) -> u64 {
                 .fold(0u64, u64::saturating_add)
         })
         .unwrap_or(0)
-}
-
-pub(super) fn is_link_or_reparse_point(metadata: &std::fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-    metadata.file_type().is_symlink()
-        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
 
 pub(super) fn ensure_replay_cache_free_space(opts: &ServiceOptions) -> Result<(), String> {

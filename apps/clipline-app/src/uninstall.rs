@@ -2,6 +2,8 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use clipline_storage::is_link_or_reparse_point;
+
 const CLEANUP_ARGUMENT: &str = "--uninstall-cleanup";
 const DELETE_RECORDINGS_ARGUMENT: &str = "--delete-recordings";
 const CREDENTIAL_PREFIXES: [&str; 2] = ["Clipline Cloud:", "Clipline osu!:"];
@@ -406,22 +408,6 @@ fn remove_tree_best_effort_except(path: &Path, protected_roots: &[PathBuf]) {
         }
     } else {
         let _ = fs::remove_file(path);
-    }
-}
-
-fn is_link_or_reparse_point(metadata: &fs::Metadata) -> bool {
-    if metadata.file_type().is_symlink() {
-        return true;
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-    }
-    #[cfg(not(windows))]
-    {
-        false
     }
 }
 

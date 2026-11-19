@@ -14,6 +14,7 @@ use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use crate::app_control::AppControlBlock;
 use crate::probe::{Codec, EncoderApi, EncoderBackend, EncoderCapability};
 
 /// Stop Windows from flashing a console window for each `ffmpeg` child we
@@ -176,13 +177,113 @@ pub fn search_paths() -> Vec<PathBuf> {
     )
 }
 
+/// The result of looking for a runnable `ffmpeg`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Discovery {
+    /// The first candidate that answered `-version` successfully.
+    Found(PathBuf),
+    /// Nothing ran, and Windows Application Control blocked at least one
+    /// candidate, typically Smart App Control refusing the unsigned DLLs.
+    /// Redownloading can't fix this.
+    Blocked {
+        path: PathBuf,
+        block: AppControlBlock,
+    },
+    /// No candidate ran, and none was blocked.
+    Missing,
+}
+
+impl Discovery {
+    pub fn into_path(self) -> Option<PathBuf> {
+        match self {
+            Self::Found(path) => Some(path),
+            Self::Blocked { .. } | Self::Missing => None,
+        }
+    }
+
+    pub fn blocked(&self) -> Option<AppControlBlock> {
+        match self {
+            Self::Blocked { block, .. } => Some(*block),
+            Self::Found(_) | Self::Missing => None,
+        }
+    }
+
+    /// The runnable path, or a typed reason it is unavailable. When nothing
+    /// was found, `missing_message` is reported verbatim; it is the
+    /// caller-specific "ffmpeg is not available for …" text the UI turns
+    /// into an install offer.
+    pub fn require(self, missing_message: &str) -> Result<PathBuf, FfmpegUnavailable> {
+        match self {
+            Self::Found(path) => Ok(path),
+            Self::Blocked { block, .. } => Err(FfmpegUnavailable::Blocked(block)),
+            Self::Missing => Err(FfmpegUnavailable::Missing(missing_message.to_string())),
+        }
+    }
+}
+
+/// Why an FFmpeg-backed operation can't start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FfmpegUnavailable {
+    Missing(String),
+    Blocked(AppControlBlock),
+}
+
+impl std::fmt::Display for FfmpegUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Missing(message) => f.write_str(message),
+            Self::Blocked(block) => block.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for FfmpegUnavailable {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CandidateRun {
+    Runs,
+    Blocked(AppControlBlock),
+    Unusable,
+}
+
+/// Selection rule: the first runnable candidate wins (an intentional
+/// override still works when the managed runtime is blocked). Otherwise
+/// report the first block, otherwise missing. Candidates after the first
+/// runnable one are never executed.
+fn discover_from(
+    candidates: Vec<PathBuf>,
+    mut run: impl FnMut(&Path) -> CandidateRun,
+) -> Discovery {
+    let mut first_block = None;
+    for path in candidates {
+        match run(&path) {
+            CandidateRun::Runs => return Discovery::Found(path),
+            CandidateRun::Blocked(block) => {
+                first_block.get_or_insert((path, block));
+            }
+            CandidateRun::Unusable => {}
+        }
+    }
+    match first_block {
+        Some((path, block)) => Discovery::Blocked { path, block },
+        None => Discovery::Missing,
+    }
+}
+
+/// Find a runnable `ffmpeg`, telling a block by Windows Application Control
+/// apart from a runtime that simply isn't there.
+pub fn discover() -> Discovery {
+    // run_candidate() reaches spawn_verified(), which checks each candidate
+    // immediately before executing it. Avoid hashing the same runtime twice.
+    discover_from(search_paths(), run_candidate)
+}
+
 /// Locate a runnable `ffmpeg`: the first search path that answers
-/// `-version` with success. `None` means the FFmpeg encoder tier is simply
-/// unavailable (CI, or a machine without the bundle) — never an error.
+/// `-version` with success. `None` means the FFmpeg encoder tier is
+/// unavailable (CI, a machine without the bundle, or a runtime Windows
+/// blocked; see [`discover`] to tell these apart).
 pub fn locate() -> Option<PathBuf> {
-    // runs() reaches spawn_verified(), which checks each candidate immediately
-    // before executing it. Avoid hashing the same runtime twice for this probe.
-    search_paths().into_iter().find(|path| runs(path))
+    discover().into_path()
 }
 
 fn candidate_allowed(path: &Path) -> bool {
@@ -191,11 +292,21 @@ fn candidate_allowed(path: &Path) -> bool {
 }
 
 /// Recheck cached executable paths immediately before launching a child.
+/// If Windows Application Control refuses the executable, the returned error
+/// carries a typed [`AppControlBlock`]; recover it with
+/// [`crate::app_control::block_from_io_error`].
 pub fn spawn_verified(command: &mut Command) -> io::Result<Child> {
     if !candidate_allowed(Path::new(command.get_program())) {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, "FFmpeg runtime failed integrity verification"));
     }
-    command.spawn()
+    command.spawn().map_err(classify_spawn_error)
+}
+
+fn classify_spawn_error(error: io::Error) -> io::Error {
+    match crate::app_control::block_from_io_error(&error) {
+        Some(block) => crate::app_control::into_io_error(block),
+        None => error,
+    }
 }
 
 #[cfg(all(test, windows))]
@@ -254,10 +365,22 @@ fn read_bounded(mut reader: impl Read, max_bytes: usize) -> io::Result<Vec<u8>> 
     }
 }
 
+/// How a bounded probe child ended.
+#[derive(Debug)]
+enum ProbeRun {
+    /// The child exited (successfully or not) for a reason other than an
+    /// Application Control block.
+    Exited(Output),
+    /// Windows Application Control refused the executable or a DLL it loads.
+    Blocked(AppControlBlock),
+    /// Spawn failure, pipe/reader failure, or timeout: "unavailable".
+    Failed,
+}
+
 /// Run a probe command to completion, killing it if it exceeds
 /// `PROBE_TIMEOUT`. stdout is captured (these commands emit little); stderr is
-/// discarded. `None` on spawn failure or timeout — treated as "unavailable".
-fn run_bounded(mut cmd: Command) -> Option<Output> {
+/// discarded.
+fn run_bounded(mut cmd: Command) -> ProbeRun {
     run_bounded_with_timeout(&mut cmd, PROBE_TIMEOUT, MAX_PROBE_STDOUT_BYTES)
 }
 
@@ -265,16 +388,24 @@ fn run_bounded_with_timeout(
     cmd: &mut Command,
     timeout: Duration,
     max_stdout_bytes: usize,
-) -> Option<Output> {
+) -> ProbeRun {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     suppress_console(cmd);
-    let mut child = spawn_verified(cmd).ok()?;
+    let mut child = match spawn_verified(cmd) {
+        Ok(child) => child,
+        Err(error) => {
+            return match crate::app_control::block_from_io_error(&error) {
+                Some(block) => ProbeRun::Blocked(block),
+                None => ProbeRun::Failed,
+            };
+        }
+    };
     let Some(stdout) = child.stdout.take() else {
         let _ = child.kill();
         let _ = child.wait();
-        return None;
+        return ProbeRun::Failed;
     };
     let reader = match std::thread::Builder::new()
         .name("clipline-ffmpeg-probe-reader".into())
@@ -284,27 +415,41 @@ fn run_bounded_with_timeout(
         Err(_) => {
             let _ = child.kill();
             let _ = child.wait();
-            return None;
+            return ProbeRun::Failed;
         }
     };
     let wait = wait_for_child(&mut child, timeout);
-    let stdout = reader.join().ok()?.ok()?;
-    let ChildWait::Exited(status) = wait.ok()? else {
-        return None;
+    let Some(stdout) = reader.join().ok().and_then(Result::ok) else {
+        return ProbeRun::Failed;
     };
-    Some(Output {
+    let Ok(ChildWait::Exited(status)) = wait else {
+        return ProbeRun::Failed;
+    };
+    if let Some(block) = crate::app_control::block_from_exit_status(&status) {
+        return ProbeRun::Blocked(block);
+    }
+    ProbeRun::Exited(Output {
         status,
         stdout,
         stderr: Vec::new(),
     })
 }
 
-fn runs(path: &Path) -> bool {
+fn run_candidate(path: &Path) -> CandidateRun {
     let mut cmd = Command::new(path);
     cmd.args(["-hide_banner", "-version"]);
-    run_bounded(cmd)
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    match run_bounded(cmd) {
+        ProbeRun::Exited(output) if output.status.success() => CandidateRun::Runs,
+        ProbeRun::Blocked(block) => CandidateRun::Blocked(block),
+        ProbeRun::Exited(_) | ProbeRun::Failed => CandidateRun::Unusable,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TestEncode {
+    Works,
+    Fails,
+    Blocked(AppControlBlock),
 }
 
 /// Confirm a hardware encoder actually works on this machine with a
@@ -312,7 +457,7 @@ fn runs(path: &Path) -> bool {
 /// 640x360, not a tiny placeholder: AMF rejects very small resolutions
 /// (`Init() failed with error 5` at 128x72), which would wrongly drop a
 /// working H.264/HEVC encoder.
-fn test_encode(ffmpeg: &Path, encoder: &str, backend: EncoderBackend) -> bool {
+fn test_encode(ffmpeg: &Path, encoder: &str, backend: EncoderBackend) -> TestEncode {
     let mut cmd = Command::new(ffmpeg);
     cmd.args([
         "-hide_banner",
@@ -331,42 +476,96 @@ fn test_encode(ffmpeg: &Path, encoder: &str, backend: EncoderBackend) -> bool {
         cmd.args(["-hw_encoding", "0"]);
     }
     cmd.args(["-f", "null", "-"]);
-    run_bounded(cmd)
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    match run_bounded(cmd) {
+        ProbeRun::Exited(output) if output.status.success() => TestEncode::Works,
+        ProbeRun::Blocked(block) => TestEncode::Blocked(block),
+        ProbeRun::Exited(_) | ProbeRun::Failed => TestEncode::Fails,
+    }
 }
 
-/// Probe one located `ffmpeg` binary: list compiled encoders, then confirm
-/// each hardware encoder with a test encode (software is trusted).
-fn probe_ffmpeg(ffmpeg: &Path) -> Vec<EncoderCapability> {
-    let mut cmd = Command::new(ffmpeg);
-    cmd.args(["-hide_banner", "-encoders"]);
-    let Some(output) = run_bounded(cmd) else {
-        return Vec::new();
+/// FFmpeg encoder capabilities, plus whether Windows blocked the runtime.
+#[derive(Debug, Clone, Default)]
+pub struct FfmpegProbe {
+    pub capabilities: Vec<EncoderCapability>,
+    /// Set when Windows Application Control blocked FFmpeg. In that case
+    /// `capabilities` is empty: one clear state, not one error per encoder.
+    pub blocked: Option<AppControlBlock>,
+}
+
+/// List compiled encoders, then confirm each hardware encoder with a test
+/// encode (SVT-AV1 is trusted). The first blocked child stops the probe: a
+/// runtime Windows refuses to load is unusable as a whole.
+fn probe_with(
+    list_encoders: impl FnOnce() -> ProbeRun,
+    mut test: impl FnMut(&str, EncoderBackend) -> TestEncode,
+) -> FfmpegProbe {
+    let output = match list_encoders() {
+        ProbeRun::Exited(output) if output.status.success() => output,
+        ProbeRun::Blocked(block) => {
+            return FfmpegProbe {
+                capabilities: Vec::new(),
+                blocked: Some(block),
+            };
+        }
+        ProbeRun::Exited(_) | ProbeRun::Failed => return FfmpegProbe::default(),
     };
-    if !output.status.success() {
-        return Vec::new();
-    }
     let listed = parse_available_encoders(&String::from_utf8_lossy(&output.stdout));
-    let usable: Vec<(EncoderBackend, Codec)> = listed
-        .into_iter()
-        .filter(|&(backend, codec)| {
-            !requires_test_encode(backend)
-                || encoder_name(backend, codec)
-                    .map(|name| test_encode(ffmpeg, name, backend))
-                    .unwrap_or(false)
-        })
-        .collect();
-    group_capabilities(usable)
+    let mut usable = Vec::with_capacity(listed.len());
+    for (backend, codec) in listed {
+        if !requires_test_encode(backend) {
+            usable.push((backend, codec));
+            continue;
+        }
+        let Some(name) = encoder_name(backend, codec) else {
+            continue;
+        };
+        match test(name, backend) {
+            TestEncode::Works => usable.push((backend, codec)),
+            TestEncode::Fails => {}
+            TestEncode::Blocked(block) => {
+                return FfmpegProbe {
+                    capabilities: Vec::new(),
+                    blocked: Some(block),
+                };
+            }
+        }
+    }
+    FfmpegProbe {
+        capabilities: group_capabilities(usable),
+        blocked: None,
+    }
+}
+
+/// Probe one located `ffmpeg` binary.
+fn probe_ffmpeg(ffmpeg: &Path) -> FfmpegProbe {
+    probe_with(
+        || {
+            let mut cmd = Command::new(ffmpeg);
+            cmd.args(["-hide_banner", "-encoders"]);
+            run_bounded(cmd)
+        },
+        |name, backend| test_encode(ffmpeg, name, backend),
+    )
+}
+
+/// Discover FFmpeg and probe it. Capabilities are empty when no usable
+/// FFmpeg is present (the app falls back to the MFT-only matrix), and
+/// `blocked` says when that is because Windows refused to load it.
+pub fn probe_report() -> FfmpegProbe {
+    match discover() {
+        Discovery::Found(ffmpeg) => probe_ffmpeg(&ffmpeg),
+        Discovery::Blocked { block, .. } => FfmpegProbe {
+            capabilities: Vec::new(),
+            blocked: Some(block),
+        },
+        Discovery::Missing => FfmpegProbe::default(),
+    }
 }
 
 /// Locate FFmpeg and probe it. Empty when no usable FFmpeg is present —
 /// the app falls back to the MFT-only matrix exactly as before.
 pub fn probe() -> Vec<EncoderCapability> {
-    match locate() {
-        Some(ffmpeg) => probe_ffmpeg(&ffmpeg),
-        None => Vec::new(),
-    }
+    probe_report().capabilities
 }
 
 #[cfg(test)]
@@ -386,8 +585,173 @@ mod tests {
                 std::io::stdout().flush().expect("flush burst");
             }
             Ok("hang") => std::thread::sleep(Duration::from_secs(60)),
+            // What a loader-blocked ffmpeg looks like to its parent once the
+            // hard-error dialog is suppressed.
+            Ok("blocked") => std::process::exit(0xC0E9_0002_u32 as i32),
             _ => {}
         }
+    }
+
+    fn blocked() -> AppControlBlock {
+        crate::app_control::block_from_exit_code(Some(0xC0E9_0002_u32 as i32)).unwrap()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn loader_blocked_probe_child_is_reported_as_blocked() {
+        let mut command = probe_helper_command("blocked");
+        match run_bounded_with_timeout(&mut command, Duration::from_secs(10), 1024) {
+            ProbeRun::Blocked(block) => assert_eq!(block, blocked()),
+            other => panic!("expected an App Control block, got {other:?}"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn blocked_spawn_errors_carry_the_typed_block() {
+        let mapped = classify_spawn_error(io::Error::from_raw_os_error(4551));
+        assert_eq!(
+            crate::app_control::block_from_io_error(&mapped).map(|b| b.code()),
+            Some(4551)
+        );
+        assert!(mapped.to_string().starts_with(crate::app_control::BLOCKED_MESSAGE_PREFIX));
+        let other = classify_spawn_error(io::Error::from_raw_os_error(2));
+        assert_eq!(other.raw_os_error(), Some(2));
+    }
+
+    fn paths(names: &[&str]) -> Vec<PathBuf> {
+        names.iter().map(PathBuf::from).collect()
+    }
+
+    #[test]
+    fn discovery_prefers_any_runnable_candidate_over_a_block() {
+        let found = discover_from(paths(&["managed", "override"]), |path| {
+            if path == Path::new("managed") {
+                CandidateRun::Blocked(blocked())
+            } else {
+                CandidateRun::Runs
+            }
+        });
+        assert_eq!(found, Discovery::Found(PathBuf::from("override")));
+    }
+
+    #[test]
+    fn discovery_reports_the_first_block_when_nothing_runs() {
+        let discovery = discover_from(paths(&["missing", "managed", "other"]), |path| {
+            if path == Path::new("missing") {
+                CandidateRun::Unusable
+            } else {
+                CandidateRun::Blocked(blocked())
+            }
+        });
+        assert_eq!(
+            discovery,
+            Discovery::Blocked {
+                path: PathBuf::from("managed"),
+                block: blocked()
+            }
+        );
+        assert_eq!(discovery.clone().into_path(), None);
+        assert_eq!(discovery.blocked(), Some(blocked()));
+        let error = discovery
+            .require("ffmpeg is not available for poster extraction")
+            .unwrap_err();
+        assert_eq!(error, FfmpegUnavailable::Blocked(blocked()));
+        assert!(error.to_string().starts_with(crate::app_control::BLOCKED_MESSAGE_PREFIX));
+    }
+
+    #[test]
+    fn discovery_without_blocks_or_runnable_candidates_is_missing() {
+        let discovery = discover_from(paths(&["a", "b"]), |_| CandidateRun::Unusable);
+        assert_eq!(discovery, Discovery::Missing);
+        assert_eq!(
+            discovery
+                .require("ffmpeg is not available for poster extraction")
+                .unwrap_err()
+                .to_string(),
+            "ffmpeg is not available for poster extraction"
+        );
+    }
+
+    const LISTING: &str = " V....D h264_nvenc           NVIDIA NVENC H.264 encoder (codec h264)
+ V....D hevc_nvenc           NVIDIA NVENC hevc encoder (codec hevc)
+ V....D h264_amf             AMD AMF H.264 Encoder (codec h264)
+ V..... libsvtav1            SVT-AV1 encoder (codec av1)";
+
+    #[test]
+    fn blocked_encoder_listing_yields_one_blocked_state() {
+        let mut tests = 0;
+        let report = probe_with(
+            || ProbeRun::Blocked(blocked()),
+            |_, _| {
+                tests += 1;
+                TestEncode::Works
+            },
+        );
+        assert_eq!(report.blocked, Some(blocked()));
+        assert!(report.capabilities.is_empty());
+        assert_eq!(tests, 0, "no test encodes after a blocked listing");
+    }
+
+    #[test]
+    fn first_blocked_test_encode_stops_the_probe() {
+        let mut tested = Vec::new();
+        let report = probe_with(
+            || ProbeRun::Exited(listing_output(LISTING)),
+            |name, _| {
+                tested.push(name.to_string());
+                if tested.len() == 2 {
+                    TestEncode::Blocked(blocked())
+                } else {
+                    TestEncode::Works
+                }
+            },
+        );
+        assert_eq!(report.blocked, Some(blocked()));
+        assert!(
+            report.capabilities.is_empty(),
+            "a blocked runtime offers no FFmpeg encoders"
+        );
+        assert_eq!(tested.len(), 2, "probing stops at the first block");
+    }
+
+    #[test]
+    fn unblocked_probe_keeps_confirmed_encoders() {
+        let report = probe_with(
+            || ProbeRun::Exited(listing_output(LISTING)),
+            |name, _| {
+                if name == "h264_amf" {
+                    TestEncode::Fails
+                } else {
+                    TestEncode::Works
+                }
+            },
+        );
+        assert_eq!(report.blocked, None);
+        let backends: Vec<_> = report.capabilities.iter().map(|c| c.backend).collect();
+        assert!(backends.contains(&EncoderBackend::Nvenc));
+        assert!(backends.contains(&EncoderBackend::SvtAv1));
+        assert!(!backends.contains(&EncoderBackend::Amf));
+    }
+
+    fn listing_output(listing: &str) -> Output {
+        Output {
+            status: success_status(),
+            stdout: listing.as_bytes().to_vec(),
+            stderr: Vec::new(),
+        }
+    }
+
+    #[cfg(windows)]
+    fn success_status() -> ExitStatus {
+        use std::os::windows::process::ExitStatusExt;
+        ExitStatus::from_raw(0)
+    }
+
+    #[cfg(unix)]
+    fn success_status() -> ExitStatus {
+        use std::os::unix::process::ExitStatusExt;
+        ExitStatus::from_raw(0)
     }
 
     fn probe_helper_command(mode: &str) -> Command {
@@ -426,8 +790,11 @@ mod tests {
     #[test]
     fn verbose_probe_is_drained_concurrently_and_retained_output_is_bounded() {
         let mut command = probe_helper_command("burst");
-        let output = run_bounded_with_timeout(&mut command, Duration::from_secs(5), 1024 * 1024)
-            .expect("verbose child must not block on a full pipe");
+        let ProbeRun::Exited(output) =
+            run_bounded_with_timeout(&mut command, Duration::from_secs(5), 1024 * 1024)
+        else {
+            panic!("verbose child must not block on a full pipe");
+        };
 
         assert!(output.status.success());
         assert_eq!(output.stdout.len(), 1024 * 1024);
@@ -442,9 +809,10 @@ mod tests {
         let mut command = probe_helper_command("hang");
         let started = Instant::now();
 
-        assert!(
-            run_bounded_with_timeout(&mut command, Duration::from_millis(100), 1024,).is_none()
-        );
+        assert!(matches!(
+            run_bounded_with_timeout(&mut command, Duration::from_millis(100), 1024),
+            ProbeRun::Failed
+        ));
         assert!(started.elapsed() < Duration::from_secs(2));
     }
 

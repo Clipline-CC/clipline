@@ -12,6 +12,7 @@ fn clips_dir_resolved_with_probe(
         ffmpeg_capability_identity, ffmpeg_capability_slot, full_session_quota_check,
         quota_would_be_exceeded, storage_quota_full_event, Event, FullSessionRecording,
     };
+    use clipline_capture::ffmpeg::FfmpegProbe;
     use clipline_capture::{Codec, EncoderApi, EncoderBackend, EncoderCapability};
     use clipline_events::PlayerParticipant;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -180,11 +181,14 @@ fn clips_dir_resolved_with_probe(
         let probes = AtomicUsize::new(0);
         let first = ffmpeg_capability_slot(None, "managed:x:abc", || {
             probes.fetch_add(1, Ordering::SeqCst);
-            vec![EncoderCapability {
-                api: EncoderApi::Ffmpeg,
-                backend: EncoderBackend::SvtAv1,
-                codecs: vec![Codec::Av1],
-            }]
+            FfmpegProbe {
+                capabilities: vec![EncoderCapability {
+                    api: EncoderApi::Ffmpeg,
+                    backend: EncoderBackend::SvtAv1,
+                    codecs: vec![Codec::Av1],
+                }],
+                blocked: None,
+            }
         });
         let second = ffmpeg_capability_slot(Some(&first), "managed:x:abc", || {
             probes.fetch_add(1, Ordering::SeqCst);
@@ -200,17 +204,50 @@ fn clips_dir_resolved_with_probe(
         let probes = AtomicUsize::new(0);
         let first = ffmpeg_capability_slot(None, "missing", || {
             probes.fetch_add(1, Ordering::SeqCst);
-            Vec::new()
+            FfmpegProbe::default()
         });
         let second = ffmpeg_capability_slot(Some(&first), "external:C:/ffmpeg.exe", || {
             probes.fetch_add(1, Ordering::SeqCst);
-            vec![EncoderCapability {
-                api: EncoderApi::Ffmpeg,
-                backend: EncoderBackend::Nvenc,
-                codecs: vec![Codec::H264],
-            }]
+            FfmpegProbe {
+                capabilities: vec![EncoderCapability {
+                    api: EncoderApi::Ffmpeg,
+                    backend: EncoderBackend::Nvenc,
+                    codecs: vec![Codec::H264],
+                }],
+                blocked: None,
+            }
         });
         assert_ne!(first.identity, second.identity);
+        assert_eq!(second.caps.len(), 1);
+        assert_eq!(probes.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn ffmpeg_capability_slot_reprobes_a_blocked_runtime() {
+        // The managed bytes (and so the identity) don't change when the user
+        // allows FFmpeg in Windows, so a blocked result must not be cached.
+        let probes = AtomicUsize::new(0);
+        let block =
+            clipline_capture::app_control::block_from_exit_code(Some(0xC0E9_0002_u32 as i32));
+        let first = ffmpeg_capability_slot(None, "managed:x:abc", || {
+            probes.fetch_add(1, Ordering::SeqCst);
+            FfmpegProbe {
+                capabilities: Vec::new(),
+                blocked: block,
+            }
+        });
+        let second = ffmpeg_capability_slot(Some(&first), "managed:x:abc", || {
+            probes.fetch_add(1, Ordering::SeqCst);
+            FfmpegProbe {
+                capabilities: vec![EncoderCapability {
+                    api: EncoderApi::Ffmpeg,
+                    backend: EncoderBackend::Nvenc,
+                    codecs: vec![Codec::H264],
+                }],
+                blocked: None,
+            }
+        });
+        assert!(first.caps.is_empty());
         assert_eq!(second.caps.len(), 1);
         assert_eq!(probes.load(Ordering::SeqCst), 2);
     }

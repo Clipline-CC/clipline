@@ -112,6 +112,8 @@ pub(crate) fn poster_failure_kind(error: &str) -> &'static str {
         .eq_ignore_ascii_case("ffmpeg is not available for poster extraction")
     {
         "runtime_unavailable"
+    } else if error.starts_with(clipline_capture::app_control::BLOCKED_MESSAGE_PREFIX) {
+        "blocked_by_app_control"
     } else if error.starts_with("spawn ffmpeg poster") {
         "spawn_failed"
     } else if error.contains("timed out") {
@@ -302,6 +304,13 @@ mod tests {
             assert_eq!(
                 poster_failure_kind("ffmpeg poster produced no JPEG data"),
                 "invalid_output"
+            );
+            assert_eq!(
+                poster_failure_kind(
+                    "Windows blocked FFmpeg (Smart App Control or an App Control policy): \
+                     STATUS_SYSTEM_INTEGRITY_POLICY_VIOLATION 0xC0E90002"
+                ),
+                "blocked_by_app_control"
             );
             assert_eq!(
                 poster_failure_kind("finalize poster: sharing violation"),

@@ -7,6 +7,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
 use clipline_events::{ClipMarkers, ClipPlay, GameId};
+use clipline_storage::is_link_or_reparse_point;
 use serde::{Deserialize, Serialize};
 
 use crate::util::unix_now_i64;
@@ -312,7 +313,7 @@ pub fn discover_pending(media_root: &Path) -> Result<Vec<DiscoveredPendingEnrich
             Ok(metadata) => metadata,
             Err(_) => continue,
         };
-        if metadata.is_dir() && !metadata_is_link_or_reparse(&metadata) {
+        if metadata.is_dir() && !is_link_or_reparse_point(&metadata) {
             discover_pending_in_dir(configured_media_root, &media_root, &path, &mut out)?;
         }
     }
@@ -327,7 +328,7 @@ pub fn discover_pending(media_root: &Path) -> Result<Vec<DiscoveredPendingEnrich
 
 fn regular_unlinked_file(path: &Path) -> bool {
     std::fs::symlink_metadata(path)
-        .is_ok_and(|metadata| metadata.is_file() && !metadata_is_link_or_reparse(&metadata))
+        .is_ok_and(|metadata| metadata.is_file() && !is_link_or_reparse_point(&metadata))
 }
 
 /// Caller holds the clip mutation lock. Use only discovery-bound paths, including
@@ -681,7 +682,7 @@ fn discover_pending_file(
 ) -> Result<DiscoveredPendingEnrichment, String> {
     let metadata = std::fs::symlink_metadata(path)
         .map_err(|e| format!("inspect pending osu! enrichment {path:?}: {e}"))?;
-    if !metadata.is_file() || metadata_is_link_or_reparse(&metadata) {
+    if !metadata.is_file() || is_link_or_reparse_point(&metadata) {
         return Err("pending sidecar is not a regular unlinked file".into());
     }
     let sidecar_path = path
@@ -698,7 +699,7 @@ fn discover_pending_file(
             "pending osu! enrichment {sidecar_path:?} has no expected MP4 {clip_candidate:?}: {e}"
         )
     })?;
-    if !clip_metadata.is_file() || metadata_is_link_or_reparse(&clip_metadata) {
+    if !clip_metadata.is_file() || is_link_or_reparse_point(&clip_metadata) {
         return Err(format!(
             "expected MP4 {clip_candidate:?} is not a regular unlinked file"
         ));
@@ -773,23 +774,7 @@ fn quarantine_pending_file(path: &Path) -> Result<PathBuf, String> {
 fn path_is_link_or_reparse(path: &Path) -> Result<bool, String> {
     let metadata = std::fs::symlink_metadata(path)
         .map_err(|e| format!("inspect osu! enrichment path {path:?}: {e}"))?;
-    Ok(metadata_is_link_or_reparse(&metadata))
-}
-
-fn metadata_is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
-    if metadata.file_type().is_symlink() {
-        return true;
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-    }
-    #[cfg(not(windows))]
-    {
-        false
-    }
+    Ok(is_link_or_reparse_point(&metadata))
 }
 
 fn clip_session_is_osu(path: &Path) -> bool {

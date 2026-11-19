@@ -12,6 +12,9 @@ pub(super) fn mft_capabilities_cached() -> &'static [EncoderCapability] {
 pub(super) struct FfmpegCapabilitySlot {
     pub(super) identity: String,
     pub(super) caps: Vec<EncoderCapability>,
+    /// Windows Application Control refused FFmpeg during this probe. Allowing
+    /// it doesn't change the runtime identity, so such a slot is never reused.
+    pub(super) blocked: bool,
 }
 
 pub(super) fn ffmpeg_caps_slot() -> &'static std::sync::Mutex<Option<FfmpegCapabilitySlot>> {
@@ -23,16 +26,18 @@ pub(super) fn ffmpeg_caps_slot() -> &'static std::sync::Mutex<Option<FfmpegCapab
 pub(super) fn ffmpeg_capability_slot(
     existing: Option<&FfmpegCapabilitySlot>,
     identity: &str,
-    probe: impl FnOnce() -> Vec<EncoderCapability>,
+    probe: impl FnOnce() -> ffmpeg::FfmpegProbe,
 ) -> FfmpegCapabilitySlot {
     if let Some(existing) = existing {
-        if existing.identity == identity {
+        if existing.identity == identity && !existing.blocked {
             return existing.clone();
         }
     }
+    let report = probe();
     FfmpegCapabilitySlot {
         identity: identity.to_string(),
-        caps: probe(),
+        caps: report.capabilities,
+        blocked: report.blocked.is_some(),
     }
 }
 
@@ -73,7 +78,7 @@ pub(super) fn ffmpeg_capabilities_cached() -> Vec<EncoderCapability> {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
-    let next = ffmpeg_capability_slot(guard.as_ref(), &identity, ffmpeg::probe);
+    let next = ffmpeg_capability_slot(guard.as_ref(), &identity, ffmpeg::probe_report);
     *guard = Some(next.clone());
     next.caps
 }

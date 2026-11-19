@@ -161,6 +161,7 @@ pub(super) fn download_ffmpeg_archive(
                     discovery: FfmpegDiscoveryKind::Missing,
                     managed: None,
                     locate_path: None,
+                    blocked: None,
                 },
             );
         }

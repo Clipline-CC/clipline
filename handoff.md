@@ -4,6 +4,56 @@
 > **`ddoc.md` is the single source of truth** for product/architecture decisions. This file is
 > the bridge: where the project stands, how it's built, what bit us, and what's next.
 
+## Checkpoint (2026-11-18): WebView2 157 review and quinn-udp advisory
+
+Both checks were failing on `develop` too, and they blocked PR #285. The
+Fixed Version review expired on 2026-11-06, which broke
+`repository_security` on every branch. The Dependency security workflow had
+been failing on `main` since its 2026-11-17 scheduled run.
+
+RUSTSEC-2026-0538: `quinn-udp` 0.5.14 can spin its receive loop after a
+truncated datagram. It is in `Cargo.lock` only through reqwest's optional
+QUIC path and is not compiled, but cargo-audit scans the lockfile. It moved to
+0.5.16, and only that entry changed. A plain `cargo update -p quinn-udp`
+re-resolves the crate's wide `windows-sys`/`socket2` ranges and downgrades
+unrelated crates to `windows-sys` 0.52. Don't accept that diff.
+`.cargo/audit.toml` still has `ignore = []`.
+
+Standalone WebView2 moved from Fixed Version 154.0.4258.62 to 157.0.4341.60
+(Edge Stable Update 3, November 13). 154 was six Stable security releases
+behind, including the fix for in-the-wild CVE-2026-125350 (157.0.4341.46+).
+The x64 CAB is 310,954,844 bytes with SHA-256
+`1bad3df802a4c21f6b271cf3cd640912056291e3915b86fa7577a18899f761b9`. The CAB
+and every staged `.exe`/`.dll` carry valid Microsoft signatures, and both
+runtime preflights passed. Review window: 2026-11-18 to 2026-12-18. Microsoft's
+security notes said on 2026-11-17 that another Chromium security fix is in
+progress. Re-review when that Fixed Version appears.
+
+Sharp edge: the length of the Fixed Version runtime path decides whether the
+GPU works. Fixed 157 decodes HEVC, and so does 154. On the dev machine (AMD RX
+6700 XT, driver 32.0.21045.16010), the sandboxed GPU process crashes at startup
+with `0xC0000409` once the path to `msedgewebview2.exe` reaches 187 characters,
+which is a runtime folder of 168 or more. Chromium then falls back to
+`--use-gl=disabled`. H.264 and AV1 still decode in software, but Chromium has no
+software HEVC decoder. HEVC therefore reports `""` and fails with
+`DEMUXER_ERROR_NO_SUPPORTED_STREAMS`, and every GPU feature reads
+`disabled_software`. The same files work at a folder length of 167 and fail at
+168, for both 154 and 157. The crash needs the long path, the GPU sandbox and the
+AMD hardware driver together (`--disable-gpu-sandbox` or WARP avoids it). The
+default standalone install at `%LOCALAPPDATA%\Clipline\webview2-fixed\…` is far
+below the limit, and HEVC, 1080p60 HEVC+Opus, H.264/Opus and AV1 all play there.
+A deep custom install directory (about 95+ characters) loses HEVC and all GPU
+acceleration. Run standalone smokes from a short path such as
+`%LOCALAPPDATA%\<name>`. A first 157 smoke ran from a 178-character worktree
+path and wrongly concluded that 157 had dropped HEVC. Diagnostic harness and
+logs: ignored `target/wv2-hevc-diag/` in the PR #285 worktree.
+
+Sharp edge: CI's `stable` toolchain is now Rust 1.100. Its `needless_bool`
+lint failed Ubuntu Clippy on `clipline-storage`'s reparse-point check, which
+became an `if`/`false` pair once the `#[cfg(windows)]` block compiled out. The
+check is now split into cfg-gated helpers. A local `stable` older than CI won't
+catch new lints, so run `cargo +<CI version> clippy` before trusting a local pass.
+
 ## Checkpoint (2026-10-25): Opus fork moved to shiguredo_opus 2026.4.0
 
 The controlled fork in `third-party/shiguredo_opus` now matches the published

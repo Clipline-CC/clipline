@@ -5420,6 +5420,65 @@ fn ffmpeg_install_is_reachable_from_settings_and_blocked_library_actions() {
 }
 
 #[test]
+fn windows_blocked_ffmpeg_explains_itself_without_offering_a_reinstall() {
+    let html = index_html();
+    let css = styles_css();
+    let settings = settings_js();
+    let library = library_js();
+    let gallery = read_ui_js("gallery-window-core.js");
+    let install =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ffmpeg_install.rs"))
+            .expect("read ffmpeg_install.rs");
+
+    for required in [
+        "id=\"ffmpeg-runtime-blocked\"",
+        "id=\"ffmpeg-runtime-blocked-code\"",
+        "id=\"poster-runtime-warning-text\"",
+        "aren't code-signed",
+        "Smart App Control",
+        "App &amp; browser control",
+        "CodeIntegrity",
+        "3077",
+    ] {
+        assert!(
+            html.contains(required),
+            "blocked FFmpeg guidance must include `{required}`"
+        );
+    }
+    for forbidden in ["can't be undone", "cannot be undone", "reset Windows", "reinstall Windows"] {
+        assert!(
+            !html.contains(forbidden),
+            "blocked FFmpeg guidance must stay neutral about Smart App Control: `{forbidden}`"
+        );
+    }
+    assert!(
+        css.contains(".ffmpeg-runtime-blocked[hidden] { display: none; }"),
+        "the blocked panel sets display, so it needs an explicit [hidden] rule"
+    );
+    assert!(
+        settings.contains("snapshot.blocked")
+            && settings.contains("$(\"ffmpeg-runtime-blocked\")")
+            && settings.contains("install.hidden = active || managed || blocked"),
+        "settings must show the blocked state and hide Install / Repair"
+    );
+    assert!(
+        settings.contains("!snapshot.blocked"),
+        "install-and-retry must not rerun work FFmpeg can't do while blocked"
+    );
+    assert!(
+        gallery.contains("posterRuntimeBlocked")
+            && library.contains("GalleryWindowCore.posterRuntimeBlocked(error)")
+            && library.contains("showPosterRuntimeWarning(error, true)")
+            && library.contains("install.hidden = blocked"),
+        "a blocked poster runtime must explain itself without the Install FFmpeg button"
+    );
+    assert!(
+        install.contains("EnsureAction::RefuseBlocked"),
+        "ensure_ffmpeg_runtime must refuse to redownload a runtime Windows blocks"
+    );
+}
+
+#[test]
 fn ffmpeg_managed_runtime_verifier_is_separate_from_locate() {
     let runtime =
         fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ffmpeg_runtime.rs"))
